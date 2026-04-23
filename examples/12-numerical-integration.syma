@@ -1,0 +1,49 @@
+(* ============================================= *)
+(* Syma Language Examples — 12: Numerical Integration *)
+(*                                               *)
+(* Approximate definite integrals using:         *)
+(*   1. Trapezoidal rule                         *)
+(*   2. Simpson's rule                           *)
+(*   3. Use them to compute pi                   *)
+(* ============================================= *)
+
+(* ── 1. Trapezoidal rule ── *)
+trapezoidal[f_, a_, b_, n_] := (
+    h = (b - a) / n;
+    pts = Table[f[a + i*h], {i, 1, n - 1}];
+    h * (f[a] / 2 + Total[pts] + f[b] / 2)
+);
+
+(* ── 2. Simpson's rule ── *)
+simpson[f_, a_, b_, n_] := (
+    h = (b - a) / n;
+    oddPts = Table[f[a + i*h], {i, 1, n - 1, 2}];
+    evenPts = Table[f[a + i*h], {i, 2, n - 2, 2}];
+    h / 3 * (f[a] + 4*Total[oddPts] + 2*Total[evenPts] + f[b])
+);
+
+(* ── Test: integrate 4/(1+x^2) from 0 to 1 = pi ── *)
+piFunc[x_] := 4.0 / (1 + x^2);
+
+Print["=== Numerical Integration: int 4/(1+x^2) dx = pi ==="];
+Print[""];
+
+Print["Trapezoidal rule:"];
+Print[StringJoin["  n=10:   ", ToString[trapezoidal[piFunc, 0, 1, 10]]]];
+Print[StringJoin["  n=100:  ", ToString[trapezoidal[piFunc, 0, 1, 100]]]];
+Print[StringJoin["  n=1000: ", ToString[trapezoidal[piFunc, 0, 1, 1000]]]];
+Print[""];
+
+Print["Simpson's rule:"];
+Print[StringJoin["  n=10:   ", ToString[simpson[piFunc, 0, 1, 10]]]];
+Print[StringJoin["  n=100:  ", ToString[simpson[piFunc, 0, 1, 100]]]];
+Print[StringJoin["  n=1000: ", ToString[simpson[piFunc, 0, 1, 1000]]]];
+Print[""];
+
+Print[StringJoin["Actual pi: ", ToString[N[Pi]]]];
+
+(* ── Bonus: integrate sin(x) from 0 to pi = 2 ── *)
+Print[""];
+Print["=== Bonus: int sin(x) dx from 0 to pi = 2 ==="];
+Print[StringJoin["  Trapezoidal: ", ToString[trapezoidal[Sin, 0, N[Pi], 1000]]]];
+Print[StringJoin["  Simpson:     ", ToString[simpson[Sin, 0, N[Pi], 1000]]]];

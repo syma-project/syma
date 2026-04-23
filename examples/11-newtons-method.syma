@@ -1,0 +1,48 @@
+(* ============================================= *)
+(* Syma Language Examples — 11: Newton's Method     *)
+(*                                               *)
+(* Use Newton-Raphson iteration to find roots.   *)
+(* ============================================= *)
+
+(* ── 1. Square root via Newton's method ── *)
+(*    Iteration: x_{n+1} = (x_n + S/x_n) / 2    *)
+newtonSqrt[S_, n_] := Nest[(# + S / #) / 2 &, 1.0, n];
+
+Print["=== Newton's Method for Square Roots ==="];
+Print[StringJoin["  sqrt(2)  = ", ToString[newtonSqrt[2, 20]]]];
+Print[StringJoin["  actual   = ", ToString[Sqrt[2.0]]]];
+Print[StringJoin["  sqrt(3)  = ", ToString[newtonSqrt[3, 20]]]];
+Print[StringJoin["  sqrt(10) = ", ToString[newtonSqrt[10, 20]]]];
+Print[StringJoin["  sqrt(99) = ", ToString[newtonSqrt[99, 20]]]];
+
+(* ── 2. Cube root via Newton's method ── *)
+(*    Iteration: x_{n+1} = (2*x_n + S/x_n^2) / 3 *)
+cbrtNewton[S_, n_] := Nest[(2*# + S / #^2) / 3 &, 1.0, n];
+
+Print[""];
+Print["=== Cube Root ==="];
+Print[StringJoin["  cbrt(2)   = ", ToString[cbrtNewton[2, 30]]]];
+Print[StringJoin["  cbrt(27)  = ", ToString[cbrtNewton[27, 30]]]];
+Print[StringJoin["  cbrt(100) = ", ToString[cbrtNewton[100, 30]]]];
+
+(* ── 3. General Newton's method ── *)
+(*    Find root of f(x) = x^3 - 2x - 5          *)
+f[x_] := x^3 - 2*x - 5;
+fp[x_] := 3*x^2 - 2;
+newtonStep[x_] := x - f[x] / fp[x];
+
+Print[""];
+Print["=== General: x^3 - 2x - 5 = 0 ==="];
+x0 = 2.0;
+Print[StringJoin["  iter 0: ", ToString[x0]]];
+x1 = newtonStep[x0];
+Print[StringJoin["  iter 1: ", ToString[x1]]];
+x2 = newtonStep[x1];
+Print[StringJoin["  iter 2: ", ToString[x2]]];
+x3 = newtonStep[x2];
+Print[StringJoin["  iter 3: ", ToString[x3]]];
+x4 = newtonStep[x3];
+Print[StringJoin["  iter 4: ", ToString[x4]]];
+x5 = newtonStep[x4];
+Print[StringJoin["  iter 5: ", ToString[x5]]];
+Print[StringJoin["  f(x5)  = ", ToString[f[x5]]]];

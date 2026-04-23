@@ -1,0 +1,44 @@
+(* ============================================= *)
+(* Syma Language Examples — 10: Pi Approximations   *)
+(*                                               *)
+(* Three classic series/formulas for pi:         *)
+(*   1. Leibniz formula                          *)
+(*   2. Nilakantha series                        *)
+(*   3. Machin's formula                         *)
+(* ============================================= *)
+
+(* ── 1. Leibniz formula ── *)
+(*    pi/4 = 1 - 1/3 + 1/5 - 1/7 + ...          *)
+leibnizTerms[n_] := Table[(-1)^(i+1) / (2.0*i - 1), {i, 1, n}];
+leibniz[n_] := 4.0 * Total[leibnizTerms[n]];
+
+Print["=== Leibniz Formula ==="];
+Print[StringJoin["  100 terms:   ", ToString[leibniz[100]]]];
+Print[StringJoin["  1000 terms:  ", ToString[leibniz[1000]]]];
+Print[StringJoin["  10000 terms: ", ToString[leibniz[10000]]]];
+
+(* ── 2. Nilakantha series ── *)
+(*    pi = 3 + 4/(2*3*4) - 4/(4*5*6) + ...      *)
+nilakTerms[n_] := Table[(-1)^(i+1) / ((2.0*i) * (2*i + 1) * (2*i + 2)), {i, 1, n}];
+nilakantha[n_] := 3.0 + 4.0 * Total[nilakTerms[n]];
+
+Print[""];
+Print["=== Nilakantha Series ==="];
+Print[StringJoin["  10 terms:  ", ToString[nilakantha[10]]]];
+Print[StringJoin["  100 terms: ", ToString[nilakantha[100]]]];
+
+(* ── 3. Machin's formula ── *)
+(*    pi/4 = 4*arctan(1/5) - arctan(1/239)       *)
+(* arctan via Taylor series: x - x^3/3 + x^5/5 - ... *)
+atanTerms[x_, n_] := Table[(-1)^(i+1) * x^(2*i-1) / (2.0*i - 1), {i, 1, n}];
+atan[x_, n_] := Total[atanTerms[x, n]];
+
+pi_machin = 4.0 * (4.0 * atan[1.0/5, 20] - atan[1.0/239, 20]);
+
+Print[""];
+Print["=== Machin's Formula ==="];
+Print[StringJoin["  20 terms per arctan: ", ToString[pi_machin]]];
+
+(* ── Summary ── *)
+Print[""];
+Print[StringJoin["Actual pi: ", ToString[N[Pi]]]];

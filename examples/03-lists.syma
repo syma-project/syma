@@ -1,0 +1,34 @@
+(* ============================================= *)
+(* Syma Language Examples — 03: Lists                *)
+(* ============================================= *)
+
+(* ── Creating lists ── *)
+{1, 2, 3, 4, 5}
+{}
+{"a", "b", "c"}
+
+(* ── List accessors ── *)
+nums = {10, 20, 30, 40, 50};
+First[nums]
+Last[nums]
+Rest[nums]
+Most[nums]
+Length[nums]
+Part[nums, 2]
+
+(* ── Building lists ── *)
+Append[{1, 2, 3}, 4]
+Prepend[{1, 2, 3}, 0]
+Join[{1, 2}, {3, 4}]
+
+(* ── Transforming lists ── *)
+Reverse[{1, 2, 3}]
+Sort[{3, 1, 4, 1, 5, 9}]
+Flatten[{{1, 2}, {3, {4, 5}}}]
+
+(* ── Generating lists ── *)
+Range[5]
+Range[1, 10]
+
+(* ── Aggregating ── *)
+Total[{1, 2, 3, 4, 5}]

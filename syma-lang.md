@@ -1,8 +1,8 @@
-# Sym: A Symbolic-First Language with OOP Structure
+# Syma: A Symbolic-First Language with OOP Structure
 
 ## 1. Philosophy
 
-Sym is a dynamically typed, symbolic-first programming language that combines the
+Syma is a dynamically typed, symbolic-first programming language that combines the
 expressiveness of Wolfram Language with the organizational power of object-oriented
 programming.
 
@@ -23,7 +23,7 @@ programming.
 
 ### 2.1 Expressions
 
-Everything in Sym is an expression of the form `head[arg1, arg2, ...]`:
+Everything in Syma is an expression of the form `head[arg1, arg2, ...]`:
 
 ```
 f[x, y]              (* function application *)
@@ -124,7 +124,7 @@ Function[{x, y}, x + y]    (* multiple parameters *)
 
 ## 4. Type System
 
-Sym is dynamically typed. Types are runtime values, not compile-time annotations.
+Syma is dynamically typed. Types are runtime values, not compile-time annotations.
 Type checking happens through pattern matching at call time.
 
 ### 4.1 Built-in Type Hierarchy
@@ -631,7 +631,7 @@ try {
     riskyOperation[]
 } catch err {
     match err {
-        e_SymError  => "Sym error: " <> e.message
+        e_SymError  => "Syma error: " <> e.message
         e_TypeError => "Type error: " <> e.message
         _           => "Unknown error"
     }
@@ -646,7 +646,7 @@ throw SymError["something went wrong"]
 
 ## 10. Built-in Symbolic Functions
 
-Sym ships with a core symbolic library:
+Syma ships with a core symbolic library:
 
 ### 10.1 Mathematics
 
@@ -742,7 +742,7 @@ Protected          (* cannot be redefined *)
 
 ## 12. JIT Execution Model
 
-Sym uses a three-phase JIT compilation strategy:
+Syma uses a three-phase JIT compilation strategy:
 
 ### Phase 1: Tree-Walk Interpreter
 
@@ -753,7 +753,7 @@ Sym uses a three-phase JIT compilation strategy:
 
 ### Phase 2: Bytecode Compiler
 
-- Frequently-executed functions are compiled to Sym bytecode.
+- Frequently-executed functions are compiled to Syma bytecode.
 - A virtual machine executes bytecode with a register-based architecture.
 - Pattern matchers are compiled to decision trees.
 - Used for: warm code paths, loops, recursive functions.
@@ -792,7 +792,7 @@ extern "C" {
     function initArith(): Void
 }
 
-(* Call native C functions from Sym *)
+(* Call native C functions from Syma *)
 result = fastMul[ptr1, ptr2]
 ```
 
@@ -1230,7 +1230,7 @@ match_branch   = pattern "=>" expression ";"
 
 ## 16. Comparison with Wolfram Language
 
-| Feature | Wolfram Language | Sym |
+| Feature | Wolfram Language | Syma |
 |---------|-----------------|-----|
 | Typing | Dynamic | Dynamic |
 | Dispatch | Pattern-based | Pattern-based |

@@ -1,0 +1,31 @@
+(* ============================================= *)
+(* Syma Language Examples — 07: Math                *)
+(* ============================================= *)
+
+(* ── Constants ── *)
+Pi
+E
+
+(* ── Trigonometry ── *)
+Sin[0]
+Sin[Pi / 6]
+Cos[0]
+Cos[Pi]
+Tan[Pi / 4]
+
+(* ── Exponential and logarithmic ── *)
+Exp[0]
+Exp[1]
+Log[1]
+Log[E]
+Log[100]
+
+(* ── Square root and absolute value ── *)
+Sqrt[144]
+Sqrt[2]
+Abs[-42]
+Abs[3.14]
+
+(* ── Powers ── *)
+2^10
+16^(1/2)

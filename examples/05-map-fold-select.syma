@@ -1,0 +1,37 @@
+(* ============================================= *)
+(* Syma Language Examples — 05: Map, Fold, Select   *)
+(* ============================================= *)
+
+(* ── Map: apply a function to every element ── *)
+(* The /@ operator is syntactic sugar for Map *)
+sq[x_] := x^2;
+Map[sq, {1, 2, 3, 4, 5}]
+
+(* Using the /@ operator *)
+Sqrt /@ {1, 4, 9, 16, 25}
+
+(* Map with a multi-argument function *)
+add10[x_] := x + 10;
+add10 /@ {1, 2, 3}
+
+(* ── Fold: reduce a list to a single value ── *)
+(* Fold[fun, init, list] starts with init and folds left *)
+Fold[Plus, 0, {1, 2, 3, 4, 5}]
+
+(* Without initial value — uses first element *)
+Fold[Plus, {1, 2, 3, 4, 5}]
+
+(* Product of a list *)
+prod[a_, b_] := a * b;
+Fold[prod, 1, {1, 2, 3, 4, 5}]
+
+(* ── Select: filter elements by predicate ── *)
+positive[x_] := x > 0;
+Select[{-3, -1, 0, 2, 5, -4}, positive]
+
+even[x_] := x / 2 * 2 == x;
+Select[{1, 2, 3, 4, 5, 6, 7, 8}, even]
+
+(* ── Scan: apply function for side effects, return Null ── *)
+(* (useful when you don't need the result) *)
+Print /@ {1, 2, 3}

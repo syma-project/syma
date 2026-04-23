@@ -1,0 +1,57 @@
+(* ============================================= *)
+(* Syma Language Examples — 13: Taylor Series       *)
+(*                                               *)
+(* Approximate transcendental functions using    *)
+(* their Taylor/Maclaurin series expansions.     *)
+(* ============================================= *)
+
+(* ── 1. e^x via Taylor series ── *)
+expTerms[x_, n_] := Table[x^i / Factorial[i], {i, 0, n}];
+expTaylor[x_, n_] := Total[expTerms[x, n]];
+
+Print["=== e^x Taylor Series ==="];
+Print[StringJoin["  e^1  (10 terms) = ", ToString[expTaylor[1.0, 10]]]];
+Print[StringJoin["  e^1  (actual)   = ", ToString[Exp[1.0]]]];
+Print[StringJoin["  e^2  (20 terms) = ", ToString[expTaylor[2.0, 20]]]];
+Print[StringJoin["  e^2  (actual)   = ", ToString[Exp[2.0]]]];
+Print[StringJoin["  e^-1 (10 terms) = ", ToString[expTaylor[-1.0, 10]]]];
+Print[StringJoin["  e^-1 (actual)   = ", ToString[Exp[-1.0]]]];
+
+(* ── 2. sin(x) via Taylor series ── *)
+sinTerms[x_, n_] := Table[(-1)^i * x^(2*i + 1) / Factorial[2*i + 1], {i, 0, n}];
+sinTaylor[x_, n_] := Total[sinTerms[x, n]];
+
+Print[""];
+Print["=== sin(x) Taylor Series ==="];
+Print[StringJoin["  sin(pi/4) = ", ToString[sinTaylor[N[Pi]/4, 10]]]];
+Print[StringJoin["  actual    = ", ToString[Sin[N[Pi]/4]]]];
+Print[StringJoin["  sin(pi/2) = ", ToString[sinTaylor[N[Pi]/2, 10]]]];
+Print[StringJoin["  actual    = ", ToString[Sin[N[Pi]/2]]]];
+
+(* ── 3. cos(x) via Taylor series ── *)
+cosTerms[x_, n_] := Table[(-1)^i * x^(2*i) / Factorial[2*i], {i, 0, n}];
+cosTaylor[x_, n_] := Total[cosTerms[x, n]];
+
+Print[""];
+Print["=== cos(x) Taylor Series ==="];
+Print[StringJoin["  cos(pi/3) = ", ToString[cosTaylor[N[Pi]/3, 10]]]];
+Print[StringJoin["  actual    = ", ToString[Cos[N[Pi]/3]]]];
+
+(* ── 4. ln(1+x) via Taylor series ── *)
+logTerms[x_, n_] := Table[(-1)^(i+1) * x^i / i, {i, 1, n}];
+logTaylor[x_, n_] := Total[logTerms[x, n]];
+
+Print[""];
+Print["=== ln(1+x) Taylor Series ==="];
+Print[StringJoin["  ln(2) (100 terms)  = ", ToString[logTaylor[1.0, 100]]]];
+Print[StringJoin["  ln(2) (actual)     = ", ToString[Log[2.0]]]];
+Print[StringJoin["  ln(1.5) (50 terms) = ", ToString[logTaylor[0.5, 50]]]];
+Print[StringJoin["  ln(1.5) (actual)   = ", ToString[Log[1.5]]]];
+
+(* ── 5. Convergence comparison ── *)
+Print[""];
+Print["=== Convergence: Approximating e ==="];
+Print[StringJoin["  5 terms:  ", ToString[expTaylor[1.0, 5]]]];
+Print[StringJoin["  10 terms: ", ToString[expTaylor[1.0, 10]]]];
+Print[StringJoin["  15 terms: ", ToString[expTaylor[1.0, 15]]]];
+Print[StringJoin["  actual e: ", ToString[N[E]]]];

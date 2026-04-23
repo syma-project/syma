@@ -1,0 +1,44 @@
+(* ============================================= *)
+(* Syma Language Examples — 06: Patterns & Rules    *)
+(* ============================================= *)
+
+(* ── Pattern matching basics ── *)
+(* _  matches anything (blank) *)
+(* x_  matches anything and binds to x *)
+
+(* ── Rules: -> (immediate) and :> (delayed) ── *)
+(* A rule pairs a pattern with a replacement *)
+rule1 = x_ -> 42;
+
+(* ── ReplaceAll (/.): apply rules to an expression ── *)
+5 /. x_ -> 42
+
+(* Replace inside a list *)
+{1, 2, 3} /. x_ -> x^2
+
+(* ── Type-constrained patterns ── *)
+(* _Integer matches only integers *)
+f[x_Integer] := x * 2;
+f[5]
+(* f["hello"] would stay unevaluated — no matching definition *)
+
+(* ── Literal patterns ── *)
+g[0] := "zero";
+g[1] := "one";
+g[2] := "two";
+g[0]
+g[1]
+g[2]
+
+(* ── Fibonacci with pattern dispatch ── *)
+fib[0] := 0;
+fib[1] := 1;
+fib[n_] := fib[n - 1] + fib[n - 2];
+fib[10]
+fib[15]
+
+(* ── Factorial with recursive pattern ── *)
+fact[0] := 1;
+fact[n_] := n * fact[n - 1];
+fact[5]
+fact[10]

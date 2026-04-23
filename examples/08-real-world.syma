@@ -1,0 +1,29 @@
+(* ============================================= *)
+(* Syma Language Examples — 08: Real-World Snippets *)
+(* ============================================= *)
+
+(* ── Temperature conversion ── *)
+celsiusToF[c_] := c * 9 / 5 + 32;
+celsiusToF[0]
+celsiusToF[100]
+celsiusToF[-40]
+
+(* ── Euclidean distance ── *)
+dist[x1_, y1_, x2_, y2_] := Sqrt[(x2 - x1)^2 + (y2 - y1)^2];
+dist[0, 0, 3, 4]
+dist[1, 1, 4, 5]
+
+(* ── Sum of squares ── *)
+sq[x_] := x^2;
+sumOfSquares[list_] := Fold[Plus, sq /@ list];
+sumOfSquares[{1, 2, 3, 4, 5}]
+
+(* ── List statistics ── *)
+mean[list_] := Total[list] / Length[list];
+mean[{10, 20, 30, 40, 50}]
+
+(* ── Factorial (recursive) ── *)
+fact[0] := 1;
+fact[n_] := n * fact[n - 1];
+fact[10]
+fact[20]

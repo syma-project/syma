@@ -1,0 +1,34 @@
+(* ============================================= *)
+(* Syma Language Examples — 09: Monte Carlo Pi      *)
+(*                                               *)
+(* Estimate pi by throwing random darts at a     *)
+(* unit square and checking how many land inside *)
+(* the inscribed unit circle.                    *)
+(*                                               *)
+(*   pi/4 ~= (points inside circle) / (total)    *)
+(*   pi   ~= 4 * inside / total                 *)
+(* ============================================= *)
+
+(* ── Warm up the PRNG ── *)
+RandomReal[]; RandomReal[]; RandomReal[];
+
+(* ── Parameters ── *)
+n = 10000;
+
+(* ── Generate hits: 1 if inside quarter-circle, 0 otherwise ── *)
+points = Table[RandomReal[], {i, 1, n}];
+ys = Table[RandomReal[], {i, 1, n}];
+hits = Table[If[Part[points, i]^2 + Part[ys, i]^2 < 1, 1, 0], {i, 1, n}];
+inside = Total[hits];
+
+(* ── Estimate pi ── *)
+estimate = 4.0 * inside / n;
+
+(* ── Report ── *)
+Print["=== Monte Carlo Pi Estimation ==="];
+Print[StringJoin["  Trials:    ", ToString[n]]];
+Print[StringJoin["  Hits:      ", ToString[inside]]];
+Print[StringJoin["  Estimate:  ", ToString[estimate]]];
+Print[StringJoin["  Actual pi: ", ToString[N[Pi]]]];
+Print[StringJoin["  Error:     ", ToString[Abs[estimate - Pi]]]];
+estimate

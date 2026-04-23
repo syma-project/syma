@@ -1,6 +1,8 @@
 [package]
-name = "sym"
+name = "syma"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rug = "1.29"
+rustyline = "18.0.0"

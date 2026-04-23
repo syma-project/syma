@@ -1,0 +1,35 @@
+(* ============================================= *)
+(* Syma Language Examples — 02: Functions           *)
+(* ============================================= *)
+
+(* ── Simple function definitions ── *)
+square[x_] := x^2;
+square[5]
+
+cube[x_] := x^3;
+cube[3]
+
+(* ── Multi-argument functions ── *)
+add[a_, b_] := a + b;
+add[3, 4]
+
+hypotenuse[a_, b_] := Sqrt[a^2 + b^2];
+hypotenuse[3, 4]
+
+(* ── Multiple definitions (dispatch by pattern) ── *)
+(* The evaluator tries definitions in order, most-specific first *)
+f[0] := 0;
+f[1] := 1;
+f[n_] := f[n - 1] + f[n - 2];
+f[10]
+
+(* ── Pure functions (lambdas) ── *)
+(* #^2 &  is a pure function that squares its argument *)
+(* Note: pure function evaluation is basic — user-defined functions work better *)
+
+(* ── Prefix and postfix application ── *)
+(* f @ x  is the same as  f[x] *)
+Length @ {1, 2, 3, 4, 5}
+
+(* x // f  is also  f[x] *)
+{1, 2, 3, 4, 5} // Length

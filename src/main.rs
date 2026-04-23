@@ -1,3 +1,263 @@
+/// Syma: A Symbolic-First Language with OOP Structure
+///
+/// Phase 1: Tree-walk interpreter with REPL.
+
+mod ast;
+mod lexer;
+mod parser;
+mod value;
+mod eval;
+mod env;
+mod pattern;
+mod builtins;
+
+use std::fs;
+
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
+
+const VERSION: &str = "0.1.0";
+
+fn print_usage() {
+    println!("Syma v{} — Symbolic-First Language with OOP Structure", VERSION);
+    println!();
+    println!("Usage:");
+    println!("  syma             Start the interactive REPL");
+    println!("  syma <file>      Evaluate a Syma source file");
+    println!("  syma --help      Show this help message");
+    println!("  syma --version   Show version information");
+}
+
+fn print_repl_help() {
+    println!("Syma REPL Commands:");
+    println!("  help             Show this help message");
+    println!("  quit, exit, :q   Exit the REPL");
+    println!();
+    println!("Syntax:");
+    println!("  f[x_] := x^2    Function definition");
+    println!("  x = 5            Assignment");
+    println!("  {{1, 2, 3}}       List literal");
+    println!("  \"a\" <> \"b\"      String concatenation");
+    println!("  a -> b           Rule");
+    println!("  a /. rules       Apply rules");
+    println!("  expr // f        Postfix pipe");
+    println!("  (* comment *)    Comment");
+}
+
+fn eval_input(input: &str, env: &env::Env) {
+    // Tokenize
+    let tokens = match lexer::tokenize(input) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            eprintln!("  Lexer error: {}", e);
+            eprintln!("  | {}", input);
+            return;
+        }
+    };
+
+    // Parse
+    let ast = match parser::parse(tokens) {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("  Parse error: {}", e);
+            eprintln!("  | {}", input);
+            return;
+        }
+    };
+
+    // Evaluate
+    match eval::eval_program(&ast, env) {
+        Ok(value) => {
+            if value != value::Value::Null {
+                println!("{}", value);
+            }
+        }
+        Err(e) => {
+            eprintln!("  Error: {}", e);
+            eprintln!("  | {}", input);
+        }
+    }
+}
+
+fn eval_input_silent(input: &str, env: &env::Env) {
+    let tokens = match lexer::tokenize(input) {
+        Ok(tokens) => tokens,
+        Err(e) => { eprintln!("  Lexer error: {}", e); return; }
+    };
+    let ast = match parser::parse(tokens) {
+        Ok(ast) => ast,
+        Err(e) => { eprintln!("  Parse error: {}", e); return; }
+    };
+    if let Err(e) = eval::eval_program(&ast, env) {
+        eprintln!("  Error: {}", e);
+    }
+}
+
+fn run_file(path: &str) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading '{}': {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let env = env::Env::new();
+    builtins::register_builtins(&env);
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("(*") {
+            continue;
+        }
+        // Suppress output for lines ending with ';'
+        if line.ends_with(';') {
+            eval_input_silent(line, &env);
+        } else {
+            eval_input(line, &env);
+        }
+    }
+}
+
+const HISTORY_FILE: &str = ".syma_history";
+
+fn run_repl() {
+    println!("Syma v{} — Symbolic-First Language with OOP Structure", VERSION);
+    println!("Type 'help' for commands, 'quit' to exit.\n");
+
+    let env = env::Env::new();
+    builtins::register_builtins(&env);
+
+    let mut rl = match DefaultEditor::new() {
+        Ok(rl) => rl,
+        Err(e) => {
+            eprintln!("Failed to initialize REPL: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Load history from file
+    let history_path = dirs_or_default().map(|d| d.join(HISTORY_FILE));
+    if let Some(ref path) = history_path {
+        let _ = rl.load_history(path);
+    }
+
+    loop {
+        match rl.readline("syma> ") {
+            Ok(line) => {
+                let input = line.trim();
+                if input.is_empty() {
+                    continue;
+                }
+
+                // Add to history (skip duplicates)
+                let _ = rl.add_history_entry(input);
+
+                // REPL commands
+                match input {
+                    "quit" | "exit" | ":q" => {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    "help" => {
+                        print_repl_help();
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                eval_input(input, &env);
+            }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C: cancel current input
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl+D: exit
+                println!("Goodbye!");
+                break;
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Save history
+    if let Some(ref path) = history_path {
+        let _ = rl.save_history(path);
+    }
+}
+
+/// Get the home directory for history file storage.
+fn dirs_or_default() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
 fn main() {
-    println!("Hello, world!");
+    let args: Vec<String> = std::env::args().collect();
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("--help") | Some("-h") => print_usage(),
+        Some("--version") | Some("-v") => println!("syma {}", VERSION),
+        Some(path) => run_file(path),
+        None => run_repl(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Integer;
+
+    fn eval_str(input: &str) -> value::Value {
+        let env = env::Env::new();
+        builtins::register_builtins(&env);
+        let tokens = lexer::tokenize(input).unwrap();
+        let ast = parser::parse(tokens).unwrap();
+        eval::eval_program(&ast, &env).unwrap()
+    }
+
+    #[test]
+    fn test_arithmetic() {
+        assert_eq!(eval_str("1 + 2"), value::Value::Integer(Integer::from(3)));
+        assert_eq!(eval_str("3 * 4"), value::Value::Integer(Integer::from(12)));
+        assert_eq!(eval_str("10 / 2"), value::Value::Integer(Integer::from(5)));
+        assert_eq!(eval_str("2^3"), value::Value::Integer(Integer::from(8)));
+    }
+
+    #[test]
+    fn test_variables() {
+        assert_eq!(eval_str("x = 5; x"), value::Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_lists() {
+        let val = eval_str("{1, 2, 3}");
+        assert_eq!(val, value::Value::List(vec![
+            value::Value::Integer(Integer::from(1)),
+            value::Value::Integer(Integer::from(2)),
+            value::Value::Integer(Integer::from(3)),
+        ]));
+    }
+
+    #[test]
+    fn test_function_def() {
+        let val = eval_str("f[x_] := x^2; f[3]");
+        assert_eq!(val, value::Value::Integer(Integer::from(9)));
+    }
+
+    #[test]
+    fn test_if() {
+        assert_eq!(eval_str("If[True, 1, 2]"), value::Value::Integer(Integer::from(1)));
+        assert_eq!(eval_str("If[False, 1, 2]"), value::Value::Integer(Integer::from(2)));
+    }
+
+    #[test]
+    fn test_comparison() {
+        assert_eq!(eval_str("1 == 1"), value::Value::Bool(true));
+        assert_eq!(eval_str("1 != 2"), value::Value::Bool(true));
+        assert_eq!(eval_str("1 < 2"), value::Value::Bool(true));
+    }
 }

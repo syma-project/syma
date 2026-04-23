@@ -1,0 +1,34 @@
+(* ============================================= *)
+(* Syma Language Examples — 04: Control Flow        *)
+(* ============================================= *)
+
+(* ── If ── *)
+If[True, "yes", "no"]
+If[False, "yes", "no"]
+If[1 + 1 == 2, "math works", "broken"]
+
+(* ── Comparisons ── *)
+3 > 2
+3 < 2
+3 == 3
+3 != 4
+3 <= 3
+3 >= 4
+
+(* ── Logical operators ── *)
+True && True
+True && False
+True || False
+False || False
+!True
+!False
+
+(* ── Conditional functions ── *)
+abs[x_] := If[x >= 0, x, -1 * x];
+abs[-7]
+abs[7]
+
+sign[x_] := Which[x > 0, 1, x < 0, -1, True, 0];
+sign[5]
+sign[-3]
+sign[0]
