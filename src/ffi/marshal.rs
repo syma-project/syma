@@ -101,6 +101,385 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
 
 // ── JSON wire marshalling (Tier 2 Python, Tier 3 extensions) ─────────────────
 
+// ── Full tagged-JSON serialisation (frontend/kernel) ───────────────────────────
+
+/// Serialise a `Value` to a tagged-JSON representation suitable for the frontend.
+///
+/// All variants are supported. Complex types that contain `Expr` (Pattern,
+/// PureFunction body, ClassDef internals) are represented via their Display
+/// string rather than a full structural serialisation.
+///
+/// Format: `{"t": "<type-tag>", ...variant-specific fields...}`
+pub fn value_to_json_full(v: &Value) -> serde_json::Value {
+    use serde_json::{Map, Number, Value as JVal};
+    match v {
+        Value::Integer(n) => {
+            // Serialise as a string to avoid i64 precision loss for huge integers.
+            // The frontend can parse small values as numbers when needed.
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("int".into()));
+            m.insert("v".into(), JVal::String(n.to_string()));
+            JVal::Object(m)
+        }
+        Value::Real(r) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("real".into()));
+            m.insert("v".into(), Number::from_f64(r.to_f64()).into());
+            JVal::Object(m)
+        }
+        Value::Complex { re, im } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("cpx".into()));
+            m.insert("re".into(), Number::from_f64(*re).into());
+            m.insert("im".into(), Number::from_f64(*im).into());
+            JVal::Object(m)
+        }
+        Value::Str(s) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("str".into()));
+            m.insert("v".into(), JVal::String(s.clone()));
+            JVal::Object(m)
+        }
+        Value::Bool(b) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("bool".into()));
+            m.insert("v".into(), JVal::Bool(*b));
+            JVal::Object(m)
+        }
+        Value::Null => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("null".into()));
+            JVal::Object(m)
+        }
+        Value::Symbol(s) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("sym".into()));
+            m.insert("v".into(), JVal::String(s.clone()));
+            JVal::Object(m)
+        }
+        Value::List(items) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("list".into()));
+            m.insert(
+                "v".into(),
+                JVal::Array(items.iter().map(value_to_json_full).collect()),
+            );
+            JVal::Object(m)
+        }
+        Value::Call { head, args } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("call".into()));
+            m.insert("h".into(), JVal::String(head.clone()));
+            m.insert(
+                "v".into(),
+                JVal::Array(args.iter().map(value_to_json_full).collect()),
+            );
+            JVal::Object(m)
+        }
+        Value::Assoc(map) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("assoc".into()));
+            let obj: Map<String, JVal> = map
+                .iter()
+                .map(|(k, val)| (k.clone(), value_to_json_full(val)))
+                .collect();
+            m.insert("v".into(), JVal::Object(obj));
+            JVal::Object(m)
+        }
+        Value::Rule { lhs, rhs, delayed } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("rule".into()));
+            m.insert("l".into(), value_to_json_full(lhs));
+            m.insert("r".into(), value_to_json_full(rhs));
+            m.insert("d".into(), JVal::Bool(*delayed));
+            JVal::Object(m)
+        }
+        Value::Function(fd) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("func".into()));
+            m.insert("n".into(), JVal::String(fd.name.clone()));
+            // Include definitions as display strings for reference
+            let defs: Vec<JVal> = fd
+                .definitions
+                .iter()
+                .map(|d| {
+                    let params: Vec<String> = d.params.iter().map(|p| format!("{p}")).collect();
+                    JVal::String(format!(
+                        "{}[{:?}] := {}",
+                        fd.name,
+                        params.join(", "),
+                        d.body
+                    ))
+                })
+                .collect();
+            m.insert("def".into(), JVal::Array(defs));
+            JVal::Object(m)
+        }
+        Value::Builtin(name, _) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("builtin".into()));
+            m.insert("n".into(), JVal::String(name.clone()));
+            JVal::Object(m)
+        }
+        Value::PureFunction { slot_count, .. } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("purefn".into()));
+            m.insert("n".into(), JVal::Number((*slot_count as u64).into()));
+            JVal::Object(m)
+        }
+        Value::Method { name, object } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("method".into()));
+            m.insert("n".into(), JVal::String(name.clone()));
+            m.insert("o".into(), value_to_json_full(object));
+            JVal::Object(m)
+        }
+        Value::Object { class_name, fields } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("obj".into()));
+            m.insert("c".into(), JVal::String(class_name.clone()));
+            let f_map: Map<String, JVal> = fields
+                .iter()
+                .map(|(k, val)| (k.clone(), value_to_json_full(val)))
+                .collect();
+            m.insert("f".into(), JVal::Object(f_map));
+            JVal::Object(m)
+        }
+        Value::Class(cd) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("class".into()));
+            m.insert("n".into(), JVal::String(cd.name.clone()));
+            JVal::Object(m)
+        }
+        Value::RuleSet { name, rules } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("ruleset".into()));
+            m.insert("n".into(), JVal::String(name.clone()));
+            // Rules are Vec<(Value, Value)>
+            let pairs: Vec<JVal> = rules
+                .iter()
+                .map(|(lhs, rhs)| {
+                    JVal::Array(vec![value_to_json_full(lhs), value_to_json_full(rhs)])
+                })
+                .collect();
+            m.insert("r".into(), JVal::Array(pairs));
+            JVal::Object(m)
+        }
+        Value::Pattern(expr) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("pat".into()));
+            m.insert("v".into(), JVal::String(format!("{expr}")));
+            JVal::Object(m)
+        }
+        Value::Module { name, exports } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("mod".into()));
+            m.insert("n".into(), JVal::String(name.clone()));
+            let e_map: Map<String, JVal> = exports
+                .iter()
+                .map(|(k, val)| (k.clone(), value_to_json_full(val)))
+                .collect();
+            m.insert("e".into(), JVal::Object(e_map));
+            JVal::Object(m)
+        }
+        Value::Hold(inner) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("hold".into()));
+            m.insert("v".into(), value_to_json_full(inner));
+            JVal::Object(m)
+        }
+        Value::HoldComplete(inner) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("holdc".into()));
+            m.insert("v".into(), value_to_json_full(inner));
+            JVal::Object(m)
+        }
+        Value::NativeLib { name, .. } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("nativelib".into()));
+            m.insert("n".into(), JVal::String(name.clone()));
+            JVal::Object(m)
+        }
+        Value::NativeFunction {
+            lib_name,
+            symbol_name,
+            ..
+        } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("nativefn".into()));
+            m.insert("l".into(), JVal::String(lib_name.clone()));
+            m.insert("s".into(), JVal::String(symbol_name.clone()));
+            JVal::Object(m)
+        }
+    }
+}
+
+/// Deserialise a tagged-JSON value back into a `Value`.
+pub fn json_val_to_value_full(jv: &serde_json::Value) -> Result<Value, EvalError> {
+    use serde_json::Value as JVal;
+    let obj = match jv {
+        JVal::Object(m) => m,
+        _ => return json_to_value_fallback(jv), // Untagged JSON: fallback to old parser
+    };
+    let tag = match obj.get("t").and_then(|t| t.as_str()) {
+        Some(t) => t,
+        None => return json_to_value_fallback(jv),
+    };
+    match tag {
+        "int" => {
+            let s = obj
+                .get("v")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EvalError::FfiError("int missing 'v' field".into()))?;
+            let n = Integer::parse(s)
+                .map_err(|e| EvalError::FfiError(format!("invalid integer '{s}': {e}")))?;
+            Ok(Value::Integer(rug::Integer::from(n)))
+        }
+        "real" => {
+            let f = obj
+                .get("v")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| EvalError::FfiError("real missing 'v' field".into()))?;
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, f)))
+        }
+        "cpx" => {
+            let re = obj.get("re").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let im = obj.get("im").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            Ok(Value::Complex { re, im })
+        }
+        "str" => {
+            let s = obj
+                .get("v")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EvalError::FfiError("str missing 'v' field".into()))?;
+            Ok(Value::Str(s.to_string()))
+        }
+        "bool" => {
+            let b = obj
+                .get("v")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| EvalError::FfiError("bool missing 'v' field".into()))?;
+            Ok(Value::Bool(b))
+        }
+        "null" => Ok(Value::Null),
+        "sym" => {
+            let s = obj
+                .get("v")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EvalError::FfiError("sym missing 'v' field".into()))?;
+            Ok(Value::Symbol(s.to_string()))
+        }
+        "list" => {
+            let arr = obj
+                .get("v")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| EvalError::FfiError("list missing 'v' field".into()))?;
+            let items: Result<Vec<_>, _> = arr.iter().map(json_val_to_value_full).collect();
+            Ok(Value::List(items?))
+        }
+        "call" => {
+            let head = obj
+                .get("h")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EvalError::FfiError("call missing 'h' field".into()))?;
+            let arr = obj
+                .get("v")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| EvalError::FfiError("call missing 'v' field".into()))?;
+            let args: Result<Vec<_>, _> = arr.iter().map(json_val_to_value_full).collect();
+            Ok(Value::Call {
+                head: head.to_string(),
+                args: args?,
+            })
+        }
+        "assoc" => {
+            let map_obj = obj
+                .get("v")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| EvalError::FfiError("assoc missing 'v' field".into()))?;
+            let map: Result<std::collections::HashMap<_, _>, _> = map_obj
+                .iter()
+                .map(|(k, val)| json_val_to_value_full(val).map(|v| (k.clone(), v)))
+                .collect();
+            Ok(Value::Assoc(map?))
+        }
+        "rule" => {
+            let lhs = obj
+                .get("l")
+                .ok_or_else(|| EvalError::FfiError("rule missing 'l' field".into()))?;
+            let rhs = obj
+                .get("r")
+                .ok_or_else(|| EvalError::FfiError("rule missing 'r' field".into()))?;
+            let delayed = obj.get("d").and_then(|v| v.as_bool()).unwrap_or(false);
+            Ok(Value::Rule {
+                lhs: Box::new(json_val_to_value_full(lhs)?),
+                rhs: Box::new(json_val_to_value_full(rhs)?),
+                delayed,
+            })
+        }
+        "func" | "builtin" | "purefn" | "method" | "class" | "ruleset" | "pat" | "mod"
+        | "nativelib" | "nativefn" | "obj" | "hold" | "holdc" => {
+            // These types are useful as output but generally shouldn't be
+            // round-tripped through JSON. Return a display-string representation.
+            Ok(Value::Str(format!("{jv}")))
+        }
+        _ => Err(EvalError::FfiError(format!(
+            "unknown type tag '{tag}' in JSON value"
+        ))),
+    }
+}
+
+/// Fallback: parse an untagged JSON value using the original simple format
+/// (numbers → Integer/Real, strings → Str, arrays → List, objects → Assoc).
+fn json_to_value_fallback(jv: &serde_json::Value) -> Result<Value, EvalError> {
+    match jv {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Integer(Integer::from(i)))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, f)))
+            } else {
+                Err(EvalError::FfiError(format!(
+                    "unrepresentable JSON number: {n}"
+                )))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Value::Str(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let items: Result<Vec<_>, _> = arr.iter().map(json_val_to_value_full).collect();
+            Ok(Value::List(items?))
+        }
+        serde_json::Value::Object(_) => {
+            // Untagged objects are treated as associations
+            let map: Result<std::collections::HashMap<_, _>, _> = jv
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, val)| json_val_to_value_full(val).map(|v| (k.clone(), v)))
+                .collect();
+            Ok(Value::Assoc(map?))
+        }
+    }
+}
+
+/// Serialise a slice of Values to a tagged-JSON string (frontend format).
+pub fn values_to_json_full(args: &[Value]) -> Result<String, EvalError> {
+    let json_vals: Vec<serde_json::Value> = args.iter().map(value_to_json_full).collect();
+    serde_json::to_string(&json_vals)
+        .map_err(|e| EvalError::FfiError(format!("JSON serialisation failed: {e}")))
+}
+
+/// Parse a tagged-JSON string back into a Value.
+pub fn json_to_value_full(json: &str) -> Result<Value, EvalError> {
+    let jv: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| EvalError::FfiError(format!("JSON parse failed: {e}")))?;
+    json_val_to_value_full(&jv)
+}
+
+// ── Legacy FFI JSON marshalling (kept for backward compatibility) ──────────────
+
 /// Serialise a slice of Syma values to a JSON string.
 ///
 /// Only the following types can cross the JSON boundary:

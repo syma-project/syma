@@ -1,5 +1,10 @@
 .claude/
 
+# gui (Tauri frontend)
+gui/node_modules/
+gui/dist/
+gui/src-tauri/target/
+
 .vscode/
 .idea/
 

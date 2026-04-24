@@ -538,6 +538,11 @@ impl Value {
         }
     }
 
+    /// Convert this value to a tagged-JSON representation for frontend consumption.
+    pub fn serialize_json(&self) -> serde_json::Value {
+        crate::ffi::marshal::value_to_json_full(self)
+    }
+
     /// Check if two values are structurally equal.
     pub fn struct_eq(&self, other: &Value) -> bool {
         match (self, other) {

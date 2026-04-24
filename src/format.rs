@@ -17,21 +17,21 @@ macro_rules! ansi {
     }};
 }
 
-pub(crate) fn green(s: &str) -> String {
+pub fn green(s: &str) -> String {
     ansi!("32", s)
 }
-pub(crate) fn red(s: &str) -> String {
+pub fn red(s: &str) -> String {
     ansi!("31", s)
 }
-pub(crate) fn bold_red(s: &str) -> String {
+pub fn bold_red(s: &str) -> String {
     ansi!("1;31", s)
 }
-pub(crate) fn cyan(s: &str) -> String {
+pub fn cyan(s: &str) -> String {
     ansi!("36", s)
 }
-pub(crate) fn dim(s: &str) -> String {
+pub fn dim(s: &str) -> String {
     ansi!("2", s)
 }
-pub(crate) fn bold(s: &str) -> String {
+pub fn bold(s: &str) -> String {
     ansi!("1", s)
 }

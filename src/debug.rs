@@ -377,20 +377,22 @@ fn send_event(event: &ServerEvent) {
 fn read_client_message() -> Option<ClientMessage> {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-    match lines.next() {
-        Some(Ok(line)) => {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return read_client_message();
-            }
-            match serde_json::from_str::<ClientMessage>(trimmed) {
-                Ok(msg) => Some(msg),
-                Err(e) => {
-                    eprintln!("[syma debug] Failed to parse command: {}", e);
-                    read_client_message() // skip bad lines
+    loop {
+        match lines.next() {
+            Some(Ok(line)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<ClientMessage>(trimmed) {
+                    Ok(msg) => return Some(msg),
+                    Err(e) => {
+                        eprintln!("[syma debug] Failed to parse command: {}", e);
+                        continue; // skip bad lines
+                    }
                 }
             }
+            _ => return None,
         }
-        _ => None,
     }
 }

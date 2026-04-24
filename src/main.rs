@@ -1,31 +1,17 @@
-// `cloned_ref_to_slice_refs` — suggestion `std::slice::from_ref` gives `&[&T]` but
-// apply_function/simplify_call take `&[T]`, so the fix doesn't apply in this codebase.
-#![allow(clippy::cloned_ref_to_slice_refs)]
-
 /// Syma: A Symbolic-First Language with OOP Structure
 ///
-/// Phase 1: Tree-walk interpreter with REPL.
-mod ast;
-mod builtins;
-mod cli;
-mod debug;
-mod env;
-mod eval;
-mod ffi;
-mod format;
-mod lexer;
-mod manifest;
-mod parser;
-mod pattern;
-mod value;
+/// CLI entry point. The language library lives in `lib.rs`.
+use std::io::{self, BufRead};
+use std::process;
 
-use std::fs;
-
-use crate::format::{bold_red, cyan, dim, green, red};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use syma::format::{cyan, dim, green, red};
+use syma::kernel::SymaKernel;
+use syma::value::Value;
+use syma::{VERSION, eval_input, run_file};
 
-const VERSION: &str = "0.1.0";
+const HISTORY_FILE: &str = ".syma_history";
 
 fn print_usage() {
     println!(
@@ -39,6 +25,7 @@ fn print_usage() {
     println!("  syma -e <expr>             Evaluate an expression and print the result");
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --check <file>        Parse-only check (no evaluation)");
+    println!("  syma --serve               Run in kernel mode (JSON over stdin/stdout)");
     println!("  syma --help                Show this help");
     println!("  syma --version             Show version");
     println!();
@@ -79,67 +66,6 @@ fn print_repl_help() {
     println!("  (* comment *)    Comment");
 }
 
-fn print_error(label: &str, message: &str, source: &str) {
-    eprintln!("{}: {}", bold_red(label), message);
-    eprintln!("  {}", dim(source));
-}
-
-/// Returns the value if successful, None on error.
-fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
-    let tokens = match lexer::tokenize(input) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            print_error("LexError", &e.to_string(), input);
-            return None;
-        }
-    };
-    let ast = match parser::parse(tokens) {
-        Ok(ast) => ast,
-        Err(e) => {
-            print_error("ParseError", &e.to_string(), input);
-            return None;
-        }
-    };
-    match eval::eval_program(&ast, env) {
-        Ok(value) => Some(value),
-        Err(e) => {
-            print_error("Error", &e.to_string(), input);
-            None
-        }
-    }
-}
-
-pub(crate) fn run_file(path: &str) -> Result<(), String> {
-    let source =
-        fs::read_to_string(path).map_err(|e| format!("Error reading '{}': {}", path, e))?;
-
-    let env = env::Env::new();
-    builtins::register_builtins(&env);
-
-    // Add the file's directory to the module search path so that
-    // `import Foo` can find sibling files (e.g. `Foo.syma`).
-    if let Some(parent) = std::path::Path::new(path).parent()
-        && parent != std::path::Path::new("")
-    {
-        env.add_search_path(parent.to_path_buf());
-    }
-
-    let tokens = lexer::tokenize(&source).map_err(|e| format!("{}", e))?;
-    let stmts = parser::parse_with_suppress(tokens).map_err(|e| format!("{}", e))?;
-
-    for (stmt, suppress) in &stmts {
-        match eval::eval(stmt, &env) {
-            Ok(value::Value::Null) => {}
-            Ok(value) if !suppress => println!("{}", value),
-            Ok(_) => {}
-            Err(e) => print_error("Error", &e.to_string(), path),
-        }
-    }
-    Ok(())
-}
-
-const HISTORY_FILE: &str = ".syma_history";
-
 fn run_repl() {
     println!(
         "{} — Symbolic-First Language with OOP Structure",
@@ -151,14 +77,14 @@ fn run_repl() {
         cyan("'quit'")
     );
 
-    let env = env::Env::new();
-    builtins::register_builtins(&env);
+    let env = syma::env::Env::new();
+    syma::builtins::register_builtins(&env);
 
     let mut rl = match DefaultEditor::new() {
         Ok(rl) => rl,
         Err(e) => {
             eprintln!("Failed to initialize REPL: {}", e);
-            std::process::exit(1);
+            process::exit(1);
         }
     };
 
@@ -197,7 +123,7 @@ fn run_repl() {
                 }
 
                 if let Some(value) = eval_input(input, &env)
-                    && value != value::Value::Null
+                    && value != Value::Null
                 {
                     // Information queries display directly without Out[n]: prefix
                     if input.starts_with('?') {
@@ -242,6 +168,28 @@ fn dirs_or_default() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
+/// Run in kernel mode: read JSON requests from stdin, write JSON responses to stdout.
+fn run_kernel() {
+    let kernel = SymaKernel::new();
+    let stdin = io::stdin().lock();
+    for line in stdin.lines() {
+        match line {
+            Ok(input) => {
+                let trimmed = input.trim().to_string();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let response = kernel.eval_json(&trimmed);
+                println!("{response}");
+            }
+            Err(e) => {
+                eprintln!("Error reading stdin: {}", e);
+                break;
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -271,20 +219,20 @@ fn main() {
 
     if has_dap {
         if let Some(path) = file_arg {
-            debug::run_debug(path);
+            syma::debug::run_debug(path);
         } else {
             eprintln!("Usage: syma --dap <file>");
-            std::process::exit(1);
+            process::exit(1);
         }
         return;
     }
 
     if has_check {
         if let Some(path) = file_arg {
-            cli::check_single_file(path);
+            syma::cli::check_single_file(path);
         } else {
             eprintln!("Usage: syma --check <file>");
-            std::process::exit(1);
+            process::exit(1);
         }
         return;
     }
@@ -294,23 +242,25 @@ fn main() {
         Some("--help") | Some("-h") => print_usage(),
         Some("--version") | Some("-v") => println!("syma {}", VERSION),
 
+        // ── Kernel / server mode ──────────────────────────────────────────────
+        Some("--serve") | Some("--kernel") => run_kernel(),
+
         // ── Expression evaluation ──────────────────────────────────────────────
         Some("--eval") | Some("-e") => {
             let expr = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
                 eprintln!("Usage: syma --eval <expression>");
-                std::process::exit(1);
+                process::exit(1);
             });
-            let env = env::Env::new();
-            builtins::register_builtins(&env);
+            let env = syma::env::Env::new();
+            syma::builtins::register_builtins(&env);
             match eval_input(expr, &env) {
                 Some(val) => println!("{}", val),
-                None => std::process::exit(1),
+                None => process::exit(1),
             }
         }
 
         // ── Package scaffolding ───────────────────────────────────────────────
         Some("new") => {
-            // syma new [--lib] <name>
             let is_lib = args.contains(&"--lib".to_string());
             let name = args
                 .iter()
@@ -319,129 +269,61 @@ fn main() {
                 .map(|s| s.as_str())
                 .unwrap_or_else(|| {
                     eprintln!("Usage: syma new [--lib] <name>");
-                    std::process::exit(1);
+                    process::exit(1);
                 });
-            cli::cmd_new(name, is_lib);
+            syma::cli::cmd_new(name, is_lib);
         }
 
         // ── Source execution ─────────────────────────────────────────────────
-        Some("run") => cli::cmd_run(),
-        Some("build") => cli::cmd_build(),
-        Some("check") => cli::cmd_check(),
-        Some("test") => cli::cmd_test(),
+        Some("run") => syma::cli::cmd_run(),
+        Some("build") => syma::cli::cmd_build(),
+        Some("check") => syma::cli::cmd_check(),
+        Some("test") => syma::cli::cmd_test(),
 
         // ── Dependency management ─────────────────────────────────────────────
         Some("add") => {
             let spec = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
                 eprintln!("Usage: syma add <package>[@version] [--dev]");
-                std::process::exit(1);
+                process::exit(1);
             });
             let dev = args.contains(&"--dev".to_string());
-            cli::cmd_add(spec, dev);
+            syma::cli::cmd_add(spec, dev);
         }
         Some("remove") | Some("rm") => {
             let name = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
                 eprintln!("Usage: syma remove <package>");
-                std::process::exit(1);
+                process::exit(1);
             });
-            cli::cmd_remove(name);
+            syma::cli::cmd_remove(name);
         }
-        Some("install") => cli::cmd_install(),
-        Some("update") => cli::cmd_update(),
+        Some("install") => syma::cli::cmd_install(),
+        Some("update") => syma::cli::cmd_update(),
 
         // ── Registry (planned) ────────────────────────────────────────────────
-        Some("publish") => cli::cmd_publish(),
+        Some("publish") => syma::cli::cmd_publish(),
         Some("search") => {
             let query = args.get(2).map(|s| s.as_str()).unwrap_or("");
-            cli::cmd_search(query);
+            syma::cli::cmd_search(query);
         }
         Some("info") => {
             let pkg = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
                 eprintln!("Usage: syma info <package>");
-                std::process::exit(1);
+                process::exit(1);
             });
-            cli::cmd_info(pkg);
+            syma::cli::cmd_info(pkg);
         }
 
         // ── Direct file execution and REPL ────────────────────────────────────
         Some(path) if !path.starts_with('-') => {
             if let Err(e) = run_file(path) {
                 eprintln!("{}: {}", red("Error"), e);
-                std::process::exit(1);
+                process::exit(1);
             }
         }
         Some(flag) => {
             eprintln!("Unknown option: {}. Try `syma --help`.", flag);
-            std::process::exit(1);
+            process::exit(1);
         }
         None => run_repl(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rug::Integer;
-
-    fn eval_str(input: &str) -> value::Value {
-        let env = env::Env::new();
-        builtins::register_builtins(&env);
-        let tokens = lexer::tokenize(input).unwrap();
-        let ast = parser::parse(tokens).unwrap();
-        eval::eval_program(&ast, &env).unwrap()
-    }
-
-    #[test]
-    fn test_arithmetic() {
-        assert_eq!(eval_str("1 + 2"), value::Value::Integer(Integer::from(3)));
-        assert_eq!(eval_str("3 * 4"), value::Value::Integer(Integer::from(12)));
-        assert_eq!(eval_str("10 / 2"), value::Value::Integer(Integer::from(5)));
-        assert_eq!(eval_str("2^3"), value::Value::Integer(Integer::from(8)));
-    }
-
-    #[test]
-    fn test_variables() {
-        assert_eq!(
-            eval_str("x = 5; x"),
-            value::Value::Integer(Integer::from(5))
-        );
-    }
-
-    #[test]
-    fn test_lists() {
-        let val = eval_str("{1, 2, 3}");
-        assert_eq!(
-            val,
-            value::Value::List(vec![
-                value::Value::Integer(Integer::from(1)),
-                value::Value::Integer(Integer::from(2)),
-                value::Value::Integer(Integer::from(3)),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_function_def() {
-        let val = eval_str("f[x_] := x^2; f[3]");
-        assert_eq!(val, value::Value::Integer(Integer::from(9)));
-    }
-
-    #[test]
-    fn test_if() {
-        assert_eq!(
-            eval_str("If[True, 1, 2]"),
-            value::Value::Integer(Integer::from(1))
-        );
-        assert_eq!(
-            eval_str("If[False, 1, 2]"),
-            value::Value::Integer(Integer::from(2))
-        );
-    }
-
-    #[test]
-    fn test_comparison() {
-        assert_eq!(eval_str("1 == 1"), value::Value::Bool(true));
-        assert_eq!(eval_str("1 != 2"), value::Value::Bool(true));
-        assert_eq!(eval_str("1 < 2"), value::Value::Bool(true));
     }
 }
