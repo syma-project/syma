@@ -15,7 +15,6 @@ pub enum Expr {
     // ── Atoms ──
     Integer(Integer),
     Real(Float),
-    #[allow(dead_code)]
     Complex {
         re: f64,
         im: f64,
@@ -192,7 +191,6 @@ pub enum Expr {
     },
 
     /// {a, b} = value — destructuring assignment
-    #[allow(dead_code)]
     DestructAssign {
         patterns: Vec<Expr>,
         rhs: Box<Expr>,
@@ -233,7 +231,6 @@ pub enum Expr {
     // ── Hold ──
     Hold(Box<Expr>),
     HoldComplete(Box<Expr>),
-    #[allow(dead_code)]
     ReleaseHold(Box<Expr>),
 
     // ── Help ──

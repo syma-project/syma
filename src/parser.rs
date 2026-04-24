@@ -15,7 +15,6 @@ pub struct Parser {
 #[derive(Debug)]
 pub struct ParseError {
     pub message: String,
-    #[allow(dead_code)]
     pub token: Option<Token>,
     pub span: Option<Span>,
 }
@@ -1547,10 +1546,23 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
 
-                // Check if next token starts with _
-                // This is tricky because _ is part of the identifier in our lexer
-                // For now, check if the identifier ends with _
-                if name.ends_with('_') {
+                // Check from longest to shortest to avoid ambiguity:
+                // "x___" ends with _ but should be BlankNullSequence, not NamedBlank.
+                if name.len() >= 3 && name.ends_with("___") {
+                    let base = &name[..name.len() - 3];
+                    let type_constraint = self.try_parse_type_suffix()?;
+                    Ok(Expr::BlankNullSequence {
+                        name: if base.is_empty() { None } else { Some(base.to_string()) },
+                        type_constraint,
+                    })
+                } else if name.len() >= 2 && name.ends_with("__") {
+                    let base = &name[..name.len() - 2];
+                    let type_constraint = self.try_parse_type_suffix()?;
+                    Ok(Expr::BlankSequence {
+                        name: if base.is_empty() { None } else { Some(base.to_string()) },
+                        type_constraint,
+                    })
+                } else if name.ends_with('_') {
                     let base = &name[..name.len() - 1];
                     let type_constraint = self.try_parse_type_suffix()?;
                     if base.is_empty() {
@@ -1574,20 +1586,6 @@ impl Parser {
                             })
                         }
                     }
-                } else if name.ends_with("__") && name.len() > 2 {
-                    let base = &name[..name.len() - 2];
-                    let type_constraint = self.try_parse_type_suffix()?;
-                    Ok(Expr::BlankSequence {
-                        name: Some(base.to_string()),
-                        type_constraint,
-                    })
-                } else if name.ends_with("___") && name.len() > 3 {
-                    let base = &name[..name.len() - 3];
-                    let type_constraint = self.try_parse_type_suffix()?;
-                    Ok(Expr::BlankNullSequence {
-                        name: Some(base.to_string()),
-                        type_constraint,
-                    })
                 } else {
                     Ok(Expr::Symbol(name))
                 }
@@ -1637,7 +1635,7 @@ impl Parser {
             Token::LParen => {
                 self.advance();
                 let mut patterns = vec![self.parse_pattern()?];
-                while self.at(&Token::Ident("|".to_string())) {
+                while self.at(&Token::PipeAlt) {
                     self.advance();
                     patterns.push(self.parse_pattern()?);
                 }
@@ -1715,32 +1713,85 @@ impl Parser {
     fn convert_pattern(expr: Expr) -> Expr {
         match expr {
             Expr::Symbol(ref s) if s.contains('_') => {
-                if s == "_" {
-                    Expr::Blank {
-                        type_constraint: None,
-                    }
-                } else if let Some(pos) = s.find('_') {
-                    let name = &s[..pos];
-                    let rest = &s[pos + 1..];
-                    if rest.is_empty() {
-                        // x_ → NamedBlank { name: "x", type_constraint: None }
-                        Expr::NamedBlank {
-                            name: name.to_string(),
+                match s.as_str() {
+                    "_" => {
+                        return Expr::Blank {
                             type_constraint: None,
-                        }
+                        };
+                    }
+                    "__" => {
+                        return Expr::BlankSequence {
+                            name: None,
+                            type_constraint: None,
+                        };
+                    }
+                    "___" => {
+                        return Expr::BlankNullSequence {
+                            name: None,
+                            type_constraint: None,
+                        };
+                    }
+                    _ => {}
+                }
+                // Find the first underscore — everything before is the name,
+                // everything from the underscore onward determines the pattern type.
+                if let Some(pos) = s.find('_') {
+                    let prefix = &s[..pos];
+                    let underscore_part = &s[pos..];
+
+                    if let Some(tc) = underscore_part.strip_prefix("___") {
+                        return Expr::BlankNullSequence {
+                            name: if prefix.is_empty() {
+                                None
+                            } else {
+                                Some(prefix.to_string())
+                            },
+                            type_constraint: if tc.is_empty() {
+                                None
+                            } else {
+                                Some(tc.to_string())
+                            },
+                        };
+                    } else if let Some(tc) = underscore_part.strip_prefix("__") {
+                        return Expr::BlankSequence {
+                            name: if prefix.is_empty() {
+                                None
+                            } else {
+                                Some(prefix.to_string())
+                            },
+                            type_constraint: if tc.is_empty() {
+                                None
+                            } else {
+                                Some(tc.to_string())
+                            },
+                        };
                     } else {
-                        // x_Integer → NamedBlank { name: "x", type_constraint: Some("Integer") }
-                        Expr::NamedBlank {
-                            name: name.to_string(),
-                            type_constraint: Some(rest.to_string()),
+                        // Single underscore: Blank or NamedBlank
+                        let tc = &underscore_part[1..];
+                        if prefix.is_empty() {
+                            return Expr::Blank {
+                                type_constraint: if tc.is_empty() {
+                                    None
+                                } else {
+                                    Some(tc.to_string())
+                                },
+                            };
+                        } else {
+                            return Expr::NamedBlank {
+                                name: prefix.to_string(),
+                                type_constraint: if tc.is_empty() {
+                                    None
+                                } else {
+                                    Some(tc.to_string())
+                                },
+                            };
                         }
                     }
-                } else {
-                    expr
                 }
             }
-            _ => expr,
+            _ => {}
         }
+        expr
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
@@ -2065,6 +2116,35 @@ mod tests {
                     }
                     _ => panic!("Expected Call in body"),
                 }
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_function_definition_sequence() {
+        // x__ should be parsed as BlankSequence
+        let expr = parse_one("f[x__] := Total[{x}]");
+        match expr {
+            Expr::FuncDef { params, .. } => {
+                assert_eq!(params.len(), 1);
+                assert!(matches!(
+                    &params[0],
+                    Expr::BlankSequence { name: Some(n), .. } if n == "x"
+                ));
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+
+        // x___ should be parsed as BlankNullSequence
+        let expr = parse_one("f[x___] := {x}");
+        match expr {
+            Expr::FuncDef { params, .. } => {
+                assert_eq!(params.len(), 1);
+                assert!(matches!(
+                    &params[0],
+                    Expr::BlankNullSequence { name: Some(n), .. } if n == "x"
+                ));
             }
             _ => panic!("Expected FuncDef"),
         }

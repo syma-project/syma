@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 /// A native dependency entry in `syma.toml`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct NativeDep {
     /// Path to the compiled native library (`.so` / `.dylib` / `.dll`).
     pub path: String,
@@ -13,13 +12,11 @@ pub struct NativeDep {
 
 /// Parsed representation of a `syma.toml` package manifest.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Manifest {
     /// Absolute path to the `syma.toml` file.
     pub path: PathBuf,
     pub name: String,
     pub version: String,
-    #[allow(dead_code)]
     pub description: String,
     /// Explicit entry point (`entry` key in `[package]`).
     pub entry: Option<String>,

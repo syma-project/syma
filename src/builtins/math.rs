@@ -1,4 +1,6 @@
 use crate::builtins::arithmetic::{builtin_divide, builtin_plus};
+use crate::env::Env;
+use crate::eval::apply_function;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
@@ -1373,10 +1375,30 @@ pub fn builtin_factorial(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── FixedPoint stub (evaluator handles this) ──
 
-pub fn builtin_fixed_point_stub(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "FixedPoint should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_fixed_point(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error(
+            "FixedPoint requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let max_iter = if args.len() == 3 {
+        args[2].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[2].type_name().to_string(),
+        })? as usize
+    } else {
+        1000
+    };
+    let f = &args[0];
+    let mut val = args[1].clone();
+    for _ in 0..max_iter {
+        let new_val = apply_function(f, &[val.clone()], env)?;
+        if new_val.struct_eq(&val) {
+            return Ok(new_val);
+        }
+        val = new_val;
+    }
+    Ok(val)
 }
 
 #[cfg(test)]

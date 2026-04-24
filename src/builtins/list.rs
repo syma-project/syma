@@ -1,3 +1,5 @@
+use crate::env::Env;
+use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
@@ -355,52 +357,135 @@ pub fn builtin_table(_args: &[Value]) -> Result<Value, EvalError> {
     Err(EvalError::Error("Table not yet implemented".to_string()))
 }
 
-pub fn builtin_map(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Map requires exactly 2 arguments".to_string(),
         ));
     }
-    // Map is handled by the evaluator for proper function application
-    Err(EvalError::Error(
-        "Map should be handled by evaluator".to_string(),
-    ))
-}
-
-pub fn builtin_fold(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "Fold requires exactly 3 arguments".to_string(),
-        ));
+    let f = &args[0];
+    match &args[1] {
+        Value::List(items) => {
+            let mut result = Vec::new();
+            for item in items {
+                result.push(apply_function(f, &[item.clone()], env)?);
+            }
+            Ok(Value::List(result))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
     }
-    // Fold is handled by the evaluator for proper function application
-    Err(EvalError::Error(
-        "Fold should be handled by evaluator".to_string(),
-    ))
 }
 
-pub fn builtin_select(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_fold(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let (f, init, items) = match args.len() {
+        2 => {
+            match &args[1] {
+                Value::List(list) if !list.is_empty() => (&args[0], list[0].clone(), &list[1..]),
+                Value::List(_) => {
+                    return Err(EvalError::Error(
+                        "Fold on empty list requires initial value".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
+            }
+        }
+        3 => {
+            match &args[2] {
+                Value::List(list) => (&args[0], args[1].clone(), list.as_slice()),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List".to_string(),
+                        got: args[2].type_name().to_string(),
+                    });
+                }
+            }
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "Fold requires 2 or 3 arguments".to_string(),
+            ));
+        }
+    };
+    let mut acc = init;
+    for item in items {
+        acc = apply_function(f, &[acc, item.clone()], env)?;
+    }
+    Ok(acc)
+}
+
+pub fn builtin_select(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Select requires exactly 2 arguments".to_string(),
         ));
     }
-    // Select is handled by the evaluator for proper function application
-    Err(EvalError::Error(
-        "Select should be handled by evaluator".to_string(),
-    ))
+    match &args[0] {
+        Value::List(items) => {
+            let test = &args[1];
+            let mut result = Vec::new();
+            for item in items {
+                let keep = apply_function(test, &[item.clone()], env)?;
+                if keep.to_bool() {
+                    result.push(item.clone());
+                }
+            }
+            Ok(Value::List(result))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
 }
 
-pub fn builtin_scan(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "Scan should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_scan(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Scan requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match &args[1] {
+        Value::List(items) => {
+            for item in items {
+                apply_function(&args[0], &[item.clone()], env)?;
+            }
+            Ok(Value::Null)
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
+    }
 }
 
-pub fn builtin_nest(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "Nest should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_nest(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "Nest requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let n = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: args[2].type_name().to_string(),
+    })?;
+    if n < 0 {
+        return Err(EvalError::Error(
+            "Nest count must be non-negative".to_string(),
+        ));
+    }
+    let mut val = args[1].clone();
+    for _ in 0..n {
+        val = apply_function(&args[0], &[val], env)?;
+    }
+    Ok(val)
 }
 
 pub fn builtin_take(args: &[Value]) -> Result<Value, EvalError> {

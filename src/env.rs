@@ -26,7 +26,6 @@ pub type NativeLibRegistry = Arc<Mutex<HashMap<String, Arc<NativeLibHandle>>>>;
 
 /// A lazy-loading provider: when an undefined symbol is first used in a call,
 /// the provider is fired once, then removed from the registry.
-#[allow(dead_code)]
 pub enum LazyProvider {
     /// Load a `.syma` file and evaluate it to define the symbol.
     /// The path is resolved against the environment's `search_paths`.
@@ -98,7 +97,6 @@ impl Scope {
         self.bindings.insert(name, value);
     }
 
-    #[allow(dead_code)]
     pub fn set_local(&mut self, name: String, value: Value) {
         self.bindings.insert(name, value);
     }
@@ -194,19 +192,16 @@ impl Env {
     }
 
     /// Set a variable in the current (local) scope only.
-    #[allow(dead_code)]
     pub fn set_local(&self, name: String, value: Value) {
         self.scope.lock().unwrap().set_local(name, value);
     }
 
     /// Check if a variable exists in the current scope (not parents).
-    #[allow(dead_code)]
     pub fn has_local(&self, name: &str) -> bool {
         self.scope.lock().unwrap().bindings.contains_key(name)
     }
 
     /// Return all bindings in the current scope (not parents), as a Vec of (name, value) pairs.
-    #[allow(dead_code)]
     pub fn bindings(&self) -> Vec<(String, Value)> {
         self.scope
             .lock()
@@ -256,7 +251,6 @@ impl Env {
     }
 
     /// Check if a symbol has a specific attribute.
-    #[allow(dead_code)]
     pub fn has_attribute(&self, name: &str, attr: &str) -> bool {
         self.get_attributes(name).iter().any(|a| a == attr)
     }

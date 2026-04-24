@@ -77,8 +77,9 @@ pub enum Token {
     Or,              // ||
     Not,             // !
     FatArrow,        // =>
-    #[allow(dead_code)]
     StringJoinOp, // <>
+    PipeAlt,       // | (pattern alternatives)
+    FuncRef,       // & (function reference / pure function)
 
     // ── Special ──
     Quote,        // ' (quote)
@@ -114,8 +115,6 @@ pub enum Token {
     Hold,
     HoldComplete,
     ReleaseHold,
-    #[allow(dead_code)]
-    Transform,
     Mixin,
 
     // ── Special tokens ──
@@ -176,6 +175,8 @@ impl fmt::Display for Token {
             Token::Not => write!(f, "!"),
             Token::FatArrow => write!(f, "=>"),
             Token::StringJoinOp => write!(f, "<>"),
+            Token::PipeAlt => write!(f, "|"),
+            Token::FuncRef => write!(f, "&"),
             Token::Quote => write!(f, "'"),
             Token::Tilde => write!(f, "~"),
             Token::QuestionMark => write!(f, "?"),
@@ -207,7 +208,6 @@ impl fmt::Display for Token {
             Token::Hold => write!(f, "Hold"),
             Token::HoldComplete => write!(f, "HoldComplete"),
             Token::ReleaseHold => write!(f, "ReleaseHold"),
-            Token::Transform => write!(f, "@transform"),
             Token::Mixin => write!(f, "mixin"),
             Token::ColonSlashSemicolon => write!(f, "/;"),
             Token::AtTransform => write!(f, "@transform"),
@@ -230,7 +230,6 @@ pub struct Lexer {
 #[derive(Debug)]
 pub struct LexError {
     pub message: String,
-    #[allow(dead_code)]
     pub pos: usize,
     pub line: usize,
     pub col: usize,
@@ -740,8 +739,7 @@ impl Lexer {
                         push!(Token::And);
                     } else {
                         // & is used in pure functions — treat as a special token
-                        // For now, just push as a symbol
-                        push!(Token::Ident("&".to_string()));
+                        push!(Token::FuncRef);
                     }
                 }
 
@@ -756,7 +754,7 @@ impl Lexer {
                         push!(Token::RAssoc);
                     } else {
                         // | in pattern alternatives
-                        push!(Token::Ident("|".to_string()));
+                        push!(Token::PipeAlt);
                     }
                 }
 

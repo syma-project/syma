@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use crate::env::Env;
+use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
+use rug::Integer;
 
 // ── Thread Pool ──
 
@@ -180,29 +183,84 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
     }
 }
 
-// ── Stubs (evaluator-dependent, dispatched from eval.rs) ──
+// ── Builtins ──
 
-pub fn builtin_parallel_map(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "ParallelMap should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_parallel_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelMap requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    match &args[1] {
+        Value::List(items) if items.is_empty() => Ok(Value::List(vec![])),
+        Value::List(items) => {
+            if items.len() < 4 {
+                let mut result = Vec::with_capacity(items.len());
+                for item in items {
+                    result.push(apply_function(f, &[item.clone()], env)?);
+                }
+                return Ok(Value::List(result));
+            }
+            let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = items
+                .iter()
+                .map(|item| {
+                    let f = f.clone();
+                    let item = item.clone();
+                    let env = env.clone();
+                    Box::new(move || apply_function(&f, &[item], &env))
+                        as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+                })
+                .collect();
+            let results = parallel_batch(jobs);
+            let mut out = Vec::with_capacity(results.len());
+            for r in results {
+                out.push(r?);
+            }
+            Ok(Value::List(out))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
+    }
+}
+
+pub fn builtin_launch_kernels(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        0 => Ok(Value::Integer(Integer::from(pool_size() as i64))),
+        1 => {
+            let n = args[0].to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[0].type_name().to_string(),
+            })?;
+            if n < 1 {
+                return Err(EvalError::Error(
+                    "LaunchKernels requires a positive integer".to_string(),
+                ));
+            }
+            launch_kernels(n as usize);
+            Ok(Value::Integer(Integer::from(n)))
+        }
+        _ => Err(EvalError::Error(
+            "LaunchKernels requires 0 or 1 arguments".to_string(),
+        )),
+    }
+}
+
+pub fn builtin_close_kernels(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Err(EvalError::Error(
+            "CloseKernels takes no arguments".to_string(),
+        ));
+    }
+    close_kernels();
+    Ok(Value::Null)
 }
 
 pub fn builtin_parallel_table(_args: &[Value]) -> Result<Value, EvalError> {
     Err(EvalError::Error(
         "ParallelTable should be handled by evaluator".to_string(),
-    ))
-}
-
-pub fn builtin_launch_kernels(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "LaunchKernels should be handled by evaluator".to_string(),
-    ))
-}
-
-pub fn builtin_close_kernels(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "CloseKernels should be handled by evaluator".to_string(),
     ))
 }
 

@@ -212,7 +212,7 @@ fn ext_builtin_stub(name: &str) -> Value {
     //
     // We register under `name` as a `Value::Builtin(name, _EXT_DISPATCH)`.
     // `_EXT_DISPATCH` is an alias for the generic trampoline below.
-    Value::Builtin(name.to_string(), _ext_dispatch)
+    Value::Builtin(name.to_string(), crate::value::BuiltinFn::Pure(_ext_dispatch))
 }
 
 fn _ext_dispatch(args: &[Value]) -> Result<Value, EvalError> {
@@ -231,4 +231,7 @@ fn _ext_dispatch(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// The trampoline function pointer used as the marker for extension builtins.
-pub const EXT_DISPATCH_FN: crate::value::BuiltinFn = _ext_dispatch;
+pub const EXT_DISPATCH_FN: crate::value::BuiltinFn = crate::value::BuiltinFn::Pure(_ext_dispatch);
+
+/// Raw fn pointer for the extension dispatch, used for pointer comparison in eval.
+pub const EXT_DISPATCH_PTR: fn(&[Value]) -> Result<Value, EvalError> = _ext_dispatch;

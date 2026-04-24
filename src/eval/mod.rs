@@ -10,17 +10,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rug::float::Constant;
-use rug::ops::Pow;
-use rug::{Float, Integer};
+use rug::Integer;
 
 use crate::ast::*;
-use crate::builtins::parallel::{close_kernels, launch_kernels, parallel_batch, pool_size};
 use crate::env::Env;
 use crate::env::LazyProvider;
 use crate::ffi;
 use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
 use crate::value::*;
+
+pub(crate) mod rules;
+pub(crate) mod numeric;
+pub(crate) mod table;
+pub(crate) mod plot;
 
 /// Evaluate a program (list of statements) in the given environment.
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
@@ -80,7 +82,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── List ──
         Expr::List(items) => {
             let values: Result<Vec<Value>, _> = items.iter().map(|item| eval(item, env)).collect();
-            Ok(Value::List(values?))
+            Ok(Value::List(flatten_sequences(values?)))
         }
 
         // ── Association ──
@@ -128,8 +130,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::ReplaceAll { expr, rules } => {
             let val = eval(expr, env)?;
             let rules_val = eval(rules, env)?;
-            apply_rules_value(&val, &rules_val, env)
-        }
+            rules::apply_rules_value(&val, &rules_val, env)        }
 
         // ── ReplaceRepeated: expr //. rules ──
         Expr::ReplaceRepeated { expr, rules } => {
@@ -137,7 +138,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let rules_val = eval(rules, env)?;
             let max_iterations = 1000;
             for _ in 0..max_iterations {
-                match apply_rules_value(&val, &rules_val, env)? {
+                match rules::apply_rules_value(&val, &rules_val, env)? {
                     new_val if !new_val.struct_eq(&val) => val = new_val,
                     _ => break,
                 }
@@ -219,7 +220,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let val = eval(expr, env)?;
             for (pattern, result) in cases {
                 let pat_val = eval(pattern, env)?;
-                if let MatchResult::Match(_) = match_pattern(&pat_to_expr(&pat_val), &val) {
+                if let MatchResult::Match(_) = match_pattern(&rules::pat_to_expr(&pat_val), &val) {
                     return eval(result, env);
                 }
             }
@@ -724,7 +725,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 ///
 /// Returns (inner_pattern, Some(guard_condition)) if the expression is a
 /// PatternGuard, otherwise (expr, None).
-fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
+pub(super) fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
     match expr {
         Expr::PatternGuard { pattern, condition } => (pattern.as_ref(), Some(condition.as_ref())),
         _ => (expr, None),
@@ -732,7 +733,7 @@ fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
 }
 
 /// Check if an expression looks like a pattern that should not be evaluated.
-fn is_pattern_like(expr: &Expr) -> bool {
+pub(super) fn is_pattern_like(expr: &Expr) -> bool {
     match expr {
         Expr::Symbol(s) => s.ends_with('_') || s == "_",
         Expr::Blank { .. }
@@ -872,19 +873,19 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             }
             "Table" => {
                 // Table[expr, {i, min, max}] — iterator spec has unevaluated symbols
-                eval_table(args, env)
+                table::eval_table(args, env)
             }
             "ParallelTable" => {
                 // ParallelTable[expr, {i, min, max}] — parallel version of Table
-                eval_parallel_table(args, env)
+                table::eval_parallel_table(args, env)
             }
             "Sum" => {
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
-                eval_sum(args, env)
+                table::eval_sum(args, env)
             }
             "Plot" => {
                 // Plot[f, {x, xmin, xmax}] — needs unevaluated expr for sampling
-                eval_plot(args, env)
+                plot::eval_plot(args, env)
             }
             "Catch" => {
                 // Catch[expr] — evaluate expr, catching any Throw[val]
@@ -927,24 +928,24 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 } else {
                     DEFAULT_PRECISION
                 };
-                numeric_eval_expr(&args[0], prec_bits, env)
+                numeric::numeric_eval_expr(&args[0], prec_bits, env)
             }
             _ => {
-                // Normal function call — check for Hold attributes
                 let head_val = eval(head, env)?;
                 let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
-                apply_function(&head_val, &arg_vals, env)
+
+                apply_function(&head_val, &flatten_sequences(arg_vals), env)
             }
         }
     } else {
         let head_val = eval(head, env)?;
         let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
-        apply_function(&head_val, &arg_vals, env)
+        apply_function(&head_val, &flatten_sequences(arg_vals), env)
     }
 }
 
 /// Apply a function value to arguments.
-fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
+pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // ── Listable attribute: auto-thread over lists ──
     let func_name = match func {
         Value::Builtin(name, _) => Some(name.as_str()),
@@ -1011,182 +1012,25 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
     }
 
     match func {
-        Value::Builtin(name, f) => {
-            // Handle evaluator-dependent builtins that need apply_function
-            match name.as_str() {
-                "Map" => return builtin_map_eval(args, env),
-                "Fold" => return builtin_fold_eval(args, env),
-                "Select" => return builtin_select_eval(args, env),
-                "Scan" => return builtin_scan_eval(args, env),
-                "Nest" => return builtin_nest_eval(args, env),
-                "MatchQ" => return builtin_match_q_eval(args),
-                "FreeQ" => return builtin_free_q_eval(args),
-                "FixedPoint" => return builtin_fixed_point_eval(args, env),
-                "ParallelMap" => return builtin_parallel_map_eval(args, env),
-                "LaunchKernels" => return builtin_launch_kernels_eval(args, env),
-                "CloseKernels" => return builtin_close_kernels_eval(args, env),
-                // ── Package loading ──
-                "Needs" => return builtin_needs_eval(args, env),
-                // ── FFI builtins (need env access) ──
-                "LoadLibrary" => {
-                    if args.len() != 1 {
-                        return Err(EvalError::Error(
-                            "LoadLibrary requires exactly 1 argument".to_string(),
-                        ));
-                    }
-                    if let Value::Str(path) = &args[0] {
-                        return ffi::loader::load_native_library(path, env);
-                    }
-                    return Err(EvalError::TypeError {
-                        expected: "String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
+        Value::Builtin(name, f) => match f {
+            BuiltinFn::Pure(f) => {
+                // Extension-registered builtin: trampoline through ext registry
+                if std::ptr::fn_addr_eq(
+                    *f,
+                    ffi::extension::EXT_DISPATCH_PTR,
+                ) {
+                    return ffi::extension::call_ext_fn(name, args);
                 }
-                "LoadExtension" => {
-                    if args.len() != 1 {
-                        return Err(EvalError::Error(
-                            "LoadExtension requires exactly 1 argument".to_string(),
-                        ));
-                    }
-                    if let Value::Str(path) = &args[0] {
-                        ffi::extension::load_extension(path, env)?;
-                        return Ok(Value::Null);
-                    }
-                    return Err(EvalError::TypeError {
-                        expected: "String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
-                }
-                "LibraryFunction" => {
-                    // LibraryFunction[lib, "symbol", {types} -> retType]
-                    if args.len() != 3 {
-                        return Err(EvalError::Error(
-                            "LibraryFunction requires 3 arguments: lib, symbol, signature"
-                                .to_string(),
-                        ));
-                    }
-                    let sym = match &args[1] {
-                        Value::Str(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "String".to_string(),
-                                got: args[1].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let sig = ffi::loader::parse_sig(&args[2])?;
-                    return ffi::loader::library_function(&args[0], &sym, sig);
-                }
-                "LibraryFunctionLoad" => {
-                    // LibraryFunctionLoad["path", "symbol", {types} -> retType]
-                    if args.len() != 3 {
-                        return Err(EvalError::Error(
-                            "LibraryFunctionLoad requires 3 arguments: path, symbol, signature"
-                                .to_string(),
-                        ));
-                    }
-                    let path = match &args[0] {
-                        Value::Str(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "String".to_string(),
-                                got: args[0].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let sym = match &args[1] {
-                        Value::Str(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "String".to_string(),
-                                got: args[1].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let sig = ffi::loader::parse_sig(&args[2])?;
-                    let lib = ffi::loader::load_native_library(&path, env)?;
-                    return ffi::loader::library_function(&lib, &sym, sig);
-                }
-                "ExternalEvaluate" => {
-                    if args.len() < 2 {
-                        return Err(EvalError::Error(
-                            "ExternalEvaluate requires at least 2 arguments: system, opts"
-                                .to_string(),
-                        ));
-                    }
-                    let system = match &args[0] {
-                        Value::Str(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "String".to_string(),
-                                got: args[0].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let (module, func, call_args) =
-                        ffi::python::parse_external_evaluate_args(&system, &args[1], &args[2..])?;
-                    return ffi::python::call_python(&module, &func, &call_args);
-                }
-                // ── Attribute builtins ──
-                "SetAttributes" => {
-                    if args.len() < 2 {
-                        return Err(EvalError::Error(
-                            "SetAttributes requires at least 2 arguments: symbol and attributes"
-                                .to_string(),
-                        ));
-                    }
-                    let sym_name = match &args[0] {
-                        Value::Symbol(s) | Value::Str(s) => s.clone(),
-                        Value::Builtin(name, _) => name.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "Symbol or String".to_string(),
-                                got: args[0].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let attrs: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
-                    env.set_attributes(&sym_name, attrs);
-                    return Ok(Value::Null);
-                }
-                "Attributes" => {
-                    if args.len() != 1 {
-                        return Err(EvalError::Error(
-                            "Attributes requires exactly 1 argument".to_string(),
-                        ));
-                    }
-                    let sym_name = match &args[0] {
-                        Value::Symbol(s) | Value::Str(s) => s.clone(),
-                        Value::Builtin(name, _) => name.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "Symbol or String".to_string(),
-                                got: args[0].type_name().to_string(),
-                            });
-                        }
-                    };
-                    let attrs = env.get_attributes(&sym_name);
-                    let list: Vec<Value> = attrs.into_iter().map(Value::Symbol).collect();
-                    return Ok(Value::List(list));
-                }
-                _ => {
-                    // Extension-registered builtin: trampoline through ext registry.
-                    if std::ptr::fn_addr_eq(
-                        *f as fn(&[Value]) -> _,
-                        ffi::extension::EXT_DISPATCH_FN as fn(&[Value]) -> _,
-                    ) {
-                        return ffi::extension::call_ext_fn(name, args);
-                    }
-                }
+                f(args).map_err(|e| match e {
+                    EvalError::NoMatch { .. } => EvalError::NoMatch {
+                        head: name.clone(),
+                        args: args.to_vec(),
+                    },
+                    other => other,
+                })
             }
-            f(args).map_err(|e| match e {
-                EvalError::NoMatch { .. } => EvalError::NoMatch {
-                    head: name.clone(),
-                    args: args.to_vec(),
-                },
-                other => other,
-            })
-        }
+            BuiltinFn::Env(f) => f(args, env),
+        },
 
         Value::NativeFunction {
             fn_ptr, signature, ..
@@ -1383,1287 +1227,120 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
 /// Try to match parameters against arguments, evaluating any pattern guards.
 ///
 /// Returns Ok(Some(bindings)) on success, Ok(None) if no match, Err on guard eval error.
+///
+/// Handles sequence patterns (__ / ___) in function parameters using backtracking:
+///   f[x__] := Total[x]             — sequence of 1+ elements
+///   f[x___] := {x}                 — sequence of 0+ elements
+///   f[a_, b__, c_] := {a, b, c}    — mixed fixed and sequence parameters
 fn try_match_params(
     params: &[Expr],
     args: &[Value],
     env: &Env,
 ) -> Result<Option<Bindings>, EvalError> {
-    if params.len() != args.len() {
-        return Ok(None);
-    }
+    // Check if any parameter uses a sequence pattern (__ or ___)
+    let has_sequences = params.iter().any(|p| {
+        let (inner, _guard) = extract_guard_expr(p);
+        has_sequence_pattern(inner)
+    });
 
-    let mut bindings = HashMap::new();
-    // Collect both top-level and nested guards (owned exprs)
+    // Collect from each param: inner pattern and guards (top-level + nested)
     let mut guard_exprs: Vec<Expr> = Vec::new();
 
-    for (param, arg) in params.iter().zip(args.iter()) {
-        let (inner_pat, guard) = extract_guard_expr(param);
-        match match_pattern(inner_pat, arg) {
-            MatchResult::Match(b) => {
-                bindings.extend(b);
+    if has_sequences {
+        // Sequence path: wrap params as a list pattern and use the existing
+        // backtracking sequence matcher in pattern.rs.
+        let inner_params: Vec<Expr> = params
+            .iter()
+            .map(|p| {
+                let (inner, guard) = extract_guard_expr(p);
                 if let Some(g) = guard {
                     guard_exprs.push(g.clone());
                 }
-                // Also collect guards nested inside list/call patterns
-                collect_nested_guards(inner_pat, &mut guard_exprs);
-            }
-            MatchResult::NoMatch => return Ok(None),
-        }
-    }
+                collect_nested_guards(inner, &mut guard_exprs);
+                inner.clone()
+            })
+            .collect();
 
-    // Evaluate guards with the collected bindings
-    for guard in &guard_exprs {
-        let guard_env = env.child();
-        for (name, val) in &bindings {
-            guard_env.set(name.clone(), val.clone());
+        let list_pattern = Expr::List(inner_params);
+        let list_value = Value::List(args.to_vec());
+
+        match match_pattern(&list_pattern, &list_value) {
+            MatchResult::Match(bindings) => {
+                // Evaluate guards with the collected bindings
+                for guard in &guard_exprs {
+                    let guard_env = env.child();
+                    for (name, val) in &bindings {
+                        guard_env.set(name.clone(), val.clone());
+                    }
+                    if !eval(guard, &guard_env)?.to_bool() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(bindings))
+            }
+            MatchResult::NoMatch => Ok(None),
         }
-        if !eval(guard, &guard_env)?.to_bool() {
+    } else {
+        // Fast path: no sequence patterns, direct matching
+        if params.len() != args.len() {
             return Ok(None);
         }
-    }
 
-    Ok(Some(bindings))
-}
+        let mut bindings = HashMap::new();
 
-/// Apply rules to a value, optionally evaluating pattern guards.
-fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Value, EvalError> {
-    match rules {
-        Value::RuleSet {
-            rules: rule_pairs, ..
-        } => {
-            'next_rule: for (lhs, rhs) in rule_pairs {
-                if let Value::Pattern(lhs_expr) = lhs
-                    && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
-                    && let Value::Pattern(rhs_expr) = rhs
-                {
-                    // Evaluate guards if present
-                    let (inner_pat, guard) = extract_guard_expr(lhs_expr);
-                    if let Some(guard_expr) = guard {
-                        let guard_env = env.child();
-                        for (name, val) in &bindings {
-                            guard_env.set(name.clone(), val.clone());
-                        }
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue 'next_rule;
-                        }
+        for (param, arg) in params.iter().zip(args.iter()) {
+            let (inner_pat, guard) = extract_guard_expr(param);
+            match match_pattern(inner_pat, arg) {
+                MatchResult::Match(b) => {
+                    bindings.extend(b);
+                    if let Some(g) = guard {
+                        guard_exprs.push(g.clone());
                     }
-                    // Evaluate nested guards
-                    let mut guard_exprs = Vec::new();
+                    // Also collect guards nested inside list/call patterns
                     collect_nested_guards(inner_pat, &mut guard_exprs);
-                    for guard_expr in &guard_exprs {
-                        let guard_env = env.child();
-                        for (name, val) in &bindings {
-                            guard_env.set(name.clone(), val.clone());
-                        }
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue 'next_rule;
-                        }
-                    }
-                    return substitute_value(rhs_expr, &bindings);
                 }
+                MatchResult::NoMatch => return Ok(None),
             }
-            Ok(value.clone())
         }
-        Value::List(rule_list) => {
-            for rule in rule_list {
-                let result = apply_rules_value(value, rule, env)?;
-                if !result.struct_eq(value) {
-                    return Ok(result);
-                }
-            }
-            Ok(value.clone())
-        }
-        Value::Rule { lhs, rhs, delayed } => {
-            if let Value::Pattern(lhs_expr) = lhs.as_ref()
-                && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
-            {
-                // Evaluate guards if present
-                let (inner_pat, guard) = extract_guard_expr(lhs_expr);
-                if let Some(guard_expr) = guard {
-                    let guard_env = env.child();
-                    for (name, val) in &bindings {
-                        guard_env.set(name.clone(), val.clone());
-                    }
-                    if !eval(guard_expr, &guard_env)?.to_bool() {
-                        return Ok(value.clone());
-                    }
-                }
-                let mut guard_exprs = Vec::new();
-                collect_nested_guards(inner_pat, &mut guard_exprs);
-                for guard_expr in &guard_exprs {
-                    let guard_env = env.child();
-                    for (name, val) in &bindings {
-                        guard_env.set(name.clone(), val.clone());
-                    }
-                    if !eval(guard_expr, &guard_env)?.to_bool() {
-                        return Ok(value.clone());
-                    }
-                }
 
-                if *delayed {
-                    if let Value::Pattern(rhs_expr) = rhs.as_ref() {
-                        return substitute_value(rhs_expr, &bindings);
-                    }
-                } else {
-                    return Ok(rhs.as_ref().clone());
-                }
+        // Evaluate guards with the collected bindings
+        for guard in &guard_exprs {
+            let guard_env = env.child();
+            for (name, val) in &bindings {
+                guard_env.set(name.clone(), val.clone());
             }
-            Ok(value.clone())
+            if !eval(guard, &guard_env)?.to_bool() {
+                return Ok(None);
+            }
         }
-        _ => Ok(value.clone()),
+
+        Ok(Some(bindings))
     }
 }
 
-/// Substitute bindings into an expression and evaluate.
-fn substitute_value(expr: &Expr, bindings: &Bindings) -> Result<Value, EvalError> {
-    // Simple substitution: replace symbols with bound values
-    match expr {
-        Expr::Symbol(s) => {
-            if let Some(val) = bindings.get(s) {
-                Ok(val.clone())
-            } else {
-                Ok(Value::Symbol(s.clone()))
-            }
-        }
-        Expr::Integer(n) => Ok(Value::Integer(n.clone())),
-        Expr::Real(r) => Ok(Value::Real(r.clone())),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Str(s) => Ok(Value::Str(s.clone())),
-        Expr::Null => Ok(Value::Null),
-        Expr::List(items) => {
-            let values: Result<Vec<Value>, _> = items
-                .iter()
-                .map(|item| substitute_value(item, bindings))
-                .collect();
-            Ok(Value::List(values?))
-        }
-        Expr::Call { head, args } => {
-            let h = substitute_value(head, bindings)?;
-            let a: Result<Vec<Value>, _> = args
-                .iter()
-                .map(|arg| substitute_value(arg, bindings))
-                .collect();
-            match h {
-                Value::Symbol(name) => Ok(Value::Call {
-                    head: name,
-                    args: a?,
-                }),
-                _ => Ok(Value::Call {
-                    head: h.to_string(),
-                    args: a?,
-                }),
-            }
-        }
-        _ => Ok(Value::Pattern(expr.clone())),
-    }
-}
-
-/// Convert a Value back to an Expr for pattern matching.
-fn pat_to_expr(val: &Value) -> Expr {
-    match val {
-        Value::Integer(n) => Expr::Integer(n.clone()),
-        Value::Real(r) => Expr::Real(r.clone()),
-        Value::Bool(b) => Expr::Bool(*b),
-        Value::Str(s) => Expr::Str(s.clone()),
-        Value::Null => Expr::Null,
-        Value::Symbol(s) => Expr::Symbol(s.clone()),
-        Value::List(items) => Expr::List(items.iter().map(pat_to_expr).collect()),
-        Value::Call { head, args } => Expr::Call {
-            head: Box::new(Expr::Symbol(head.clone())),
-            args: args.iter().map(pat_to_expr).collect(),
-        },
-        Value::Pattern(expr) => expr.clone(),
-        _ => Expr::Symbol(val.to_string()),
-    }
-}
-
-// ── Evaluator-dependent builtins ──
-
-/// Evaluate an expression numerically at the given bit precision.
-/// Keeps symbolic constants (Pi, E) alive so they can be computed at
-/// arbitrary precision instead of using the pre-stored DEFAULT_PRECISION value.
-fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, EvalError> {
-    match expr {
-        Expr::Symbol(s) => match s.as_str() {
-            "Pi" => Ok(Value::Real(Float::with_val(prec_bits, Constant::Pi))),
-            "E" => {
-                let one = Float::with_val(prec_bits, 1u32);
-                Ok(Value::Real(one.exp()))
-            }
-            _ => {
-                let v = eval(expr, env)?;
-                coerce_to_float(v, prec_bits)
-            }
-        },
-        Expr::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
-        Expr::Real(r) => Ok(Value::Real(Float::with_val(prec_bits, r))),
-        // Recursively evaluate calls at the requested precision.
-        // Each argument is numeric-evaluated first, then the operation is
-        // performed on high-precision floats.
-        Expr::Call { head, args } => {
-            if let Expr::Symbol(name) = head.as_ref() {
-                let evaluated_args: Result<Vec<Value>, _> = args
-                    .iter()
-                    .map(|a| numeric_eval_expr(a, prec_bits, env))
-                    .collect();
-                let evaluated_args = evaluated_args?;
-                match name.as_str() {
-                    "Plus" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a + b),
-                    "Times" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a * b),
-                    "Power" if evaluated_args.len() == 2 => {
-                        let (b, e) = (&evaluated_args[0], &evaluated_args[1]);
-                        let bf = to_float(b, prec_bits);
-                        let ef = to_float(e, prec_bits);
-                        match (bf, ef) {
-                            (Some(b), Some(e)) => Ok(Value::Real(b.pow(e))),
-                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Divide" if evaluated_args.len() == 2 => {
-                        let bf = to_float(&evaluated_args[0], prec_bits);
-                        let ef = to_float(&evaluated_args[1], prec_bits);
-                        match (bf, ef) {
-                            (Some(a), Some(b)) => Ok(Value::Real(a / b)),
-                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Log" => {
-                        let ln = |v: &Value| -> Option<Float> {
-                            to_float(v, prec_bits).map(|f| Float::with_val(prec_bits, f.ln()))
-                        };
-                        match evaluated_args.len() {
-                            1 => match ln(&evaluated_args[0]) {
-                                Some(r) => Ok(Value::Real(r)),
-                                None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                            },
-                            2 => match (ln(&evaluated_args[1]), ln(&evaluated_args[0])) {
-                                (Some(lx), Some(lb)) => {
-                                    Ok(Value::Real(Float::with_val(prec_bits, &lx) / lb))
-                                }
-                                _ => apply_function(&eval(head, env)?, &evaluated_args, env),
-                            },
-                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Sin" if evaluated_args.len() == 1 => {
-                        match to_float(&evaluated_args[0], prec_bits) {
-                            Some(f) => Ok(Value::Real(f.sin())),
-                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Cos" if evaluated_args.len() == 1 => {
-                        match to_float(&evaluated_args[0], prec_bits) {
-                            Some(f) => Ok(Value::Real(f.cos())),
-                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Tan" if evaluated_args.len() == 1 => {
-                        match to_float(&evaluated_args[0], prec_bits) {
-                            Some(f) => Ok(Value::Real(f.tan())),
-                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Exp" if evaluated_args.len() == 1 => {
-                        match to_float(&evaluated_args[0], prec_bits) {
-                            Some(f) => Ok(Value::Real(f.exp())),
-                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    "Sqrt" if evaluated_args.len() == 1 => {
-                        match to_float(&evaluated_args[0], prec_bits) {
-                            Some(f) => Ok(Value::Real(f.sqrt())),
-                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                        }
-                    }
-                    _ => apply_function(&eval(head, env)?, &evaluated_args, env),
-                }
-            } else {
-                let v = eval(expr, env)?;
-                coerce_to_float(v, prec_bits)
-            }
-        }
-        _ => {
-            let v = eval(expr, env)?;
-            coerce_to_float(v, prec_bits)
-        }
-    }
-}
-
-fn to_float(v: &Value, prec_bits: u32) -> Option<Float> {
-    match v {
-        Value::Integer(n) => Some(Float::with_val(prec_bits, n)),
-        Value::Real(r) => Some(Float::with_val(prec_bits, r)),
-        _ => None,
-    }
-}
-
-fn numeric_fold_op<F>(args: Vec<Value>, prec_bits: u32, op: F) -> Result<Value, EvalError>
-where
-    F: Fn(Float, Float) -> Float,
-{
-    let mut acc: Option<Float> = None;
-    for v in &args {
-        match to_float(v, prec_bits) {
-            Some(f) => {
-                acc = Some(match acc {
-                    None => f,
-                    Some(a) => op(a, f),
-                })
-            }
-            None => {
-                return Ok(Value::Call {
-                    head: "Unknown".to_string(),
-                    args,
-                });
-            }
-        }
-    }
-    Ok(acc
-        .map(Value::Real)
-        .unwrap_or(Value::Integer(Integer::from(0))))
-}
-
-fn coerce_to_float(v: Value, prec_bits: u32) -> Result<Value, EvalError> {
-    match v {
-        Value::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
-        Value::Real(r) => Ok(Value::Real(Float::with_val(prec_bits, r))),
-        other => Ok(other),
-    }
-}
-
-/// Map[f, list] — apply f to each element of list.
-fn builtin_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Map requires exactly 2 arguments".to_string(),
-        ));
-    }
-    let f = &args[0];
-    match &args[1] {
-        Value::List(items) => {
-            let mut result = Vec::new();
-            for item in items {
-                result.push(apply_function(f, &[item.clone()], env)?);
-            }
-            Ok(Value::List(result))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: args[1].type_name().to_string(),
-        }),
-    }
-}
-
-/// Fold[f, init, list] or Fold[f, list] — left fold.
-fn builtin_fold_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    let (f, init, items) = match args.len() {
-        2 => {
-            // Fold[f, list] — use first element as init
-            match &args[1] {
-                Value::List(list) if !list.is_empty() => (&args[0], list[0].clone(), &list[1..]),
-                Value::List(_) => {
-                    return Err(EvalError::Error(
-                        "Fold on empty list requires initial value".to_string(),
-                    ));
-                }
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List".to_string(),
-                        got: args[1].type_name().to_string(),
-                    });
-                }
-            }
-        }
-        3 => {
-            // Fold[f, init, list]
-            match &args[2] {
-                Value::List(list) => (&args[0], args[1].clone(), list.as_slice()),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List".to_string(),
-                        got: args[2].type_name().to_string(),
-                    });
-                }
-            }
-        }
-        _ => {
-            return Err(EvalError::Error(
-                "Fold requires 2 or 3 arguments".to_string(),
-            ));
-        }
-    };
-    let mut acc = init;
+/// Flatten Sequence values into the surrounding list or call arguments.
+/// In Wolfram Language semantics, Sequence[...] automatically splats.
+fn flatten_sequences(items: Vec<Value>) -> Vec<Value> {
+    let mut result = Vec::with_capacity(items.len());
     for item in items {
-        acc = apply_function(f, &[acc, item.clone()], env)?;
+        match item {
+            Value::Sequence(seq) => result.extend(seq),
+            other => result.push(other),
+        }
     }
-    Ok(acc)
+    result
 }
 
-/// Select[list, test] — keep elements where test returns True.
-fn builtin_select_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Select requires exactly 2 arguments".to_string(),
-        ));
-    }
-    match &args[0] {
-        Value::List(items) => {
-            let test = &args[1];
-            let mut result = Vec::new();
-            for item in items {
-                let keep = apply_function(test, &[item.clone()], env)?;
-                if keep.to_bool() {
-                    result.push(item.clone());
-                }
-            }
-            Ok(Value::List(result))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+/// Check if an expression contains a sequence pattern (BlankSequence or BlankNullSequence).
+fn has_sequence_pattern(expr: &Expr) -> bool {
+    match expr {
+        Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. } => true,
+        Expr::List(items) => items.iter().any(has_sequence_pattern),
+        Expr::Call { args, .. } => args.iter().any(has_sequence_pattern),
+        _ => false,
     }
 }
 
-/// Scan[f, list] — like Map but returns Null.
-fn builtin_scan_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Scan requires exactly 2 arguments".to_string(),
-        ));
-    }
-    match &args[1] {
-        Value::List(items) => {
-            for item in items {
-                apply_function(&args[0], &[item.clone()], env)?;
-            }
-            Ok(Value::Null)
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: args[1].type_name().to_string(),
-        }),
-    }
-}
-
-/// Nest[f, x, n] — apply f to x, n times.
-fn builtin_nest_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "Nest requires exactly 3 arguments".to_string(),
-        ));
-    }
-    let n = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
-        expected: "Integer".to_string(),
-        got: args[2].type_name().to_string(),
-    })?;
-    if n < 0 {
-        return Err(EvalError::Error(
-            "Nest count must be non-negative".to_string(),
-        ));
-    }
-    let mut val = args[1].clone();
-    for _ in 0..n {
-        val = apply_function(&args[0], &[val], env)?;
-    }
-    Ok(val)
-}
-
-/// MatchQ[expr, pattern] — returns True/False.
-fn builtin_match_q_eval(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "MatchQ requires exactly 2 arguments".to_string(),
-        ));
-    }
-    // The pattern arg is stored as a Value::Pattern(Expr)
-    let result = match &args[1] {
-        Value::Pattern(pat_expr) => {
-            matches!(
-                crate::pattern::match_pattern(pat_expr, &args[0]),
-                crate::pattern::MatchResult::Match(_)
-            )
-        }
-        // If the pattern is a regular value, do structural equality
-        _ => args[0].struct_eq(&args[1]),
-    };
-    Ok(Value::Bool(result))
-}
-
-/// FreeQ[expr, pattern] — returns True if pattern does not appear anywhere in expr.
-fn builtin_free_q_eval(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "FreeQ requires exactly 2 arguments".to_string(),
-        ));
-    }
-    fn contains_pattern(value: &Value, pattern: &Value) -> bool {
-        // Check if value matches pattern
-        let matched = match pattern {
-            Value::Pattern(pat_expr) => {
-                matches!(
-                    crate::pattern::match_pattern(pat_expr, value),
-                    crate::pattern::MatchResult::Match(_)
-                )
-            }
-            _ => value.struct_eq(pattern),
-        };
-        if matched {
-            return true;
-        }
-        // Recurse into compound values
-        match value {
-            Value::List(items) => items.iter().any(|item| contains_pattern(item, pattern)),
-            Value::Call { args, .. } => args.iter().any(|arg| contains_pattern(arg, pattern)),
-            _ => false,
-        }
-    }
-    Ok(Value::Bool(!contains_pattern(&args[0], &args[1])))
-}
-
-/// Table[expr, n] or Table[expr, {i, ...}] or Table[expr, {i, ...}, {j, ...}, ...].
-/// Called from eval_call as a special form (iterator spec has unevaluated symbols).
-fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "Table requires at least 2 arguments".to_string(),
-        ));
-    }
-
-    let expr = &args[0];
-
-    // Case 1: Table[expr, n] — n copies of expr (no variable binding)
-    if args.len() == 2 {
-        // Check if second arg is a plain integer (not a list)
-        if let Expr::Integer(_) = &args[1] {
-            let n = eval(&args[1], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
-            if n < 0 {
-                return Err(EvalError::Error(
-                    "Table count must be non-negative".to_string(),
-                ));
-            }
-            let mut result = Vec::new();
-            for _ in 0..n {
-                result.push(eval(expr, env)?);
-            }
-            return Ok(Value::List(result));
-        }
-    }
-
-    // Case 2: Table[expr, {i, ...}] or Table[expr, {i, ...}, {j, ...}, ...]
-    let iter_specs = &args[1..];
-    eval_table_recursive(expr, iter_specs, env, 0)
-}
-
-/// Recursive helper for nested Table iteration.
-fn eval_table_recursive(
-    expr: &Expr,
-    iter_specs: &[Expr],
-    env: &Env,
-    depth: usize,
-) -> Result<Value, EvalError> {
-    if depth >= iter_specs.len() {
-        // Base case: all iterators processed, evaluate expression
-        return eval(expr, env);
-    }
-
-    let iter_items = match &iter_specs[depth] {
-        Expr::List(items) => items,
-        _ => {
-            return Err(EvalError::Error(
-                "Table iterator spec must be a list".to_string(),
-            ));
-        }
-    };
-
-    // Parse the iterator spec and generate values
-    let (var_name, values) =
-        match iter_items.len() {
-            2 => {
-                // {var, n} or {var, {values}}
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-
-                // Check if second element is a list (explicit values)
-                if let Expr::List(_) = &iter_items[1] {
-                    let list_val = eval(&iter_items[1], env)?;
-                    match list_val {
-                        Value::List(items) => (var, items),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "List".to_string(),
-                                got: list_val.type_name().to_string(),
-                            });
-                        }
-                    }
-                } else {
-                    // {var, n} — iterate 1..=n
-                    let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                        EvalError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: "non-Integer".to_string(),
-                        }
-                    })?;
-                    let values: Vec<Value> =
-                        (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
-                    (var, values)
-                }
-            }
-            3 => {
-                // {var, min, max}
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let values: Vec<Value> = (min..=max)
-                    .map(|i| Value::Integer(Integer::from(i)))
-                    .collect();
-                (var, values)
-            }
-            4 => {
-                // {var, min, max, step}
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                if step == 0 {
-                    return Err(EvalError::Error("Table step cannot be zero".to_string()));
-                }
-                let mut values = Vec::new();
-                if step > 0 {
-                    let mut i = min;
-                    while i <= max {
-                        values.push(Value::Integer(Integer::from(i)));
-                        i += step;
-                    }
-                } else {
-                    let mut i = min;
-                    while i >= max {
-                        values.push(Value::Integer(Integer::from(i)));
-                        i += step;
-                    }
-                }
-                (var, values)
-            }
-            _ => {
-                return Err(EvalError::Error(
-                    "Table iterator spec must have 2-4 elements".to_string(),
-                ));
-            }
-        };
-
-    // Generate results for this iterator level
-    let child_env = env.child();
-    let mut result = Vec::new();
-    for val in values {
-        child_env.set(var_name.clone(), val);
-        result.push(eval_table_recursive(
-            expr,
-            iter_specs,
-            &child_env,
-            depth + 1,
-        )?);
-    }
-
-    Ok(Value::List(result))
-}
-
-/// Sum[expr, {i, min, max}] — like Table but adds results.
-/// Called from eval_call as a special form (iterator spec has unevaluated symbols).
-fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Sum requires exactly 2 arguments".to_string(),
-        ));
-    }
-    let iter_items = match &args[1] {
-        Expr::List(items) => items,
-        _ => {
-            return Err(EvalError::Error(
-                "Sum iterator spec must be a list".to_string(),
-            ));
-        }
-    };
-
-    let (var_name, min, max) =
-        match iter_items.len() {
-            3 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Sum iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                (var, min, max)
-            }
-            _ => {
-                return Err(EvalError::Error(
-                    "Sum iterator spec must have 3 elements {i, min, max}".to_string(),
-                ));
-            }
-        };
-
-    let expr = &args[0];
-    let child_env = env.child();
-    let mut acc = Value::Integer(Integer::from(0));
-
-    for i in min..=max {
-        child_env.set(var_name.clone(), Value::Integer(Integer::from(i)));
-        let val = eval(expr, &child_env)?;
-        acc = crate::builtins::add_values_public(&acc, &val)?;
-    }
-
-    Ok(acc)
-}
-
-// ── Parallel evaluation builtins ──
-
-/// ParallelMap[f, list] — apply f to each element of list using the thread pool.
-fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "ParallelMap requires exactly 2 arguments".to_string(),
-        ));
-    }
-    let f = &args[0];
-    match &args[1] {
-        Value::List(items) if items.is_empty() => Ok(Value::List(vec![])),
-        Value::List(items) => {
-            // For small lists, sequential is faster than thread overhead
-            if items.len() < 4 {
-                let mut result = Vec::with_capacity(items.len());
-                for item in items {
-                    result.push(apply_function(f, &[item.clone()], env)?);
-                }
-                return Ok(Value::List(result));
-            }
-
-            let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = items
-                .iter()
-                .map(|item| {
-                    let f = f.clone();
-                    let item = item.clone();
-                    let env = env.clone();
-                    Box::new(move || apply_function(&f, &[item], &env))
-                        as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
-                })
-                .collect();
-
-            let results = parallel_batch(jobs);
-            let mut out = Vec::with_capacity(results.len());
-            for r in results {
-                out.push(r?);
-            }
-            Ok(Value::List(out))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: args[1].type_name().to_string(),
-        }),
-    }
-}
-
-/// LaunchKernels[n] — set up the parallel kernel thread pool with n workers.
-fn builtin_launch_kernels_eval(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
-    match args.len() {
-        0 => {
-            // Return current pool size
-            Ok(Value::Integer(Integer::from(pool_size() as i64)))
-        }
-        1 => {
-            let n = args[0].to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: args[0].type_name().to_string(),
-            })?;
-            if n < 1 {
-                return Err(EvalError::Error(
-                    "LaunchKernels requires a positive integer".to_string(),
-                ));
-            }
-            launch_kernels(n as usize);
-            Ok(Value::Integer(Integer::from(n)))
-        }
-        _ => Err(EvalError::Error(
-            "LaunchKernels requires 0 or 1 arguments".to_string(),
-        )),
-    }
-}
-
-/// CloseKernels[] — shut down the parallel kernel thread pool.
-fn builtin_close_kernels_eval(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
-    if !args.is_empty() {
-        return Err(EvalError::Error(
-            "CloseKernels takes no arguments".to_string(),
-        ));
-    }
-    close_kernels();
-    Ok(Value::Null)
-}
-
-/// ParallelTable[expr, {i, ...}] — evaluate expr for each iterator value in parallel.
-fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "ParallelTable requires exactly 2 arguments".to_string(),
-        ));
-    }
-
-    let expr = &args[0];
-
-    // Parse the iterator spec (reuse the same logic as eval_table)
-    let iter_items = match &args[1] {
-        Expr::List(items) => items,
-        _ => {
-            return Err(EvalError::Error(
-                "ParallelTable iterator spec must be a list".to_string(),
-            ));
-        }
-    };
-
-    let (var_name, values) =
-        match iter_items.len() {
-            2 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "ParallelTable iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                if let Expr::List(_) = &iter_items[1] {
-                    let list_val = eval(&iter_items[1], env)?;
-                    match list_val {
-                        Value::List(items) => (var, items),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "List".to_string(),
-                                got: list_val.type_name().to_string(),
-                            });
-                        }
-                    }
-                } else {
-                    let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                        EvalError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: "non-Integer".to_string(),
-                        }
-                    })?;
-                    let values: Vec<Value> =
-                        (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
-                    (var, values)
-                }
-            }
-            3 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "ParallelTable iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let values: Vec<Value> = (min..=max)
-                    .map(|i| Value::Integer(Integer::from(i)))
-                    .collect();
-                (var, values)
-            }
-            4 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "ParallelTable iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                if step == 0 {
-                    return Err(EvalError::Error(
-                        "ParallelTable step cannot be zero".to_string(),
-                    ));
-                }
-                let mut values = Vec::new();
-                if step > 0 {
-                    let mut i = min;
-                    while i <= max {
-                        values.push(Value::Integer(Integer::from(i)));
-                        i += step;
-                    }
-                } else {
-                    let mut i = min;
-                    while i >= max {
-                        values.push(Value::Integer(Integer::from(i)));
-                        i += step;
-                    }
-                }
-                (var, values)
-            }
-            _ => {
-                return Err(EvalError::Error(
-                    "ParallelTable iterator spec must have 2-4 elements".to_string(),
-                ));
-            }
-        };
-
-    // For small iteration counts, sequential is faster
-    if values.len() < 4 {
-        let child_env = env.child();
-        let mut result = Vec::with_capacity(values.len());
-        for val in values {
-            child_env.set(var_name.clone(), val);
-            result.push(eval(expr, &child_env)?);
-        }
-        return Ok(Value::List(result));
-    }
-
-    // Parallel evaluation using the thread pool (or sequential fallback)
-    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = values
-        .into_iter()
-        .map(|val| {
-            let expr = expr.clone();
-            let var_name = var_name.clone();
-            let env = env.clone();
-            Box::new(move || {
-                let child_env = env.child();
-                child_env.set(var_name, val);
-                eval(&expr, &child_env)
-            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
-        })
-        .collect();
-
-    let results = parallel_batch(jobs);
-    let mut out = Vec::with_capacity(results.len());
-    for r in results {
-        out.push(r?);
-    }
-    Ok(Value::List(out))
-}
-
-/// FixedPoint[f, x] — apply f until result stops changing.
-fn builtin_fixed_point_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(EvalError::Error(
-            "FixedPoint requires 2 or 3 arguments".to_string(),
-        ));
-    }
-    let max_iter = if args.len() == 3 {
-        args[2].to_integer().ok_or_else(|| EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: args[2].type_name().to_string(),
-        })? as usize
-    } else {
-        1000
-    };
-
-    let f = &args[0];
-    let mut val = args[1].clone();
-    for _ in 0..max_iter {
-        let new_val = apply_function(f, &[val.clone()], env)?;
-        if new_val.struct_eq(&val) {
-            return Ok(new_val);
-        }
-        val = new_val;
-    }
-    Ok(val)
-}
-
-/// Needs["PackageName"] — load a standard library package.
-fn builtin_needs_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Needs requires exactly 1 argument".to_string(),
-        ));
-    }
-    let pkg_name = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-
-    // Already loaded?
-    if env.get_module(&pkg_name).is_some() {
-        return Ok(Value::Null);
-    }
-
-    match pkg_name.as_str() {
-        "LinearAlgebra" => {
-            crate::builtins::linalg::register(env);
-            let exports: HashMap<String, Value> = crate::builtins::linalg::SYMBOLS
-                .iter()
-                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
-                .collect();
-            let module = Value::Module {
-                name: "LinearAlgebra".to_string(),
-                exports,
-            };
-            env.register_module("LinearAlgebra".to_string(), module);
-        }
-        "Statistics" => {
-            crate::builtins::statistics::register(env);
-            let exports: HashMap<String, Value> = crate::builtins::statistics::SYMBOLS
-                .iter()
-                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
-                .collect();
-            let module = Value::Module {
-                name: "Statistics".to_string(),
-                exports,
-            };
-            env.register_module("Statistics".to_string(), module);
-        }
-        "Graphics" => {
-            crate::builtins::graphics::register(env);
-            let exports: HashMap<String, Value> = crate::builtins::graphics::SYMBOLS
-                .iter()
-                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
-                .collect();
-            let module = Value::Module {
-                name: "Graphics".to_string(),
-                exports,
-            };
-            env.register_module("Graphics".to_string(), module);
-        }
-        _ => {
-            // Try loading from search paths (disk-based packages)
-            return Err(EvalError::Error(format!(
-                "Package '{}' not found. Built-in packages: LinearAlgebra, Statistics, Graphics.",
-                pkg_name
-            )));
-        }
-    }
-    Ok(Value::Null)
-}
-
-/// Plot[f, {x, xmin, xmax}] — sample f and render SVG.
-/// This is a special form: the first argument (expression) is kept unevaluated
-/// so we can evaluate it in a child env with x bound to each sample point.
-fn eval_plot(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "Plot requires at least 2 arguments: f, {x, xmin, xmax}".to_string(),
-        ));
-    }
-    let expr = &args[0];
-
-    // Evaluate the iterator spec: {x, xmin, xmax}
-    let iter_val = eval(&args[1], env)?;
-    let iter_items = match &iter_val {
-        Value::List(items) if items.len() == 3 || items.len() == 4 => items,
-        _ => {
-            return Err(EvalError::Error(
-                "Plot iterator must be {x, xmin, xmax} or {x, xmin, xmax, step}".to_string(),
-            ));
-        }
-    };
-
-    let var_name = match &iter_items[0] {
-        Value::Symbol(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Symbol".to_string(),
-                got: iter_items[0].type_name().to_string(),
-            });
-        }
-    };
-
-    let xmin = to_f64_val(&iter_items[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: iter_items[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64_val(&iter_items[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: iter_items[2].type_name().to_string(),
-    })?;
-
-    if xmin >= xmax {
-        return Err(EvalError::Error(
-            "Plot: xmin must be less than xmax".to_string(),
-        ));
-    }
-
-    // Evaluate remaining option args
-    let plot_opts: Vec<Value> = args[2..]
-        .iter()
-        .map(|a| eval(a, env))
-        .collect::<Result<_, _>>()?;
-
-    // Sample the expression at n_points
-    let n_points = 200usize;
-    let step = (xmax - xmin) / (n_points - 1) as f64;
-    let mut points = Vec::with_capacity(n_points);
-
-    for i in 0..n_points {
-        let x = if i == n_points - 1 {
-            xmax
-        } else {
-            xmin + step * i as f64
-        };
-        let child_env = env.child();
-        child_env.set(
-            var_name.clone(),
-            Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, x)),
-        );
-        match eval(expr, &child_env) {
-            Ok(val) => {
-                if let Some(y) = to_f64_val(&val)
-                    && y.is_finite()
-                {
-                    points.push(Value::List(vec![
-                        Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, x)),
-                        Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, y)),
-                    ]));
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if points.is_empty() {
-        return Err(EvalError::Error(
-            "Plot: no valid points were sampled".to_string(),
-        ));
-    }
-
-    // Build Line primitive
-    let line = Value::Call {
-        head: "Line".to_string(),
-        args: vec![Value::List(points)],
-    };
-    let primitives = Value::List(vec![line]);
-
-    // Build options: default ImageSize and Axes
-    let mut opt_map = std::collections::HashMap::new();
-    opt_map.insert(
-        "ImageSize".to_string(),
-        Value::List(vec![
-            Value::Integer(Integer::from(400)),
-            Value::Integer(Integer::from(300)),
-        ]),
-    );
-    opt_map.insert("Axes".to_string(), Value::Bool(true));
-    for opt in &plot_opts {
-        if let Value::Rule { lhs, rhs, .. } = opt
-            && let Value::Symbol(k) | Value::Str(k) = lhs.as_ref()
-        {
-            opt_map.insert(k.clone(), rhs.as_ref().clone());
-        }
-    }
-    let options = Value::Assoc(opt_map);
-
-    crate::builtins::graphics::render_svg(&primitives, &options).map(Value::Str)
-}
-
-/// Helper: convert a Value to f64 if possible.
-fn to_f64_val(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Complex { re, im } => {
-            if *im == 0.0 {
-                Some(*re)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
 
 /// Evaluate `?expr` — display help information for a symbol.
 fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
@@ -2920,6 +1597,48 @@ mod tests {
         assert_eq!(
             eval_str("add[a_, b_] := a + b; add[3, 4]"),
             Value::Integer(Integer::from(7))
+        );
+    }
+
+    #[test]
+    fn test_function_sequence_param() {
+        // `__` (BlankSequence) matches one or more arguments.
+        // The sequence is bound as a Sequence value, which automatically
+        // splats into lists and call arguments (Wolfram Language compatible).
+        assert_eq!(
+            eval_str("f[x__] := Total[{x}]; f[1, 2, 3]"),
+            Value::Integer(Integer::from(6))
+        );
+        assert_eq!(
+            eval_str("g[x__] := Length[{x}]; g[42]"),
+            Value::Integer(Integer::from(1))
+        );
+    }
+
+    #[test]
+    fn test_function_sequence_param_mixed() {
+        // Mixed fixed and sequence parameters
+        // b__ binds as Sequence, which splats into {a, b}
+        assert_eq!(
+            eval_str("h[a_, b__] := {a, b}; h[1, 2, 3]"),
+            eval_str("{1, 2, 3}")
+        );
+    }
+
+    #[test]
+    fn test_function_sequence_param_zero_args() {
+        // `___` (BlankNullSequence) matches zero or more arguments.
+        // x___ binds as Sequence (possibly empty), which splats into lists.
+        assert_eq!(
+            eval_str("f[x___] := {x}; f[]"),
+            Value::List(vec![])
+        );
+        assert_eq!(
+            eval_str("f[x___] := {x}; f[1, 2]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+            ])
         );
     }
 

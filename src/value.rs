@@ -10,6 +10,7 @@ use rug::Float;
 use rug::Integer;
 
 use crate::ast::Expr;
+use crate::env::Env;
 
 // ── FFI types ─────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,6 @@ impl NativeType {
     }
 
     /// Return the Syma display name.
-    #[allow(dead_code)]
     pub fn syma_name(&self) -> &'static str {
         match self {
             NativeType::Void => "Void",
@@ -176,6 +176,10 @@ pub enum Value {
     /// A list of values.
     List(Vec<Value>),
 
+    /// A sequence of values that automatically splats into lists and calls.
+    /// Analogous to Wolfram Language's Sequence[...].
+    Sequence(Vec<Value>),
+
     /// A named function with its head.
     Call {
         head: String,
@@ -202,12 +206,10 @@ pub enum Value {
     /// A pure function (lambda) with slots.
     PureFunction {
         body: Expr,
-        #[allow(dead_code)]
         slot_count: usize,
     },
 
     /// A method bound to an object.
-    #[allow(dead_code)]
     Method {
         name: String,
         object: Box<Value>,
@@ -263,7 +265,17 @@ pub enum Value {
 }
 
 /// A built-in function implementation.
-pub type BuiltinFn = fn(&[Value]) -> Result<Value, EvalError>;
+///
+/// `Pure` functions only receive their arguments. `Env` functions also receive
+/// the current evaluation environment (needed for recursive `eval`/`apply_function` calls,
+/// lazy loading, or module registration).
+#[derive(Debug, Clone)]
+pub enum BuiltinFn {
+    /// Pure builtin — does not need environment access.
+    Pure(fn(&[Value]) -> Result<Value, EvalError>),
+    /// Environment-aware builtin — receives the current evaluation environment.
+    Env(fn(&[Value], &Env) -> Result<Value, EvalError>),
+}
 
 /// A user-defined function with multiple pattern-matched definitions.
 #[derive(Debug, Clone)]
@@ -277,13 +289,11 @@ pub struct FunctionDef {
 pub struct FunctionDefinition {
     pub params: Vec<Expr>,
     pub body: Expr,
-    #[allow(dead_code)]
     pub delayed: bool,
 }
 
 /// A class definition with fields, methods, constructor, and inheritance info.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClassDef {
     pub name: String,
     pub parent: Option<String>,
@@ -295,7 +305,6 @@ pub struct ClassDef {
 
 /// A class field with optional type hint and default value.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClassField {
     pub name: String,
     pub type_hint: Option<String>,
@@ -304,7 +313,6 @@ pub struct ClassField {
 
 /// A class method.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClassMethod {
     pub name: String,
     pub params: Vec<Expr>,
@@ -330,10 +338,8 @@ pub enum EvalError {
     /// Index out of bounds.
     IndexOutOfBounds { index: i64, length: usize },
     /// Unknown symbol.
-    #[allow(dead_code)]
     UnknownSymbol(String),
     /// User-thrown error.
-    #[allow(dead_code)]
     Thrown(Value),
     /// General error message.
     Error(String),
@@ -384,6 +390,7 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Sequence(a), Value::Sequence(b)) => a == b,
             (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) => {
                 h1 == h2 && a1 == a2
             }
@@ -453,6 +460,7 @@ impl Value {
             Value::Null => "Null",
             Value::Symbol(_) => "Symbol",
             Value::List(_) => "List",
+            Value::Sequence(_) => "Sequence",
             Value::Call { .. } => "Expr",
             Value::Assoc(_) => "Assoc",
             Value::Rule { .. } => "Rule",
@@ -528,7 +536,6 @@ impl Value {
     }
 
     /// Try to convert to f64.
-    #[allow(dead_code)]
     pub fn to_real(&self) -> Option<f64> {
         match self {
             Value::Integer(n) => Some(n.to_f64()),
@@ -810,6 +817,16 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
             Value::Null => write!(f, "Null"),
             Value::Symbol(s) => write!(f, "{}", s),
+            Value::Sequence(items) => {
+                write!(f, "Sequence[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
             Value::List(items) => {
                 write!(f, "{{")?;
                 for (i, item) in items.iter().enumerate() {

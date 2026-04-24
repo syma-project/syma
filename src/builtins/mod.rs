@@ -18,7 +18,7 @@ pub mod string;
 pub mod symbolic;
 
 use crate::env::{Env, LazyProvider};
-use crate::value::{EvalError, Value};
+use crate::value::{BuiltinFn, EvalError, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -60,11 +60,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Part", list::builtin_part);
     register_builtin(env, "Range", list::builtin_range);
     register_builtin(env, "Table", list::builtin_table);
-    register_builtin(env, "Map", list::builtin_map);
-    register_builtin(env, "Fold", list::builtin_fold);
-    register_builtin(env, "Select", list::builtin_select);
-    register_builtin(env, "Scan", list::builtin_scan);
-    register_builtin(env, "Nest", list::builtin_nest);
+    register_builtin_env(env, "Map", list::builtin_map);
+    register_builtin_env(env, "Fold", list::builtin_fold);
+    register_builtin_env(env, "Select", list::builtin_select);
+    register_builtin_env(env, "Scan", list::builtin_scan);
+    register_builtin_env(env, "Nest", list::builtin_nest);
     register_builtin(env, "Take", list::builtin_take);
     register_builtin(env, "Drop", list::builtin_drop);
     register_builtin(env, "Riffle", list::builtin_riffle);
@@ -113,17 +113,17 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Series", symbolic::builtin_series);
 
     // ── Control (evaluator-dependent) ──
-    register_builtin(env, "FixedPoint", math::builtin_fixed_point_stub);
+    register_builtin_env(env, "FixedPoint", math::builtin_fixed_point);
 
     // ── Package loading (evaluator-dependent) ──
-    register_builtin(env, "Needs", builtin_needs_stub);
+    register_builtin_env(env, "Needs", builtin_needs);
 
     // ── Graphics (evaluator-dependent) ──
     register_builtin(env, "Plot", graphics::builtin_plot_stub);
 
-    // ── Attributes (evaluator-dependent) ──
-    register_builtin(env, "SetAttributes", symbolic::builtin_set_attributes_stub);
-    register_builtin(env, "Attributes", symbolic::builtin_attributes_stub);
+    // ── Attributes ──
+    register_builtin_env(env, "SetAttributes", symbolic::builtin_set_attributes);
+    register_builtin_env(env, "Attributes", symbolic::builtin_attributes);
 
     // ── Extended math ──
     register_builtin(env, "ArcSin", math::builtin_arcsin);
@@ -220,20 +220,18 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "StringEndsQ", string::builtin_string_ends_q);
 
     // ── Parallel computation ──
-    register_builtin(env, "ParallelMap", parallel::builtin_parallel_map);
+    register_builtin_env(env, "ParallelMap", parallel::builtin_parallel_map);
     register_builtin(env, "ParallelTable", parallel::builtin_parallel_table);
     register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
     register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
     register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
 
-    // ── FFI (env-aware; stubs registered so Help/Head works) ──
-    register_builtin(env, "LoadLibrary", ffi::builtin_load_library);
-    register_builtin(env, "LoadExtension", ffi::builtin_load_extension);
-    register_builtin(env, "ExternalEvaluate", ffi::builtin_external_evaluate);
-    // LibraryFunction and LibraryFunctionLoad are handled as special cases in eval.rs.
-    // Register stubs so they appear in the environment and can be looked up.
-    register_builtin(env, "LibraryFunction", ffi::builtin_load_library);
-    register_builtin(env, "LibraryFunctionLoad", ffi::builtin_load_library);
+    // ── FFI ──
+    register_builtin_env(env, "LoadLibrary", ffi::builtin_load_library);
+    register_builtin_env(env, "LoadExtension", ffi::builtin_load_extension);
+    register_builtin_env(env, "ExternalEvaluate", ffi::builtin_external_evaluate);
+    register_builtin_env(env, "LibraryFunction", ffi::builtin_library_function);
+    register_builtin_env(env, "LibraryFunctionLoad", ffi::builtin_library_function_load);
 
     // ── File system ──
     register_builtin(env, "FileNameSplit", filesystem::builtin_file_name_split);
@@ -323,7 +321,22 @@ pub fn register_builtins(env: &Env) {
 }
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
-    env.set(name.to_string(), Value::Builtin(name.to_string(), func));
+    env.set(
+        name.to_string(),
+        Value::Builtin(name.to_string(), BuiltinFn::Pure(func)),
+    );
+    let attrs = get_attributes(name);
+    if !attrs.is_empty() {
+        env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
+    }
+}
+
+/// Register an environment-aware built-in function.
+fn register_builtin_env(env: &Env, name: &str, func: fn(&[Value], &Env) -> Result<Value, EvalError>) {
+    env.set(
+        name.to_string(),
+        Value::Builtin(name.to_string(), BuiltinFn::Env(func)),
+    );
     let attrs = get_attributes(name);
     if !attrs.is_empty() {
         env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
@@ -381,11 +394,72 @@ fn register_lazy_package(
     }
 }
 
-/// Stub for `Needs` — the real implementation is in eval.rs (requires Env access).
-fn builtin_needs_stub(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "Needs should be handled by evaluator".to_string(),
-    ))
+/// `Needs["PackageName"]` — load a standard library package.
+fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Needs requires exactly 1 argument".to_string(),
+        ));
+    }
+    let pkg_name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    // Already loaded?
+    if env.get_module(&pkg_name).is_some() {
+        return Ok(Value::Null);
+    }
+    use std::collections::HashMap;
+    match pkg_name.as_str() {
+        "LinearAlgebra" => {
+            crate::builtins::linalg::register(env);
+            let exports: HashMap<String, Value> = crate::builtins::linalg::SYMBOLS
+                .iter()
+                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
+                .collect();
+            let module = Value::Module {
+                name: "LinearAlgebra".to_string(),
+                exports,
+            };
+            env.register_module("LinearAlgebra".to_string(), module);
+        }
+        "Statistics" => {
+            crate::builtins::statistics::register(env);
+            let exports: HashMap<String, Value> = crate::builtins::statistics::SYMBOLS
+                .iter()
+                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
+                .collect();
+            let module = Value::Module {
+                name: "Statistics".to_string(),
+                exports,
+            };
+            env.register_module("Statistics".to_string(), module);
+        }
+        "Graphics" => {
+            crate::builtins::graphics::register(env);
+            let exports: HashMap<String, Value> = crate::builtins::graphics::SYMBOLS
+                .iter()
+                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
+                .collect();
+            let module = Value::Module {
+                name: "Graphics".to_string(),
+                exports,
+            };
+            env.register_module("Graphics".to_string(), module);
+        }
+        _ => {
+            return Err(EvalError::Error(format!(
+                "Package '{}' not found. Built-in packages: LinearAlgebra, Statistics, Graphics.",
+                pkg_name
+            )));
+        }
+    }
+    Ok(Value::Null)
 }
 
 /// Re-export for use by eval.rs

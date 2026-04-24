@@ -325,6 +325,10 @@ fn format_value(val: &Value) -> String {
             symbol_name,
             ..
         } => format!("<native {}::{}>", lib_name, symbol_name),
+        Value::Sequence(items) => {
+            let parts: Vec<String> = items.iter().map(format_value).collect();
+            format!("Sequence[{}]", parts.join(", "))
+        }
     }
 }
 

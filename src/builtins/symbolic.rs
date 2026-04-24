@@ -1,3 +1,4 @@
+use crate::env::Env;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
@@ -1389,17 +1390,46 @@ fn try_numerical_eval(head: &str, args: &[Value]) -> Option<Value> {
 }
 
 /// Stub for SetAttributes (evaluator-dependent, handled in eval.rs).
-pub fn builtin_set_attributes_stub(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "SetAttributes should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::Error(
+            "SetAttributes requires at least 2 arguments: symbol and attributes".to_string(),
+        ));
+    }
+    let sym_name = match &args[0] {
+        Value::Symbol(s) | Value::Str(s) => s.clone(),
+        Value::Builtin(name, _) => name.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let attrs: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
+    env.set_attributes(&sym_name, attrs);
+    Ok(Value::Null)
 }
 
-/// Stub for Attributes (evaluator-dependent, handled in eval.rs).
-pub fn builtin_attributes_stub(_args: &[Value]) -> Result<Value, EvalError> {
-    Err(EvalError::Error(
-        "Attributes should be handled by evaluator".to_string(),
-    ))
+pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Attributes requires exactly 1 argument".to_string(),
+        ));
+    }
+    let sym_name = match &args[0] {
+        Value::Symbol(s) | Value::Str(s) => s.clone(),
+        Value::Builtin(name, _) => name.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let attrs = env.get_attributes(&sym_name);
+    let list: Vec<Value> = attrs.into_iter().map(Value::Symbol).collect();
+    Ok(Value::List(list))
 }
 
 #[cfg(test)]

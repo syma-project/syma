@@ -233,6 +233,20 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
                 return MatchResult::NoMatch;
             }
 
+            // Check for Except: Except[pat] matches anything not matching pat
+            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Except") && args.len() == 1 {
+                return match match_pattern(&args[0], value) {
+                    MatchResult::Match(_) => MatchResult::NoMatch,
+                    MatchResult::NoMatch => MatchResult::Match(HashMap::new()),
+                };
+            }
+
+            // Check for Repeated: Repeated[pat] matches pat 1+ times in a list.
+            // Repeated[pat, n] matches pat exactly n times in a list.
+            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated") {
+                return match_repeated_pattern(args, value);
+            }
+
             // Regular call pattern: f[x_, y_]
             match_call_pattern(head, args, value)
         }
@@ -347,7 +361,7 @@ fn match_sequence_pattern(
             let mut b = bindings.clone();
             for p in &patterns[pat_idx..] {
                 if let Expr::BlankNullSequence { name: Some(n), .. } = p {
-                    b.insert(n.clone(), Value::List(vec![]));
+                    b.insert(n.clone(), Value::Sequence(vec![]));
                 }
             }
             MatchResult::Match(b)
@@ -378,7 +392,7 @@ fn match_sequence_pattern(
                     continue;
                 }
                 let mut new_bindings = bindings.clone();
-                let seq_val = Value::List(seq_items.to_vec());
+                let seq_val = Value::Sequence(seq_items.to_vec());
                 if let Some(n) = name {
                     new_bindings.insert(n.clone(), seq_val);
                 }
@@ -409,7 +423,7 @@ fn match_sequence_pattern(
                     // Match zero elements
                     let mut new_bindings = bindings.clone();
                     if let Some(n) = name {
-                        new_bindings.insert(n.clone(), Value::List(vec![]));
+                        new_bindings.insert(n.clone(), Value::Sequence(vec![]));
                     }
                     if let MatchResult::Match(b) = match_sequence_pattern(
                         patterns,
@@ -428,7 +442,7 @@ fn match_sequence_pattern(
                         continue;
                     }
                     let mut new_bindings = bindings.clone();
-                    let seq_val = Value::List(seq_items.to_vec());
+                    let seq_val = Value::Sequence(seq_items.to_vec());
                     if let Some(n) = name {
                         new_bindings.insert(n.clone(), seq_val);
                     }
@@ -492,6 +506,57 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
     match_sequence_pattern(patterns, items, 0, 0, &mut bindings)
 }
 
+/// Handle `Repeated[pat]` and `Repeated[pat, n]` in pattern matching.
+///
+/// `Repeated[pat]` matches `pat` one or more times consecutively in a list.
+/// `Repeated[pat, n]` matches `pat` exactly `n` times in a list.
+fn match_repeated_pattern(args: &[Expr], value: &Value) -> MatchResult {
+    let items = match value {
+        Value::List(items) => items,
+        _ => return MatchResult::NoMatch,
+    };
+
+    let pat = match args.first() {
+        Some(p) => p,
+        None => return MatchResult::NoMatch,
+    };
+
+    let count = if args.len() == 2 {
+        match &args[1] {
+            Expr::Integer(n) => {
+                match n.to_usize() {
+                    Some(v) if v > 0 => v,
+                    _ => return MatchResult::NoMatch,
+                }
+            }
+            _ => return MatchResult::NoMatch,
+        }
+    } else if args.len() == 1 {
+        items.len() // match all items (1+)
+    } else {
+        return MatchResult::NoMatch;
+    };
+
+    if items.len() < count {
+        return MatchResult::NoMatch;
+    }
+
+    // Try partitioning at `count` — only meaningful partition
+    if count <= items.len() {
+        let matched_items = &items[..count];
+        let mut bindings = Bindings::new();
+        for item in matched_items {
+            match match_pattern(pat, item) {
+                MatchResult::Match(b) => bindings.extend(b),
+                MatchResult::NoMatch => return MatchResult::NoMatch,
+            }
+        }
+        MatchResult::Match(bindings)
+    } else {
+        MatchResult::NoMatch
+    }
+}
+
 /// Match a call pattern (e.g., f[x_, y_]) against a value.
 fn match_call_pattern(head: &Expr, args: &[Expr], value: &Value) -> MatchResult {
     match value {
@@ -534,7 +599,6 @@ fn match_call_pattern(head: &Expr, args: &[Expr], value: &Value) -> MatchResult 
 /// Try to match a value against a list of patterns and return the first match.
 ///
 /// Returns (index, bindings) for the first matching pattern, or None.
-#[allow(dead_code)]
 pub fn match_first(patterns: &[Expr], value: &Value) -> Option<(usize, Bindings)> {
     for (i, pattern) in patterns.iter().enumerate() {
         if let MatchResult::Match(bindings) = match_pattern(pattern, value) {
@@ -547,7 +611,6 @@ pub fn match_first(patterns: &[Expr], value: &Value) -> Option<(usize, Bindings)
 /// Apply a set of rules to a value.
 ///
 /// Returns the first matching rule's RHS with bindings substituted, or None.
-#[allow(dead_code)]
 pub fn apply_rules(rules: &[(Expr, Expr)], value: &Value) -> Option<Value> {
     for (lhs, rhs) in rules {
         if let MatchResult::Match(bindings) = match_pattern(lhs, value) {
@@ -558,7 +621,6 @@ pub fn apply_rules(rules: &[(Expr, Expr)], value: &Value) -> Option<Value> {
 }
 
 /// Substitute bindings into an expression.
-#[allow(dead_code)]
 fn substitute(expr: &Expr, bindings: &Bindings) -> Value {
     match expr {
         Expr::Symbol(s) => {
@@ -725,7 +787,7 @@ mod tests {
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
             assert_eq!(
                 bindings.get("a"),
-                Some(&Value::List(vec![
+                Some(&Value::Sequence(vec![
                     Value::Integer(Integer::from(1)),
                     Value::Integer(Integer::from(2)),
                     Value::Integer(Integer::from(3)),
@@ -757,7 +819,7 @@ mod tests {
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
             assert_eq!(
                 bindings.get("a"),
-                Some(&Value::List(vec![
+                Some(&Value::Sequence(vec![
                     Value::Integer(Integer::from(1)),
                     Value::Integer(Integer::from(2)),
                 ]))
@@ -811,7 +873,7 @@ mod tests {
         ]);
         let value = Value::List(vec![Value::Integer(Integer::from(1))]);
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
-            assert_eq!(bindings.get("a"), Some(&Value::List(vec![])));
+            assert_eq!(bindings.get("a"), Some(&Value::Sequence(vec![])));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
         } else {
             panic!("Expected match");
@@ -840,7 +902,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
         ]);
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
-            assert_eq!(bindings.get("a"), Some(&Value::List(vec![])));
+            assert_eq!(bindings.get("a"), Some(&Value::Sequence(vec![])));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
             assert_eq!(bindings.get("c"), Some(&Value::Integer(Integer::from(2))));
         } else {
@@ -870,14 +932,14 @@ mod tests {
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
             assert_eq!(
                 bindings.get("a"),
-                Some(&Value::List(vec![
+                Some(&Value::Sequence(vec![
                     Value::Integer(Integer::from(1)),
                     Value::Integer(Integer::from(2)),
                 ]))
             );
             assert_eq!(
                 bindings.get("b"),
-                Some(&Value::List(vec![Value::Integer(Integer::from(3))]))
+                Some(&Value::Sequence(vec![Value::Integer(Integer::from(3))]))
             );
         } else {
             panic!("Expected match");
@@ -979,5 +1041,123 @@ mod tests {
         } else {
             panic!("Expected match");
         }
+    }
+
+    // ── Except pattern tests ──
+
+    #[test]
+    fn test_except_matches_non_matching() {
+        // Except[0] should match any value that is NOT 0
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Except".to_string())),
+            args: vec![Expr::Integer(Integer::from(0))],
+        };
+        // 1 != 0 → match
+        assert!(matches!(
+            match_pattern(&pat, &Value::Integer(Integer::from(1))),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_except_does_not_match_excluded() {
+        // Except[0] should NOT match 0
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Except".to_string())),
+            args: vec![Expr::Integer(Integer::from(0))],
+        };
+        // 0 → no match
+        assert!(matches!(
+            match_pattern(&pat, &Value::Integer(Integer::from(0))),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_except_with_blank() {
+        // Except[x_] matches any value but doesn't capture x
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Except".to_string())),
+            args: vec![Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
+        };
+        // 42 would match x_, so Except[x_] should NOT match 42
+        assert!(matches!(
+            match_pattern(&pat, &Value::Integer(Integer::from(42))),
+            MatchResult::NoMatch
+        ));
+    }
+
+    // ── Repeated pattern tests ──
+
+    #[test]
+    fn test_repeated_matches_consecutive() {
+        // Repeated[0] on list [0, 0, 0] should match all three
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Repeated".to_string())),
+            args: vec![Expr::Integer(Integer::from(0))],
+        };
+        let val = Value::List(vec![
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(0)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_repeated_n_matches_exactly() {
+        // Repeated[0, 2] on list [0, 0, 0] should match first two
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Repeated".to_string())),
+            args: vec![
+                Expr::Integer(Integer::from(0)),
+                Expr::Integer(Integer::from(2)),
+            ],
+        };
+        let val = Value::List(vec![
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(0)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_repeated_mismatch_returns_nomatch() {
+        // Repeated[0] on list [1, 2] should not match
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Repeated".to_string())),
+            args: vec![Expr::Integer(Integer::from(0))],
+        };
+        let val = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_repeated_non_list_returns_nomatch() {
+        // Repeated[0] on non-list should not match
+        let pat = Expr::Call {
+            head: Box::new(Expr::Symbol("Repeated".to_string())),
+            args: vec![Expr::Integer(Integer::from(0))],
+        };
+        assert!(matches!(
+            match_pattern(&pat, &Value::Integer(Integer::from(0))),
+            MatchResult::NoMatch
+        ));
     }
 }
