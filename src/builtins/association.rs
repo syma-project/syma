@@ -1,5 +1,5 @@
-use crate::eval::apply_function;
 use crate::env::Env;
+use crate::eval::apply_function;
 use crate::value::EvalError;
 use crate::value::Value;
 use std::collections::HashMap;
@@ -530,9 +530,7 @@ pub fn builtin_key_union(args: &[Value]) -> Result<Value, EvalError> {
                     }
                 }
             }
-            Ok(Value::List(
-                all_keys.into_iter().map(Value::Str).collect(),
-            ))
+            Ok(Value::List(all_keys.into_iter().map(Value::Str).collect()))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
@@ -582,9 +580,7 @@ pub fn builtin_key_intersection(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
             result.sort();
-            Ok(Value::List(
-                result.into_iter().map(Value::Str).collect(),
-            ))
+            Ok(Value::List(result.into_iter().map(Value::Str).collect()))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
@@ -625,9 +621,7 @@ pub fn builtin_key_complement(args: &[Value]) -> Result<Value, EvalError> {
         .cloned()
         .collect();
     keys.sort();
-    Ok(Value::List(
-        keys.into_iter().map(Value::Str).collect(),
-    ))
+    Ok(Value::List(keys.into_iter().map(Value::Str).collect()))
 }
 
 // ── Keys ────────────────────────────────────────────────────────────────
@@ -643,7 +637,9 @@ pub fn builtin_keys(args: &[Value]) -> Result<Value, EvalError> {
         Value::Assoc(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            Ok(Value::List(keys.into_iter().map(|k| Value::Str(k.clone())).collect()))
+            Ok(Value::List(
+                keys.into_iter().map(|k| Value::Str(k.clone())).collect(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
@@ -665,7 +661,9 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
         Value::Assoc(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            Ok(Value::List(keys.into_iter().map(|k| map[k].clone()).collect()))
+            Ok(Value::List(
+                keys.into_iter().map(|k| map[k].clone()).collect(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
@@ -783,7 +781,11 @@ mod tests {
 
     #[test]
     fn test_key_take() {
-        let a = assoc(vec![("a", integer(1)), ("b", integer(2)), ("c", integer(3))]);
+        let a = assoc(vec![
+            ("a", integer(1)),
+            ("b", integer(2)),
+            ("c", integer(3)),
+        ]);
         let result = builtin_key_take(&[a, list(vec![string("a"), string("c")])]).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -798,7 +800,11 @@ mod tests {
 
     #[test]
     fn test_key_drop() {
-        let a = assoc(vec![("a", integer(1)), ("b", integer(2)), ("c", integer(3))]);
+        let a = assoc(vec![
+            ("a", integer(1)),
+            ("b", integer(2)),
+            ("c", integer(3)),
+        ]);
         let result = builtin_key_drop(&[a, list(vec![string("a"), string("c")])]).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -814,13 +820,18 @@ mod tests {
     fn test_key_select() {
         let env = make_env();
         // Key length > 1: select keys longer than 1 char
-        let a = assoc(vec![("x", integer(1)), ("yy", integer(2)), ("zzz", integer(3))]);
-        let pred = Value::Builtin("_pred".to_string(), crate::value::BuiltinFn::Pure(|args| {
-            match &args[0] {
+        let a = assoc(vec![
+            ("x", integer(1)),
+            ("yy", integer(2)),
+            ("zzz", integer(3)),
+        ]);
+        let pred = Value::Builtin(
+            "_pred".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
                 Value::Str(s) => Ok(Value::Bool(s.len() > 1)),
                 _ => Ok(Value::Bool(false)),
-            }
-        }));
+            }),
+        );
         let result = builtin_key_select(&[a, pred], &env).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -838,7 +849,10 @@ mod tests {
         let env = make_env();
         let a = assoc(vec![("a", integer(1)), ("b", integer(2))]);
         // Map ToUpperCase over keys
-        let f = Value::Builtin("ToUpperCase".to_string(), crate::value::BuiltinFn::Pure(crate::builtins::string::builtin_to_upper_case));
+        let f = Value::Builtin(
+            "ToUpperCase".to_string(),
+            crate::value::BuiltinFn::Pure(crate::builtins::string::builtin_to_upper_case),
+        );
         let result = builtin_key_map(&[f, a], &env).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -855,12 +869,13 @@ mod tests {
         let env = make_env();
         let a = assoc(vec![("x", integer(10)), ("y", integer(20))]);
         // Use a function that extracts the second element (the value) from {key, val}
-        let extract_val = Value::Builtin("_Extract".to_string(), crate::value::BuiltinFn::Pure(|args| {
-            match &args[0] {
+        let extract_val = Value::Builtin(
+            "_Extract".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
                 Value::List(items) if items.len() >= 2 => Ok(items[1].clone()),
                 _ => Err(EvalError::Error("expected pair".to_string())),
-            }
-        }));
+            }),
+        );
         let result = builtin_key_value_map(&[extract_val, a], &env).unwrap();
         match result {
             Value::List(items) => {
@@ -943,12 +958,13 @@ mod tests {
         let env = make_env();
         // Count strings by their first character
         let items = list(vec![string("ab"), string("ac"), string("ba")]);
-        let f = Value::Builtin("StringTake".to_string(), crate::value::BuiltinFn::Pure(|args| {
-            match &args[0] {
+        let f = Value::Builtin(
+            "StringTake".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
                 Value::Str(s) => Ok(Value::Str(s.chars().next().unwrap_or(' ').to_string())),
                 _ => Err(EvalError::Error("expected string".to_string())),
-            }
-        }));
+            }),
+        );
         let result = builtin_counts_by(&[items, f], &env).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -970,13 +986,20 @@ mod tests {
             integer(5),
         ]);
         // Group by parity
-        let f = Value::Builtin("Mod".to_string(), crate::value::BuiltinFn::Pure(|args| {
-            let n = match &args[0] {
-                Value::Integer(n) => n.clone(),
-                _ => return Err(EvalError::Error("expected integer".to_string())),
-            };
-            Ok(Value::Str(if n.to_i64().unwrap_or(0) % 2 == 0 { "even".to_string() } else { "odd".to_string() }))
-        }));
+        let f = Value::Builtin(
+            "Mod".to_string(),
+            crate::value::BuiltinFn::Pure(|args| {
+                let n = match &args[0] {
+                    Value::Integer(n) => n.clone(),
+                    _ => return Err(EvalError::Error("expected integer".to_string())),
+                };
+                Ok(Value::Str(if n.to_i64().unwrap_or(0) % 2 == 0 {
+                    "even".to_string()
+                } else {
+                    "odd".to_string()
+                }))
+            }),
+        );
         let result = builtin_group_by(&[items, f], &env).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -1001,7 +1024,10 @@ mod tests {
         let a2 = assoc(vec![("b", integer(3)), ("c", integer(4))]);
         let assocs = list(vec![a1, a2]);
         // Use Total as combiner
-        let f = Value::Builtin("Total".to_string(), crate::value::BuiltinFn::Pure(crate::builtins::list::builtin_total));
+        let f = Value::Builtin(
+            "Total".to_string(),
+            crate::value::BuiltinFn::Pure(crate::builtins::list::builtin_total),
+        );
         let result = builtin_merge(&[assocs, f], &env).unwrap();
         match result {
             Value::Assoc(map) => {
@@ -1023,10 +1049,13 @@ mod tests {
         let result = builtin_key_union(&[assocs]).unwrap();
         match result {
             Value::List(keys) => {
-                let key_strs: Vec<String> = keys.iter().map(|k| match k {
-                    Value::Str(s) => s.clone(),
-                    _ => panic!("expected string key"),
-                }).collect();
+                let key_strs: Vec<String> = keys
+                    .iter()
+                    .map(|k| match k {
+                        Value::Str(s) => s.clone(),
+                        _ => panic!("expected string key"),
+                    })
+                    .collect();
                 assert_eq!(key_strs.len(), 3);
                 assert!(key_strs.contains(&"a".to_string()));
                 assert!(key_strs.contains(&"b".to_string()));
@@ -1044,10 +1073,13 @@ mod tests {
         let result = builtin_key_intersection(&[assocs]).unwrap();
         match result {
             Value::List(keys) => {
-                let key_strs: Vec<String> = keys.iter().map(|k| match k {
-                    Value::Str(s) => s.clone(),
-                    _ => panic!("expected string key"),
-                }).collect();
+                let key_strs: Vec<String> = keys
+                    .iter()
+                    .map(|k| match k {
+                        Value::Str(s) => s.clone(),
+                        _ => panic!("expected string key"),
+                    })
+                    .collect();
                 assert_eq!(key_strs, vec!["b"]);
             }
             _ => panic!("Expected List"),
@@ -1056,15 +1088,22 @@ mod tests {
 
     #[test]
     fn test_key_complement() {
-        let a1 = assoc(vec![("a", integer(1)), ("b", integer(2)), ("c", integer(3))]);
+        let a1 = assoc(vec![
+            ("a", integer(1)),
+            ("b", integer(2)),
+            ("c", integer(3)),
+        ]);
         let a2 = assoc(vec![("b", integer(4))]);
         let result = builtin_key_complement(&[a1, a2]).unwrap();
         match result {
             Value::List(keys) => {
-                let key_strs: Vec<String> = keys.iter().map(|k| match k {
-                    Value::Str(s) => s.clone(),
-                    _ => panic!("expected string key"),
-                }).collect();
+                let key_strs: Vec<String> = keys
+                    .iter()
+                    .map(|k| match k {
+                        Value::Str(s) => s.clone(),
+                        _ => panic!("expected string key"),
+                    })
+                    .collect();
                 assert_eq!(key_strs.len(), 2);
                 assert!(key_strs.contains(&"a".to_string()));
                 assert!(key_strs.contains(&"c".to_string()));

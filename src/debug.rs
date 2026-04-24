@@ -290,6 +290,7 @@ fn format_value(val: &Value) -> String {
     match val {
         Value::Integer(n) => n.to_string(),
         Value::Real(r) => r.to_string(),
+        Value::Rational(r) => r.to_string(),
         Value::Str(s) => format!("\"{}\"", s),
         Value::Bool(b) => b.to_string(),
         Value::Null => "Null".to_string(),

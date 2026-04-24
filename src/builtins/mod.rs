@@ -2,16 +2,17 @@ pub mod arithmetic;
 pub mod association;
 pub mod comparison;
 pub mod dataset;
+pub mod discrete;
 pub mod error;
 pub mod ffi;
-pub mod format;
 pub mod filesystem;
+pub mod format;
 pub mod graphics;
 pub mod image;
 pub mod io;
 pub mod linalg;
-pub mod localsymbol;
 pub mod list;
+pub mod localsymbol;
 pub mod logical;
 pub mod math;
 pub mod number_theory;
@@ -20,7 +21,6 @@ pub mod pattern;
 pub mod random;
 pub mod statistics;
 pub mod string;
-pub mod discrete;
 pub mod symbolic;
 
 use crate::env::{Env, LazyProvider};
@@ -109,13 +109,21 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "NestList", list::builtin_nest_list);
     register_builtin_env(env, "Apply", list::builtin_apply);
 
+    // ── Rule application ──
+    register_builtin_env(env, "ReplaceAll", crate::eval::rules::builtin_replace_all);
+    register_builtin_env(
+        env,
+        "ReplaceRepeated",
+        crate::eval::rules::builtin_replace_repeated,
+    );
+
     // ── Pattern ──
-    register_builtin(env, "MatchQ", pattern::builtin_match_q);
+    register_builtin_env(env, "MatchQ", pattern::builtin_match_q);
     register_builtin(env, "Head", pattern::builtin_head);
     register_builtin(env, "TypeOf", pattern::builtin_type_of);
-    register_builtin(env, "FreeQ", pattern::builtin_free_q);
-    register_builtin(env, "Cases", pattern::builtin_cases);
-    register_builtin(env, "DeleteCases", pattern::builtin_delete_cases);
+    register_builtin_env(env, "FreeQ", pattern::builtin_free_q);
+    register_builtin_env(env, "Cases", pattern::builtin_cases);
+    register_builtin_env(env, "DeleteCases", pattern::builtin_delete_cases);
 
     // ── String ──
     register_builtin(env, "StringJoin", string::builtin_string_join);
@@ -162,7 +170,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "GroupBy", association::builtin_group_by);
     register_builtin_env(env, "Merge", association::builtin_merge);
     register_builtin(env, "KeyUnion", association::builtin_key_union);
-    register_builtin(env, "KeyIntersection", association::builtin_key_intersection);
+    register_builtin(
+        env,
+        "KeyIntersection",
+        association::builtin_key_intersection,
+    );
     register_builtin(env, "KeyComplement", association::builtin_key_complement);
 
     // ── Dataset ──
@@ -178,6 +190,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin(env, "Series", symbolic::builtin_series);
+    register_builtin(env, "Integrate", symbolic::builtin_integrate);
 
     // ── Discrete Calculus ──
     register_builtin(env, "DiscreteDelta", discrete::builtin_discrete_delta);
@@ -253,17 +266,41 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Divisible", number_theory::builtin_divisible);
     register_builtin(env, "CoprimeQ", number_theory::builtin_coprime_q);
     register_builtin(env, "IntegerDigits", number_theory::builtin_integer_digits);
-    register_builtin(env, "ModularInverse", number_theory::builtin_modular_inverse);
+    register_builtin(
+        env,
+        "ModularInverse",
+        number_theory::builtin_modular_inverse,
+    );
     register_builtin(env, "PrimeOmega", number_theory::builtin_prime_omega);
     register_builtin(env, "PrimeNu", number_theory::builtin_prime_nu);
     register_builtin(env, "DigitCount", number_theory::builtin_digit_count);
     register_builtin(env, "JacobiSymbol", number_theory::builtin_jacobi_symbol);
-    register_builtin(env, "ChineseRemainder", number_theory::builtin_chinese_remainder);
-    register_builtin(env, "MultiplicativeOrder", number_theory::builtin_multiplicative_order);
+    register_builtin(
+        env,
+        "ChineseRemainder",
+        number_theory::builtin_chinese_remainder,
+    );
+    register_builtin(
+        env,
+        "MultiplicativeOrder",
+        number_theory::builtin_multiplicative_order,
+    );
     register_builtin(env, "PrimitiveRoot", number_theory::builtin_primitive_root);
-    register_builtin(env, "PerfectNumberQ", number_theory::builtin_perfect_number_q);
-    register_builtin(env, "MangoldtLambda", number_theory::builtin_mangoldt_lambda);
-    register_builtin(env, "LiouvilleLambda", number_theory::builtin_liouville_lambda);
+    register_builtin(
+        env,
+        "PerfectNumberQ",
+        number_theory::builtin_perfect_number_q,
+    );
+    register_builtin(
+        env,
+        "MangoldtLambda",
+        number_theory::builtin_mangoldt_lambda,
+    );
+    register_builtin(
+        env,
+        "LiouvilleLambda",
+        number_theory::builtin_liouville_lambda,
+    );
     register_builtin_env(env, "DivisorSum", number_theory::builtin_divisor_sum);
 
     // ── Reciprocal trig ──
@@ -390,7 +427,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "LoadExtension", ffi::builtin_load_extension);
     register_builtin_env(env, "ExternalEvaluate", ffi::builtin_external_evaluate);
     register_builtin_env(env, "LibraryFunction", ffi::builtin_library_function);
-    register_builtin_env(env, "LibraryFunctionLoad", ffi::builtin_library_function_load);
+    register_builtin_env(
+        env,
+        "LibraryFunctionLoad",
+        ffi::builtin_library_function_load,
+    );
 
     // ── File system ──
     register_builtin(env, "FileNameSplit", filesystem::builtin_file_name_split);
@@ -526,7 +567,11 @@ fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, E
 }
 
 /// Register an environment-aware built-in function.
-fn register_builtin_env(env: &Env, name: &str, func: fn(&[Value], &Env) -> Result<Value, EvalError>) {
+fn register_builtin_env(
+    env: &Env,
+    name: &str,
+    func: fn(&[Value], &Env) -> Result<Value, EvalError>,
+) {
     env.set(
         name.to_string(),
         Value::Builtin(name.to_string(), BuiltinFn::Env(func)),
@@ -651,8 +696,9 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             env.register_module("Graphics".to_string(), module);
         }
         _ => {
-            // Fall back to file-based module loading
-            let module_val = crate::eval::load_module_from_file(&pkg_name, env)?;
+            // Strip trailing backtick context marker ("Combinatorics`" -> "Combinatorics")
+            let clean_name = pkg_name.trim_end_matches('`');
+            let module_val = crate::eval::load_module_from_file(clean_name, env)?;
             // Import all exported symbols AND internal helpers into the current environment
             if let Value::Module {
                 exports, locals, ..
@@ -673,8 +719,8 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
 /// Re-export for use by eval.rs
 pub use arithmetic::add_values_public;
-pub use arithmetic::sub_values_public;
 pub use arithmetic::mul_values_public;
+pub use arithmetic::sub_values_public;
 
 // ── Help documentation ──
 
@@ -725,9 +771,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Nor[a, b, ...] returns True if no argument is True, False otherwise.\n\
              Nor[] = True."
         }
-        "Implies" => {
-            "Implies[p, q] returns True unless p is True and q is False (p → q)."
-        }
+        "Implies" => "Implies[p, q] returns True unless p is True and q is False (p → q).",
         "Equivalent" => {
             "Equivalent[a, b, ...] returns True if all arguments have the same truth value.\n\
              Equivalent[] = True."
@@ -736,12 +780,8 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Majority[a, b, c, ...] returns True if more than half of the arguments are True.\n\
              Requires an odd number of arguments."
         }
-        "Boole" => {
-            "Boole[expr] returns 1 if expr is True, 0 otherwise."
-        }
-        "BooleanQ" => {
-            "BooleanQ[expr] returns True if expr is True or False, False otherwise."
-        }
+        "Boole" => "Boole[expr] returns 1 if expr is True, 0 otherwise.",
+        "BooleanQ" => "BooleanQ[expr] returns True if expr is True or False, False otherwise.",
 
         // ── List ──
         "Length" => "Length[expr] gives the number of elements in expr.",
@@ -788,18 +828,30 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "Split" => "Split[list] splits list into runs of identical adjacent elements.",
         "Gather" => "Gather[list] groups identical elements into sublists.",
-        "DeleteDuplicates" => "DeleteDuplicates[list] deletes all duplicates from list, keeping the first occurrence.",
-        "Insert" => "Insert[list, elem, n] inserts elem at position n in list (1-indexed, negative counts from end).",
-        "Delete" => "Delete[list, n] deletes the element at position n in list (1-indexed, negative counts from end).",
-        "ReplacePart" => "ReplacePart[list, n, new] replaces the element at position n in list with new.",
+        "DeleteDuplicates" => {
+            "DeleteDuplicates[list] deletes all duplicates from list, keeping the first occurrence."
+        }
+        "Insert" => {
+            "Insert[list, elem, n] inserts elem at position n in list (1-indexed, negative counts from end)."
+        }
+        "Delete" => {
+            "Delete[list, n] deletes the element at position n in list (1-indexed, negative counts from end)."
+        }
+        "ReplacePart" => {
+            "ReplacePart[list, n, new] replaces the element at position n in list with new."
+        }
         "RotateLeft" => "RotateLeft[list, n] rotates the elements of list n positions to the left.",
-        "RotateRight" => "RotateRight[list, n] rotates the elements of list n positions to the right.",
+        "RotateRight" => {
+            "RotateRight[list, n] rotates the elements of list n positions to the right."
+        }
         "Ordering" => {
             "Ordering[list] returns the positions that would sort list.\nOrdering[list, n] returns the first n positions.\nOrdering[list, -n] returns the last n positions."
         }
         "ConstantArray" => "ConstantArray[val, n] creates a list of n copies of val.",
         "Diagonal" => "Diagonal[matrix] extracts the diagonal elements from a matrix.",
-        "Accumulate" => "Accumulate[list] computes the running total (cumulative sum) of list elements.",
+        "Accumulate" => {
+            "Accumulate[list] computes the running total (cumulative sum) of list elements."
+        }
         "Differences" => "Differences[list] computes the adjacent differences of list elements.",
         "Clip" => {
             "Clip[val] clamps val to the range [0, 1].\nClip[val, {min, max}] clamps val to the range [min, max]."
@@ -807,10 +859,18 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Array" => {
             "Array[f, n] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n}] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n, m}] generates {f[n], f[n+1], ..., f[m]}."
         }
-        "SplitBy" => "SplitBy[list, f] splits list into runs where f applied to each element gives identical values.",
-        "GatherBy" => "GatherBy[list, f] groups elements by the values of f applied to each element.",
-        "FoldList" => "FoldList[f, init, list] gives all intermediate results of folding f from the left.",
-        "NestList" => "NestList[f, expr, n] gives all intermediate results of applying f to expr n times.",
+        "SplitBy" => {
+            "SplitBy[list, f] splits list into runs where f applied to each element gives identical values."
+        }
+        "GatherBy" => {
+            "GatherBy[list, f] groups elements by the values of f applied to each element."
+        }
+        "FoldList" => {
+            "FoldList[f, init, list] gives all intermediate results of folding f from the left."
+        }
+        "NestList" => {
+            "NestList[f, expr, n] gives all intermediate results of applying f to expr n times."
+        }
         "MapApply" => {
             "MapApply[f, expr] (f @@@ expr) replaces heads at level 1, using elements of lists as arguments.\n\
              MapApply[f, {{a,b}, {c,d}}] → {f[a,b], f[c,d]}."
@@ -948,13 +1008,19 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Simplify" => "Simplify[expr] attempts to simplify expr. (Currently a pass-through.)",
         "Expand" => "Expand[expr] expands products and powers in expr. (Currently a pass-through.)",
         "D" => "D[f, x] gives the partial derivative of f with respect to x. (Planned.)",
-        "Integrate" => "Integrate[f, x] computes the indefinite integral of f. (Planned.)",
+        "Integrate" => {
+            "Integrate[f, x] computes the indefinite integral of f with respect to x.\n\
+                         Supports: polynomials, sin, cos, exp, tan, sec², csc², sum rule,\n\
+                         constant factor extraction, and linear substitution."
+        }
         "Factor" => "Factor[expr] factors the polynomial expr. (Planned.)",
         "Solve" => "Solve[eqns, vars] solves equations for variables. (Planned.)",
         "Series" => "Series[expr, {x, x0, n}] computes a power series expansion. (Planned.)",
 
         // ── Discrete Calculus ──
-        "DiscreteDelta" => "DiscreteDelta[n1, n2, ...] returns 1 if all arguments are zero, 0 otherwise.",
+        "DiscreteDelta" => {
+            "DiscreteDelta[n1, n2, ...] returns 1 if all arguments are zero, 0 otherwise."
+        }
         "DiscreteShift" => {
             "DiscreteShift[expr, n] represents the forward shift of expr with respect to n.\n\
              DiscreteShift[expr, n, h] shifts by step h."
@@ -968,7 +1034,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
              FactorialPower[x, n, h] uses step h."
         }
         "BernoulliB" => "BernoulliB[n] gives the n-th Bernoulli number B_n.",
-        "LinearRecurrence" => "LinearRecurrence[kernel, init, n] gives the n-th term of a linear recurrence with kernel coefficients and initial values.",
+        "LinearRecurrence" => {
+            "LinearRecurrence[kernel, init, n] gives the n-th term of a linear recurrence with kernel coefficients and initial values."
+        }
         "RecurrenceTable" => {
             "RecurrenceTable[eqns, f, {n, nmin, nmax}] generates a list of values from recurrence equations.\n\
              Example: RecurrenceTable[{a[1] == 1, a[n+1] == 2*a[n]}, a, {n, 1, 5}]"
@@ -1117,36 +1185,18 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Lookup[assoc, key] gives the value associated with key, or Missing if not found."
         }
         "KeyExistsQ" => "KeyExistsQ[assoc, key] returns True if key exists in the association.",
-        "AssociationQ" => {
-            "AssociationQ[expr] returns True if expr is a valid association."
-        }
-        "Normal" => {
-            "Normal[assoc] converts an association to a list of rules."
-        }
-        "KeySort" => {
-            "KeySort[assoc] sorts the keys of an association alphabetically."
-        }
-        "KeySortBy" => {
-            "KeySortBy[assoc, f] sorts keys using the ordering function f."
-        }
-        "KeyTake" => {
-            "KeyTake[assoc, keys] returns an association with only the specified keys."
-        }
-        "KeyDrop" => {
-            "KeyDrop[assoc, keys] returns an association without the specified keys."
-        }
-        "KeySelect" => {
-            "KeySelect[assoc, pred] selects entries where pred[key] returns True."
-        }
-        "KeyMap" => {
-            "KeyMap[f, assoc] applies f to each key in the association."
-        }
+        "AssociationQ" => "AssociationQ[expr] returns True if expr is a valid association.",
+        "Normal" => "Normal[assoc] converts an association to a list of rules.",
+        "KeySort" => "KeySort[assoc] sorts the keys of an association alphabetically.",
+        "KeySortBy" => "KeySortBy[assoc, f] sorts keys using the ordering function f.",
+        "KeyTake" => "KeyTake[assoc, keys] returns an association with only the specified keys.",
+        "KeyDrop" => "KeyDrop[assoc, keys] returns an association without the specified keys.",
+        "KeySelect" => "KeySelect[assoc, pred] selects entries where pred[key] returns True.",
+        "KeyMap" => "KeyMap[f, assoc] applies f to each key in the association.",
         "KeyValueMap" => {
             "KeyValueMap[f, assoc] applies f to each {key, value} pair, returning a list."
         }
-        "KeyMemberQ" => {
-            "KeyMemberQ[assoc, key] returns True if the key exists in the association."
-        }
+        "KeyMemberQ" => "KeyMemberQ[assoc, key] returns True if the key exists in the association.",
         "KeyFreeQ" => {
             "KeyFreeQ[assoc, key] returns True if the key does NOT exist in the association."
         }
@@ -1157,15 +1207,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "KeyDropFrom" => {
             "KeyDropFrom[assoc, key] returns a new association with the specified key removed."
         }
-        "Counts" => {
-            "Counts[list] returns an association counting occurrences of each element."
-        }
-        "CountsBy" => {
-            "CountsBy[list, f] counts occurrences grouped by f[element]."
-        }
-        "GroupBy" => {
-            "GroupBy[list, f] groups elements of list by f[element]."
-        }
+        "Counts" => "Counts[list] returns an association counting occurrences of each element.",
+        "CountsBy" => "CountsBy[list, f] counts occurrences grouped by f[element].",
+        "GroupBy" => "GroupBy[list, f] groups elements of list by f[element].",
         "Merge" => {
             "Merge[{assoc1, assoc2, ...}, combiner] merges associations, using combiner for duplicate keys."
         }
@@ -1184,8 +1228,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Dataset[data] creates a Dataset wrapper around structured data for pretty display and query operations.\nUse call syntax: ds[All, \"col\"], ds[i], ds[i, \"col\"]."
         }
         "DatasetQ" => "DatasetQ[x] returns True if x is a Dataset, False otherwise.",
-        "SortBy" => "SortBy[list, f] sorts list elements by the key produced by applying f to each element.",
-        "JoinAcross" => "JoinAcross[list1, list2, key] performs an inner join of two lists of associations on the specified key.",
+        "SortBy" => {
+            "SortBy[list, f] sorts list elements by the key produced by applying f to each element."
+        }
+        "JoinAcross" => {
+            "JoinAcross[list1, list2, key] performs an inner join of two lists of associations on the specified key."
+        }
 
         // ── Random ──
         "RandomInteger" => {
@@ -1269,8 +1317,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ParallelCombine" => {
             "ParallelCombine[f, list] applies binary function f to combine elements of list in parallel, returning a single result."
         }
-        "ProcessorCount" => "ProcessorCount returns the number of processor cores on the current computer.",
-        "AbortKernels" => "AbortKernels[] aborts all running kernel evaluations. (Currently a no-op.)",
+        "ProcessorCount" => {
+            "ProcessorCount returns the number of processor cores on the current computer."
+        }
+        "AbortKernels" => {
+            "AbortKernels[] aborts all running kernel evaluations. (Currently a no-op.)"
+        }
 
         // ── Format/display ──
         "InputForm" => {
@@ -1283,15 +1335,11 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Shallow" => {
             "Shallow[expr] displays expr with limited nesting depth (default 3).\nShallow[expr, n] limits nesting to n levels."
         }
-        "NumberForm" => {
-            "NumberForm[expr, n] displays numbers with n significant digits."
-        }
+        "NumberForm" => "NumberForm[expr, n] displays numbers with n significant digits.",
         "ScientificForm" => {
             "ScientificForm[expr, n] displays numbers in scientific notation with n significant digits."
         }
-        "BaseForm" => {
-            "BaseForm[expr, base] displays a number in the given base (2–36)."
-        }
+        "BaseForm" => "BaseForm[expr, base] displays a number in the given base (2–36).",
         "Grid" => "Grid[list] displays a 2D list as an aligned table grid.",
         "Defer" => "Defer[expr] displays expr in its original form. (Currently a display wrapper.)",
         "SyntaxQ" => {
@@ -1340,9 +1388,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ImageData" => {
             "ImageData[image] extracts pixel data as a list of lists with values in [0,1]."
         }
-        "ImageDimensions" => {
-            "ImageDimensions[image] returns {width, height} of the image."
-        }
+        "ImageDimensions" => "ImageDimensions[image] returns {width, height} of the image.",
         "ImageType" => {
             "ImageType[image] returns the image type as a string: \"Byte\", \"Bit16\", or \"Real32\"."
         }
@@ -1365,9 +1411,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "ColorConvert[image, \"Grayscale\"] converts an image to grayscale.\n\
              ColorConvert[image, \"RGB\"] converts to RGB."
         }
-        "GaussianFilter" => {
-            "GaussianFilter[image, r] applies Gaussian blur with sigma = r."
-        }
+        "GaussianFilter" => "GaussianFilter[image, r] applies Gaussian blur with sigma = r.",
         "EdgeDetect" => {
             "EdgeDetect[image] applies Sobel edge detection, returning an edge magnitude image."
         }

@@ -18,8 +18,8 @@
 pub mod compiler;
 pub mod runtime;
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::bytecode::BytecodeFunctionDef;
 

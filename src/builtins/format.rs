@@ -52,7 +52,7 @@ pub fn builtin_short(args: &[Value]) -> Result<Value, EvalError> {
         _ => {
             return Err(EvalError::Error(
                 "Short requires 1 or 2 arguments".to_string(),
-            ))
+            ));
         }
     };
     Ok(Value::Formatted {
@@ -78,7 +78,7 @@ pub fn builtin_shallow(args: &[Value]) -> Result<Value, EvalError> {
         _ => {
             return Err(EvalError::Error(
                 "Shallow requires 1 or 2 arguments".to_string(),
-            ))
+            ));
         }
     };
     Ok(Value::Formatted {
@@ -112,8 +112,7 @@ pub fn builtin_number_form(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_scientific_form(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "ScientificForm requires exactly 2 arguments: ScientificForm[expr, n]"
-                .to_string(),
+            "ScientificForm requires exactly 2 arguments: ScientificForm[expr, n]".to_string(),
         ));
     }
     let digits = args[1].to_integer().unwrap_or(6);
@@ -188,10 +187,12 @@ pub fn builtin_syntax_q(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = match &args[0] {
         Value::Str(s) => s.clone(),
-        other => return Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: other.type_name().to_string(),
-        }),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
     };
     match lexer::tokenize(&s) {
         Ok(tokens) => match parser::parse(tokens) {
@@ -212,10 +213,12 @@ pub fn builtin_syntax_length(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = match &args[0] {
         Value::Str(s) => s.clone(),
-        other => return Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: other.type_name().to_string(),
-        }),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
     };
     let len = s.len();
     match lexer::tokenize(&s) {
@@ -281,7 +284,11 @@ mod tests {
     #[test]
     fn test_short_builtin() {
         // Short on a long list
-        let v = Value::List((0..20).map(|i| Value::Integer(rug::Integer::from(i))).collect());
+        let v = Value::List(
+            (0..20)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect(),
+        );
         let result = builtin_short(&[v]).unwrap();
         let s = result.to_string();
         assert!(s.contains("<<"));
@@ -290,7 +297,11 @@ mod tests {
 
     #[test]
     fn test_short_with_n() {
-        let v = Value::List((0..20).map(|i| Value::Integer(rug::Integer::from(i))).collect());
+        let v = Value::List(
+            (0..20)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect(),
+        );
         let n = Value::Integer(rug::Integer::from(3));
         let result = builtin_short(&[v, n]).unwrap();
         let s = result.to_string();
@@ -369,7 +380,11 @@ mod tests {
         let n = Value::Integer(rug::Integer::from(4));
         let result = builtin_number_form(&[v, n]).unwrap();
         let s = result.to_string();
-        assert!(s.starts_with("3.14"), "NumberForm[Pi, 4] should start with 3.14, got: {}", s);
+        assert!(
+            s.starts_with("3.14"),
+            "NumberForm[Pi, 4] should start with 3.14, got: {}",
+            s
+        );
     }
 
     #[test]
@@ -428,16 +443,15 @@ mod tests {
     #[test]
     fn test_shallow_builtin() {
         // 4 levels of nesting, Shallow default depth 3 → innermost truncated
-        let inner = Value::List(vec![
-            Value::List(vec![
-                Value::List(vec![
-                    Value::List(vec![Value::Integer(rug::Integer::from(42))])
-                ])
-            ])
-        ]);
+        let inner = Value::List(vec![Value::List(vec![Value::List(vec![Value::List(
+            vec![Value::Integer(rug::Integer::from(42))],
+        )])])]);
         let result = builtin_shallow(&[inner]).unwrap();
         let s = result.to_string();
         // At depth 3 of 4, should show <<...>> for innermost
-        assert!(s.contains("<<...>>"), "Shallow output should contain <<...>>, got: {s}");
+        assert!(
+            s.contains("<<...>>"),
+            "Shallow output should contain <<...>>, got: {s}"
+        );
     }
 }

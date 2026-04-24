@@ -3,18 +3,19 @@
 /// Handles ReplaceAll (/. / //.) and similar rule-based substitution.
 use crate::ast::*;
 use crate::env::Env;
-use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
+use crate::pattern::{AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern};
 use crate::value::*;
 
 /// Apply rules to a value, optionally evaluating pattern guards.
-pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Value, EvalError> {
+pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Value, EvalError> {
+    let _attr_checker = AttributeChecker::new(env.attributes.clone());
     match rules {
         Value::RuleSet {
             rules: rule_pairs, ..
         } => {
             'next_rule: for (lhs, rhs) in rule_pairs {
                 if let Value::Pattern(lhs_expr) = lhs
-                    && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
+                    && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value, Some(&_attr_checker))
                     && let Value::Pattern(rhs_expr) = rhs
                 {
                     // Evaluate guards if present
@@ -24,6 +25,7 @@ pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Resu
                         for (name, val) in &bindings {
                             guard_env.set(name.clone(), val.clone());
                         }
+                        guard_env.set("#".to_string(), value.clone());
                         if !super::eval(guard_expr, &guard_env)?.to_bool() {
                             continue 'next_rule;
                         }
@@ -36,6 +38,7 @@ pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Resu
                         for (name, val) in &bindings {
                             guard_env.set(name.clone(), val.clone());
                         }
+                        guard_env.set("#".to_string(), value.clone());
                         if !super::eval(guard_expr, &guard_env)?.to_bool() {
                             continue 'next_rule;
                         }
@@ -56,7 +59,7 @@ pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Resu
         }
         Value::Rule { lhs, rhs, delayed } => {
             if let Value::Pattern(lhs_expr) = lhs.as_ref()
-                && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
+                && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value, Some(&_attr_checker))
             {
                 // Evaluate guards if present
                 let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
@@ -65,6 +68,7 @@ pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Resu
                     for (name, val) in &bindings {
                         guard_env.set(name.clone(), val.clone());
                     }
+                    guard_env.set("#".to_string(), value.clone());
                     if !super::eval(guard_expr, &guard_env)?.to_bool() {
                         return Ok(value.clone());
                     }
@@ -76,6 +80,7 @@ pub(super) fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Resu
                     for (name, val) in &bindings {
                         guard_env.set(name.clone(), val.clone());
                     }
+                    guard_env.set("#".to_string(), value.clone());
                     if !super::eval(guard_expr, &guard_env)?.to_bool() {
                         return Ok(value.clone());
                     }
@@ -156,4 +161,33 @@ pub(super) fn pat_to_expr(val: &Value) -> Expr {
         Value::Pattern(expr) => expr.clone(),
         _ => Expr::Symbol(val.to_string()),
     }
+}
+
+/// Builtin: ReplaceAll[expr, rules] — apply rules once.
+pub fn builtin_replace_all(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ReplaceAll requires exactly 2 arguments".to_string(),
+        ));
+    }
+    apply_rules_value(&args[0], &args[1], env)
+}
+
+/// Builtin: ReplaceRepeated[expr, rules] — apply rules repeatedly until no change.
+pub fn builtin_replace_repeated(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ReplaceRepeated requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let mut val = args[0].clone();
+    let max_iterations = 1000;
+    for _ in 0..max_iterations {
+        let next = apply_rules_value(&val, &args[1], env)?;
+        if next.struct_eq(&val) {
+            return Ok(val);
+        }
+        val = next;
+    }
+    Ok(val)
 }

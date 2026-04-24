@@ -94,15 +94,19 @@ pub enum Expr {
         condition: Box<Expr>,
     },
 
-    /// _.— optional blank (defaults to Null if unmatched)
+    /// _.— optional blank (defaults to Null if unmatched, or expr with :default)
     OptionalBlank {
         type_constraint: Option<Symbol>,
+        /// Default value expression (e.g., 5 in _:5). None means fallback to Null.
+        default_value: Option<Box<Expr>>,
     },
 
     /// x_. or x_Integer.— named optional blank
     OptionalNamedBlank {
         name: Symbol,
         type_constraint: Option<Symbol>,
+        /// Default value expression (e.g., 5 in x_:5). None means fallback to Null.
+        default_value: Option<Box<Expr>>,
     },
 
     // ── Special forms ──
@@ -374,19 +378,27 @@ impl PartialEq for Expr {
                 },
             ) => p1 == p2 && c1 == c2,
             (
-                Expr::OptionalBlank { type_constraint: a },
-                Expr::OptionalBlank { type_constraint: b },
-            ) => a == b,
+                Expr::OptionalBlank {
+                    type_constraint: a,
+                    default_value: d1,
+                },
+                Expr::OptionalBlank {
+                    type_constraint: b,
+                    default_value: d2,
+                },
+            ) => a == b && d1 == d2,
             (
                 Expr::OptionalNamedBlank {
                     name: n1,
                     type_constraint: t1,
+                    default_value: d1,
                 },
                 Expr::OptionalNamedBlank {
                     name: n2,
                     type_constraint: t2,
+                    default_value: d2,
                 },
-            ) => n1 == n2 && t1 == t2,
+            ) => n1 == n2 && t1 == t2 && d1 == d2,
             (
                 Expr::ReplaceAll {
                     expr: e1,
@@ -791,17 +803,33 @@ impl fmt::Display for Expr {
             Expr::PatternGuard { pattern, condition } => {
                 write!(f, "{} /; {}", pattern, condition)
             }
-            Expr::OptionalBlank { type_constraint } => match type_constraint {
-                Some(tc) => write!(f, "_{}.", tc),
-                None => write!(f, "_."),
-            },
+            Expr::OptionalBlank {
+                type_constraint,
+                default_value,
+            } => {
+                match type_constraint {
+                    Some(tc) => write!(f, "_{}.", tc)?,
+                    None => write!(f, "_.")?,
+                }
+                if let Some(dv) = default_value {
+                    write!(f, ":{}", dv)?;
+                }
+                Ok(())
+            }
             Expr::OptionalNamedBlank {
                 name,
                 type_constraint,
-            } => match type_constraint {
-                Some(tc) => write!(f, "{}_{}.", name, tc),
-                None => write!(f, "{}_.", name),
-            },
+                default_value,
+            } => {
+                match type_constraint {
+                    Some(tc) => write!(f, "{}_{}.", name, tc)?,
+                    None => write!(f, "{}_.", name)?,
+                }
+                if let Some(dv) = default_value {
+                    write!(f, ":{}", dv)?;
+                }
+                Ok(())
+            }
             Expr::ReplaceAll { expr, rules } => write!(f, "{} /. {}", expr, rules),
             Expr::ReplaceRepeated { expr, rules } => write!(f, "{} //. {}", expr, rules),
             Expr::Map { func, list } => write!(f, "{} /@ {}", func, list),

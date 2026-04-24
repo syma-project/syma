@@ -1384,9 +1384,9 @@ macro_rules! hyperbolic_builtin {
                 ));
             }
             match &args[0] {
-                Value::Integer(n) => Ok(Value::Real(
-                    Float::with_val(DEFAULT_PRECISION, n).$method(),
-                )),
+                Value::Integer(n) => {
+                    Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, n).$method()))
+                }
                 Value::Real(r) => Ok(Value::Real(r.clone().$method())),
                 _ => Ok(Value::Call {
                     head: $sym_name.to_string(),
@@ -1419,7 +1419,10 @@ pub fn builtin_csch(args: &[Value]) -> Result<Value, EvalError> {
             let s = r.clone().sinh();
             Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / s))
         }
-        _ => Ok(Value::Call { head: "Csch".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Csch".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1438,7 +1441,10 @@ pub fn builtin_sech(args: &[Value]) -> Result<Value, EvalError> {
             let c = r.clone().cosh();
             Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / c))
         }
-        _ => Ok(Value::Call { head: "Sech".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Sech".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1458,7 +1464,10 @@ pub fn builtin_coth(args: &[Value]) -> Result<Value, EvalError> {
             let t = r.clone().tanh();
             Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / t))
         }
-        _ => Ok(Value::Call { head: "Coth".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Coth".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1478,7 +1487,10 @@ pub fn builtin_arccsch(args: &[Value]) -> Result<Value, EvalError> {
             let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
             Ok(Value::Real(recip.asinh()))
         }
-        _ => Ok(Value::Call { head: "ArcCsch".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcCsch".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1498,7 +1510,10 @@ pub fn builtin_arcsech(args: &[Value]) -> Result<Value, EvalError> {
             let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
             Ok(Value::Real(recip.acosh()))
         }
-        _ => Ok(Value::Call { head: "ArcSech".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcSech".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1518,7 +1533,10 @@ pub fn builtin_arccoth(args: &[Value]) -> Result<Value, EvalError> {
             let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
             Ok(Value::Real(recip.atanh()))
         }
-        _ => Ok(Value::Call { head: "ArcCoth".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcCoth".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1541,7 +1559,10 @@ pub fn builtin_sinc(args: &[Value]) -> Result<Value, EvalError> {
             let s = r.clone().sin() / r;
             Ok(Value::Real(s))
         }
-        _ => Ok(Value::Call { head: "Sinc".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Sinc".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1558,7 +1579,9 @@ pub fn builtin_integer_part(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
         Value::Real(r) => {
             let truncated = r.clone().trunc();
-            Ok(Value::Integer(truncated.to_integer().unwrap_or(Integer::from(0))))
+            Ok(Value::Integer(
+                truncated.to_integer().unwrap_or(Integer::from(0)),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Number".to_string(),
@@ -1614,7 +1637,10 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
             };
             Ok(Value::Integer(Integer::from(s)))
         }
-        _ => Ok(Value::Call { head: "Sign".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Sign".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1631,7 +1657,12 @@ pub fn builtin_unit_step(args: &[Value]) -> Result<Value, EvalError> {
         let is_neg = match arg {
             Value::Integer(n) => n < &Integer::from(0),
             Value::Real(r) => r.is_sign_negative() && !r.is_zero(),
-            _ => return Ok(Value::Call { head: "UnitStep".to_string(), args: args.to_vec() }),
+            _ => {
+                return Ok(Value::Call {
+                    head: "UnitStep".to_string(),
+                    args: args.to_vec(),
+                });
+            }
         };
         if is_neg {
             return Ok(Value::Integer(Integer::from(0)));
@@ -1650,7 +1681,10 @@ pub fn builtin_boole(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Symbol(s) if s == "True" => Ok(Value::Integer(Integer::from(1))),
         Value::Symbol(s) if s == "False" => Ok(Value::Integer(Integer::from(0))),
-        _ => Ok(Value::Call { head: "Boole".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Boole".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -1676,7 +1710,7 @@ pub fn builtin_clip(args: &[Value]) -> Result<Value, EvalError> {
         _ => {
             return Err(EvalError::Error(
                 "Clip requires 1 or 2 arguments".to_string(),
-            ))
+            ));
         }
     };
 
@@ -1727,12 +1761,10 @@ pub fn builtin_rescale(args: &[Value]) -> Result<Value, EvalError> {
                 "Rescale: second argument must be {xmin, xmax}".to_string(),
             ));
         }
-        let xmin = to_f64(&bounds[0]).ok_or_else(|| EvalError::Error(
-            "Rescale: xmin must be a number".to_string(),
-        ))?;
-        let xmax = to_f64(&bounds[1]).ok_or_else(|| EvalError::Error(
-            "Rescale: xmax must be a number".to_string(),
-        ))?;
+        let xmin = to_f64(&bounds[0])
+            .ok_or_else(|| EvalError::Error("Rescale: xmin must be a number".to_string()))?;
+        let xmax = to_f64(&bounds[1])
+            .ok_or_else(|| EvalError::Error("Rescale: xmax must be a number".to_string()))?;
         if (xmax - xmin).abs() < f64::EPSILON {
             return Err(EvalError::Error("Rescale: xmin == xmax".to_string()));
         }

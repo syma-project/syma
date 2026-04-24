@@ -36,10 +36,7 @@ enum WlNode {
     /// `{item1, item2, ...}`
     List(Vec<WlNode>),
     /// `lhs -> rhs` (rule / option spec)
-    Rule {
-        lhs: Box<WlNode>,
-        rhs: Box<WlNode>,
-    },
+    Rule { lhs: Box<WlNode>, rhs: Box<WlNode> },
 }
 
 fn is_sym(node: &WlNode, name: &str) -> bool {
@@ -565,15 +562,11 @@ fn box_to_code(node: &WlNode) -> String {
                 }
 
                 // Graphics boxes — skip (not code)
-                "GraphicsBox" | "Graphics3DBox" | "GraphicsComplexBox" |
-                "GraphicsGroupBox" | "PointBox" | "LineBox" | "PolygonBox" => {
-                    String::new()
-                }
+                "GraphicsBox" | "Graphics3DBox" | "GraphicsComplexBox" | "GraphicsGroupBox"
+                | "PointBox" | "LineBox" | "PolygonBox" => String::new(),
 
                 // DynamicBox — skip (dynamic frontend content)
-                "DynamicBox" | "DynamicModuleBox" | "DynamicWrapperBox" => {
-                    String::new()
-                }
+                "DynamicBox" | "DynamicModuleBox" | "DynamicWrapperBox" => String::new(),
 
                 // ButtonBox — skip (frontend interaction, not code)
                 "ButtonBox" => String::new(),
@@ -655,7 +648,10 @@ fn generic_call(head: &WlNode, args: &[WlNode]) -> String {
 
 /// Check if an expression needs parens when used as a power exponent.
 fn needs_parens_for_power(node: &WlNode) -> bool {
-    matches!(node, WlNode::Call { .. } | WlNode::List(_) | WlNode::Rule { .. })
+    matches!(
+        node,
+        WlNode::Call { .. } | WlNode::List(_) | WlNode::Rule { .. }
+    )
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -670,21 +666,26 @@ pub fn notebook_to_code(contents: &str) -> Result<String, String> {
 
     // Walk the Notebook[...] expression to find Input cells
     if let WlNode::Call { head, args } = &notebook
-        && is_sym(head, "Notebook") && !args.is_empty()
+        && is_sym(head, "Notebook")
+        && !args.is_empty()
     {
         // The first argument is the cell list; subsequent args are
         // notebook-level options (PageFooters, PrintingOptions, etc.).
         if let WlNode::List(cells) = &args[0] {
             let mut code_parts: Vec<String> = Vec::new();
             for cell in cells {
-                if let WlNode::Call { head: cell_head, args: cell_args } = cell
-                    && is_sym(cell_head, "Cell") && cell_args.len() >= 2
+                if let WlNode::Call {
+                    head: cell_head,
+                    args: cell_args,
+                } = cell
+                    && is_sym(cell_head, "Cell")
+                    && cell_args.len() >= 2
                     && matches!(&cell_args[1], WlNode::Str(s) if s == "Input")
                 {
-                        let cell_code = box_to_code(&cell_args[0]);
-                        if !cell_code.trim().is_empty() {
-                            code_parts.push(cell_code);
-                        }
+                    let cell_code = box_to_code(&cell_args[0]);
+                    if !cell_code.trim().is_empty() {
+                        code_parts.push(cell_code);
+                    }
                 }
             }
             return Ok(code_parts.join(";\n"));

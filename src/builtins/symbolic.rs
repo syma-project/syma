@@ -737,6 +737,70 @@ fn integrate(expr: &Value, var: &str) -> Value {
                     simplify_call("Log", &[simplify_call("Cos", &[x])]),
                 ],
             ),
+            // ∫ sec²(x) dx = tan(x)
+            "Power"
+                if args.len() == 2
+                    && args[0].struct_eq(&simplify_call("Sec", &[x.clone()]))
+                    && args[1].struct_eq(&Value::Integer(Integer::from(2))) =>
+            {
+                simplify_call("Tan", &[x.clone()])
+            }
+            // ∫ csc²(x) dx = -cot(x)
+            "Power"
+                if args.len() == 2
+                    && args[0].struct_eq(&simplify_call("Csc", &[x.clone()]))
+                    && args[1].struct_eq(&Value::Integer(Integer::from(2))) =>
+            {
+                simplify_call(
+                    "Times",
+                    &[
+                        Value::Integer(Integer::from(-1)),
+                        simplify_call("Cot", &[x.clone()]),
+                    ],
+                )
+            }
+            // ∫ log(x) dx = x*log(x) - x
+            "Log" if args.len() == 1 && args[0].struct_eq(&x) => simplify_call(
+                "Plus",
+                &[
+                    simplify_call("Times", &[x.clone(), simplify_call("Log", &[x.clone()])]),
+                    simplify_call("Times", &[Value::Integer(Integer::from(-1)), x.clone()]),
+                ],
+            ),
+            // Linear substitution: ∫ f(a*x + b) dx = (1/a) * F(a*x + b)
+            // where F is the antiderivative of f, and a, b are constants
+            head @ ("Sin" | "Cos" | "Exp" | "Tan") if args.len() == 1 => {
+                if let Some((a, b)) = try_extract_linear(&args[0], var) {
+                    if a != Value::Integer(Integer::from(0)) {
+                        // Compute ∫ f(u) du where u = a*x + b
+                        let inner = Value::Call {
+                            head: head.to_string(),
+                            args: vec![Value::Symbol("u".to_string())],
+                        };
+                        let f_of_u = integrate(&inner, "u");
+                        // Substitute back u = a*x + b
+                        let mut result = substitute_var(
+                            &f_of_u,
+                            "u",
+                            &Value::Call {
+                                head: "Plus".to_string(),
+                                args: vec![
+                                    simplify_call("Times", &[a.clone(), x.clone()]),
+                                    b.clone().unwrap_or(Value::Integer(Integer::from(0))),
+                                ],
+                            },
+                        );
+                        // Multiply by 1/a for the chain rule
+                        let inv_a = simplify_call("Power", &[a, Value::Integer(Integer::from(-1))]);
+                        result = simplify_call("Times", &[inv_a, result]);
+                        return result;
+                    }
+                }
+                Value::Call {
+                    head: "Integrate".to_string(),
+                    args: vec![expr.clone(), x],
+                }
+            }
             _ => Value::Call {
                 head: "Integrate".to_string(),
                 args: vec![expr.clone(), x],
@@ -746,6 +810,64 @@ fn integrate(expr: &Value, var: &str) -> Value {
             head: "Integrate".to_string(),
             args: vec![expr.clone(), x],
         },
+    }
+}
+
+/// Try to extract a*x + b form from an expression.
+/// Returns Some((a, Some(b))) for a*x + b, Some((a, None)) for a*x, None otherwise.
+fn try_extract_linear(expr: &Value, var: &str) -> Option<(Value, Option<Value>)> {
+    let x = Value::Symbol(var.to_string());
+    match expr {
+        Value::Symbol(s) if s == var => Some((Value::Integer(Integer::from(1)), None)),
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+            if args[0].struct_eq(&x) && is_constant_wrt(&args[1], var) {
+                Some((args[1].clone(), None))
+            } else if args[1].struct_eq(&x) && is_constant_wrt(&args[0], var) {
+                Some((args[0].clone(), None))
+            } else {
+                None
+            }
+        }
+        Value::Call { head, args } if head == "Plus" && args.len() == 2 => {
+            // Check if one arg is a*x form and the other is constant
+            let linear = try_extract_linear(&args[0], var);
+            let constant = try_extract_linear(&args[1], var);
+            match (linear, constant) {
+                (Some((a, None)), _) if is_constant_wrt(&args[1], var) => {
+                    Some((a, Some(args[1].clone())))
+                }
+                (_, Some((a, None))) if is_constant_wrt(&args[0], var) => {
+                    Some((a, Some(args[0].clone())))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Substitute a variable with an expression in a value tree.
+fn substitute_var(expr: &Value, old_var: &str, new_expr: &Value) -> Value {
+    match expr {
+        Value::Symbol(s) if s == old_var => new_expr.clone(),
+        Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
+            expr.clone()
+        }
+        Value::Symbol(s) => Value::Symbol(s.clone()),
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|i| substitute_var(i, old_var, new_expr))
+                .collect(),
+        ),
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_var(a, old_var, new_expr))
+                .collect(),
+        },
+        other => other.clone(),
     }
 }
 

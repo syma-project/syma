@@ -103,9 +103,7 @@ fn format_from_extension(path: &str) -> Option<Format> {
 /// from the file path extension.
 pub fn detect_format(path: &str, format_name: Option<&str>) -> Result<Format, EvalError> {
     if let Some(name) = format_name {
-        format_from_name(name).ok_or_else(|| {
-            EvalError::Error(format!("Unknown format '{}'", name))
-        })
+        format_from_name(name).ok_or_else(|| EvalError::Error(format!("Unknown format '{}'", name)))
     } else {
         format_from_extension(path).ok_or_else(|| {
             EvalError::Error(format!(
@@ -243,10 +241,7 @@ fn export_tsv(value: &Value) -> Result<String, EvalError> {
     let rows = value_to_rows(value)?;
     let mut out = String::new();
     for row in &rows {
-        let cols: Vec<String> = row
-            .iter()
-            .map(value_to_csv_field)
-            .collect();
+        let cols: Vec<String> = row.iter().map(value_to_csv_field).collect();
         out.push_str(&cols.join("\t"));
         out.push('\n');
     }

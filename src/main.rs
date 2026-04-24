@@ -24,7 +24,9 @@ fn print_usage() {
     println!("  syma                       Start the interactive REPL");
     println!("  syma <file>                Evaluate a Syma source file");
     println!("  syma -e <expr>             Evaluate an expression and print the result");
-    println!("  syma -e <expr> --format F  Evaluate and format output (inputform|fullform, default inputform)");
+    println!(
+        "  syma -e <expr> --format F  Evaluate and format output (inputform|fullform, default inputform)"
+    );
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --check <file>        Parse-only check (no evaluation)");
     println!("  syma --kernel              Run in kernel mode (JSON over stdin/stdout)");
@@ -280,9 +282,10 @@ fn main() {
                 process::exit(1);
             });
             // Check for --format flag
-            let format_flag = args.iter().position(|a| a == "--format").and_then(|i| {
-                args.get(i + 1).map(|s| s.as_str())
-            });
+            let format_flag = args
+                .iter()
+                .position(|a| a == "--format")
+                .and_then(|i| args.get(i + 1).map(|s| s.as_str()));
             let env = syma::env::Env::new();
             syma::builtins::register_builtins(&env);
             match eval_input(expr, &env) {

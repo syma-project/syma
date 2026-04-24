@@ -511,14 +511,36 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
 
+        // Optional finally block
+        let finally_body = if self.at(&Token::Finally) {
+            self.advance();
+            self.expect(&Token::LBrace)?;
+            let mut body = Vec::new();
+            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                body.push(self.parse_statement()?);
+                if self.at(&Token::Semicolon) {
+                    self.advance();
+                }
+            }
+            self.expect(&Token::RBrace)?;
+            Some(Expr::Sequence(body))
+        } else {
+            None
+        };
+
+        let mut args = vec![
+            Expr::Sequence(try_body),
+            Expr::Symbol(err_var),
+            Expr::Sequence(catch_body),
+        ];
+        if let Some(finally) = finally_body {
+            args.push(finally);
+        }
+
         // Simplified: store as a Call for now
         Ok(Expr::Call {
             head: Box::new(Expr::Symbol("TryCatch".to_string())),
-            args: vec![
-                Expr::Sequence(try_body),
-                Expr::Symbol(err_var),
-                Expr::Sequence(catch_body),
-            ],
+            args,
         })
     }
 
@@ -1530,6 +1552,66 @@ impl Parser {
                         args,
                     };
                 }
+
+                // PatternTest: _?test — desugars to PatternGuard { pattern, condition: test[#] }
+                Token::QuestionMark => {
+                    self.advance();
+                    let test = self.parse_postfix_expr()?;
+                    expr = Expr::PatternGuard {
+                        pattern: Box::new(expr),
+                        condition: Box::new(Expr::Call {
+                            head: Box::new(test),
+                            args: vec![Expr::Slot(None)],
+                        }),
+                    };
+                }
+
+                // Default value for optional patterns: x_:default or _.:default
+                Token::Colon => {
+                    self.advance();
+                    let default = Box::new(self.parse_expression()?);
+                    expr = match expr {
+                        // x_:5 → make it optional with default
+                        Expr::NamedBlank {
+                            name,
+                            type_constraint,
+                        } => Expr::OptionalNamedBlank {
+                            name,
+                            type_constraint,
+                            default_value: Some(default),
+                        },
+                        // _:5 → make it optional with default
+                        Expr::Blank { type_constraint } => Expr::OptionalBlank {
+                            type_constraint,
+                            default_value: Some(default),
+                        },
+                        // x_.:5 → add default to existing optional
+                        Expr::OptionalNamedBlank {
+                            name,
+                            type_constraint,
+                            ..
+                        } => Expr::OptionalNamedBlank {
+                            name,
+                            type_constraint,
+                            default_value: Some(default),
+                        },
+                        // _.:5 → add default to existing optional
+                        Expr::OptionalBlank {
+                            type_constraint, ..
+                        } => Expr::OptionalBlank {
+                            type_constraint,
+                            default_value: Some(default),
+                        },
+                        _ => {
+                            return Err(ParseError {
+                                message: "Default values can only be applied to blank patterns (x_, _, x_., _.)".to_string(),
+                                token: Some(self.peek().clone()),
+                                span: self.peek_span(),
+                            });
+                        }
+                    };
+                }
+
                 _ => break,
             }
         }
@@ -1545,7 +1627,10 @@ impl Parser {
                 let type_constraint = self.try_parse_type_suffix()?;
                 if self.at(&Token::Dot) {
                     self.advance();
-                    Ok(Expr::OptionalBlank { type_constraint })
+                    Ok(Expr::OptionalBlank {
+                        type_constraint,
+                        default_value: None,
+                    })
                 } else {
                     Ok(Expr::Blank { type_constraint })
                 }
@@ -1581,14 +1666,22 @@ impl Parser {
                     let base = &name[..name.len() - 3];
                     let type_constraint = self.try_parse_type_suffix()?;
                     Ok(Expr::BlankNullSequence {
-                        name: if base.is_empty() { None } else { Some(base.to_string()) },
+                        name: if base.is_empty() {
+                            None
+                        } else {
+                            Some(base.to_string())
+                        },
                         type_constraint,
                     })
                 } else if name.len() >= 2 && name.ends_with("__") {
                     let base = &name[..name.len() - 2];
                     let type_constraint = self.try_parse_type_suffix()?;
                     Ok(Expr::BlankSequence {
-                        name: if base.is_empty() { None } else { Some(base.to_string()) },
+                        name: if base.is_empty() {
+                            None
+                        } else {
+                            Some(base.to_string())
+                        },
                         type_constraint,
                     })
                 } else if name.ends_with('_') {
@@ -1597,7 +1690,10 @@ impl Parser {
                     if base.is_empty() {
                         if self.at(&Token::Dot) {
                             self.advance();
-                            Ok(Expr::OptionalBlank { type_constraint })
+                            Ok(Expr::OptionalBlank {
+                                type_constraint,
+                                default_value: None,
+                            })
                         } else {
                             Ok(Expr::Blank { type_constraint })
                         }
@@ -1607,6 +1703,7 @@ impl Parser {
                             Ok(Expr::OptionalNamedBlank {
                                 name: base.to_string(),
                                 type_constraint,
+                                default_value: None,
                             })
                         } else {
                             Ok(Expr::NamedBlank {
@@ -1729,12 +1826,35 @@ impl Parser {
                 Ok(Expr::Assoc(entries))
             }
 
-            // Keywords treated as symbols in pattern/expression context
-            // (allows Function[{s}, s] to be parsed as a regular call inside
-            // function-call argument lists, which are parsed via parse_pattern_list.)
+            // Function[{params}, body] — must produce Expr::Function so the
+            // evaluator creates a PureFunction with bound parameter names.
+            // (Function-call argument lists are parsed via parse_pattern_list,
+            //  so we handle it here as well as in parse_primary.)
             Token::Function => {
                 self.advance();
-                Ok(Expr::Symbol("Function".to_string()))
+                self.expect(&Token::LBracket)?;
+
+                let params = if self.at(&Token::LBrace) {
+                    self.advance();
+                    let mut params = vec![self.expect_ident()?];
+                    while self.at(&Token::Comma) {
+                        self.advance();
+                        params.push(self.expect_ident()?);
+                    }
+                    self.expect(&Token::RBrace)?;
+                    params
+                } else {
+                    vec![self.expect_ident()?]
+                };
+
+                self.expect(&Token::Comma)?;
+                let body = self.parse_expression()?;
+                self.expect(&Token::RBracket)?;
+
+                Ok(Expr::Function {
+                    params,
+                    body: Box::new(body),
+                })
             }
             Token::Hold => {
                 self.advance();
@@ -1799,8 +1919,14 @@ impl Parser {
                     cases.push((pat, val));
                 }
                 self.expect(&Token::RBracket)?;
-                Ok(Expr::Switch { expr: Box::new(expr), cases })
+                Ok(Expr::Switch {
+                    expr: Box::new(expr),
+                    cases,
+                })
             }
+
+            // ── Try/Catch expression — also valid in pattern context (e.g. in Call args) ──
+            Token::Try => self.parse_try(),
 
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),
@@ -1925,6 +2051,15 @@ impl Parser {
                         }
                     }
                 }
+            }
+            Expr::List(items) => {
+                return Expr::List(items.into_iter().map(Self::convert_pattern).collect());
+            }
+            Expr::Call { head, args } => {
+                return Expr::Call {
+                    head: Box::new(Self::convert_pattern(*head)),
+                    args: args.into_iter().map(Self::convert_pattern).collect(),
+                };
             }
             _ => {}
         }

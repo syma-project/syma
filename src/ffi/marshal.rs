@@ -118,10 +118,7 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("t".into(), JVal::String("img".into()));
             m.insert("w".into(), JVal::Number((img.width() as u64).into()));
             m.insert("h".into(), JVal::Number((img.height() as u64).into()));
-            m.insert(
-                "c".into(),
-                JVal::String(format!("{:?}", img.color())),
-            );
+            m.insert("c".into(), JVal::String(format!("{:?}", img.color())));
             JVal::Object(m)
         }
         Value::Dataset(inner) => {
@@ -143,6 +140,13 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("real".into()));
             m.insert("v".into(), Number::from_f64(r.to_f64()).into());
+            JVal::Object(m)
+        }
+        Value::Rational(r) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("rat".into()));
+            m.insert("n".into(), JVal::String(r.numer().to_string()));
+            m.insert("d".into(), JVal::String(r.denom().to_string()));
             JVal::Object(m)
         }
         Value::Complex { re, im } => {
@@ -539,6 +543,14 @@ pub fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
                 .map(serde_json::Value::Number)
                 .ok_or_else(|| EvalError::FfiError(format!("Real {f} is not JSON-serialisable")))
         }
+        Value::Rational(r) => {
+            let f = r.to_f64();
+            serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| {
+                    EvalError::FfiError(format!("Rational {r} is not JSON-serialisable"))
+                })
+        }
         Value::Str(s) => Ok(serde_json::Value::String(s.clone())),
         Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
         Value::Null => Ok(serde_json::Value::Null),
@@ -600,6 +612,16 @@ fn require_int(v: &Value, ty_name: &str) -> Result<i64, EvalError> {
     match v {
         Value::Integer(n) => Ok(n.to_i64().unwrap_or(0)),
         Value::Real(r) => Ok(r.to_f64() as i64),
+        Value::Rational(r) => {
+            if r.denom() == &Integer::from(1) {
+                r.numer().to_i64().ok_or_else(|| EvalError::TypeError {
+                    expected: ty_name.to_string(),
+                    got: v.type_name().to_string(),
+                })
+            } else {
+                Ok(r.to_f64() as i64)
+            }
+        }
         _ => Err(EvalError::TypeError {
             expected: ty_name.to_string(),
             got: v.type_name().to_string(),
@@ -611,6 +633,7 @@ fn require_real(v: &Value, ty_name: &str) -> Result<f64, EvalError> {
     match v {
         Value::Integer(n) => Ok(n.to_f64()),
         Value::Real(r) => Ok(r.to_f64()),
+        Value::Rational(r) => Ok(r.to_f64()),
         _ => Err(EvalError::TypeError {
             expected: ty_name.to_string(),
             got: v.type_name().to_string(),

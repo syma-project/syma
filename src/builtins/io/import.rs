@@ -36,7 +36,7 @@ pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
 
     // Always read as bytes; binary formats decode directly, text formats
     // decode as UTF-8 inside format_import_binary.
-    let data = std::fs::read(&path)
-        .map_err(|e| EvalError::Error(format!("Import failed: {}", e)))?;
+    let data =
+        std::fs::read(&path).map_err(|e| EvalError::Error(format!("Import failed: {}", e)))?;
     super::formats::format_import_binary(&format, &data)
 }

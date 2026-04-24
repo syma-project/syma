@@ -10,8 +10,8 @@ use rug::Integer;
 
 use crate::ast::Expr;
 use crate::ast::IteratorSpec;
-use crate::bytecode::instruction::*;
 use crate::bytecode::CompiledBytecode;
+use crate::bytecode::instruction::*;
 use crate::value::{FunctionDefinition, Value};
 
 /// Errors emitted during compilation.
@@ -151,11 +151,7 @@ impl BytecodeCompiler {
             ));
         }
         if definitions.len() == 1 {
-            return Self::compile_function(
-                &definitions[0].params,
-                &definitions[0].body,
-                name,
-            );
+            return Self::compile_function(&definitions[0].params, &definitions[0].body, name);
         }
         for def in definitions {
             Self::compile_function(&def.params, &def.body, name)?;
@@ -262,9 +258,11 @@ impl BytecodeCompiler {
             }
             Expr::Assoc(entries) => self.compile_assoc(entries),
             Expr::Call { head, args } => self.compile_call(head, args),
-            Expr::If { condition, then_branch, else_branch } => {
-                self.compile_if(condition, then_branch, else_branch)
-            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => self.compile_if(condition, then_branch, else_branch),
             Expr::While { condition, body } => self.compile_while(condition, body),
             Expr::Sequence(stmts) => self.compile_sequence(stmts),
             Expr::Assign { lhs, rhs } => self.compile_assign(lhs, rhs),
@@ -297,12 +295,163 @@ impl BytecodeCompiler {
             // ── Complex literal ──
             Expr::Complex { re, im } => self.emit_const(Value::Complex { re: *re, im: *im }),
             // ── For loop ──
-            Expr::For { init, condition, step, body } => self.compile_for(init, condition, step, body),
+            Expr::For {
+                init,
+                condition,
+                step,
+                body,
+            } => self.compile_for(init, condition, step, body),
             // ── Do loop (range iterator only) ──
             Expr::Do { body, iterator } => self.compile_do(body, iterator),
-            _ => Err(CompileError::UnsupportedFeature(format!(
-                "expression: {expr:?}"
-            ))),
+            // ── Rule / RuleDelayed ──
+            Expr::Rule { lhs, rhs } => self.emit_const(Value::Rule {
+                lhs: Box::new(Value::Pattern(*lhs.clone())),
+                rhs: Box::new(Value::Pattern(*rhs.clone())),
+                delayed: false,
+            }),
+            Expr::RuleDelayed { lhs, rhs } => self.emit_const(Value::Rule {
+                lhs: Box::new(Value::Pattern(*lhs.clone())),
+                rhs: Box::new(Value::Pattern(*rhs.clone())),
+                delayed: true,
+            }),
+            // ── ReplaceAll / ReplaceRepeated (desugar to Call) ──
+            Expr::ReplaceAll { expr, rules } => self.compile_expr(&Expr::Call {
+                head: Box::new(Expr::Symbol("ReplaceAll".to_string())),
+                args: vec![*expr.clone(), *rules.clone()],
+            }),
+            Expr::ReplaceRepeated { expr, rules } => self.compile_expr(&Expr::Call {
+                head: Box::new(Expr::Symbol("ReplaceRepeated".to_string())),
+                args: vec![*expr.clone(), *rules.clone()],
+            }),
+            // ── Hold / HoldComplete ──
+            Expr::Hold(inner) => {
+                self.emit_const(Value::Hold(Box::new(Value::Pattern(*inner.clone()))))
+            }
+            Expr::HoldComplete(inner) => {
+                self.emit_const(Value::HoldComplete(Box::new(Value::Pattern(*inner.clone()))))
+            }
+            // ── Slot ──
+            Expr::Slot(None) => {
+                let dst = self.regs.alloc()?;
+                let idx = self.symbol_idx("#");
+                self.emit(Instruction::LoadSym(dst, idx));
+                Ok(dst)
+            }
+            Expr::Slot(Some(n)) => {
+                let name = format!("#{}", n);
+                let dst = self.regs.alloc()?;
+                let idx = self.symbol_idx(&name);
+                self.emit(Instruction::LoadSym(dst, idx));
+                Ok(dst)
+            }
+            // ── Pure function sugar ──
+            Expr::Pure { body } => {
+                let slot_count = count_slots(body);
+                self.emit_const(Value::PureFunction {
+                    body: *body.clone(),
+                    slot_count,
+                    params: vec![],
+                })
+            }
+            // ── Function constructor ──
+            Expr::Function { params, body } => self.emit_const(Value::PureFunction {
+                body: Expr::Function {
+                    params: params.clone(),
+                    body: body.clone(),
+                },
+                slot_count: params.len(),
+                params: params.clone(),
+            }),
+            // ── Pattern literals ──
+            Expr::Blank { type_constraint } => {
+                self.emit_const(Value::Pattern(Expr::Blank {
+                    type_constraint: type_constraint.clone(),
+                }))
+            }
+            Expr::NamedBlank { name, type_constraint } => {
+                self.emit_const(Value::Pattern(Expr::NamedBlank {
+                    name: name.clone(),
+                    type_constraint: type_constraint.clone(),
+                }))
+            }
+            Expr::BlankSequence {
+                name,
+                type_constraint,
+            } => self.emit_const(Value::Pattern(Expr::BlankSequence {
+                name: name.clone(),
+                type_constraint: type_constraint.clone(),
+            })),
+            Expr::BlankNullSequence {
+                name,
+                type_constraint,
+            } => self.emit_const(Value::Pattern(Expr::BlankNullSequence {
+                name: name.clone(),
+                type_constraint: type_constraint.clone(),
+            })),
+            Expr::PatternGuard {
+                pattern,
+                condition,
+            } => self.emit_const(Value::Pattern(Expr::PatternGuard {
+                pattern: pattern.clone(),
+                condition: condition.clone(),
+            })),
+            Expr::OptionalBlank {
+                type_constraint,
+                default_value,
+            } => self.emit_const(Value::Pattern(Expr::OptionalBlank {
+                type_constraint: type_constraint.clone(),
+                default_value: default_value.clone(),
+            })),
+            Expr::OptionalNamedBlank {
+                name,
+                type_constraint,
+                default_value,
+            } => self.emit_const(Value::Pattern(Expr::OptionalNamedBlank {
+                name: name.clone(),
+                type_constraint: type_constraint.clone(),
+                default_value: default_value.clone(),
+            })),
+            // ── Match (desugar to ReplaceAll) ──
+            Expr::Match { expr, branches } => {
+                let rules_list = Expr::List(
+                    branches
+                        .iter()
+                        .map(|b| Expr::Rule {
+                            lhs: Box::new(b.pattern.clone()),
+                            rhs: Box::new(b.result.clone()),
+                        })
+                        .collect(),
+                );
+                self.compile_expr(&Expr::Call {
+                    head: Box::new(Expr::Symbol("ReplaceAll".to_string())),
+                    args: vec![*expr.clone(), rules_list],
+                })
+            }
+            // ── Top-level definitions (explicit errors) ──
+            Expr::FuncDef { .. } => Err(CompileError::UnsupportedFeature(
+                "function definition".to_string(),
+            )),
+            Expr::DestructAssign { .. } => Err(CompileError::UnsupportedFeature(
+                "destructuring assignment".to_string(),
+            )),
+            Expr::RuleDef { .. } => Err(CompileError::UnsupportedFeature(
+                "rule definition".to_string(),
+            )),
+            Expr::ClassDef { .. } => Err(CompileError::UnsupportedFeature(
+                "class definition".to_string(),
+            )),
+            Expr::ModuleDef { .. } => Err(CompileError::UnsupportedFeature(
+                "module definition".to_string(),
+            )),
+            Expr::Import { .. } => {
+                Err(CompileError::UnsupportedFeature("import".to_string()))
+            }
+            Expr::Export(..) => {
+                Err(CompileError::UnsupportedFeature("export".to_string()))
+            }
+            Expr::Information(..) => Err(CompileError::UnsupportedFeature(
+                "information".to_string(),
+            )),
         }
     }
 
@@ -789,6 +938,105 @@ impl BytecodeCompiler {
     }
 }
 
+/// Count the maximum slot index (#, #1, #2, ...) in an expression tree.
+fn count_slots(expr: &Expr) -> usize {
+    match expr {
+        Expr::Slot(None) => 1,
+        Expr::Slot(Some(idx)) => *idx,
+        Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
+        Expr::Assoc(items) => items.iter().map(|(_, v)| count_slots(v)).max().unwrap_or(0),
+        Expr::Call { head, args } => args
+            .iter()
+            .chain(std::iter::once(head.as_ref()))
+            .map(count_slots)
+            .max()
+            .unwrap_or(0),
+        Expr::Pipe { expr: e, .. }
+        | Expr::Hold(e)
+        | Expr::HoldComplete(e)
+        | Expr::ReleaseHold(e)
+        | Expr::Information(e)
+        | Expr::Pure { body: e } => count_slots(e),
+        Expr::Rule { lhs, rhs }
+        | Expr::RuleDelayed { lhs, rhs }
+        | Expr::ReplaceAll { expr: lhs, rules: rhs }
+        | Expr::ReplaceRepeated { expr: lhs, rules: rhs }
+        | Expr::Map { func: lhs, list: rhs }
+        | Expr::Apply { func: lhs, expr: rhs }
+        | Expr::Prefix { func: lhs, arg: rhs } => count_slots(lhs).max(count_slots(rhs)),
+        Expr::Sequence(stmts) => stmts.iter().map(count_slots).max().unwrap_or(0),
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let c = count_slots(condition);
+            let t = count_slots(then_branch);
+            let e = else_branch.as_ref().map(|e| count_slots(e)).unwrap_or(0);
+            c.max(t).max(e)
+        }
+        Expr::Match { expr, branches } => branches
+            .iter()
+            .map(|b| count_slots(&b.pattern).max(count_slots(&b.result)))
+            .max()
+            .unwrap_or(0)
+            .max(count_slots(expr)),
+        Expr::Which { pairs } => pairs
+            .iter()
+            .map(|(c, v)| count_slots(c).max(count_slots(v)))
+            .max()
+            .unwrap_or(0),
+        Expr::Switch { expr, cases } => cases
+            .iter()
+            .map(|(p, v)| count_slots(p).max(count_slots(v)))
+            .max()
+            .unwrap_or(0)
+            .max(count_slots(expr)),
+        Expr::For {
+            init,
+            condition,
+            step,
+            body,
+        } => {
+            count_slots(init)
+                .max(count_slots(condition))
+                .max(count_slots(step))
+                .max(count_slots(body))
+        }
+        Expr::While { condition, body } => count_slots(condition).max(count_slots(body)),
+        Expr::Do { body, iterator } => match iterator {
+            crate::ast::IteratorSpec::Range { min, max, .. } => {
+                count_slots(body).max(count_slots(min)).max(count_slots(max))
+            }
+            crate::ast::IteratorSpec::List { .. } => count_slots(body),
+        },
+        Expr::Function { params: _, body } => count_slots(body),
+        // Atoms and patterns have no slots
+        Expr::Integer(_)
+        | Expr::Real(_)
+        | Expr::Complex { .. }
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Symbol(_)
+        | Expr::Null
+        | Expr::Blank { .. }
+        | Expr::NamedBlank { .. }
+        | Expr::BlankSequence { .. }
+        | Expr::BlankNullSequence { .. }
+        | Expr::PatternGuard { .. }
+        | Expr::OptionalBlank { .. }
+        | Expr::OptionalNamedBlank { .. }
+        | Expr::Assign { .. }
+        | Expr::FuncDef { .. }
+        | Expr::DestructAssign { .. }
+        | Expr::RuleDef { .. }
+        | Expr::ClassDef { .. }
+        | Expr::ModuleDef { .. }
+        | Expr::Import { .. }
+        | Expr::Export(..) => 0,
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -834,15 +1082,16 @@ mod tests {
         ];
         let body = Expr::Call {
             head: Box::new(Expr::Symbol("Plus".to_string())),
-            args: vec![
-                Expr::Symbol("x".to_string()),
-                Expr::Symbol("y".to_string()),
-            ],
+            args: vec![Expr::Symbol("x".to_string()), Expr::Symbol("y".to_string())],
         };
         let bc = compile(params, body);
         assert_eq!(bc.nparams, 2);
         // Should use Add (not IntAdd) since params are not statically int
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Add(..))));
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Add(..)))
+        );
     }
 
     #[test]
@@ -865,8 +1114,16 @@ mod tests {
         }];
         let bc = compile(params, body);
         // Should contain JumpIfZero and Jump instructions
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))));
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Jump(..))));
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::JumpIfZero(..)))
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Jump(..)))
+        );
     }
 
     #[test]
@@ -877,8 +1134,12 @@ mod tests {
             args: vec![Expr::Integer(1.into()), Expr::Integer(2.into())],
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::IntAdd(..))),
-            "Plus of two integers should emit IntAdd");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::IntAdd(..))),
+            "Plus of two integers should emit IntAdd"
+        );
     }
 
     #[test]
@@ -893,8 +1154,12 @@ mod tests {
             type_constraint: None,
         }];
         let bc = compile(params, body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Neg(..))),
-            "Times[-1, x] should emit Neg");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Neg(..))),
+            "Times[-1, x] should emit Neg"
+        );
     }
 
     #[test]
@@ -909,8 +1174,12 @@ mod tests {
             type_constraint: None,
         }];
         let bc = compile(params, body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Not(..))),
-            "Not[x] should emit Not instruction");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Not(..))),
+            "Not[x] should emit Not instruction"
+        );
     }
 
     #[test]
@@ -923,10 +1192,18 @@ mod tests {
             body: Box::new(Expr::Null),
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))),
-            "For loop should contain JumpIfZero");
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Jump(..))),
-            "For loop should contain Jump");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "For loop should contain JumpIfZero"
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Jump(..))),
+            "For loop should contain Jump"
+        );
     }
 
     #[test]
@@ -941,8 +1218,12 @@ mod tests {
             },
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))),
-            "Do loop should contain JumpIfZero");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "Do loop should contain JumpIfZero"
+        );
     }
 
     #[test]
@@ -970,8 +1251,12 @@ mod tests {
             ])),
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
-            "Map desugaring should produce Apply instruction");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Apply(..))),
+            "Map desugaring should produce Apply instruction"
+        );
     }
 
     #[test]
@@ -981,8 +1266,12 @@ mod tests {
             func: Box::new(Expr::Symbol("f".to_string())),
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
-            "Pipe desugaring should produce Apply instruction");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Apply(..))),
+            "Pipe desugaring should produce Apply instruction"
+        );
     }
 
     #[test]
@@ -992,8 +1281,12 @@ mod tests {
             arg: Box::new(Expr::Integer(10.into())),
         };
         let bc = compile(vec![], body);
-        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
-            "Prefix desugaring should produce Apply instruction");
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Apply(..))),
+            "Prefix desugaring should produce Apply instruction"
+        );
     }
 
     #[test]

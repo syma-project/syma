@@ -25,9 +25,11 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Real(x), Value::Real(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Integer(x), Value::Real(y)) => rug::Float::with_val(crate::value::DEFAULT_PRECISION, x)
-            .partial_cmp(y)
-            .unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Integer(x), Value::Real(y)) => {
+            rug::Float::with_val(crate::value::DEFAULT_PRECISION, x)
+                .partial_cmp(y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Real(x), Value::Integer(y)) => x
             .partial_cmp(&rug::Float::with_val(crate::value::DEFAULT_PRECISION, y))
             .unwrap_or(std::cmp::Ordering::Equal),
@@ -230,24 +232,46 @@ pub fn builtin_join(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_flatten(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "Flatten requires exactly 1 argument".to_string(),
+            "Flatten requires 1 or 2 arguments".to_string(),
         ));
     }
-    fn flatten(val: &Value) -> Vec<Value> {
+    let max_depth = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(n) => {
+                if let Some(u) = n.to_usize() {
+                    u
+                } else {
+                    return Err(EvalError::Error(
+                        "Flatten: depth must be a non-negative integer".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
+            }
+        }
+    } else {
+        usize::MAX
+    };
+
+    fn flatten_depth(val: &Value, depth: usize) -> Vec<Value> {
         match val {
-            Value::List(items) => {
+            Value::List(items) if depth > 0 => {
                 let mut result = Vec::new();
                 for item in items {
-                    result.extend(flatten(item));
+                    result.extend(flatten_depth(item, depth - 1));
                 }
                 result
             }
             _ => vec![val.clone()],
         }
     }
-    Ok(Value::List(flatten(&args[0])))
+    Ok(Value::List(flatten_depth(&args[0], max_depth)))
 }
 
 pub fn builtin_sort(args: &[Value]) -> Result<Value, EvalError> {
@@ -432,9 +456,23 @@ pub fn builtin_range(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-pub fn builtin_table(_args: &[Value]) -> Result<Value, EvalError> {
-    // TODO: implement Table with iterator spec
-    Err(EvalError::Error("Table not yet implemented".to_string()))
+pub fn builtin_table(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        if let Value::Integer(n) = &args[1] {
+            if let Some(n_usize) = n.to_usize() {
+                let mut result = Vec::with_capacity(n_usize);
+                for _ in 0..n_usize {
+                    result.push(args[0].clone());
+                }
+                return Ok(Value::List(result));
+            }
+        }
+    }
+    Err(EvalError::Error(
+        "Table: unsupported form (use Table[expr, n] for n copies, \
+         or the special form for iterator specs)"
+            .to_string(),
+    ))
 }
 
 pub fn builtin_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
@@ -461,33 +499,29 @@ pub fn builtin_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
 pub fn builtin_fold(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let (f, init, items) = match args.len() {
-        2 => {
-            match &args[1] {
-                Value::List(list) if !list.is_empty() => (&args[0], list[0].clone(), &list[1..]),
-                Value::List(_) => {
-                    return Err(EvalError::Error(
-                        "Fold on empty list requires initial value".to_string(),
-                    ));
-                }
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List".to_string(),
-                        got: args[1].type_name().to_string(),
-                    });
-                }
+        2 => match &args[1] {
+            Value::List(list) if !list.is_empty() => (&args[0], list[0].clone(), &list[1..]),
+            Value::List(_) => {
+                return Err(EvalError::Error(
+                    "Fold on empty list requires initial value".to_string(),
+                ));
             }
-        }
-        3 => {
-            match &args[2] {
-                Value::List(list) => (&args[0], args[1].clone(), list.as_slice()),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List".to_string(),
-                        got: args[2].type_name().to_string(),
-                    });
-                }
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "List".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
             }
-        }
+        },
+        3 => match &args[2] {
+            Value::List(list) => (&args[0], args[1].clone(), list.as_slice()),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "List".to_string(),
+                    got: args[2].type_name().to_string(),
+                });
+            }
+        },
         _ => {
             return Err(EvalError::Error(
                 "Fold requires 2 or 3 arguments".to_string(),
@@ -584,11 +618,7 @@ pub fn builtin_take(args: &[Value]) -> Result<Value, EvalError> {
                 expected: "Integer".to_string(),
                 got: range[1].type_name().to_string(),
             })?;
-            let start = if m >= 1 {
-                (m - 1) as usize
-            } else {
-                0
-            };
+            let start = if m >= 1 { (m - 1) as usize } else { 0 };
             let end = (n as usize).min(items.len());
             if start >= end {
                 return Ok(Value::List(vec![]));
@@ -627,11 +657,7 @@ pub fn builtin_drop(args: &[Value]) -> Result<Value, EvalError> {
                 expected: "Integer".to_string(),
                 got: range[1].type_name().to_string(),
             })?;
-            let start = if m >= 1 {
-                (m - 1) as usize
-            } else {
-                0
-            };
+            let start = if m >= 1 { (m - 1) as usize } else { 0 };
             let end = (n as usize).min(items.len());
             if start == 0 {
                 Ok(Value::List(items[end..].to_vec()))
@@ -1057,9 +1083,7 @@ pub fn builtin_gather(args: &[Value]) -> Result<Value, EvalError> {
             groups.push(vec![item.clone()]);
         }
     }
-    Ok(Value::List(
-        groups.into_iter().map(Value::List).collect(),
-    ))
+    Ok(Value::List(groups.into_iter().map(Value::List).collect()))
 }
 
 /// DeleteDuplicates[list] — remove duplicates, keeping the first occurrence.
@@ -1326,7 +1350,9 @@ pub fn builtin_differences(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut result = Vec::with_capacity(items.len() - 1);
     for pair in items.windows(2) {
-        result.push(crate::builtins::arithmetic::sub_values_public(&pair[1], &pair[0])?);
+        result.push(crate::builtins::arithmetic::sub_values_public(
+            &pair[1], &pair[0],
+        )?);
     }
     Ok(Value::List(result))
 }
@@ -1341,9 +1367,7 @@ pub fn builtin_clip(args: &[Value]) -> Result<Value, EvalError> {
     }
     let (min, max) = if args.len() == 2 {
         match &args[1] {
-            Value::List(bounds) if bounds.len() == 2 => {
-                (bounds[0].clone(), bounds[1].clone())
-            }
+            Value::List(bounds) if bounds.len() == 2 => (bounds[0].clone(), bounds[1].clone()),
             _ => {
                 return Err(EvalError::TypeError {
                     expected: "List of length 2".to_string(),
@@ -1352,7 +1376,10 @@ pub fn builtin_clip(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     } else {
-        (Value::Integer(Integer::from(0)), Value::Integer(Integer::from(1)))
+        (
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(1)),
+        )
     };
     // Use builtin_less for comparison: if val < min, return min
     let less_min = crate::builtins::comparison::builtin_less(&[args[0].clone(), min.clone()])?;
@@ -1669,9 +1696,7 @@ pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
             got: args[2].type_name().to_string(),
         })?;
         if nn <= 0 {
-            return Err(EvalError::Error(
-                "Nearest n must be positive".to_string(),
-            ));
+            return Err(EvalError::Error("Nearest n must be positive".to_string()));
         }
         nn as usize
     } else {
@@ -1683,9 +1708,8 @@ pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     // Compute distances as f64
-    let target_f = to_f64(target).ok_or_else(|| EvalError::Error(
-        "Nearest target must be numeric".to_string(),
-    ))?;
+    let target_f = to_f64(target)
+        .ok_or_else(|| EvalError::Error("Nearest target must be numeric".to_string()))?;
 
     let mut scored: Vec<(f64, &Value)> = items
         .iter()
@@ -1889,18 +1913,30 @@ mod tests {
 
     #[test]
     fn test_partition_basic() {
-        let result = builtin_partition(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
-        assert_eq!(result, list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]));
+        let result =
+            builtin_partition(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])])
+        );
     }
 
     #[test]
     fn test_partition_with_offset() {
-        let result = builtin_partition(&[list(vec![int(1), int(2), int(3), int(4), int(5)]), int(3), int(1)]).unwrap();
-        assert_eq!(result, list(vec![
-            list(vec![int(1), int(2), int(3)]),
-            list(vec![int(2), int(3), int(4)]),
-            list(vec![int(3), int(4), int(5)]),
-        ]));
+        let result = builtin_partition(&[
+            list(vec![int(1), int(2), int(3), int(4), int(5)]),
+            int(3),
+            int(1),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(2), int(3)]),
+                list(vec![int(2), int(3), int(4)]),
+                list(vec![int(3), int(4), int(5)]),
+            ])
+        );
     }
 
     #[test]
@@ -1918,11 +1954,14 @@ mod tests {
     #[test]
     fn test_split_basic() {
         let result = builtin_split(&[list(vec![int(1), int(1), int(2), int(2), int(3)])]).unwrap();
-        assert_eq!(result, list(vec![
-            list(vec![int(1), int(1)]),
-            list(vec![int(2), int(2)]),
-            list(vec![int(3)]),
-        ]));
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(1)]),
+                list(vec![int(2), int(2)]),
+                list(vec![int(3)]),
+            ])
+        );
     }
 
     #[test]
@@ -1940,11 +1979,14 @@ mod tests {
     #[test]
     fn test_gather_basic() {
         let result = builtin_gather(&[list(vec![int(1), int(2), int(1), int(3), int(2)])]).unwrap();
-        assert_eq!(result, list(vec![
-            list(vec![int(1), int(1)]),
-            list(vec![int(2), int(2)]),
-            list(vec![int(3)]),
-        ]));
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(1)]),
+                list(vec![int(2), int(2)]),
+                list(vec![int(3)]),
+            ])
+        );
     }
 
     #[test]
@@ -1955,7 +1997,9 @@ mod tests {
 
     #[test]
     fn test_delete_duplicates_basic() {
-        let result = builtin_delete_duplicates(&[list(vec![int(1), int(2), int(1), int(3), int(2)])]).unwrap();
+        let result =
+            builtin_delete_duplicates(&[list(vec![int(1), int(2), int(1), int(3), int(2)])])
+                .unwrap();
         assert_eq!(result, list(vec![int(1), int(2), int(3)]));
     }
 
@@ -1967,7 +2011,8 @@ mod tests {
 
     #[test]
     fn test_insert_basic() {
-        let result = builtin_insert(&[list(vec![int(1), int(2), int(3)]), int(99), int(2)]).unwrap();
+        let result =
+            builtin_insert(&[list(vec![int(1), int(2), int(3)]), int(99), int(2)]).unwrap();
         assert_eq!(result, list(vec![int(1), int(99), int(2), int(3)]));
     }
 
@@ -1979,7 +2024,8 @@ mod tests {
 
     #[test]
     fn test_insert_negative() {
-        let result = builtin_insert(&[list(vec![int(1), int(2), int(3)]), int(99), int(-1)]).unwrap();
+        let result =
+            builtin_insert(&[list(vec![int(1), int(2), int(3)]), int(99), int(-1)]).unwrap();
         assert_eq!(result, list(vec![int(1), int(2), int(99), int(3)]));
     }
 
@@ -1997,13 +2043,15 @@ mod tests {
 
     #[test]
     fn test_replace_part_basic() {
-        let result = builtin_replace_part(&[list(vec![int(1), int(2), int(3)]), int(2), int(99)]).unwrap();
+        let result =
+            builtin_replace_part(&[list(vec![int(1), int(2), int(3)]), int(2), int(99)]).unwrap();
         assert_eq!(result, list(vec![int(1), int(99), int(3)]));
     }
 
     #[test]
     fn test_rotate_left_basic() {
-        let result = builtin_rotate_left(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
+        let result =
+            builtin_rotate_left(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
         assert_eq!(result, list(vec![int(3), int(4), int(1), int(2)]));
     }
 
@@ -2021,7 +2069,8 @@ mod tests {
 
     #[test]
     fn test_rotate_right_basic() {
-        let result = builtin_rotate_right(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
+        let result =
+            builtin_rotate_right(&[list(vec![int(1), int(2), int(3), int(4)]), int(2)]).unwrap();
         assert_eq!(result, list(vec![int(3), int(4), int(1), int(2)]));
     }
 
@@ -2057,10 +2106,7 @@ mod tests {
 
     #[test]
     fn test_diagonal() {
-        let mat = list(vec![
-            list(vec![int(1), int(2)]),
-            list(vec![int(3), int(4)]),
-        ]);
+        let mat = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
         let result = builtin_diagonal(&[mat]).unwrap();
         assert_eq!(result, list(vec![int(1), int(4)]));
     }
@@ -2120,22 +2166,27 @@ mod tests {
 
     #[test]
     fn test_take_range() {
-        let result = builtin_take(&[list(vec![int(1), int(2), int(3), int(4), int(5)]), list(vec![int(2), int(4)])]).unwrap();
+        let result = builtin_take(&[
+            list(vec![int(1), int(2), int(3), int(4), int(5)]),
+            list(vec![int(2), int(4)]),
+        ])
+        .unwrap();
         assert_eq!(result, list(vec![int(2), int(3), int(4)]));
     }
 
     #[test]
     fn test_drop_range() {
-        let result = builtin_drop(&[list(vec![int(1), int(2), int(3), int(4), int(5)]), list(vec![int(2), int(4)])]).unwrap();
+        let result = builtin_drop(&[
+            list(vec![int(1), int(2), int(3), int(4), int(5)]),
+            list(vec![int(2), int(4)]),
+        ])
+        .unwrap();
         assert_eq!(result, list(vec![int(1), int(5)]));
     }
 
     #[test]
     fn test_part_multi_index() {
-        let mat = list(vec![
-            list(vec![int(1), int(2)]),
-            list(vec![int(3), int(4)]),
-        ]);
+        let mat = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
         let result = builtin_part(&[mat, int(2), int(1)]).unwrap();
         assert_eq!(result, int(3));
     }

@@ -116,9 +116,8 @@ pub(crate) fn write_local_symbol(name: &str, value: &Value) -> Result<Value, Eva
     let json_str = serde_json::to_string_pretty(&json)
         .map_err(|e| EvalError::Error(format!("LocalSymbol: serialization failed: {}", e)))?;
 
-    std::fs::write(&path, &json_str).map_err(|e| {
-        EvalError::Error(format!("LocalSymbol: failed to write '{}': {}", name, e))
-    })?;
+    std::fs::write(&path, &json_str)
+        .map_err(|e| EvalError::Error(format!("LocalSymbol: failed to write '{}': {}", name, e)))?;
 
     Ok(value.clone())
 }
@@ -187,7 +186,9 @@ mod tests {
     fn test_read_write_roundtrip() {
         let _lock = ENV_LOCK.lock().unwrap();
         let tmp = TestDir::new("rwp");
-        unsafe { std::env::set_var("SYMA_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("SYMA_HOME", tmp.path());
+        }
 
         let val = Value::Integer(rug::Integer::from(42));
         let result = write_local_symbol("test_key", &val).unwrap();
@@ -196,26 +197,34 @@ mod tests {
         let read_back = builtin_local_symbol(&[Value::Str("test_key".to_string())]).unwrap();
         assert_eq!(read_back, val);
 
-        unsafe { std::env::remove_var("SYMA_HOME"); }
+        unsafe {
+            std::env::remove_var("SYMA_HOME");
+        }
     }
 
     #[test]
     fn test_read_missing_returns_null() {
         let _lock = ENV_LOCK.lock().unwrap();
         let tmp = TestDir::new("null");
-        unsafe { std::env::set_var("SYMA_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("SYMA_HOME", tmp.path());
+        }
 
         let result = builtin_local_symbol(&[Value::Str("nonexistent".to_string())]).unwrap();
         assert_eq!(result, Value::Null);
 
-        unsafe { std::env::remove_var("SYMA_HOME"); }
+        unsafe {
+            std::env::remove_var("SYMA_HOME");
+        }
     }
 
     #[test]
     fn test_read_missing_with_default() {
         let _lock = ENV_LOCK.lock().unwrap();
         let tmp = TestDir::new("default");
-        unsafe { std::env::set_var("SYMA_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("SYMA_HOME", tmp.path());
+        }
 
         let default = Value::Str("default_value".to_string());
         let result =
@@ -223,14 +232,18 @@ mod tests {
                 .unwrap();
         assert_eq!(result, default);
 
-        unsafe { std::env::remove_var("SYMA_HOME"); }
+        unsafe {
+            std::env::remove_var("SYMA_HOME");
+        }
     }
 
     #[test]
     fn test_write_and_read_list() {
         let _lock = ENV_LOCK.lock().unwrap();
         let tmp = TestDir::new("list");
-        unsafe { std::env::set_var("SYMA_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("SYMA_HOME", tmp.path());
+        }
 
         let list = Value::List(vec![
             Value::Integer(rug::Integer::from(1)),
@@ -242,6 +255,8 @@ mod tests {
         let read_back = builtin_local_symbol(&[Value::Str("mylist".to_string())]).unwrap();
         assert_eq!(read_back, list);
 
-        unsafe { std::env::remove_var("SYMA_HOME"); }
+        unsafe {
+            std::env::remove_var("SYMA_HOME");
+        }
     }
 }

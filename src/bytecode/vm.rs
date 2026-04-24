@@ -1,3 +1,4 @@
+use crate::bytecode::CompiledBytecode;
 /// Register-based bytecode VM.
 ///
 /// Executes `CompiledBytecode` by dispatching on each `Instruction`.
@@ -5,7 +6,6 @@
 /// `apply_function`, which returns the call back here for compiled callees.
 ///
 use crate::bytecode::instruction::*;
-use crate::bytecode::CompiledBytecode;
 use crate::env::Env;
 use crate::eval;
 use crate::value::*;
@@ -128,8 +128,7 @@ impl VmState<'_> {
                         }
                         _ => {
                             let neg_b = self.negate(bv)?;
-                            self.regs[*d as usize] =
-                                self.builtin2("Plus", av, &neg_b)?;
+                            self.regs[*d as usize] = self.builtin2("Plus", av, &neg_b)?;
                         }
                     }
                 }
@@ -166,11 +165,17 @@ impl VmState<'_> {
                     }
                 }
                 Instruction::RealMul(d, a, b) => {
-                    self.real_binop(*d, *a, *b, |x, y| {
-                        let mut r = x;
-                        r *= y.to_f64();
-                        Value::Real(r)
-                    }, "Times")?;
+                    self.real_binop(
+                        *d,
+                        *a,
+                        *b,
+                        |x, y| {
+                            let mut r = x;
+                            r *= y.to_f64();
+                            Value::Real(r)
+                        },
+                        "Times",
+                    )?;
                 }
                 Instruction::RealDiv(d, a, b) => {
                     let av = &self.regs[*a as usize];
@@ -202,11 +207,8 @@ impl VmState<'_> {
                         self.builtin2("Less", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Gt(d, a, b) => {
-                    self.regs[*d as usize] = self.builtin2(
-                        "Greater",
-                        &self.regs[*a as usize],
-                        &self.regs[*b as usize],
-                    )?;
+                    self.regs[*d as usize] =
+                        self.builtin2("Greater", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Le(d, a, b) => {
                     self.regs[*d as usize] = self.builtin2(
@@ -279,18 +281,12 @@ impl VmState<'_> {
                         .unwrap_or(Value::Null);
                 }
                 Instruction::LoadArg(d, idx) => {
-                    self.regs[*d as usize] = self
-                        .args
-                        .get(*idx as usize)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                    self.regs[*d as usize] =
+                        self.args.get(*idx as usize).cloned().unwrap_or(Value::Null);
                 }
                 Instruction::LoadSym(d, idx) => {
                     let name = self.const_str(*idx);
-                    let val = self
-                        .env
-                        .get(&name)
-                        .unwrap_or_else(|| Value::Symbol(name));
+                    let val = self.env.get(&name).unwrap_or_else(|| Value::Symbol(name));
                     self.regs[*d as usize] = val;
                 }
                 Instruction::StoreSym(idx, s) => {
@@ -463,18 +459,17 @@ fn validate_bytecode_regs(bc: &CompiledBytecode) -> Result<(), EvalError> {
 /// Return the maximum register index referenced by an instruction.
 fn max_reg_index(instr: &Instruction) -> usize {
     match instr {
-        Instruction::Halt
-        | Instruction::Jump(_) => 0,
+        Instruction::Halt | Instruction::Jump(_) => 0,
 
         // 1 register
-        Instruction::LoadNull(d)
-        | Instruction::LoadTrue(d)
-        | Instruction::LoadFalse(d) => *d as usize,
+        Instruction::LoadNull(d) | Instruction::LoadTrue(d) | Instruction::LoadFalse(d) => {
+            *d as usize
+        }
 
         // 2 registers — max of both
-        Instruction::Mov(d, s)
-        | Instruction::Neg(d, s)
-        | Instruction::Not(d, s) => (*d).max(*s) as usize,
+        Instruction::Mov(d, s) | Instruction::Neg(d, s) | Instruction::Not(d, s) => {
+            (*d).max(*s) as usize
+        }
 
         // 3 registers — max of all three
         Instruction::Add(d, a, b)
@@ -513,9 +508,9 @@ fn max_reg_index(instr: &Instruction) -> usize {
         }
 
         // reg + u32
-        Instruction::LoadConst(d, _)
-        | Instruction::LoadArg(d, _)
-        | Instruction::LoadSym(d, _) => *d as usize,
+        Instruction::LoadConst(d, _) | Instruction::LoadArg(d, _) | Instruction::LoadSym(d, _) => {
+            *d as usize
+        }
 
         // MakeSeq: dest register only
         Instruction::MakeSeq(d, _) => *d as usize,
@@ -524,8 +519,7 @@ fn max_reg_index(instr: &Instruction) -> usize {
         Instruction::StoreSym(_, s) => *s as usize,
 
         // reg + i32
-        Instruction::JumpIfZero(r, _)
-        | Instruction::JumpIfNotZero(r, _) => *r as usize,
+        Instruction::JumpIfZero(r, _) | Instruction::JumpIfNotZero(r, _) => *r as usize,
 
         // Return
         Instruction::Return(r) => *r as usize,
@@ -538,8 +532,8 @@ fn max_reg_index(instr: &Instruction) -> usize {
 mod tests {
     use super::*;
     use crate::builtins;
-    use crate::bytecode::compiler::BytecodeCompiler;
     use crate::bytecode::CompiledBytecode;
+    use crate::bytecode::compiler::BytecodeCompiler;
     use crate::env::Env;
 
     fn make_env() -> Env {
@@ -618,7 +612,10 @@ mod tests {
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+        assert!(
+            msg.contains("out of bounds"),
+            "expected bounds error, got: {msg}"
+        );
     }
 
     #[test]
@@ -632,7 +629,10 @@ mod tests {
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+        assert!(
+            msg.contains("out of bounds"),
+            "expected bounds error, got: {msg}"
+        );
     }
 
     #[test]
@@ -645,7 +645,10 @@ mod tests {
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+        assert!(
+            msg.contains("out of bounds"),
+            "expected bounds error, got: {msg}"
+        );
     }
 
     #[test]

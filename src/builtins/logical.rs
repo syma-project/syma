@@ -186,18 +186,9 @@ mod tests {
     fn test_and_two_args() {
         let env = test_env();
         assert_eq!(builtin_and(&[b(true), b(true)], &env).unwrap(), b(true));
-        assert_eq!(
-            builtin_and(&[b(true), b(false)], &env).unwrap(),
-            b(false)
-        );
-        assert_eq!(
-            builtin_and(&[b(false), b(true)], &env).unwrap(),
-            b(false)
-        );
-        assert_eq!(
-            builtin_and(&[b(false), b(false)], &env).unwrap(),
-            b(false)
-        );
+        assert_eq!(builtin_and(&[b(true), b(false)], &env).unwrap(), b(false));
+        assert_eq!(builtin_and(&[b(false), b(true)], &env).unwrap(), b(false));
+        assert_eq!(builtin_and(&[b(false), b(false)], &env).unwrap(), b(false));
     }
 
     #[test]
@@ -231,10 +222,7 @@ mod tests {
         assert_eq!(builtin_or(&[b(true), b(true)], &env).unwrap(), b(true));
         assert_eq!(builtin_or(&[b(true), b(false)], &env).unwrap(), b(true));
         assert_eq!(builtin_or(&[b(false), b(true)], &env).unwrap(), b(true));
-        assert_eq!(
-            builtin_or(&[b(false), b(false)], &env).unwrap(),
-            b(false)
-        );
+        assert_eq!(builtin_or(&[b(false), b(false)], &env).unwrap(), b(false));
     }
 
     #[test]
@@ -287,7 +275,10 @@ mod tests {
         // True, True, True → 3 trues (odd) → True
         assert_eq!(builtin_xor(&[b(true), b(true), b(true)]).unwrap(), b(true));
         // True, True, False → 2 trues (even) → False
-        assert_eq!(builtin_xor(&[b(true), b(true), b(false)]).unwrap(), b(false));
+        assert_eq!(
+            builtin_xor(&[b(true), b(true), b(false)]).unwrap(),
+            b(false)
+        );
     }
 
     // ── Nand ──
@@ -325,10 +316,7 @@ mod tests {
     #[test]
     fn test_implies_truth_table() {
         let env = test_env();
-        assert_eq!(
-            builtin_implies(&[b(true), b(true)], &env).unwrap(),
-            b(true)
-        );
+        assert_eq!(builtin_implies(&[b(true), b(true)], &env).unwrap(), b(true));
         assert_eq!(
             builtin_implies(&[b(true), b(false)], &env).unwrap(),
             b(false)
@@ -422,8 +410,7 @@ mod tests {
 
     #[test]
     fn test_boole_non_bool() {
-        let result =
-            builtin_boole(&[Value::Integer(rug::Integer::from(42))]).unwrap();
+        let result = builtin_boole(&[Value::Integer(rug::Integer::from(42))]).unwrap();
         assert_eq!(result, Value::Integer(rug::Integer::from(0)));
         let result = builtin_boole(&[Value::Str("hello".to_string())]).unwrap();
         assert_eq!(result, Value::Integer(rug::Integer::from(0)));

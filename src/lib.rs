@@ -3,8 +3,8 @@
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
 pub mod ast;
-pub mod bytecode;
 pub mod builtins;
+pub mod bytecode;
 pub mod cli;
 pub mod debug;
 pub mod env;

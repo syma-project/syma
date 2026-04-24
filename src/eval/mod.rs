@@ -17,14 +17,14 @@ use crate::bytecode;
 use crate::env::Env;
 use crate::env::LazyProvider;
 use crate::ffi;
-use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
+use crate::pattern::{AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern};
 use crate::profiler;
 use crate::value::*;
 
-pub(crate) mod rules;
 pub(crate) mod numeric;
-pub(crate) mod table;
 pub(crate) mod plot;
+pub(crate) mod rules;
+pub(crate) mod table;
 
 use crate::builtins::dataset;
 
@@ -71,6 +71,7 @@ fn release_inner(val: Value, env: &Env) -> Result<Value, EvalError> {
 
 /// Evaluate a single expression in the given environment.
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+    let _attr_checker = AttributeChecker::new(env.attributes.clone());
     match expr {
         // ── Atoms ──
         Expr::Integer(n) => Ok(Value::Integer(n.clone())),
@@ -81,7 +82,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Null => Ok(Value::Null),
 
         // ── Symbol lookup ──
-        Expr::Symbol(s) => Ok(env.get(s).unwrap_or_else(|| Value::Symbol(s.clone()))),
+        Expr::Symbol(s) => {
+            // Symbols containing _ are patterns in Syma (e.g., _Integer, x_, x_Integer, __, ___)
+            if s.starts_with('_') || s.contains('_') {
+                Ok(Value::Pattern(convert_blank_pattern(s)))
+            } else {
+                Ok(env.get(s).unwrap_or_else(|| Value::Symbol(s.clone())))
+            }
+        }
 
         // ── List ──
         Expr::List(items) => {
@@ -134,7 +142,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::ReplaceAll { expr, rules } => {
             let val = eval(expr, env)?;
             let rules_val = eval(rules, env)?;
-            rules::apply_rules_value(&val, &rules_val, env)        }
+            rules::apply_rules_value(&val, &rules_val, env)
+        }
 
         // ── ReplaceRepeated: expr //. rules ──
         Expr::ReplaceRepeated { expr, rules } => {
@@ -224,7 +233,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let val = eval(expr, env)?;
             for (pattern, result) in cases {
                 let pat_val = eval(pattern, env)?;
-                if let MatchResult::Match(_) = match_pattern(&rules::pat_to_expr(&pat_val), &val) {
+                if let MatchResult::Match(_) = match_pattern(&rules::pat_to_expr(&pat_val), &val, Some(&_attr_checker)) {
                     return eval(result, env);
                 }
             }
@@ -236,13 +245,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let val = eval(expr, env)?;
             for branch in branches {
                 let (inner_pat, guard) = extract_guard_expr(&branch.pattern);
-                if let MatchResult::Match(bindings) = match_pattern(inner_pat, &val) {
+                if let MatchResult::Match(bindings) = match_pattern(inner_pat, &val, Some(&_attr_checker)) {
                     // Evaluate guard if present
                     if let Some(guard_expr) = guard {
                         let guard_env = env.child();
                         for (name, value) in &bindings {
                             guard_env.set(name.clone(), value.clone());
                         }
+                        guard_env.set("#".to_string(), val.clone());
                         if !eval(guard_expr, &guard_env)?.to_bool() {
                             continue;
                         }
@@ -386,9 +396,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 {
                     let name = eval(&call_args[0], env)?;
                     match name {
-                        Value::Str(s) => {
-                            crate::builtins::localsymbol::write_local_symbol(&s, &val)
-                        }
+                        Value::Str(s) => crate::builtins::localsymbol::write_local_symbol(&s, &val),
                         _ => Err(EvalError::Error(
                             "LocalSymbol requires a string name".to_string(),
                         )),
@@ -444,7 +452,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             }
                             _ => {
                                 // Pattern destructuring
-                                if let MatchResult::Match(bindings) = match_pattern(pat, item) {
+                                if let MatchResult::Match(bindings) = match_pattern(pat, item, Some(&_attr_checker)) {
                                     for (name, value) in bindings {
                                         env.set(name, value);
                                     }
@@ -661,7 +669,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             match &module_val {
                 Value::Module {
                     name: mod_name,
-                    exports, ..
+                    exports,
+                    ..
                 } => {
                     match (selective.as_deref(), alias.as_deref()) {
                         (Some(names), _) => {
@@ -741,9 +750,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         | Expr::PatternGuard { .. } => Ok(Value::Pattern(expr.clone())),
 
         // ── Slot (look up from env; PureFunction application binds #, #1, ...) ──
-        Expr::Slot(None) => env.get("#").ok_or_else(|| {
-            EvalError::Error("Slot # used outside of pure function".to_string())
-        }),
+        Expr::Slot(None) => env
+            .get("#")
+            .ok_or_else(|| EvalError::Error("Slot # used outside of pure function".to_string())),
         Expr::Slot(Some(n)) => {
             let key = format!("#{}", n);
             env.get(&key).ok_or_else(|| {
@@ -757,6 +766,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             Ok(Value::PureFunction {
                 body: body.as_ref().clone(),
                 slot_count,
+                params: vec![],
             })
         }
 
@@ -767,6 +777,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Function { params, body } => Ok(Value::PureFunction {
             body: body.as_ref().clone(),
             slot_count: params.len(),
+            params: params.clone(),
         }),
     }
 }
@@ -777,11 +788,7 @@ fn count_slots(expr: &Expr) -> usize {
         Expr::Slot(None) => 1,
         Expr::Slot(Some(idx)) => *idx,
         Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
-        Expr::Assoc(items) => items
-            .iter()
-            .map(|(_, v)| count_slots(v))
-            .max()
-            .unwrap_or(0),
+        Expr::Assoc(items) => items.iter().map(|(_, v)| count_slots(v)).max().unwrap_or(0),
         Expr::Call { head, args } => args
             .iter()
             .chain(std::iter::once(head.as_ref()))
@@ -798,11 +805,26 @@ fn count_slots(expr: &Expr) -> usize {
         // Binary containers
         Expr::Rule { lhs, rhs }
         | Expr::RuleDelayed { lhs, rhs }
-        | Expr::ReplaceAll { expr: lhs, rules: rhs }
-        | Expr::ReplaceRepeated { expr: lhs, rules: rhs }
-        | Expr::Map { func: lhs, list: rhs }
-        | Expr::Apply { func: lhs, expr: rhs }
-        | Expr::Prefix { func: lhs, arg: rhs }
+        | Expr::ReplaceAll {
+            expr: lhs,
+            rules: rhs,
+        }
+        | Expr::ReplaceRepeated {
+            expr: lhs,
+            rules: rhs,
+        }
+        | Expr::Map {
+            func: lhs,
+            list: rhs,
+        }
+        | Expr::Apply {
+            func: lhs,
+            expr: rhs,
+        }
+        | Expr::Prefix {
+            func: lhs,
+            arg: rhs,
+        }
         | Expr::Assign { lhs, rhs } => count_slots(lhs).max(count_slots(rhs)),
         Expr::Function { body, .. } => count_slots(body),
         // Other expression types don't contain slots
@@ -833,6 +855,86 @@ pub(super) fn is_pattern_like(expr: &Expr) -> bool {
         | Expr::OptionalNamedBlank { .. }
         | Expr::PatternGuard { .. } => true,
         _ => false,
+    }
+}
+
+/// Convert a symbol string containing `_` into the corresponding pattern AST node.
+/// Handles _Integer, x_, x_Integer, __, ___, x__, x___ and all typed variants.
+fn convert_blank_pattern(s: &str) -> Expr {
+    match s {
+        "_" => {
+            return Expr::Blank {
+                type_constraint: None,
+            };
+        }
+        "__" => {
+            return Expr::BlankSequence {
+                name: None,
+                type_constraint: None,
+            };
+        }
+        "___" => {
+            return Expr::BlankNullSequence {
+                name: None,
+                type_constraint: None,
+            };
+        }
+        _ => {}
+    }
+    if let Some(pos) = s.find('_') {
+        let prefix = &s[..pos];
+        let underscore_part = &s[pos..];
+
+        if let Some(tc) = underscore_part.strip_prefix("___") {
+            return Expr::BlankNullSequence {
+                name: if prefix.is_empty() {
+                    None
+                } else {
+                    Some(prefix.to_string())
+                },
+                type_constraint: if tc.is_empty() {
+                    None
+                } else {
+                    Some(tc.to_string())
+                },
+            };
+        }
+        if let Some(tc) = underscore_part.strip_prefix("__") {
+            return Expr::BlankSequence {
+                name: if prefix.is_empty() {
+                    None
+                } else {
+                    Some(prefix.to_string())
+                },
+                type_constraint: if tc.is_empty() {
+                    None
+                } else {
+                    Some(tc.to_string())
+                },
+            };
+        }
+        // Single underscore: Blank or NamedBlank
+        let tc = &underscore_part[1..];
+        if prefix.is_empty() {
+            Expr::Blank {
+                type_constraint: if tc.is_empty() {
+                    None
+                } else {
+                    Some(tc.to_string())
+                },
+            }
+        } else {
+            Expr::NamedBlank {
+                name: prefix.to_string(),
+                type_constraint: if tc.is_empty() {
+                    None
+                } else {
+                    Some(tc.to_string())
+                },
+            }
+        }
+    } else {
+        Expr::Symbol(s.to_string())
     }
 }
 
@@ -1011,6 +1113,32 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             "PolarPlot" => plot::eval_polar_plot(args, env),
             "DiscretePlot" => plot::eval_discrete_plot(args, env),
             "DensityPlot" => plot::eval_density_plot(args, env),
+            "TryCatch" => {
+                // try { body } catch var { catch_body } finally { finally_body }
+                // args: [body, err_var, catch_body, ?finally_body]
+                if args.len() < 3 {
+                    return Err(EvalError::Error(
+                        "TryCatch requires at least 3 arguments".to_string(),
+                    ));
+                }
+                let result = eval(&args[0], env);
+                let thrown = match result {
+                    Ok(v) => Ok(v),
+                    Err(EvalError::Thrown(v)) => {
+                        let child_env = env.child();
+                        if let Expr::Symbol(name) = &args[1] {
+                            child_env.set(name.clone(), v);
+                        }
+                        eval(&args[2], &child_env)
+                    }
+                    Err(e) => Err(e),
+                };
+                // Evaluate finally block if present
+                if args.len() > 3 {
+                    let _ = eval(&args[3], env);
+                }
+                thrown
+            }
             "Catch" => {
                 // Catch[expr] — evaluate expr, catching any Throw[val]
                 if args.len() != 1 {
@@ -1139,10 +1267,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         Value::Builtin(name, f) => match f {
             BuiltinFn::Pure(f) => {
                 // Extension-registered builtin: trampoline through ext registry
-                if std::ptr::fn_addr_eq(
-                    *f,
-                    ffi::extension::EXT_DISPATCH_PTR,
-                ) {
+                if std::ptr::fn_addr_eq(*f, ffi::extension::EXT_DISPATCH_PTR) {
                     return ffi::extension::call_ext_fn(name, args);
                 }
                 f(args).map_err(|e| match e {
@@ -1170,17 +1295,15 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 if prev + 1 > JIT_THRESHOLD {
                     let jit_ptr = bc_def.jit_fn_ptr.load(Ordering::Relaxed);
                     if !jit_ptr.is_null() {
-                        let mut regs =
-                            vec![Value::Null; bc_def.bytecode.nregs as usize];
+                        let mut regs = vec![Value::Null; bc_def.bytecode.nregs as usize];
                         let mut jit_ctx = crate::jit::runtime::JitContext::new(
                             &bc_def.bytecode,
                             args,
                             env,
                             &mut regs,
                         );
-                        let jit_fn: extern "C" fn(
-                            *mut crate::jit::runtime::JitContext,
-                        ) = unsafe { std::mem::transmute(jit_ptr) };
+                        let jit_fn: extern "C" fn(*mut crate::jit::runtime::JitContext) =
+                            unsafe { std::mem::transmute(jit_ptr) };
                         jit_fn(&mut jit_ctx);
                         return Ok(unsafe { (*jit_ctx.regs).clone() });
                     }
@@ -1210,12 +1333,10 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                         crate::bytecode::BytecodeFunctionDef {
                             name: func_def.name.clone(),
                             bytecode: bc,
-                            call_count: std::sync::Arc::new(
-                                std::sync::atomic::AtomicU64::new(0),
-                            ),
-                            jit_fn_ptr: std::sync::Arc::new(
-                                std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                            ),
+                            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                            jit_fn_ptr: std::sync::Arc::new(std::sync::atomic::AtomicPtr::new(
+                                std::ptr::null_mut(),
+                            )),
                         },
                     ));
                     env.set(func_def.name.clone(), bc_val.clone());
@@ -1245,6 +1366,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         Value::PureFunction {
             body,
             slot_count: _,
+            params,
         } => {
             let child_env = env.child();
             // Bind slots
@@ -1253,6 +1375,12 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             }
             if !args.is_empty() {
                 child_env.set("#".to_string(), args[0].clone());
+            }
+            // Bind named parameters (e.g., "k" in Function[{k}, body])
+            for (i, param) in params.iter().enumerate() {
+                if i < args.len() {
+                    child_env.set(param.clone(), args[i].clone());
+                }
             }
             eval(body, &child_env)
         }
@@ -1431,6 +1559,7 @@ fn try_match_params(
     args: &[Value],
     env: &Env,
 ) -> Result<Option<Bindings>, EvalError> {
+    let _attr_checker = AttributeChecker::new(env.attributes.clone());
     // Check if any parameter uses a sequence pattern (__ or ___)
     let has_sequences = params.iter().any(|p| {
         let (inner, _guard) = extract_guard_expr(p);
@@ -1458,33 +1587,56 @@ fn try_match_params(
         let list_pattern = Expr::List(inner_params);
         let list_value = Value::List(args.to_vec());
 
-        match match_pattern(&list_pattern, &list_value) {
-            MatchResult::Match(bindings) => {
+        match match_pattern(&list_pattern, &list_value, Some(&_attr_checker)) {
+            MatchResult::Match(mut bindings) => {
                 // Evaluate guards with the collected bindings
                 for guard in &guard_exprs {
                     let guard_env = env.child();
                     for (name, val) in &bindings {
                         guard_env.set(name.clone(), val.clone());
                     }
+                    // Bind # and #1, #2, ... for PatternTest desugaring (_?f → PatternGuard)
+                    for (i, arg) in args.iter().enumerate() {
+                        guard_env.set(format!("#{}", i + 1), arg.clone());
+                    }
+                    if !args.is_empty() {
+                        guard_env.set("#".to_string(), args[0].clone());
+                    }
                     if !eval(guard, &guard_env)?.to_bool() {
                         return Ok(None);
                     }
                 }
+                // Apply defaults for optional named patterns with default values
+                apply_defaults(params, &mut bindings, env)?;
                 Ok(Some(bindings))
             }
             MatchResult::NoMatch => Ok(None),
         }
     } else {
         // Fast path: no sequence patterns, direct matching
-        if params.len() != args.len() {
+        let has_optional = params.iter().any(|p| {
+            let (inner, _) = extract_guard_expr(p);
+            matches!(
+                inner,
+                Expr::OptionalBlank { .. } | Expr::OptionalNamedBlank { .. }
+            )
+        });
+
+        if has_optional {
+            // Allow fewer args than params; pad with Null for optional params
+            if args.len() > params.len() {
+                return Ok(None);
+            }
+        } else if params.len() != args.len() {
             return Ok(None);
         }
 
         let mut bindings = HashMap::new();
 
-        for (param, arg) in params.iter().zip(args.iter()) {
+        for (i, param) in params.iter().enumerate() {
+            let arg = args.get(i).unwrap_or(&Value::Null);
             let (inner_pat, guard) = extract_guard_expr(param);
-            match match_pattern(inner_pat, arg) {
+            match match_pattern(inner_pat, arg, Some(&_attr_checker)) {
                 MatchResult::Match(b) => {
                     bindings.extend(b);
                     if let Some(g) = guard {
@@ -1503,13 +1655,42 @@ fn try_match_params(
             for (name, val) in &bindings {
                 guard_env.set(name.clone(), val.clone());
             }
+            // Bind # and #1, #2, ... for PatternTest desugaring (_?f → PatternGuard)
+            for (i, arg) in args.iter().enumerate() {
+                guard_env.set(format!("#{}", i + 1), arg.clone());
+            }
+            if !args.is_empty() {
+                guard_env.set("#".to_string(), args[0].clone());
+            }
             if !eval(guard, &guard_env)?.to_bool() {
                 return Ok(None);
             }
         }
 
+        // Apply defaults for optional named patterns with default values
+        apply_defaults(params, &mut bindings, env)?;
+
         Ok(Some(bindings))
     }
+}
+
+/// Apply default values for optional named patterns (_:default, x_:default).
+fn apply_defaults(params: &[Expr], bindings: &mut Bindings, env: &Env) -> Result<(), EvalError> {
+    for param in params {
+        let (inner, _guard) = extract_guard_expr(param);
+        if let Expr::OptionalNamedBlank {
+            name,
+            default_value: Some(default),
+            ..
+        } = inner
+        {
+            if let Some(Value::Null) = bindings.get(name) {
+                let val = eval(default, env)?;
+                bindings.insert(name.clone(), val);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Flatten Sequence values into the surrounding list or call arguments.
@@ -1534,7 +1715,6 @@ fn has_sequence_pattern(expr: &Expr) -> bool {
         _ => false,
     }
 }
-
 
 /// Evaluate `?expr` — display help information for a symbol.
 fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
@@ -1840,10 +2020,7 @@ mod tests {
     fn test_function_sequence_param_zero_args() {
         // `___` (BlankNullSequence) matches zero or more arguments.
         // x___ binds as Sequence (possibly empty), which splats into lists.
-        assert_eq!(
-            eval_str("f[x___] := {x}; f[]"),
-            Value::List(vec![])
-        );
+        assert_eq!(eval_str("f[x___] := {x}; f[]"), Value::List(vec![]));
         assert_eq!(
             eval_str("f[x___] := {x}; f[1, 2]"),
             Value::List(vec![
@@ -2277,10 +2454,14 @@ mod tests {
     fn test_fixed_point() {
         // FixedPoint with halving function should converge to ~0
         let result = eval_str("half[x_] := x / 2; FixedPoint[half, 64]");
-        // Due to floating point, result is a very small Real number
+        // With Rational arithmetic, result should be a very small exact fraction
         match result {
             Value::Real(r) => assert!(r.clone().abs() < 1e-10, "Expected near-zero, got {}", r),
             Value::Integer(n) => assert_eq!(n, 0),
+            Value::Rational(r) => {
+                let approx = r.numer().to_f64() / r.denom().to_f64();
+                assert!(approx.abs() < 1e-10, "Expected near-zero, got {}", r);
+            }
             _ => panic!("Expected numeric value, got {:?}", result),
         }
     }
@@ -2322,6 +2503,37 @@ mod tests {
     fn test_catch_no_throw() {
         let result = eval_str("Catch[1 + 2]");
         assert_eq!(result, Value::Integer(Integer::from(3)));
+    }
+
+    // ── try/catch/finally ──
+
+    #[test]
+    fn test_try_catch_basic() {
+        let result = eval_str("try { Throw[42] } catch e { e + 1 }");
+        assert_eq!(result, Value::Integer(Integer::from(43)));
+    }
+
+    #[test]
+    fn test_try_catch_no_throw() {
+        let result = eval_str("try { 1 + 1 } catch e { 0 }");
+        assert_eq!(result, Value::Integer(Integer::from(2)));
+    }
+
+    #[test]
+    fn test_try_catch_nested() {
+        let result = eval_str(
+            "try {
+                try { Throw[10] } catch inner { inner + 5 }
+            } catch outer { outer + 100 }",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(15)));
+    }
+
+    #[test]
+    fn test_try_catch_rethrow() {
+        // rethrow caught by outer Catch
+        let result = eval_str("Catch[try { Throw[42] } catch e { Throw[e + 1] }]");
+        assert_eq!(result, Value::Integer(Integer::from(43)));
     }
 
     // ── Parallel computation ──
@@ -2453,10 +2665,7 @@ mod tests {
     #[test]
     fn test_parallel_evaluate_expr() {
         let result = eval_str("ParallelEvaluate[1 + 2]");
-        assert_eq!(
-            result,
-            Value::List(vec![Value::Integer(Integer::from(3))])
-        );
+        assert_eq!(result, Value::List(vec![Value::Integer(Integer::from(3))]));
     }
 
     #[test]
@@ -2924,13 +3133,19 @@ mod tests {
     #[test]
     fn test_and_short_circuit() {
         // And should short-circuit: False && (error) should not evaluate the error
-        assert_eq!(eval_str("And[False, Error[\"should not fire\"]]"), Value::Bool(false));
+        assert_eq!(
+            eval_str("And[False, Error[\"should not fire\"]]"),
+            Value::Bool(false)
+        );
     }
 
     #[test]
     fn test_or_short_circuit() {
         // Or should short-circuit: True || (error) should not evaluate the error
-        assert_eq!(eval_str("Or[True, Error[\"should not fire\"]]"), Value::Bool(true));
+        assert_eq!(
+            eval_str("Or[True, Error[\"should not fire\"]]"),
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -3151,6 +3366,28 @@ mod tests {
     }
 
     #[test]
+    fn test_jit_subtract() {
+        // Subtraction inside a hot function (previously bug: Sub used Plus)
+        let result = eval_str(
+            "f[x_, y_] := x - y;
+             Do[f[i, 1], {i, 1, 100}];
+             f[10, 3]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(7)));
+    }
+
+    #[test]
+    fn test_jit_divide() {
+        // Division inside a hot function (previously bug: Div used Times)
+        let result = eval_str(
+            "f[x_, y_] := x / y;
+             Do[f[i, 2], {i, 1, 100}];
+             f[42, 2]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(21)));
+    }
+
+    #[test]
     fn test_listable_boole() {
         // Boole is Listable, so Boole[{True, False}] should give {1, 0}
         assert_eq!(
@@ -3167,10 +3404,7 @@ mod tests {
         // Xor is Listable, so Xor[{True, False}, True] should give {False, True}
         assert_eq!(
             eval_str("Xor[{True, False}, True]"),
-            Value::List(vec![
-                Value::Bool(false),
-                Value::Bool(true),
-            ])
+            Value::List(vec![Value::Bool(false), Value::Bool(true),])
         );
     }
 
@@ -3179,19 +3413,13 @@ mod tests {
     #[test]
     fn test_pure_function_slot() {
         // #& — identity function
-        assert_eq!(
-            eval_str("(#&)[5]"),
-            Value::Integer(Integer::from(5))
-        );
+        assert_eq!(eval_str("(#&)[5]"), Value::Integer(Integer::from(5)));
     }
 
     #[test]
     fn test_pure_function_arithmetic() {
         // # + 1 &
-        assert_eq!(
-            eval_str("(# + 1 &)[5]"),
-            Value::Integer(Integer::from(6))
-        );
+        assert_eq!(eval_str("(# + 1 &)[5]"), Value::Integer(Integer::from(6)));
     }
 
     #[test]

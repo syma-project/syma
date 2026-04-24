@@ -7,25 +7,25 @@ use std::collections::{BTreeSet, HashMap};
 
 use cranelift::codegen::binemit::Reloc;
 use cranelift::codegen::control::ControlPlane;
-use cranelift::codegen::ir::condcodes::IntCC;
+use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir;
+use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::ir::{
-    types, AbiParam, Block, ExternalName, ExtFuncData, FuncRef, Signature,
-    UserExternalNameRef, UserFuncName,
+    AbiParam, Block, ExtFuncData, ExternalName, FuncRef, Signature, UserExternalNameRef,
+    UserFuncName, types,
 };
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Flags};
-use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::{Context, FinalizedMachReloc, FinalizedRelocTarget};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift::prelude::InstBuilder;
 use target_lexicon::Triple;
 
-use crate::bytecode::instruction::Instruction;
 use crate::bytecode::CompiledBytecode;
+use crate::bytecode::instruction::Instruction;
 use crate::jit::runtime::{
-    JIT_OP_EQUAL, JIT_OP_GREATER, JIT_OP_GREATEREQUAL, JIT_OP_LESS, JIT_OP_LESSEQUAL,
-    JIT_OP_PLUS, JIT_OP_POWER, JIT_OP_TIMES, JIT_OP_UNEQUAL,
+    JIT_OP_EQUAL, JIT_OP_GREATER, JIT_OP_GREATEREQUAL, JIT_OP_LESS, JIT_OP_LESSEQUAL, JIT_OP_PLUS,
+    JIT_OP_POWER, JIT_OP_TIMES, JIT_OP_UNEQUAL,
 };
 
 /// Error during native compilation.
@@ -49,6 +49,8 @@ struct JitHelpers {
     and_: FuncRef,
     or_: FuncRef,
     binop: FuncRef,
+    sub_: FuncRef,
+    div_: FuncRef,
     make_list: FuncRef,
     make_assoc: FuncRef,
     apply: FuncRef,
@@ -84,31 +86,115 @@ impl JitHelpers {
         let import = |builder: &mut FunctionBuilder, name: &str, sig: Signature| -> FuncRef {
             let sig_ref = builder.import_signature(sig);
             builder.import_function(ExtFuncData {
-                name: ExternalName::user(UserExternalNameRef::new(name.as_bytes().iter().map(|&b| b as usize).sum())),
+                name: ExternalName::user(UserExternalNameRef::new(
+                    name.as_bytes().iter().map(|&b| b as usize).sum(),
+                )),
                 signature: sig_ref,
                 colocated: true,
             })
         };
 
         Self {
-            load_const: import(builder, "jit_load_const", void_sig(&[types::I64, types::I32, types::I32])),
-            load_arg: import(builder, "jit_load_arg", void_sig(&[types::I64, types::I32, types::I32])),
-            load_true: import(builder, "jit_load_true", void_sig(&[types::I64, types::I32])),
-            load_false: import(builder, "jit_load_false", void_sig(&[types::I64, types::I32])),
-            load_null: import(builder, "jit_load_null", void_sig(&[types::I64, types::I32])),
-            mov: import(builder, "jit_mov", void_sig(&[types::I64, types::I32, types::I32])),
-            neg: import(builder, "jit_neg", void_sig(&[types::I64, types::I32, types::I32])),
-            not_: import(builder, "jit_not", void_sig(&[types::I64, types::I32, types::I32])),
-            and_: import(builder, "jit_and", void_sig(&[types::I64, types::I32, types::I32, types::I32])),
-            or_: import(builder, "jit_or", void_sig(&[types::I64, types::I32, types::I32, types::I32])),
-            binop: import(builder, "jit_binop", void_sig(&[types::I64, types::I32, types::I32, types::I32, types::I32])),
-            make_list: import(builder, "jit_make_list", void_sig(&[types::I64, types::I32, types::I32])),
-            make_assoc: import(builder, "jit_make_assoc", void_sig(&[types::I64, types::I32, types::I32])),
-            apply: import(builder, "jit_apply", void_sig(&[types::I64, types::I32, types::I32])),
-            make_seq: import(builder, "jit_make_seq", void_sig(&[types::I64, types::I32, types::I32])),
-            load_sym: import(builder, "jit_load_sym", void_sig(&[types::I64, types::I32, types::I32])),
-            store_sym: import(builder, "jit_store_sym", void_sig(&[types::I64, types::I32, types::I32])),
-            is_truthy: import(builder, "jit_is_truthy", ret_sig(&[types::I64, types::I32], types::I8)),
+            load_const: import(
+                builder,
+                "jit_load_const",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            load_arg: import(
+                builder,
+                "jit_load_arg",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            load_true: import(
+                builder,
+                "jit_load_true",
+                void_sig(&[types::I64, types::I32]),
+            ),
+            load_false: import(
+                builder,
+                "jit_load_false",
+                void_sig(&[types::I64, types::I32]),
+            ),
+            load_null: import(
+                builder,
+                "jit_load_null",
+                void_sig(&[types::I64, types::I32]),
+            ),
+            mov: import(
+                builder,
+                "jit_mov",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            neg: import(
+                builder,
+                "jit_neg",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            not_: import(
+                builder,
+                "jit_not",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            and_: import(
+                builder,
+                "jit_and",
+                void_sig(&[types::I64, types::I32, types::I32, types::I32]),
+            ),
+            or_: import(
+                builder,
+                "jit_or",
+                void_sig(&[types::I64, types::I32, types::I32, types::I32]),
+            ),
+            binop: import(
+                builder,
+                "jit_binop",
+                void_sig(&[types::I64, types::I32, types::I32, types::I32, types::I32]),
+            ),
+            sub_: import(
+                builder,
+                "jit_sub",
+                void_sig(&[types::I64, types::I32, types::I32, types::I32]),
+            ),
+            div_: import(
+                builder,
+                "jit_div",
+                void_sig(&[types::I64, types::I32, types::I32, types::I32]),
+            ),
+            make_list: import(
+                builder,
+                "jit_make_list",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            make_assoc: import(
+                builder,
+                "jit_make_assoc",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            apply: import(
+                builder,
+                "jit_apply",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            make_seq: import(
+                builder,
+                "jit_make_seq",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            load_sym: import(
+                builder,
+                "jit_load_sym",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            store_sym: import(
+                builder,
+                "jit_store_sym",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            is_truthy: import(
+                builder,
+                "jit_is_truthy",
+                ret_sig(&[types::I64, types::I32], types::I8),
+            ),
         }
     }
 }
@@ -224,7 +310,9 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
                 let truthy = builder.inst_results(call_inst)[0];
                 let zero = builder.ins().iconst(types::I8, 0);
                 let cond = builder.ins().icmp(IntCC::Equal, truthy, zero);
-                builder.ins().brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
+                builder
+                    .ins()
+                    .brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
                 terminated = true;
                 i += 1;
                 continue;
@@ -239,7 +327,9 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
                 let truthy = builder.inst_results(call_inst)[0];
                 let zero = builder.ins().iconst(types::I8, 0);
                 let cond = builder.ins().icmp(IntCC::NotEqual, truthy, zero);
-                builder.ins().brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
+                builder
+                    .ins()
+                    .brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
                 terminated = true;
                 i += 1;
                 continue;
@@ -314,24 +404,50 @@ fn helper_addresses() -> Vec<(&'static str, usize)> {
         };
     }
     vec![
-        ("jit_load_const", fn_addr!(crate::jit::runtime::jit_load_const)),
+        (
+            "jit_load_const",
+            fn_addr!(crate::jit::runtime::jit_load_const),
+        ),
         ("jit_load_arg", fn_addr!(crate::jit::runtime::jit_load_arg)),
-        ("jit_load_true", fn_addr!(crate::jit::runtime::jit_load_true)),
-        ("jit_load_false", fn_addr!(crate::jit::runtime::jit_load_false)),
-        ("jit_load_null", fn_addr!(crate::jit::runtime::jit_load_null)),
+        (
+            "jit_load_true",
+            fn_addr!(crate::jit::runtime::jit_load_true),
+        ),
+        (
+            "jit_load_false",
+            fn_addr!(crate::jit::runtime::jit_load_false),
+        ),
+        (
+            "jit_load_null",
+            fn_addr!(crate::jit::runtime::jit_load_null),
+        ),
         ("jit_mov", fn_addr!(crate::jit::runtime::jit_mov)),
         ("jit_neg", fn_addr!(crate::jit::runtime::jit_neg)),
         ("jit_not", fn_addr!(crate::jit::runtime::jit_not)),
         ("jit_and", fn_addr!(crate::jit::runtime::jit_and)),
         ("jit_or", fn_addr!(crate::jit::runtime::jit_or)),
         ("jit_binop", fn_addr!(crate::jit::runtime::jit_binop)),
-        ("jit_make_list", fn_addr!(crate::jit::runtime::jit_make_list)),
-        ("jit_make_assoc", fn_addr!(crate::jit::runtime::jit_make_assoc)),
+        ("jit_sub", fn_addr!(crate::jit::runtime::jit_sub)),
+        ("jit_div", fn_addr!(crate::jit::runtime::jit_div)),
+        (
+            "jit_make_list",
+            fn_addr!(crate::jit::runtime::jit_make_list),
+        ),
+        (
+            "jit_make_assoc",
+            fn_addr!(crate::jit::runtime::jit_make_assoc),
+        ),
         ("jit_apply", fn_addr!(crate::jit::runtime::jit_apply)),
         ("jit_make_seq", fn_addr!(crate::jit::runtime::jit_make_seq)),
         ("jit_load_sym", fn_addr!(crate::jit::runtime::jit_load_sym)),
-        ("jit_store_sym", fn_addr!(crate::jit::runtime::jit_store_sym)),
-        ("jit_is_truthy", fn_addr!(crate::jit::runtime::jit_is_truthy)),
+        (
+            "jit_store_sym",
+            fn_addr!(crate::jit::runtime::jit_store_sym),
+        ),
+        (
+            "jit_is_truthy",
+            fn_addr!(crate::jit::runtime::jit_is_truthy),
+        ),
     ]
 }
 
@@ -408,19 +524,44 @@ fn emit_op(builder: &mut FunctionBuilder, instr: &Instruction, ctx: ir::Value, h
 
         // Generic arithmetic (full Value operations)
         Instruction::Add(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
-        Instruction::Sub(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
+        Instruction::Sub(d, a, b) => {
+            let d_v = i32_val(builder, *d as u32);
+            let a_v = i32_val(builder, *a as u32);
+            let b_v = i32_val(builder, *b as u32);
+            builder.ins().call(h.sub_, &[ctx, d_v, a_v, b_v]);
+        }
         Instruction::Mul(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_TIMES),
-        Instruction::Div(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_TIMES),
+        Instruction::Div(d, a, b) => {
+            let d_v = i32_val(builder, *d as u32);
+            let a_v = i32_val(builder, *a as u32);
+            let b_v = i32_val(builder, *b as u32);
+            builder.ins().call(h.div_, &[ctx, d_v, a_v, b_v]);
+        }
         Instruction::Pow(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_POWER),
 
         // Type-specialized arithmetic
         Instruction::IntAdd(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
-        Instruction::IntSub(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
+        Instruction::IntSub(d, a, b) => {
+            let d_v = i32_val(builder, *d as u32);
+            let a_v = i32_val(builder, *a as u32);
+            let b_v = i32_val(builder, *b as u32);
+            builder.ins().call(h.sub_, &[ctx, d_v, a_v, b_v]);
+        }
         Instruction::IntMul(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_TIMES),
         Instruction::RealAdd(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
-        Instruction::RealSub(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_PLUS),
+        Instruction::RealSub(d, a, b) => {
+            let d_v = i32_val(builder, *d as u32);
+            let a_v = i32_val(builder, *a as u32);
+            let b_v = i32_val(builder, *b as u32);
+            builder.ins().call(h.sub_, &[ctx, d_v, a_v, b_v]);
+        }
         Instruction::RealMul(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_TIMES),
-        Instruction::RealDiv(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_TIMES),
+        Instruction::RealDiv(d, a, b) => {
+            let d_v = i32_val(builder, *d as u32);
+            let a_v = i32_val(builder, *a as u32);
+            let b_v = i32_val(builder, *b as u32);
+            builder.ins().call(h.div_, &[ctx, d_v, a_v, b_v]);
+        }
 
         // Comparisons
         Instruction::Eq(d, a, b) => binop(builder, ctx, h, *d, *a, *b, JIT_OP_EQUAL),
@@ -502,7 +643,15 @@ fn emit_op(builder: &mut FunctionBuilder, instr: &Instruction, ctx: ir::Value, h
 }
 
 /// Emit a call to `jit_binop` with the given opcode.
-fn binop(builder: &mut FunctionBuilder, ctx: ir::Value, h: &JitHelpers, d: u16, a: u16, b: u16, op: u32) {
+fn binop(
+    builder: &mut FunctionBuilder,
+    ctx: ir::Value,
+    h: &JitHelpers,
+    d: u16,
+    a: u16,
+    b: u16,
+    op: u32,
+) {
     let d_v = i32_val(builder, d as u32);
     let a_v = i32_val(builder, a as u32);
     let b_v = i32_val(builder, b as u32);
@@ -542,20 +691,21 @@ fn apply_relocations(
         match reloc.kind {
             Reloc::X86CallPCRel4 | Reloc::X86PCRel4 => {
                 // PC-relative: delta = target - (code_base + offset + 4) + addend
-                let delta = (target_addr as i64)
-                    - (code_base as i64 + offset as i64 + 4)
-                    + reloc.addend;
+                let delta =
+                    (target_addr as i64) - (code_base as i64 + offset as i64 + 4) + reloc.addend;
                 if offset + 4 <= code.len() {
                     code[offset..offset + 4].copy_from_slice(&(delta as i32).to_le_bytes());
                 }
             }
             Reloc::Abs4 if offset + 4 <= code.len() => {
-                code[offset..offset + 4]
-                    .copy_from_slice(&((target_addr as u32).wrapping_add(reloc.addend as u32)).to_le_bytes());
+                code[offset..offset + 4].copy_from_slice(
+                    &((target_addr as u32).wrapping_add(reloc.addend as u32)).to_le_bytes(),
+                );
             }
             Reloc::Abs8 if offset + 8 <= code.len() => {
-                code[offset..offset + 8]
-                    .copy_from_slice(&(target_addr.wrapping_add(reloc.addend as usize)).to_le_bytes());
+                code[offset..offset + 8].copy_from_slice(
+                    &(target_addr.wrapping_add(reloc.addend as usize)).to_le_bytes(),
+                );
             }
             _ => {
                 // Unsupported relocation kind — skip.
@@ -572,7 +722,7 @@ fn apply_relocations(
 unsafe fn make_executable(code: &[u8]) -> *mut u8 {
     #[cfg(unix)]
     {
-        use std::alloc::{alloc, Layout};
+        use std::alloc::{Layout, alloc};
         let page_size = 4096;
         let size = code.len().div_ceil(page_size) * page_size;
         let layout = Layout::from_size_align(size, page_size).unwrap();

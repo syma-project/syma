@@ -782,7 +782,9 @@ pub fn builtin_letter_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Str(s) => Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic()))),
+        Value::Str(s) => Ok(Value::Bool(
+            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+        )),
         _ => Err(EvalError::TypeError {
             expected: "String".to_string(),
             got: args[0].type_name().to_string(),
@@ -798,7 +800,9 @@ pub fn builtin_digit_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Str(s) => Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))),
+        Value::Str(s) => Ok(Value::Bool(
+            !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+        )),
         _ => Err(EvalError::TypeError {
             expected: "String".to_string(),
             got: args[0].type_name().to_string(),
@@ -817,7 +821,9 @@ pub fn builtin_upper_case_q(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Str(s) => {
             let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-            Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_uppercase())))
+            Ok(Value::Bool(
+                !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "String".to_string(),
@@ -837,7 +843,9 @@ pub fn builtin_lower_case_q(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Str(s) => {
             let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-            Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_lowercase())))
+            Ok(Value::Bool(
+                !letters.is_empty() && letters.iter().all(|c| c.is_lowercase()),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "String".to_string(),
@@ -1234,15 +1242,13 @@ mod tests {
 
     #[test]
     fn test_string_riffle_single() {
-        let result =
-            builtin_string_riffle(&[Value::List(vec![string("x")]), string(",")]).unwrap();
+        let result = builtin_string_riffle(&[Value::List(vec![string("x")]), string(",")]).unwrap();
         assert_eq!(result, string("x"));
     }
 
     #[test]
     fn test_string_riffle_empty() {
-        let result =
-            builtin_string_riffle(&[Value::List(vec![]), string(",")]).unwrap();
+        let result = builtin_string_riffle(&[Value::List(vec![]), string(",")]).unwrap();
         assert_eq!(result, string(""));
     }
 
@@ -1264,8 +1270,14 @@ mod tests {
 
     #[test]
     fn test_letter_q() {
-        assert_eq!(builtin_letter_q(&[string("abc")]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_letter_q(&[string("abc123")]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            builtin_letter_q(&[string("abc")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_letter_q(&[string("abc123")]).unwrap(),
+            Value::Bool(false)
+        );
         assert_eq!(builtin_letter_q(&[string("")]).unwrap(), Value::Bool(false));
     }
 
@@ -1273,8 +1285,14 @@ mod tests {
 
     #[test]
     fn test_digit_q() {
-        assert_eq!(builtin_digit_q(&[string("123")]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_digit_q(&[string("12a")]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            builtin_digit_q(&[string("123")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_digit_q(&[string("12a")]).unwrap(),
+            Value::Bool(false)
+        );
         assert_eq!(builtin_digit_q(&[string("")]).unwrap(), Value::Bool(false));
     }
 
@@ -1282,19 +1300,37 @@ mod tests {
 
     #[test]
     fn test_upper_case_q() {
-        assert_eq!(builtin_upper_case_q(&[string("ABC")]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_upper_case_q(&[string("AbC")]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            builtin_upper_case_q(&[string("ABC")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_upper_case_q(&[string("AbC")]).unwrap(),
+            Value::Bool(false)
+        );
         // Non-letters are ignored
-        assert_eq!(builtin_upper_case_q(&[string("A B C")]).unwrap(), Value::Bool(true));
+        assert_eq!(
+            builtin_upper_case_q(&[string("A B C")]).unwrap(),
+            Value::Bool(true)
+        );
     }
 
     // ── LowerCaseQ ──
 
     #[test]
     fn test_lower_case_q() {
-        assert_eq!(builtin_lower_case_q(&[string("abc")]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_lower_case_q(&[string("aBc")]).unwrap(), Value::Bool(false));
-        assert_eq!(builtin_lower_case_q(&[string("a b c")]).unwrap(), Value::Bool(true));
+        assert_eq!(
+            builtin_lower_case_q(&[string("abc")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_lower_case_q(&[string("aBc")]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_lower_case_q(&[string("a b c")]).unwrap(),
+            Value::Bool(true)
+        );
     }
 
     // ── TextWords ──

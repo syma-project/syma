@@ -10,6 +10,8 @@
 /// - Guards: pattern /; condition
 /// - Alternatives: (pat1 | pat2)
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use rug::Float;
 
@@ -18,6 +20,37 @@ use crate::value::Value;
 
 /// A set of variable bindings produced by pattern matching.
 pub type Bindings = HashMap<String, Value>;
+
+/// Lightweight attribute checker for the pattern engine.
+///
+/// Wraps the shared attribute map so the pattern engine can query
+/// symbol attributes (Flat, Orderless, OneIdentity) without depending
+/// on `Env`. Pass `None` to skip attribute-based matching.
+pub struct AttributeChecker {
+    attributes: Arc<Mutex<HashMap<String, Vec<String>>>>,
+}
+
+impl AttributeChecker {
+    pub fn new(attributes: Arc<Mutex<HashMap<String, Vec<String>>>>) -> Self {
+        AttributeChecker { attributes }
+    }
+
+    /// Returns a checker with no attributes (all lookups return false).
+    pub fn empty() -> Self {
+        AttributeChecker {
+            attributes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn has_attr(&self, name: &str, attr: &str) -> bool {
+        self.attributes
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|attrs| attrs.iter().any(|a| a == attr))
+            .unwrap_or(false)
+    }
+}
 
 /// Result of a pattern match attempt.
 #[derive(Debug)]
@@ -28,16 +61,41 @@ pub enum MatchResult {
     NoMatch,
 }
 
+/// Try to unwrap a OneIdentity value: if the value is a single-arg Call
+/// whose head has the OneIdentity attribute, return the inner argument.
+fn try_unwrap_one_identity<'a>(
+    value: &'a Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> Option<&'a Value> {
+    if let Value::Call { head, args } = value {
+        if args.len() == 1
+            && attr_checker.map_or(false, |c| c.has_attr(head, "OneIdentity"))
+        {
+            return Some(&args[0]);
+        }
+    }
+    None
+}
+
 /// Try to match a value against a pattern.
 ///
 /// Returns Match(bindings) on success, NoMatch on failure.
-pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
+/// `attr_checker` provides access to symbol attributes (Flat, Orderless, OneIdentity)
+/// for call pattern matching. Pass `None` to skip attribute-based matching.
+pub fn match_pattern(
+    pattern: &Expr,
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
     match pattern {
         // ── Blank patterns ──
         Expr::Blank { type_constraint } => {
             if let Some(tc) = type_constraint {
                 if value.matches_type(tc) {
                     MatchResult::Match(HashMap::new())
+                } else if let Some(unwrapped) = try_unwrap_one_identity(value, attr_checker) {
+                    // OneIdentity: retry with unwrapped value
+                    match_pattern(pattern, unwrapped, attr_checker)
                 } else {
                     MatchResult::NoMatch
                 }
@@ -55,6 +113,9 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
                     let mut bindings = HashMap::new();
                     bindings.insert(name.clone(), value.clone());
                     MatchResult::Match(bindings)
+                } else if let Some(unwrapped) = try_unwrap_one_identity(value, attr_checker) {
+                    // OneIdentity: retry with unwrapped value
+                    match_pattern(pattern, unwrapped, attr_checker)
                 } else {
                     MatchResult::NoMatch
                 }
@@ -68,12 +129,14 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
         // ── Optional patterns: _. and x_. ──
         // Try normal match first; if it fails, treat the pattern as matched
         // with Null as the default value.
-        Expr::OptionalBlank { type_constraint } => {
+        Expr::OptionalBlank {
+            type_constraint, ..
+        } => {
             // Try normal blank match first
             let normal_match = Expr::Blank {
                 type_constraint: type_constraint.clone(),
             };
-            match match_pattern(&normal_match, value) {
+            match match_pattern(&normal_match, value, attr_checker) {
                 MatchResult::Match(_) => MatchResult::Match(HashMap::new()),
                 MatchResult::NoMatch => {
                     // Optional: match succeeded with no bindings
@@ -85,13 +148,14 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
         Expr::OptionalNamedBlank {
             name,
             type_constraint,
+            ..
         } => {
             // Try normal named blank match first
             let normal_match = Expr::NamedBlank {
                 name: name.clone(),
                 type_constraint: type_constraint.clone(),
             };
-            match match_pattern(&normal_match, value) {
+            match match_pattern(&normal_match, value, attr_checker) {
                 MatchResult::Match(bindings) => MatchResult::Match(bindings),
                 MatchResult::NoMatch => {
                     // Optional: bind to Null
@@ -188,7 +252,7 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
         // ── List pattern ──
         Expr::List(patterns) => {
             if let Value::List(items) = value {
-                match_list_pattern(patterns, items)
+                match_list_pattern(patterns, items, attr_checker)
             } else {
                 MatchResult::NoMatch
             }
@@ -202,7 +266,7 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             // For now, just match the inner pattern.
             // Guard evaluation requires the evaluator, so it's handled
             // in the evaluator's dispatch logic.
-            match_pattern(pattern, value)
+            match_pattern(pattern, value, attr_checker)
         }
 
         // ── Call pattern: f[x_, y_], negated -expr, and alternatives (pat1 | pat2) ──
@@ -218,7 +282,7 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
                     && let Value::Integer(n) = &a[0]
                     && *n == -1
                 {
-                    return match_pattern(&args[1], &a[1]);
+                    return match_pattern(&args[1], &a[1], attr_checker);
                 }
                 return MatchResult::NoMatch;
             }
@@ -226,7 +290,7 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             // Check for alternatives: Alternatives[pat1, pat2, ...]
             if matches!(head.as_ref(), Expr::Symbol(s) if s == "Alternatives") {
                 for alt in args {
-                    if let MatchResult::Match(bindings) = match_pattern(alt, value) {
+                    if let MatchResult::Match(bindings) = match_pattern(alt, value, attr_checker) {
                         return MatchResult::Match(bindings);
                     }
                 }
@@ -235,7 +299,7 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
 
             // Check for Except: Except[pat] matches anything not matching pat
             if matches!(head.as_ref(), Expr::Symbol(s) if s == "Except") && args.len() == 1 {
-                return match match_pattern(&args[0], value) {
+                return match match_pattern(&args[0], value, attr_checker) {
                     MatchResult::Match(_) => MatchResult::NoMatch,
                     MatchResult::NoMatch => MatchResult::Match(HashMap::new()),
                 };
@@ -244,11 +308,11 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             // Check for Repeated: Repeated[pat] matches pat 1+ times in a list.
             // Repeated[pat, n] matches pat exactly n times in a list.
             if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated") {
-                return match_repeated_pattern(args, value);
+                return match_repeated_pattern(args, value, attr_checker);
             }
 
             // Regular call pattern: f[x_, y_]
-            match_call_pattern(head, args, value)
+            match_call_pattern(head, args, value, attr_checker)
         }
 
         // ── Rule patterns ──
@@ -260,9 +324,10 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             } = value
             {
                 if !delayed {
-                    let left_match = match_pattern(lhs, vl);
+                    let left_match = match_pattern(lhs, vl, attr_checker);
                     if let MatchResult::Match(mut bindings) = left_match
-                        && let MatchResult::Match(right_bindings) = match_pattern(rhs, vr)
+                        && let MatchResult::Match(right_bindings) =
+                            match_pattern(rhs, vr, attr_checker)
                     {
                         bindings.extend(right_bindings);
                         return MatchResult::Match(bindings);
@@ -282,9 +347,10 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             } = value
             {
                 if *delayed {
-                    let left_match = match_pattern(lhs, vl);
+                    let left_match = match_pattern(lhs, vl, attr_checker);
                     if let MatchResult::Match(mut bindings) = left_match
-                        && let MatchResult::Match(right_bindings) = match_pattern(rhs, vr)
+                        && let MatchResult::Match(right_bindings) =
+                            match_pattern(rhs, vr, attr_checker)
                     {
                         bindings.extend(right_bindings);
                         return MatchResult::Match(bindings);
@@ -342,6 +408,7 @@ fn match_sequence_pattern(
     pat_idx: usize,
     val_idx: usize,
     bindings: &mut Bindings,
+    attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
     // Base: all patterns consumed → check all values consumed too
     if pat_idx == patterns.len() {
@@ -402,6 +469,7 @@ fn match_sequence_pattern(
                     pat_idx + 1,
                     val_idx + take,
                     &mut new_bindings,
+                    attr_checker,
                 ) {
                     return MatchResult::Match(b);
                 }
@@ -431,6 +499,7 @@ fn match_sequence_pattern(
                         pat_idx + 1,
                         val_idx,
                         &mut new_bindings,
+                        attr_checker,
                     ) {
                         return MatchResult::Match(b);
                     }
@@ -452,6 +521,7 @@ fn match_sequence_pattern(
                         pat_idx + 1,
                         val_idx + take,
                         &mut new_bindings,
+                        attr_checker,
                     ) {
                         return MatchResult::Match(b);
                     }
@@ -465,10 +535,17 @@ fn match_sequence_pattern(
             if val_idx >= items.len() {
                 return MatchResult::NoMatch;
             }
-            match match_pattern(&patterns[pat_idx], &items[val_idx]) {
+            match match_pattern(&patterns[pat_idx], &items[val_idx], attr_checker) {
                 MatchResult::Match(b) => {
                     bindings.extend(b);
-                    match_sequence_pattern(patterns, items, pat_idx + 1, val_idx + 1, bindings)
+                    match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx + 1,
+                        bindings,
+                        attr_checker,
+                    )
                 }
                 MatchResult::NoMatch => MatchResult::NoMatch,
             }
@@ -477,7 +554,11 @@ fn match_sequence_pattern(
 }
 
 /// Match a list pattern against a list value.
-fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
+fn match_list_pattern(
+    patterns: &[Expr],
+    items: &[Value],
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
     // Check if any sequence patterns exist
     let has_sequences = patterns.iter().any(|p| {
         matches!(
@@ -493,7 +574,7 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
         }
         let mut bindings = HashMap::new();
         for (pat, val) in patterns.iter().zip(items.iter()) {
-            match match_pattern(pat, val) {
+            match match_pattern(pat, val, attr_checker) {
                 MatchResult::Match(b) => bindings.extend(b),
                 MatchResult::NoMatch => return MatchResult::NoMatch,
             }
@@ -503,14 +584,18 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
 
     // Slow path: sequences with backtracking
     let mut bindings = Bindings::new();
-    match_sequence_pattern(patterns, items, 0, 0, &mut bindings)
+    match_sequence_pattern(patterns, items, 0, 0, &mut bindings, attr_checker)
 }
 
 /// Handle `Repeated[pat]` and `Repeated[pat, n]` in pattern matching.
 ///
 /// `Repeated[pat]` matches `pat` one or more times consecutively in a list.
 /// `Repeated[pat, n]` matches `pat` exactly `n` times in a list.
-fn match_repeated_pattern(args: &[Expr], value: &Value) -> MatchResult {
+fn match_repeated_pattern(
+    args: &[Expr],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
     let items = match value {
         Value::List(items) => items,
         _ => return MatchResult::NoMatch,
@@ -523,12 +608,10 @@ fn match_repeated_pattern(args: &[Expr], value: &Value) -> MatchResult {
 
     let count = if args.len() == 2 {
         match &args[1] {
-            Expr::Integer(n) => {
-                match n.to_usize() {
-                    Some(v) if v > 0 => v,
-                    _ => return MatchResult::NoMatch,
-                }
-            }
+            Expr::Integer(n) => match n.to_usize() {
+                Some(v) if v > 0 => v,
+                _ => return MatchResult::NoMatch,
+            },
             _ => return MatchResult::NoMatch,
         }
     } else if args.len() == 1 {
@@ -546,7 +629,7 @@ fn match_repeated_pattern(args: &[Expr], value: &Value) -> MatchResult {
         let matched_items = &items[..count];
         let mut bindings = Bindings::new();
         for item in matched_items {
-            match match_pattern(pat, item) {
+            match match_pattern(pat, item, attr_checker) {
                 MatchResult::Match(b) => bindings.extend(b),
                 MatchResult::NoMatch => return MatchResult::NoMatch,
             }
@@ -557,51 +640,221 @@ fn match_repeated_pattern(args: &[Expr], value: &Value) -> MatchResult {
     }
 }
 
+/// Flatten nested calls with the same head (for Flat attribute).
+/// e.g., `Plus[Plus[x_, y_], z_]` → `[x_, y_, z_]` when head is "Plus".
+fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
+    let mut result = Vec::new();
+    for arg in args {
+        if let Expr::Call { head: h, args: a } = arg {
+            if let Expr::Symbol(s) = h.as_ref() {
+                if s == head {
+                    result.extend(flatten_expr_args(head, a));
+                    continue;
+                }
+            }
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
+/// Flatten nested value calls with the same head (for Flat attribute).
+fn flatten_value_args(head: &str, args: &[Value]) -> Vec<Value> {
+    let mut result = Vec::new();
+    for arg in args {
+        if let Value::Call { head: h, args: a } = arg {
+            if h == head {
+                result.extend(flatten_value_args(head, a));
+                continue;
+            }
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
+/// Generate all permutations of a slice of indices (Heap's algorithm).
+fn generate_permutations(indices: &[usize]) -> Vec<Vec<usize>> {
+    if indices.is_empty() {
+        return vec![vec![]];
+    }
+    let n = indices.len();
+    let mut result = Vec::new();
+    let mut c = vec![0usize; n];
+    let mut p = indices.to_vec();
+    result.push(p.clone());
+    let mut i = 0;
+    while i < n {
+        if c[i] < i {
+            if i % 2 == 0 {
+                p.swap(0, i);
+            } else {
+                p.swap(c[i], i);
+            }
+            result.push(p.clone());
+            c[i] += 1;
+            i = 0;
+        } else {
+            c[i] = 0;
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Check if there's a permutation of `val_args` that matches `pat_args`.
+fn try_orderless_match(
+    pat_args: &[Expr],
+    val_args: &[Value],
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
+    let n = pat_args.len();
+    let indices: Vec<usize> = (0..n).collect();
+    for perm in generate_permutations(&indices) {
+        let mut bindings = Bindings::new();
+        let mut ok = true;
+        for (i, &pi) in perm.iter().enumerate() {
+            match match_pattern(&pat_args[i], &val_args[pi], attr_checker) {
+                MatchResult::Match(b) => bindings.extend(b),
+                MatchResult::NoMatch => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            return MatchResult::Match(bindings);
+        }
+    }
+    MatchResult::NoMatch
+}
+
+/// Try a direct ordered match of pattern args against value args.
+fn try_ordered_match(
+    pat_args: &[Expr],
+    val_args: &[Value],
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
+    if pat_args.len() != val_args.len() {
+        return MatchResult::NoMatch;
+    }
+    let mut bindings = Bindings::new();
+    for (pat, val) in pat_args.iter().zip(val_args.iter()) {
+        match match_pattern(pat, val, attr_checker) {
+            MatchResult::Match(b) => bindings.extend(b),
+            MatchResult::NoMatch => return MatchResult::NoMatch,
+        }
+    }
+    MatchResult::Match(bindings)
+}
+
 /// Match a call pattern (e.g., f[x_, y_]) against a value.
-fn match_call_pattern(head: &Expr, args: &[Expr], value: &Value) -> MatchResult {
+///
+/// Respects Flat, Orderless, and OneIdentity attributes when an
+/// `attr_checker` is provided.
+fn match_call_pattern(
+    head: &Expr,
+    args: &[Expr],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
+    // Extract head name for attribute checks
+    let head_name = match head {
+        Expr::Symbol(s) => s.clone(),
+        _ => return MatchResult::NoMatch,
+    };
+
     match value {
         Value::Call {
             head: vhead,
             args: vargs,
         } => {
-            // Match head
-            let head_match = match head {
-                Expr::Symbol(s) => {
-                    if s == vhead {
-                        MatchResult::Match(HashMap::new())
-                    } else {
-                        MatchResult::NoMatch
+            // Head must match
+            if head_name != *vhead {
+                // OneIdentity: if head has OneIdentity and 1 pattern arg,
+                // try matching the inner pattern directly against the value.
+                if args.len() == 1
+                    && attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"))
+                {
+                    if let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker) {
+                        return MatchResult::Match(b);
                     }
                 }
-                _ => MatchResult::NoMatch,
+                return MatchResult::NoMatch;
+            }
+
+            // Determine attributes
+            let is_flat = attr_checker.map_or(false, |c| c.has_attr(&head_name, "Flat"));
+            let is_orderless =
+                attr_checker.map_or(false, |c| c.has_attr(&head_name, "Orderless"));
+            let is_one_identity =
+                attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"));
+
+            // Flatten args for Flat
+            let pat_args: Vec<Expr> = if is_flat {
+                flatten_expr_args(&head_name, args)
+            } else {
+                args.to_vec()
+            };
+            let val_args: Vec<Value> = if is_flat {
+                flatten_value_args(&head_name, vargs)
+            } else {
+                vargs.clone()
             };
 
-            if let MatchResult::Match(mut bindings) = head_match {
-                // Match args
-                if args.len() != vargs.len() {
-                    return MatchResult::NoMatch;
-                }
-                for (pat, val) in args.iter().zip(vargs.iter()) {
-                    match match_pattern(pat, val) {
-                        MatchResult::Match(b) => bindings.extend(b),
-                        MatchResult::NoMatch => return MatchResult::NoMatch,
-                    }
-                }
-                MatchResult::Match(bindings)
-            } else {
-                MatchResult::NoMatch
+            // 1. Try direct ordered match
+            if let MatchResult::Match(b) =
+                try_ordered_match(&pat_args, &val_args, attr_checker)
+            {
+                return MatchResult::Match(b);
             }
+
+            // 2. Orderless: try permutations of value args (max 6 elements)
+            if is_orderless
+                && pat_args.len() == val_args.len()
+                && val_args.len() <= 6
+                && val_args.len() >= 2
+            {
+                if let MatchResult::Match(b) =
+                    try_orderless_match(&pat_args, &val_args, attr_checker)
+                {
+                    return MatchResult::Match(b);
+                }
+            }
+
+            // 3. OneIdentity: for single arg, try matching inner pattern directly
+            if is_one_identity && args.len() == 1 && vargs.len() == 1 {
+                if let MatchResult::Match(b) = match_pattern(&args[0], &vargs[0], attr_checker) {
+                    return MatchResult::Match(b);
+                }
+            }
+
+            MatchResult::NoMatch
         }
-        _ => MatchResult::NoMatch,
+        _ => {
+            // Not a call value. With OneIdentity and single-arg pattern, try direct match.
+            if args.len() == 1
+                && attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"))
+            {
+                if let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker) {
+                    return MatchResult::Match(b);
+                }
+            }
+            MatchResult::NoMatch
+        }
     }
 }
 
 /// Try to match a value against a list of patterns and return the first match.
 ///
 /// Returns (index, bindings) for the first matching pattern, or None.
-pub fn match_first(patterns: &[Expr], value: &Value) -> Option<(usize, Bindings)> {
+pub fn match_first(
+    patterns: &[Expr],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> Option<(usize, Bindings)> {
     for (i, pattern) in patterns.iter().enumerate() {
-        if let MatchResult::Match(bindings) = match_pattern(pattern, value) {
+        if let MatchResult::Match(bindings) = match_pattern(pattern, value, attr_checker) {
             return Some((i, bindings));
         }
     }
@@ -611,9 +864,13 @@ pub fn match_first(patterns: &[Expr], value: &Value) -> Option<(usize, Bindings)
 /// Apply a set of rules to a value.
 ///
 /// Returns the first matching rule's RHS with bindings substituted, or None.
-pub fn apply_rules(rules: &[(Expr, Expr)], value: &Value) -> Option<Value> {
+pub fn apply_rules(
+    rules: &[(Expr, Expr)],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> Option<Value> {
     for (lhs, rhs) in rules {
-        if let MatchResult::Match(bindings) = match_pattern(lhs, value) {
+        if let MatchResult::Match(bindings) = match_pattern(lhs, value, attr_checker) {
             return Some(substitute(rhs, &bindings));
         }
     }
@@ -669,13 +926,13 @@ mod tests {
         let pattern = Expr::Integer(Integer::from(42));
         let value = Value::Integer(Integer::from(42));
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::Match(_)
         ));
 
         let value = Value::Integer(Integer::from(43));
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::NoMatch
         ));
     }
@@ -687,7 +944,7 @@ mod tests {
         };
         let value = Value::Integer(Integer::from(42));
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::Match(_)
         ));
     }
@@ -699,7 +956,7 @@ mod tests {
             type_constraint: None,
         };
         let value = Value::Integer(Integer::from(42));
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
         } else {
             panic!("Expected match");
@@ -715,13 +972,13 @@ mod tests {
 
         let value = Value::Integer(Integer::from(42));
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::Match(_)
         ));
 
         let value = Value::Str("hello".to_string());
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::NoMatch
         ));
     }
@@ -742,7 +999,7 @@ mod tests {
             Value::Integer(Integer::from(1)),
             Value::Integer(Integer::from(2)),
         ]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("a"), Some(&Value::Integer(Integer::from(1))));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(2))));
         } else {
@@ -763,7 +1020,7 @@ mod tests {
             head: "f".to_string(),
             args: vec![Value::Integer(Integer::from(42))],
         };
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
         } else {
             panic!("Expected match");
@@ -784,7 +1041,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
             Value::Integer(Integer::from(3)),
         ]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(
                 bindings.get("a"),
                 Some(&Value::Sequence(vec![
@@ -816,7 +1073,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
             Value::Integer(Integer::from(3)),
         ]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(
                 bindings.get("a"),
                 Some(&Value::Sequence(vec![
@@ -853,7 +1110,7 @@ mod tests {
             Value::Integer(Integer::from(3)),
         ]);
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::Match(_)
         ));
     }
@@ -872,7 +1129,7 @@ mod tests {
             },
         ]);
         let value = Value::List(vec![Value::Integer(Integer::from(1))]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("a"), Some(&Value::Sequence(vec![])));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
         } else {
@@ -901,7 +1158,7 @@ mod tests {
             Value::Integer(Integer::from(1)),
             Value::Integer(Integer::from(2)),
         ]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("a"), Some(&Value::Sequence(vec![])));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
             assert_eq!(bindings.get("c"), Some(&Value::Integer(Integer::from(2))));
@@ -929,7 +1186,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
             Value::Integer(Integer::from(3)),
         ]);
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(
                 bindings.get("a"),
                 Some(&Value::Sequence(vec![
@@ -961,7 +1218,7 @@ mod tests {
         ]);
         let value = Value::List(vec![Value::Integer(Integer::from(1))]);
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::NoMatch
         ));
     }
@@ -973,10 +1230,11 @@ mod tests {
         // _. should match any value
         let pattern = Expr::OptionalBlank {
             type_constraint: None,
+            default_value: None,
         };
         let value = Value::Integer(Integer::from(42));
         assert!(matches!(
-            match_pattern(&pattern, &value),
+            match_pattern(&pattern, &value, None),
             MatchResult::Match(_)
         ));
     }
@@ -987,9 +1245,10 @@ mod tests {
         let pattern = Expr::OptionalNamedBlank {
             name: "x".to_string(),
             type_constraint: None,
+            default_value: None,
         };
         let value = Value::Integer(Integer::from(42));
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
         } else {
             panic!("Expected match");
@@ -1002,10 +1261,11 @@ mod tests {
         let pattern = Expr::OptionalNamedBlank {
             name: "x".to_string(),
             type_constraint: Some("Integer".to_string()),
+            default_value: None,
         };
         // Integer matches
         let val_int = Value::Integer(Integer::from(42));
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_int) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_int, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
         } else {
             panic!("Expected match");
@@ -1013,7 +1273,7 @@ mod tests {
         // String does NOT match (type constraint fails), but Optional still
         // succeeds by binding Null
         let val_str = Value::Str("hello".to_string());
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_str) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_str, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Null));
         } else {
             panic!("Expected optional match with Null default");
@@ -1028,6 +1288,7 @@ mod tests {
             args: vec![Expr::OptionalNamedBlank {
                 name: "x".to_string(),
                 type_constraint: None,
+                default_value: None,
             }],
         };
 
@@ -1036,7 +1297,7 @@ mod tests {
             head: "f".to_string(),
             args: vec![Value::Integer(Integer::from(42))],
         };
-        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val) {
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val, None) {
             assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
         } else {
             panic!("Expected match");
@@ -1054,7 +1315,7 @@ mod tests {
         };
         // 1 != 0 → match
         assert!(matches!(
-            match_pattern(&pat, &Value::Integer(Integer::from(1))),
+            match_pattern(&pat, &Value::Integer(Integer::from(1)), None),
             MatchResult::Match(_)
         ));
     }
@@ -1068,7 +1329,7 @@ mod tests {
         };
         // 0 → no match
         assert!(matches!(
-            match_pattern(&pat, &Value::Integer(Integer::from(0))),
+            match_pattern(&pat, &Value::Integer(Integer::from(0)), None),
             MatchResult::NoMatch
         ));
     }
@@ -1085,7 +1346,7 @@ mod tests {
         };
         // 42 would match x_, so Except[x_] should NOT match 42
         assert!(matches!(
-            match_pattern(&pat, &Value::Integer(Integer::from(42))),
+            match_pattern(&pat, &Value::Integer(Integer::from(42)), None),
             MatchResult::NoMatch
         ));
     }
@@ -1104,10 +1365,7 @@ mod tests {
             Value::Integer(Integer::from(0)),
             Value::Integer(Integer::from(0)),
         ]);
-        assert!(matches!(
-            match_pattern(&pat, &val),
-            MatchResult::Match(_)
-        ));
+        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::Match(_)));
     }
 
     #[test]
@@ -1125,10 +1383,7 @@ mod tests {
             Value::Integer(Integer::from(0)),
             Value::Integer(Integer::from(0)),
         ]);
-        assert!(matches!(
-            match_pattern(&pat, &val),
-            MatchResult::Match(_)
-        ));
+        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::Match(_)));
     }
 
     #[test]
@@ -1142,10 +1397,7 @@ mod tests {
             Value::Integer(Integer::from(1)),
             Value::Integer(Integer::from(2)),
         ]);
-        assert!(matches!(
-            match_pattern(&pat, &val),
-            MatchResult::NoMatch
-        ));
+        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::NoMatch));
     }
 
     #[test]
@@ -1156,7 +1408,7 @@ mod tests {
             args: vec![Expr::Integer(Integer::from(0))],
         };
         assert!(matches!(
-            match_pattern(&pat, &Value::Integer(Integer::from(0))),
+            match_pattern(&pat, &Value::Integer(Integer::from(0)), None),
             MatchResult::NoMatch
         ));
     }

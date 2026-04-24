@@ -161,7 +161,9 @@ fn img_from_list(data: &[Value]) -> Result<image::DynamicImage, EvalError> {
             for (r, row) in data.iter().enumerate() {
                 if let Value::List(items) = row {
                     for (c, item) in items.iter().enumerate() {
-                        if let Value::List(chs) = item && chs.len() >= 3 {
+                        if let Value::List(chs) = item
+                            && chs.len() >= 3
+                        {
                             let rv = norm_to_u8(clamp01(value_to_f64(&chs[0])?));
                             let gv = norm_to_u8(clamp01(value_to_f64(&chs[1])?));
                             let bv = norm_to_u8(clamp01(value_to_f64(&chs[2])?));
@@ -264,9 +266,13 @@ fn list_from_img(img: &image::DynamicImage) -> Value {
 /// Determine the WL ImageType string for a DynamicImage.
 fn image_type_string(img: &image::DynamicImage) -> &'static str {
     match img.color() {
-        image::ColorType::L8 | image::ColorType::La8 | image::ColorType::Rgb8
+        image::ColorType::L8
+        | image::ColorType::La8
+        | image::ColorType::Rgb8
         | image::ColorType::Rgba8 => "Byte",
-        image::ColorType::L16 | image::ColorType::La16 | image::ColorType::Rgb16
+        image::ColorType::L16
+        | image::ColorType::La16
+        | image::ColorType::Rgb16
         | image::ColorType::Rgba16 => "Bit16",
         image::ColorType::Rgb32F | image::ColorType::Rgba32F => "Real32",
         _ => "Byte",
@@ -292,8 +298,7 @@ fn gamma_correct(v: u8, gamma: f64) -> u8 {
 pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "Image requires 1 or 2 arguments: Image[data] or Image[data, \"type\"]"
-                .to_string(),
+            "Image requires 1 or 2 arguments: Image[data] or Image[data, \"type\"]".to_string(),
         ));
     }
 
@@ -409,7 +414,9 @@ pub fn builtin_image_resize(args: &[Value]) -> Result<Value, EvalError> {
         new_h,
         image::imageops::FilterType::Lanczos3,
     );
-    Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(resized))))
+    Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(
+        resized,
+    ))))
 }
 
 /// ImageRotate[image, angle]
@@ -529,8 +536,7 @@ pub fn builtin_image_adjust(args: &[Value]) -> Result<Value, EvalError> {
             }
             _ => {
                 return Err(EvalError::Error(
-                    "ImageAdjust: second argument must be a list {c, b, g} or omitted"
-                        .to_string(),
+                    "ImageAdjust: second argument must be a list {c, b, g} or omitted".to_string(),
                 ));
             }
         }
@@ -584,8 +590,7 @@ pub fn builtin_image_adjust(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_binarize(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "Binarize takes 1 or 2 arguments: Binarize[image] or Binarize[image, t]"
-                .to_string(),
+            "Binarize takes 1 or 2 arguments: Binarize[image] or Binarize[image, t]".to_string(),
         ));
     }
     let img = get_image_arg(args, 0)?;
@@ -807,12 +812,20 @@ pub fn builtin_image_convolve(args: &[Value]) -> Result<Value, EvalError> {
         // Use the optimised filter3x3 path.
         // Flatten to 9-element array in row-major order.
         let flat: [f32; 9] = [
-            kernel[0][0], kernel[0][1], kernel[0][2],
-            kernel[1][0], kernel[1][1], kernel[1][2],
-            kernel[2][0], kernel[2][1], kernel[2][2],
+            kernel[0][0],
+            kernel[0][1],
+            kernel[0][2],
+            kernel[1][0],
+            kernel[1][1],
+            kernel[1][2],
+            kernel[2][0],
+            kernel[2][1],
+            kernel[2][2],
         ];
         let result = image::imageops::filter3x3(img.as_ref(), &flat);
-        Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(result))))
+        Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(
+            result,
+        ))))
     } else {
         // Manual convolution for larger kernels.
         let rgb = img.to_rgba8();
@@ -1082,11 +1095,7 @@ mod tests {
     #[test]
     fn test_binarize_with_threshold() {
         let img = builtin_image(&[gray2x2()]).unwrap();
-        let bin = builtin_binarize(&[
-            img,
-            Value::Real(rug::Float::with_val(53, 0.25)),
-        ])
-        .unwrap();
+        let bin = builtin_binarize(&[img, Value::Real(rug::Float::with_val(53, 0.25))]).unwrap();
         let b = extract_image(&bin);
         // Pixel (0,0) is 0.0 < 0.25 → black
         assert_eq!(b.get_pixel(0, 0)[0], 0);
@@ -1099,11 +1108,7 @@ mod tests {
     #[test]
     fn test_color_convert_grayscale() {
         let img = builtin_image(&[rgb2x2()]).unwrap();
-        let conv = builtin_color_convert(&[
-            img,
-            Value::Str("Grayscale".to_string()),
-        ])
-        .unwrap();
+        let conv = builtin_color_convert(&[img, Value::Str("Grayscale".to_string())]).unwrap();
         let c = extract_image(&conv);
         assert_eq!(c.color(), image::ColorType::L8);
     }
@@ -1111,10 +1116,7 @@ mod tests {
     #[test]
     fn test_color_convert_unknown() {
         let img = builtin_image(&[rgb2x2()]).unwrap();
-        let result = builtin_color_convert(&[
-            img,
-            Value::Str("Lab".to_string()),
-        ]);
+        let result = builtin_color_convert(&[img, Value::Str("Lab".to_string())]);
         assert!(result.is_err());
     }
 
@@ -1123,11 +1125,8 @@ mod tests {
     #[test]
     fn test_gaussian_filter() {
         let img = builtin_image(&[rgb2x2()]).unwrap();
-        let result = builtin_gaussian_filter(&[
-            img,
-            Value::Real(rug::Float::with_val(53, 1.0)),
-        ])
-        .unwrap();
+        let result =
+            builtin_gaussian_filter(&[img, Value::Real(rug::Float::with_val(53, 1.0))]).unwrap();
         assert!(matches!(&result, Value::Image(_)));
     }
 
@@ -1164,19 +1163,55 @@ mod tests {
         // Use a 3×3 image so the center pixel (1,1) has all neighbors for accurate identity kernel test.
         let data = Value::List(vec![
             Value::List(vec![
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 1.0)), Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 0.0))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 1.0)), Value::Real(rug::Float::with_val(53, 0.0))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 1.0))]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                ]),
             ]),
             Value::List(vec![
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.5)), Value::Real(rug::Float::with_val(53, 0.5)), Value::Real(rug::Float::with_val(53, 0.5))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 1.0)), Value::Real(rug::Float::with_val(53, 0.0))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.25)), Value::Real(rug::Float::with_val(53, 0.5)), Value::Real(rug::Float::with_val(53, 0.75))]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.25)),
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                    Value::Real(rug::Float::with_val(53, 0.75)),
+                ]),
             ]),
             Value::List(vec![
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 0.0))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 1.0)), Value::Real(rug::Float::with_val(53, 0.0)), Value::Real(rug::Float::with_val(53, 1.0))]),
-                Value::List(vec![Value::Real(rug::Float::with_val(53, 0.5)), Value::Real(rug::Float::with_val(53, 0.5)), Value::Real(rug::Float::with_val(53, 0.5))]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                    Value::Real(rug::Float::with_val(53, 0.0)),
+                    Value::Real(rug::Float::with_val(53, 1.0)),
+                ]),
+                Value::List(vec![
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                    Value::Real(rug::Float::with_val(53, 0.5)),
+                ]),
             ]),
         ]);
         let img = builtin_image(&[data]).unwrap();
@@ -1241,7 +1276,13 @@ mod tests {
     #[test]
     fn test_binarize_wrong_arity() {
         assert!(builtin_binarize(&[]).is_err());
-        assert!(builtin_binarize(&[Value::Integer(rug::Integer::from(1)), Value::Null, Value::Null])
-            .is_err());
+        assert!(
+            builtin_binarize(&[
+                Value::Integer(rug::Integer::from(1)),
+                Value::Null,
+                Value::Null
+            ])
+            .is_err()
+        );
     }
 }

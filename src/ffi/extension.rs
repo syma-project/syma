@@ -212,7 +212,10 @@ fn ext_builtin_stub(name: &str) -> Value {
     //
     // We register under `name` as a `Value::Builtin(name, _EXT_DISPATCH)`.
     // `_EXT_DISPATCH` is an alias for the generic trampoline below.
-    Value::Builtin(name.to_string(), crate::value::BuiltinFn::Pure(_ext_dispatch))
+    Value::Builtin(
+        name.to_string(),
+        crate::value::BuiltinFn::Pure(_ext_dispatch),
+    )
 }
 
 fn _ext_dispatch(args: &[Value]) -> Result<Value, EvalError> {

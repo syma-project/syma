@@ -144,8 +144,7 @@ pub fn builtin_read_string(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_import_string(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "ImportString requires exactly 2 arguments: ImportString[data, \"format\"]"
-                .to_string(),
+            "ImportString requires exactly 2 arguments: ImportString[data, \"format\"]".to_string(),
         ));
     }
     let data = match &args[0] {
@@ -180,8 +179,7 @@ pub fn builtin_import_string(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_export_string(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "ExportString requires exactly 2 arguments: ExportString[data, \"format\"]"
-                .to_string(),
+            "ExportString requires exactly 2 arguments: ExportString[data, \"format\"]".to_string(),
         ));
     }
     let data = &args[0];
@@ -252,10 +250,8 @@ mod tests {
         use std::fs;
         let path = "/tmp/test_syma_io_roundtrip.txt";
         let data = "Hello, Syma!";
-        let wr = builtin_write_string(&[
-            Value::Str(path.to_string()),
-            Value::Str(data.to_string()),
-        ]);
+        let wr =
+            builtin_write_string(&[Value::Str(path.to_string()), Value::Str(data.to_string())]);
         assert!(wr.is_ok());
         let rd = builtin_read_string(&[Value::Str(path.to_string())]).unwrap();
         assert_eq!(rd, Value::Str(data.to_string()));
@@ -299,8 +295,10 @@ mod tests {
         use std::fs;
         let path = "/tmp/test_syma_text_rt.txt";
         let data_str = "Hello world";
-        let export_result =
-            builtin_export(&[Value::Str(path.to_string()), Value::Str(data_str.to_string())]);
+        let export_result = builtin_export(&[
+            Value::Str(path.to_string()),
+            Value::Str(data_str.to_string()),
+        ]);
         assert!(export_result.is_ok());
         let import_result = builtin_import(&[Value::Str(path.to_string())]).unwrap();
         assert_eq!(import_result, Value::Str(data_str.to_string()));
@@ -321,8 +319,16 @@ Cell[BoxData[RowBox[{"x", "^", "2"}]], "Input"]
         let val = result.unwrap();
         match &val {
             Value::Str(s) => {
-                assert!(s.contains("1+2"), "Expected code to contain '1+2', got: {}", s);
-                assert!(s.contains("x^2"), "Expected code to contain 'x^2', got: {}", s);
+                assert!(
+                    s.contains("1+2"),
+                    "Expected code to contain '1+2', got: {}",
+                    s
+                );
+                assert!(
+                    s.contains("x^2"),
+                    "Expected code to contain 'x^2', got: {}",
+                    s
+                );
             }
             _ => panic!("Expected Value::Str from NB import, got {:?}", val),
         }
@@ -338,7 +344,11 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
 }]"#;
         fs::write(path, nb_content).ok();
         let result = builtin_import(&[Value::Str(path.to_string())]);
-        assert!(result.is_ok(), "NB import (no Input cells) failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "NB import (no Input cells) failed: {:?}",
+            result
+        );
         let val = result.unwrap();
         assert_eq!(val, Value::Str(String::new()));
         fs::remove_file(path).ok();
@@ -362,15 +372,25 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     #[test]
     fn test_import_csv_basic() {
         let csv = "a,b,c\n1,2,3\nx,y,z";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::CSV, csv,
-        ).unwrap();
+        let result = super::formats::format_import_text(&super::formats::Format::CSV, csv).unwrap();
         assert_eq!(
             result,
             Value::List(vec![
-                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
-                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
-                Value::List(vec![Value::Str("x".into()), Value::Str("y".into()), Value::Str("z".into())]),
+                Value::List(vec![
+                    Value::Str("a".into()),
+                    Value::Str("b".into()),
+                    Value::Str("c".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("1".into()),
+                    Value::Str("2".into()),
+                    Value::Str("3".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("x".into()),
+                    Value::Str("y".into()),
+                    Value::Str("z".into())
+                ]),
             ])
         );
     }
@@ -378,18 +398,14 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     #[test]
     fn test_import_csv_quoted() {
         let csv = r#""hello, world",foo,"a""b""#;
-        let result = super::formats::format_import_text(
-            &super::formats::Format::CSV, csv,
-        ).unwrap();
+        let result = super::formats::format_import_text(&super::formats::Format::CSV, csv).unwrap();
         assert_eq!(
             result,
-            Value::List(vec![
-                Value::List(vec![
-                    Value::Str("hello, world".into()),
-                    Value::Str("foo".into()),
-                    Value::Str("a\"b".into()),
-                ]),
-            ])
+            Value::List(vec![Value::List(vec![
+                Value::Str("hello, world".into()),
+                Value::Str("foo".into()),
+                Value::Str("a\"b".into()),
+            ]),])
         );
     }
 
@@ -410,14 +426,20 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     #[test]
     fn test_import_tsv() {
         let tsv = "a\tb\tc\n1\t2\t3";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::TSV, tsv,
-        ).unwrap();
+        let result = super::formats::format_import_text(&super::formats::Format::TSV, tsv).unwrap();
         assert_eq!(
             result,
             Value::List(vec![
-                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
-                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+                Value::List(vec![
+                    Value::Str("a".into()),
+                    Value::Str("b".into()),
+                    Value::Str("c".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("1".into()),
+                    Value::Str("2".into()),
+                    Value::Str("3".into())
+                ]),
             ])
         );
     }
@@ -426,9 +448,10 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     fn test_export_tsv_roundtrip() {
         use std::fs;
         let path = "/tmp/test_syma_tsv_rt.tsv";
-        let data = Value::List(vec![
-            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]),
-        ]);
+        let data = Value::List(vec![Value::List(vec![
+            Value::Str("a".into()),
+            Value::Str("b".into()),
+        ])]);
         builtin_export(&[Value::Str(path.to_string()), data.clone()]).unwrap();
         let imported = builtin_import(&[Value::Str(path.to_string())]).unwrap();
         assert_eq!(imported, data);
@@ -438,15 +461,26 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     #[test]
     fn test_import_table() {
         let table = "1 2 3\n4 5 6\n\n7 8 9";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::Table, table,
-        ).unwrap();
+        let result =
+            super::formats::format_import_text(&super::formats::Format::Table, table).unwrap();
         assert_eq!(
             result,
             Value::List(vec![
-                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
-                Value::List(vec![Value::Str("4".into()), Value::Str("5".into()), Value::Str("6".into())]),
-                Value::List(vec![Value::Str("7".into()), Value::Str("8".into()), Value::Str("9".into())]),
+                Value::List(vec![
+                    Value::Str("1".into()),
+                    Value::Str("2".into()),
+                    Value::Str("3".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("4".into()),
+                    Value::Str("5".into()),
+                    Value::Str("6".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("7".into()),
+                    Value::Str("8".into()),
+                    Value::Str("9".into())
+                ]),
             ])
         );
     }
@@ -455,39 +489,47 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     fn test_import_html_strips_tags() {
         // No space between block elements — simple tag stripper removes tags only
         let html = "<p>Hello</p><div>World</div>";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::HTML, html,
-        ).unwrap();
+        let result =
+            super::formats::format_import_text(&super::formats::Format::HTML, html).unwrap();
         assert_eq!(result, Value::Str("HelloWorld".into()));
     }
 
     #[test]
     fn test_import_html_entities() {
         let html = "a &amp; b &lt; c &gt; d &quot; e";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::HTML, html,
-        ).unwrap();
+        let result =
+            super::formats::format_import_text(&super::formats::Format::HTML, html).unwrap();
         assert_eq!(result, Value::Str("a & b < c > d \" e".into()));
     }
 
     #[test]
     fn test_import_string_csv() {
-        let result = builtin_import_string(&[
-            Value::Str("a,b,c\n1,2,3".into()),
-            Value::Str("CSV".into()),
-        ]).unwrap();
+        let result =
+            builtin_import_string(&[Value::Str("a,b,c\n1,2,3".into()), Value::Str("CSV".into())])
+                .unwrap();
         assert_eq!(
             result,
             Value::List(vec![
-                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
-                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+                Value::List(vec![
+                    Value::Str("a".into()),
+                    Value::Str("b".into()),
+                    Value::Str("c".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("1".into()),
+                    Value::Str("2".into()),
+                    Value::Str("3".into())
+                ]),
             ])
         );
     }
 
     #[test]
     fn test_export_string_json() {
-        let data = Value::List(vec![Value::Integer(rug::Integer::from(1)), Value::Integer(rug::Integer::from(2))]);
+        let data = Value::List(vec![
+            Value::Integer(rug::Integer::from(1)),
+            Value::Integer(rug::Integer::from(2)),
+        ]);
         let result = builtin_export_string(&[data, Value::Str("JSON".into())]).unwrap();
         match result {
             Value::Str(s) => assert!(s.contains("1") && s.contains("2"), "JSON string: {}", s),
@@ -518,13 +560,25 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let path = "/tmp/test_syma_explicit.xyz";
         fs::write(path, "a,b,c\n1,2,3").ok();
         let result = builtin_import(&[Value::Str(path.to_string()), Value::Str("CSV".into())]);
-        assert!(result.is_ok(), "Explicit format import failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Explicit format import failed: {:?}",
+            result
+        );
         let val = result.unwrap();
         assert_eq!(
             val,
             Value::List(vec![
-                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
-                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+                Value::List(vec![
+                    Value::Str("a".into()),
+                    Value::Str("b".into()),
+                    Value::Str("c".into())
+                ]),
+                Value::List(vec![
+                    Value::Str("1".into()),
+                    Value::Str("2".into()),
+                    Value::Str("3".into())
+                ]),
             ])
         );
         fs::remove_file(path).ok();
@@ -538,10 +592,7 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
 
     #[test]
     fn test_import_string_binary_rejected() {
-        let result = builtin_import_string(&[
-            Value::Str("fake".into()),
-            Value::Str("PNG".into()),
-        ]);
+        let result = builtin_import_string(&[Value::Str("fake".into()), Value::Str("PNG".into())]);
         assert!(result.is_err(), "ImportString should reject PNG");
     }
 
@@ -557,9 +608,7 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
     #[test]
     fn test_import_csv_multiline_field() {
         let csv = "a,\"b\nc\",d\ne,f,g";
-        let result = super::formats::format_import_text(
-            &super::formats::Format::CSV, csv,
-        ).unwrap();
+        let result = super::formats::format_import_text(&super::formats::Format::CSV, csv).unwrap();
         assert_eq!(
             result,
             Value::List(vec![

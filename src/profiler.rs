@@ -116,7 +116,17 @@ mod tests {
         Profiler::count_call("fn_a");
         Profiler::count_call("fn_a");
         Profiler::count_call("fn_b");
-        assert_eq!(Profiler::get_or_create("fn_a").call_count.load(Ordering::Relaxed), 2);
-        assert_eq!(Profiler::get_or_create("fn_b").call_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            Profiler::get_or_create("fn_a")
+                .call_count
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            Profiler::get_or_create("fn_b")
+                .call_count
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 }

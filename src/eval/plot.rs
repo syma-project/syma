@@ -146,12 +146,7 @@ pub(super) fn eval_log_linear_plot(args: &[Expr], env: &Env) -> Result<Value, Ev
     log_plot_impl(args, env, true, false)
 }
 
-fn log_plot_impl(
-    args: &[Expr],
-    env: &Env,
-    log_x: bool,
-    log_y: bool,
-) -> Result<Value, EvalError> {
+fn log_plot_impl(args: &[Expr], env: &Env, log_x: bool, log_y: bool) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "Log*Plot requires at least 2 arguments: f, {x, xmin, xmax}".to_string(),
@@ -189,7 +184,11 @@ fn log_plot_impl(
         } else {
             coord_min + step * i as f64
         };
-        let x_real = if log_x { 10.0_f64.powf(x_coord) } else { x_coord };
+        let x_real = if log_x {
+            10.0_f64.powf(x_coord)
+        } else {
+            x_coord
+        };
 
         let child_env = env.child();
         child_env.set(
@@ -286,7 +285,10 @@ pub(super) fn eval_parametric_plot(args: &[Expr], env: &Env) -> Result<Value, Ev
             .ok()
             .and_then(|v| to_f64_val(&v));
 
-        if let (Some(x), Some(y)) = (x_res, y_res) && x.is_finite() && y.is_finite() {
+        if let (Some(x), Some(y)) = (x_res, y_res)
+            && x.is_finite()
+            && y.is_finite()
+        {
             points.push(Value::List(vec![make_real(x), make_real(y)]));
         }
     }
@@ -376,10 +378,7 @@ pub(super) fn eval_discrete_plot(args: &[Expr], env: &Env) -> Result<Value, Eval
 
     for n in n_min..=n_max {
         let child_env = env.child();
-        child_env.set(
-            var_name.clone(),
-            Value::Integer(Integer::from(n)),
-        );
+        child_env.set(var_name.clone(), Value::Integer(Integer::from(n)));
 
         match super::eval(expr, &child_env) {
             Ok(val) => {

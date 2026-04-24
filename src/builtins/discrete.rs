@@ -75,9 +75,9 @@ pub fn builtin_factorial_power(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     let n = match &args[1] {
-        Value::Integer(n) if !n.is_negative() => n.to_usize().ok_or_else(|| {
-            EvalError::Error("FactorialPower: n too large".to_string())
-        })?,
+        Value::Integer(n) if !n.is_negative() => n
+            .to_usize()
+            .ok_or_else(|| EvalError::Error("FactorialPower: n too large".to_string()))?,
         _ => {
             return Ok(Value::Call {
                 head: "FactorialPower".to_string(),
@@ -92,9 +92,9 @@ pub fn builtin_factorial_power(args: &[Value]) -> Result<Value, EvalError> {
 
     let h: i64 = if args.len() == 3 {
         match &args[2] {
-            Value::Integer(h) => h.to_i64().ok_or_else(|| {
-                EvalError::Error("FactorialPower: h too large".to_string())
-            })?,
+            Value::Integer(h) => h
+                .to_i64()
+                .ok_or_else(|| EvalError::Error("FactorialPower: h too large".to_string()))?,
             _ => {
                 return Ok(Value::Call {
                     head: "FactorialPower".to_string(),
@@ -142,9 +142,9 @@ pub fn builtin_bernoulli_b(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let n = match &args[0] {
-        Value::Integer(n) if !n.is_negative() => n.to_usize().ok_or_else(|| {
-            EvalError::Error("BernoulliB: n too large".to_string())
-        })?,
+        Value::Integer(n) if !n.is_negative() => n
+            .to_usize()
+            .ok_or_else(|| EvalError::Error("BernoulliB: n too large".to_string()))?,
         _ => {
             return Ok(Value::Call {
                 head: "BernoulliB".to_string(),
@@ -171,7 +171,8 @@ pub fn builtin_bernoulli_b(args: &[Value]) -> Result<Value, EvalError> {
             // B_n = a[0] where a[m] = 1/(m+1) and a[j-1] = j * (a[j-1] - a[j])
             let mut a = vec![Float::with_val(DEFAULT_PRECISION, 0.0); n + 1];
             for m in 0..=n {
-                a[m] = Float::with_val(DEFAULT_PRECISION, 1.0) / Float::with_val(DEFAULT_PRECISION, (m + 1) as f64);
+                a[m] = Float::with_val(DEFAULT_PRECISION, 1.0)
+                    / Float::with_val(DEFAULT_PRECISION, (m + 1) as f64);
                 for j in (1..=m).rev() {
                     let diff = Float::with_val(DEFAULT_PRECISION, &a[j - 1] - &a[j]);
                     a[j - 1] = Float::with_val(DEFAULT_PRECISION, j as f64) * diff;
@@ -191,8 +192,7 @@ pub fn builtin_bernoulli_b(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(EvalError::Error(
-            "LinearRecurrence requires 3 arguments: LinearRecurrence[kernel, init, n]"
-                .to_string(),
+            "LinearRecurrence requires 3 arguments: LinearRecurrence[kernel, init, n]".to_string(),
         ));
     }
 
@@ -217,9 +217,9 @@ pub fn builtin_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     let n = match &args[2] {
-        Value::Integer(n) if n.is_positive() => n.to_usize().ok_or_else(|| {
-            EvalError::Error("LinearRecurrence: n too large".to_string())
-        })?,
+        Value::Integer(n) if n.is_positive() => n
+            .to_usize()
+            .ok_or_else(|| EvalError::Error("LinearRecurrence: n too large".to_string()))?,
         _ => {
             return Ok(Value::Call {
                 head: "LinearRecurrence".to_string(),
@@ -251,10 +251,8 @@ pub fn builtin_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
         let idx = seq.len();
         let mut next = Value::Integer(Integer::from(0));
         for j in 0..k {
-            let term = crate::builtins::arithmetic::mul_values_public(
-                &kernel[j],
-                &seq[idx - k + j],
-            )?;
+            let term =
+                crate::builtins::arithmetic::mul_values_public(&kernel[j], &seq[idx - k + j])?;
             next = crate::builtins::arithmetic::add_values_public(&next, &term)?;
         }
         seq.push(next);
@@ -336,7 +334,11 @@ mod tests {
 
     #[test]
     fn test_discrete_shift_symbolic() {
-        let result = builtin_discrete_shift(&[Value::Symbol("f".to_string()), Value::Symbol("n".to_string())]).unwrap();
+        let result = builtin_discrete_shift(&[
+            Value::Symbol("f".to_string()),
+            Value::Symbol("n".to_string()),
+        ])
+        .unwrap();
         match result {
             Value::Call { head, .. } => assert_eq!(head, "DiscreteShift"),
             _ => panic!("Expected symbolic Call"),
@@ -352,7 +354,11 @@ mod tests {
 
     #[test]
     fn test_discrete_ratio_symbolic() {
-        let result = builtin_discrete_ratio(&[Value::Symbol("f".to_string()), Value::Symbol("n".to_string())]).unwrap();
+        let result = builtin_discrete_ratio(&[
+            Value::Symbol("f".to_string()),
+            Value::Symbol("n".to_string()),
+        ])
+        .unwrap();
         match result {
             Value::Call { head, .. } => assert_eq!(head, "DiscreteRatio"),
             _ => panic!("Expected symbolic Call"),
@@ -363,7 +369,10 @@ mod tests {
 
     #[test]
     fn test_factorial_power_basic() {
-        assert_eq!(builtin_factorial_power(&[int(10), int(3)]).unwrap(), int(720));
+        assert_eq!(
+            builtin_factorial_power(&[int(10), int(3)]).unwrap(),
+            int(720)
+        );
     }
 
     #[test]
@@ -374,7 +383,10 @@ mod tests {
     #[test]
     fn test_factorial_power_step() {
         // 10 * 8 * 6 = 480
-        assert_eq!(builtin_factorial_power(&[int(10), int(3), int(2)]).unwrap(), int(480));
+        assert_eq!(
+            builtin_factorial_power(&[int(10), int(3), int(2)]).unwrap(),
+            int(480)
+        );
     }
 
     #[test]
@@ -442,14 +454,24 @@ mod tests {
     fn test_linear_recurrence_fib() {
         // Fibonacci: kernel={1,1}, init={0,1}
         assert_eq!(
-            builtin_linear_recurrence(&[list(vec![int(1), int(1)]), list(vec![int(0), int(1)]), int(6)]).unwrap(),
+            builtin_linear_recurrence(&[
+                list(vec![int(1), int(1)]),
+                list(vec![int(0), int(1)]),
+                int(6)
+            ])
+            .unwrap(),
             int(5)
         );
     }
 
     #[test]
     fn test_linear_recurrence_within_init() {
-        let result = builtin_linear_recurrence(&[list(vec![int(1), int(1)]), list(vec![int(0), int(1)]), int(1)]).unwrap();
+        let result = builtin_linear_recurrence(&[
+            list(vec![int(1), int(1)]),
+            list(vec![int(0), int(1)]),
+            int(1),
+        ])
+        .unwrap();
         assert_eq!(result, int(0));
     }
 
@@ -464,7 +486,12 @@ mod tests {
 
     #[test]
     fn test_linear_recurrence_symbolic() {
-        let result = builtin_linear_recurrence(&[Value::Symbol("x".to_string()), list(vec![int(1)]), int(3)]).unwrap();
+        let result = builtin_linear_recurrence(&[
+            Value::Symbol("x".to_string()),
+            list(vec![int(1)]),
+            int(3),
+        ])
+        .unwrap();
         match result {
             Value::Call { head, .. } => assert_eq!(head, "LinearRecurrence"),
             _ => panic!("Expected symbolic Call"),

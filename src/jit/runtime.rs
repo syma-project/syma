@@ -5,8 +5,8 @@
 /// operations (env lookup, function calls, list construction, etc.).
 use std::collections::HashMap;
 
-use crate::bytecode::vm::Truthy;
 use crate::bytecode::CompiledBytecode;
+use crate::bytecode::vm::Truthy;
 use crate::env::Env;
 use crate::eval;
 use crate::value::Value;
@@ -40,12 +40,7 @@ unsafe impl Sync for JitContext {}
 
 impl JitContext {
     /// Build a context from bytecode + runtime args.
-    pub fn new(
-        bc: &CompiledBytecode,
-        args: &[Value],
-        env: &Env,
-        regs: &mut [Value],
-    ) -> Self {
+    pub fn new(bc: &CompiledBytecode, args: &[Value], env: &Env, regs: &mut [Value]) -> Self {
         Self {
             regs: regs.as_mut_ptr(),
             nregs: regs.len() as u32,
@@ -95,21 +90,27 @@ pub extern "C" fn jit_load_arg(ctx: &mut JitContext, dst: u32, idx: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_load_true(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
-        unsafe { *ctx.regs.add(dst as usize) = Value::Bool(true); }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Bool(true);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_load_false(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
-        unsafe { *ctx.regs.add(dst as usize) = Value::Bool(false); }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Bool(false);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_load_null(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
-        unsafe { *ctx.regs.add(dst as usize) = Value::Null; }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Null;
+        }
     }
 }
 
@@ -130,36 +131,53 @@ pub extern "C" fn jit_neg(ctx: &mut JitContext, dst: u32, src: u32) {
     let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
     let env = unsafe { &*ctx.env };
     if let Some(func) = env.get("Minus")
-        && let Ok(result) = eval::apply_function(&func, &[val], env) {
-            unsafe { *ctx.regs.add(dst as usize) = result; }
-            return;
+        && let Ok(result) = eval::apply_function(&func, &[val], env)
+    {
+        unsafe {
+            *ctx.regs.add(dst as usize) = result;
+        }
+        return;
     }
-    unsafe { *ctx.regs.add(dst as usize) = Value::Null; }
+    unsafe {
+        *ctx.regs.add(dst as usize) = Value::Null;
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_not(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) < ctx.nregs as usize && (src as usize) < ctx.nregs as usize {
         let val = unsafe { &*ctx.regs.add(src as usize) };
-        unsafe { *ctx.regs.add(dst as usize) = Value::Bool(!val.is_truthy()); }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Bool(!val.is_truthy());
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_and(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
-    if (dst as usize) < ctx.nregs as usize && (a as usize) < ctx.nregs as usize && (b as usize) < ctx.nregs as usize {
+    if (dst as usize) < ctx.nregs as usize
+        && (a as usize) < ctx.nregs as usize
+        && (b as usize) < ctx.nregs as usize
+    {
         let va = unsafe { &*ctx.regs.add(a as usize) };
         let vb = unsafe { &*ctx.regs.add(b as usize) };
-        unsafe { *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() && vb.is_truthy()); }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() && vb.is_truthy());
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_or(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
-    if (dst as usize) < ctx.nregs as usize && (a as usize) < ctx.nregs as usize && (b as usize) < ctx.nregs as usize {
+    if (dst as usize) < ctx.nregs as usize
+        && (a as usize) < ctx.nregs as usize
+        && (b as usize) < ctx.nregs as usize
+    {
         let va = unsafe { &*ctx.regs.add(a as usize) };
         let vb = unsafe { &*ctx.regs.add(b as usize) };
-        unsafe { *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() || vb.is_truthy()); }
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() || vb.is_truthy());
+        }
     }
 }
 
@@ -174,8 +192,58 @@ pub extern "C" fn jit_is_truthy(ctx: &mut JitContext, reg: u32) -> u8 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn jit_sub(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
+    if (dst as usize) >= ctx.nregs as usize
+        || (a as usize) >= ctx.nregs as usize
+        || (b as usize) >= ctx.nregs as usize
+    {
+        return;
+    }
+    let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
+    let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
+    let env = unsafe { &*ctx.env };
+    // Sub(a, b) = Plus[a, Minus[b]]
+    if let Some(minus_fn) = env.get("Minus")
+        && let Ok(neg_b) = eval::apply_function(&minus_fn, &[vb], env)
+        && let Some(plus_fn) = env.get("Plus")
+        && let Ok(result) = eval::apply_function(&plus_fn, &[va, neg_b], env)
+    {
+        unsafe {
+            *ctx.regs.add(dst as usize) = result;
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_div(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
+    if (dst as usize) >= ctx.nregs as usize
+        || (a as usize) >= ctx.nregs as usize
+        || (b as usize) >= ctx.nregs as usize
+    {
+        return;
+    }
+    let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
+    let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
+    let env = unsafe { &*ctx.env };
+    // Div(a, b) = Times[a, Power[b, -1]]
+    let minus_one = Value::Integer((-1).into());
+    if let Some(power_fn) = env.get("Power")
+        && let Ok(inv_b) = eval::apply_function(&power_fn, &[vb, minus_one], env)
+        && let Some(times_fn) = env.get("Times")
+        && let Ok(result) = eval::apply_function(&times_fn, &[va, inv_b], env)
+    {
+        unsafe {
+            *ctx.regs.add(dst as usize) = result;
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: u32) {
-    if (dst as usize) >= ctx.nregs as usize || (a as usize) >= ctx.nregs as usize || (b as usize) >= ctx.nregs as usize {
+    if (dst as usize) >= ctx.nregs as usize
+        || (a as usize) >= ctx.nregs as usize
+        || (b as usize) >= ctx.nregs as usize
+    {
         return;
     }
     let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
@@ -194,8 +262,11 @@ pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: 
         _ => return,
     };
     if let Some(func) = env.get(name)
-        && let Ok(result) = eval::apply_function(&func, &[va, vb], env) {
-            unsafe { *ctx.regs.add(dst as usize) = result; }
+        && let Ok(result) = eval::apply_function(&func, &[va, vb], env)
+    {
+        unsafe {
+            *ctx.regs.add(dst as usize) = result;
+        }
     }
 }
 
@@ -210,7 +281,9 @@ pub extern "C" fn jit_make_list(ctx: &mut JitContext, dst: u32, n: u32) {
             items.push(unsafe { (*ctx.regs.add((dst + i) as usize)).clone() });
         }
     }
-    unsafe { *ctx.regs.add(dst as usize) = Value::List(items); }
+    unsafe {
+        *ctx.regs.add(dst as usize) = Value::List(items);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -234,7 +307,9 @@ pub extern "C" fn jit_make_assoc(ctx: &mut JitContext, dst: u32, n: u32) {
             map.insert(k, val);
         }
     }
-    unsafe { *ctx.regs.add(dst as usize) = Value::Assoc(map); }
+    unsafe {
+        *ctx.regs.add(dst as usize) = Value::Assoc(map);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -251,7 +326,9 @@ pub extern "C" fn jit_make_seq(ctx: &mut JitContext, dst: u32, start: u32) {
     for i in 0..count {
         items.push(unsafe { (*ctx.args.add((start + i) as usize)).clone() });
     }
-    unsafe { *ctx.regs.add(dst as usize) = Value::List(items); }
+    unsafe {
+        *ctx.regs.add(dst as usize) = Value::List(items);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -263,7 +340,9 @@ pub extern "C" fn jit_load_sym(ctx: &mut JitContext, dst: u32, idx: u32) {
     if let Value::Str(name) = name_const {
         let env = unsafe { &*ctx.env };
         if let Some(val) = env.get(name) {
-            unsafe { *ctx.regs.add(dst as usize) = val.clone(); }
+            unsafe {
+                *ctx.regs.add(dst as usize) = val.clone();
+            }
         }
     }
 }

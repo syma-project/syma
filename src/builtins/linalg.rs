@@ -30,6 +30,11 @@ fn to_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Integer(n) => Some(n.to_f64()),
         Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => {
+            let num = r.numer().to_f64();
+            let den = r.denom().to_f64();
+            if den != 0.0 { Some(num / den) } else { None }
+        }
         _ => None,
     }
 }
@@ -791,9 +796,9 @@ pub fn builtin_matrix_power(args: &[Value]) -> Result<Value, EvalError> {
         )));
     }
     let exp = match &args[1] {
-        Value::Integer(i) => i.to_i64().ok_or_else(|| {
-            EvalError::Error("MatrixPower: exponent out of range".to_string())
-        })?,
+        Value::Integer(i) => i
+            .to_i64()
+            .ok_or_else(|| EvalError::Error("MatrixPower: exponent out of range".to_string()))?,
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Integer".to_string(),
@@ -851,7 +856,11 @@ pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
     let a = matrix_to_f64(m)?;
     let (mut eigenvalues, _) = qr_iteration(&a);
     // Sort by descending absolute value (Wolfram convention)
-    eigenvalues.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    eigenvalues.sort_by(|a, b| {
+        b.abs()
+            .partial_cmp(&a.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(Value::List(eigenvalues.into_iter().map(real).collect()))
 }
 
@@ -956,24 +965,36 @@ pub fn builtin_zero_matrix(args: &[Value]) -> Result<Value, EvalError> {
     let (nrows, ncols) = match &args[0] {
         Value::Integer(i) => {
             let n = i.to_usize().ok_or_else(|| {
-                EvalError::Error(
-                    "ZeroMatrix: argument must be a non-negative integer".to_string(),
-                )
+                EvalError::Error("ZeroMatrix: argument must be a non-negative integer".to_string())
             })?;
             (n, n)
         }
         Value::List(dims) if dims.len() == 2 => {
             let r = match &dims[0] {
                 Value::Integer(i) => i.to_usize().ok_or_else(|| {
-                    EvalError::Error("ZeroMatrix: dimensions must be non-negative integers".to_string())
+                    EvalError::Error(
+                        "ZeroMatrix: dimensions must be non-negative integers".to_string(),
+                    )
                 })?,
-                _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: dims[0].type_name().into() }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Integer".into(),
+                        got: dims[0].type_name().into(),
+                    });
+                }
             };
             let c = match &dims[1] {
                 Value::Integer(i) => i.to_usize().ok_or_else(|| {
-                    EvalError::Error("ZeroMatrix: dimensions must be non-negative integers".to_string())
+                    EvalError::Error(
+                        "ZeroMatrix: dimensions must be non-negative integers".to_string(),
+                    )
                 })?,
-                _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: dims[1].type_name().into() }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Integer".into(),
+                        got: dims[1].type_name().into(),
+                    });
+                }
             };
             (r, c)
         }
@@ -1022,13 +1043,23 @@ pub fn builtin_unit_vector(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(i) => i.to_usize().ok_or_else(|| {
             EvalError::Error("UnitVector: first argument must be a positive integer".to_string())
         })?,
-        _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: args[0].type_name().into() }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".into(),
+                got: args[0].type_name().into(),
+            });
+        }
     };
     let k = match &args[1] {
         Value::Integer(i) => i.to_usize().ok_or_else(|| {
             EvalError::Error("UnitVector: second argument must be a positive integer".to_string())
         })?,
-        _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: args[1].type_name().into() }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".into(),
+                got: args[1].type_name().into(),
+            });
+        }
     };
     if k == 0 || k > n {
         return Err(EvalError::Error(format!(
@@ -1042,6 +1073,478 @@ pub fn builtin_unit_vector(args: &[Value]) -> Result<Value, EvalError> {
         .map(|i| if i == k { one.clone() } else { zero.clone() })
         .collect();
     Ok(Value::List(v))
+}
+
+/// RowReduce[m] — reduced row echelon form via Gaussian elimination.
+/// Returns the RREF of matrix m.
+pub fn builtin_row_reduce(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "RowReduce requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("RowReduce: argument must be a matrix".to_string()))?;
+    let a = matrix_to_f64(m)?;
+    let (rref, _) = rref_f64(&a, rows, cols);
+    // Convert back to Value
+    let result: Vec<Value> = rref
+        .into_iter()
+        .map(|row| Value::List(row.into_iter().map(real).collect()))
+        .collect();
+    Ok(Value::List(result))
+}
+
+/// MatrixRank[m] — rank of a matrix (number of linearly independent rows/columns).
+/// Computed via Gaussian elimination to RREF.
+pub fn builtin_matrix_rank(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "MatrixRank requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(int(0));
+    }
+    let dims = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("MatrixRank: argument must be a matrix".to_string()))?;
+    let a = matrix_to_f64(m)?;
+    let (_, rank) = rref_f64(&a, dims.0, dims.1);
+    Ok(int(rank as i64))
+}
+
+/// Helper: compute RREF and rank for an f64 matrix.
+fn rref_f64(a: &[Vec<f64>], rows: usize, cols: usize) -> (Vec<Vec<f64>>, usize) {
+    let mut m = a.to_vec();
+    let mut rank = 0;
+
+    for col in 0..cols {
+        // Find pivot (largest absolute value at or below current row)
+        let mut pivot_row = None;
+        let mut max_val = 0.0f64;
+        for r in rank..rows {
+            let v = m[r][col].abs();
+            if v > max_val {
+                max_val = v;
+                pivot_row = Some(r);
+            }
+        }
+
+        if let Some(pr) = pivot_row {
+            if max_val < 1e-14 {
+                continue;
+            }
+            m.swap(rank, pr);
+
+            // Scale pivot row to make pivot = 1
+            let pivot = m[rank][col];
+            for j in col..cols {
+                m[rank][j] /= pivot;
+            }
+
+            // Eliminate in all other rows
+            for r in 0..rows {
+                if r != rank {
+                    let factor = m[r][col];
+                    if factor.abs() > 1e-14 {
+                        for j in col..cols {
+                            m[r][j] -= factor * m[rank][j];
+                        }
+                    }
+                }
+            }
+
+            rank += 1;
+        }
+    }
+
+    (m, rank)
+}
+
+/// NullSpace[m] — basis vectors for the null space of matrix m.
+/// Returns a list of vectors; each vector v satisfies m·v = 0.
+pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "NullSpace requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("NullSpace: argument must be a matrix".to_string()))?;
+    let a = matrix_to_f64(m)?;
+    let (rref, rank) = rref_f64(&a, rows, cols);
+
+    if rank == cols {
+        // Full column rank — null space is trivial
+        return Ok(Value::List(vec![]));
+    }
+
+    // Identify pivot columns
+    let mut pivot_cols = vec![false; cols];
+    let mut r = 0;
+    for c in 0..cols {
+        if r < rows && (rref[r][c] - 1.0).abs() < 1e-10 {
+            pivot_cols[c] = true;
+            r += 1;
+        }
+    }
+
+    // Build basis vectors
+    let mut basis = Vec::new();
+    for free_col in 0..cols {
+        if pivot_cols[free_col] {
+            continue;
+        }
+        let mut v = vec![0.0; cols];
+        v[free_col] = 1.0;
+        // For each pivot row, back-substitute
+        r = 0;
+        for c in 0..cols {
+            if pivot_cols[c] {
+                if r < rows {
+                    v[c] = -rref[r][free_col];
+                }
+                r += 1;
+            }
+        }
+        basis.push(Value::List(v.into_iter().map(real).collect()));
+    }
+
+    Ok(Value::List(basis))
+}
+
+/// Row[m, i] — extract the i-th row (1-indexed).
+pub fn builtin_row(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Row requires exactly 2 arguments: matrix and index".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    let idx = match &args[1] {
+        Value::Integer(i) => {
+            let n = i.to_usize().ok_or_else(|| {
+                EvalError::Error("Row: index must be a positive integer".to_string())
+            })?;
+            if n == 0 || n > m.len() {
+                return Err(EvalError::Error(format!(
+                    "Row: index {} out of range (matrix has {} rows, 1-indexed)",
+                    n,
+                    m.len()
+                )));
+            }
+            n - 1
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    Ok(m[idx].clone())
+}
+
+/// Column[m, j] — extract the j-th column (1-indexed) as a vector.
+pub fn builtin_column(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Column requires exactly 2 arguments: matrix and index".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Err(EvalError::Error("Column: matrix is empty".to_string()));
+    }
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Column: first argument must be a matrix".to_string()))?;
+    let idx = match &args[1] {
+        Value::Integer(i) => {
+            let n = i.to_usize().ok_or_else(|| {
+                EvalError::Error("Column: index must be a positive integer".to_string())
+            })?;
+            if n == 0 || n > cols {
+                return Err(EvalError::Error(format!(
+                    "Column: index {} out of range (matrix has {} columns, 1-indexed)",
+                    n, cols
+                )));
+            }
+            n - 1
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let col: Vec<Value> = (0..rows)
+        .map(|i| {
+            let row = as_list(&m[i]).unwrap();
+            row[idx].clone()
+        })
+        .collect();
+    Ok(Value::List(col))
+}
+
+/// KroneckerProduct[a, b] — Kronecker product of two matrices.
+/// Returns a block matrix where a[i][j] * b is the (i,j)-th block.
+pub fn builtin_kronecker_product(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "KroneckerProduct requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let a_list = as_list(&args[0])?;
+    let b_list = as_list(&args[1])?;
+    let (ar, ac) = matrix_dims(a_list).ok_or_else(|| {
+        EvalError::Error("KroneckerProduct: arguments must be matrices".to_string())
+    })?;
+    let (br, bc) = matrix_dims(b_list).ok_or_else(|| {
+        EvalError::Error("KroneckerProduct: arguments must be matrices".to_string())
+    })?;
+
+    // Build b as f64 for scalar multiplication
+    let b_f64 = matrix_to_f64(b_list)?;
+
+    let mut result = Vec::with_capacity(ar * br);
+    for i in 0..ar {
+        let a_row = as_list(&a_list[i])?;
+        for bi in 0..br {
+            let mut new_row = Vec::with_capacity(ac * bc);
+            for j in 0..ac {
+                let a_val = to_f64(&a_row[j]).ok_or_else(|| EvalError::TypeError {
+                    expected: "Number".to_string(),
+                    got: a_row[j].type_name().to_string(),
+                })?;
+                for bj in 0..bc {
+                    new_row.push(real(a_val * b_f64[bi][bj]));
+                }
+            }
+            result.push(Value::List(new_row));
+        }
+    }
+    Ok(Value::List(result))
+}
+
+/// VectorAngle[u, v] — angle between two vectors in radians.
+/// Returns arccos((u·v) / (|u|·|v|)).
+pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "VectorAngle requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let u = as_list(&args[0])?;
+    let v = as_list(&args[1])?;
+    if u.len() != v.len() {
+        return Err(EvalError::Error(format!(
+            "VectorAngle: vectors must have the same length (got {} and {})",
+            u.len(),
+            v.len()
+        )));
+    }
+    if u.is_empty() {
+        return Err(EvalError::Error(
+            "VectorAngle: vectors must not be empty".to_string(),
+        ));
+    }
+
+    // Convert to f64
+    let u_f64: Result<Vec<f64>, _> = u
+        .iter()
+        .map(|x| {
+            to_f64(x).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".into(),
+                got: x.type_name().into(),
+            })
+        })
+        .collect();
+    let u_f64 = u_f64?;
+    let v_f64: Result<Vec<f64>, _> = v
+        .iter()
+        .map(|x| {
+            to_f64(x).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".into(),
+                got: x.type_name().into(),
+            })
+        })
+        .collect();
+    let v_f64 = v_f64?;
+
+    let dot: f64 = u_f64.iter().zip(v_f64.iter()).map(|(a, b)| a * b).sum();
+    let norm_u: f64 = u_f64.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_v: f64 = v_f64.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    if norm_u < 1e-15 || norm_v < 1e-15 {
+        return Err(EvalError::Error(
+            "VectorAngle: zero-length vector".to_string(),
+        ));
+    }
+
+    let cos_theta = (dot / (norm_u * norm_v)).clamp(-1.0, 1.0);
+    Ok(real(cos_theta.acos()))
+}
+
+/// PseudoInverse[m] — Moore-Penrose pseudoinverse.
+/// For full-rank matrices, computes A⁺ = (AᵀA)⁻¹Aᵀ.
+pub fn builtin_pseudo_inverse(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PseudoInverse requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("PseudoInverse: argument must be a matrix".to_string()))?;
+
+    // Convert to f64
+    let a = matrix_to_f64(m)?;
+
+    // Compute A^T
+    let mut at = vec![vec![0.0f64; rows]; cols];
+    for i in 0..rows {
+        for j in 0..cols {
+            at[j][i] = a[i][j];
+        }
+    }
+
+    // Compute A^T * A (cols × cols)
+    let mut ata = vec![vec![0.0f64; cols]; cols];
+    for i in 0..cols {
+        for k in 0..rows {
+            for j in 0..cols {
+                ata[i][j] += at[i][k] * a[k][j];
+            }
+        }
+    }
+
+    // Compute (A^T A)^(-1)
+    // Use Gaussian elimination for the inverse
+    let ata_inv = match matrix_inverse_f64(&ata) {
+        Some(inv) => inv,
+        None => {
+            return Err(EvalError::Error(
+                "PseudoInverse: AᵀA is singular, cannot compute pseudoinverse".to_string(),
+            ));
+        }
+    };
+
+    // A⁺ = (A^T A)^(-1) * A^T
+    let mut result = vec![vec![0.0f64; rows]; cols];
+    for i in 0..cols {
+        for k in 0..cols {
+            for j in 0..rows {
+                result[i][j] += ata_inv[i][k] * at[k][j];
+            }
+        }
+    }
+
+    let result_value: Vec<Value> = result
+        .into_iter()
+        .map(|row| Value::List(row.into_iter().map(real).collect()))
+        .collect();
+    Ok(Value::List(result_value))
+}
+
+/// Compute the inverse of a square f64 matrix via Gaussian elimination.
+fn matrix_inverse_f64(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = a.len();
+    if n == 0 {
+        return None;
+    }
+    // Augment with identity
+    let mut aug = vec![vec![0.0f64; 2 * n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            aug[i][j] = a[i][j];
+        }
+        aug[i][n + i] = 1.0;
+    }
+
+    // Forward elimination with partial pivoting
+    for col in 0..n {
+        // Find pivot
+        let mut max_val = aug[col][col].abs();
+        let mut max_row = col;
+        for row in (col + 1)..n {
+            if aug[row][col].abs() > max_val {
+                max_val = aug[row][col].abs();
+                max_row = row;
+            }
+        }
+        if max_val < 1e-15 {
+            return None; // Singular
+        }
+        aug.swap(col, max_row);
+
+        // Scale pivot row
+        let pivot = aug[col][col];
+        for j in 0..2 * n {
+            aug[col][j] /= pivot;
+        }
+
+        // Eliminate in other rows
+        for row in 0..n {
+            if row != col {
+                let factor = aug[row][col];
+                if factor.abs() > 1e-15 {
+                    for j in 0..2 * n {
+                        aug[row][j] -= factor * aug[col][j];
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract inverse from the right half
+    let mut inv = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            inv[i][j] = aug[i][n + j];
+        }
+    }
+    Some(inv)
+}
+
+/// Minors[m] — matrix of minors (determinant of submatrix after removing row i, column j).
+/// Returns a matrix of the same dimensions.
+pub fn builtin_minors(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Minors requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Minors: argument must be a matrix".to_string()))?;
+
+    let mut result = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let mut new_row = Vec::with_capacity(cols);
+        for j in 0..cols {
+            let minor = minor_matrix(m, i, j)?;
+            let d = det_recursive(&minor)?;
+            new_row.push(d);
+        }
+        result.push(Value::List(new_row));
+    }
+    Ok(Value::List(result))
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
@@ -1067,6 +1570,15 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "ZeroMatrix", builtin_zero_matrix);
     register_builtin(env, "DiagonalMatrix", builtin_diagonal_matrix);
     register_builtin(env, "UnitVector", builtin_unit_vector);
+    register_builtin(env, "RowReduce", builtin_row_reduce);
+    register_builtin(env, "MatrixRank", builtin_matrix_rank);
+    register_builtin(env, "NullSpace", builtin_null_space);
+    register_builtin(env, "Row", builtin_row);
+    register_builtin(env, "Column", builtin_column);
+    register_builtin(env, "KroneckerProduct", builtin_kronecker_product);
+    register_builtin(env, "VectorAngle", builtin_vector_angle);
+    register_builtin(env, "PseudoInverse", builtin_pseudo_inverse);
+    register_builtin(env, "Minors", builtin_minors);
 }
 
 /// Symbol names exported by the LinearAlgebra package.
@@ -1089,6 +1601,15 @@ pub const SYMBOLS: &[&str] = &[
     "ZeroMatrix",
     "DiagonalMatrix",
     "UnitVector",
+    "RowReduce",
+    "MatrixRank",
+    "NullSpace",
+    "Row",
+    "Column",
+    "KroneckerProduct",
+    "VectorAngle",
+    "PseudoInverse",
+    "Minors",
 ];
 
 #[cfg(test)]
@@ -1346,10 +1867,7 @@ mod tests {
         let a = matrix(vec![vec![2, 0], vec![0, 2]]);
         let b = matrix(vec![vec![3, 0], vec![0, 3]]);
         let c = matrix(vec![vec![4, 0], vec![0, 4]]);
-        let blocks = list(vec![
-            list(vec![i2.clone(), a]),
-            list(vec![b, c]),
-        ]);
+        let blocks = list(vec![list(vec![i2.clone(), a]), list(vec![b, c])]);
         let result = builtin_array_flatten(&[blocks]).unwrap();
         let rows = as_list(&result).unwrap();
         assert_eq!(rows.len(), 4);

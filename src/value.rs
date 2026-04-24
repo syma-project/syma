@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use rug::Float;
 use rug::Integer;
+use rug::Rational;
 
 use crate::ast::Expr;
 use crate::bytecode::BytecodeFunctionDef;
@@ -90,6 +91,16 @@ impl fmt::Debug for NativeLibHandle {
 // SAFETY: dlopen handles are valid from any thread once the library is loaded.
 unsafe impl Send for NativeLibHandle {}
 unsafe impl Sync for NativeLibHandle {}
+
+/// Create a Value::Rational from numerator and denominator, canonicalizing to
+/// Value::Integer when the denominator is 1.
+pub fn rational_value(num: Integer, den: Integer) -> Value {
+    if den == 1 {
+        Value::Integer(num)
+    } else {
+        Value::Rational(Box::new(Rational::from((num, den))))
+    }
+}
 
 /// Default precision for floating-point numbers (128 bits ≈ 38 decimal digits).
 pub const DEFAULT_PRECISION: u32 = 128;
@@ -192,6 +203,9 @@ pub enum Value {
     // ── Atoms ──
     Integer(Integer),
     Real(Float),
+    /// An exact rational number, e.g. 2/3.
+    /// Boxed because rug::Rational is large (two Integers).
+    Rational(Box<Rational>),
     Complex {
         re: f64,
         im: f64,
@@ -243,10 +257,13 @@ pub enum Value {
     /// A built-in function.
     Builtin(String, BuiltinFn),
 
-    /// A pure function (lambda) with slots.
+    /// A pure function (lambda) with slots or named parameters.
     PureFunction {
         body: Expr,
         slot_count: usize,
+        /// Named parameter names (e.g., ["k"] for Function[{k}, body]).
+        /// Non-empty when created via Function[{x, y}, body]; empty for slot-based (#, #1) lambdas.
+        params: Vec<String>,
     },
 
     /// A method bound to an object.
@@ -436,6 +453,10 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Real(a), Value::Real(b)) => a == b,
+            (Value::Rational(a), Value::Rational(b)) => a == b,
+            (Value::Rational(a), Value::Integer(b)) | (Value::Integer(b), Value::Rational(a)) => {
+                a.denom() == &Integer::from(1) && a.numer() == b
+            }
             (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
                 a1 == b1 && a2 == b2
             }
@@ -521,6 +542,7 @@ impl Value {
         match self {
             Value::Integer(_) => "Integer",
             Value::Real(_) => "Real",
+            Value::Rational(_) => "Rational",
             Value::Complex { .. } => "Complex",
             Value::Str(_) => "String",
             Value::Bool(_) => "Boolean",
@@ -566,10 +588,11 @@ impl Value {
         match type_name {
             "Number" => matches!(
                 self,
-                Value::Integer(_) | Value::Real(_) | Value::Complex { .. }
+                Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. }
             ),
             "Integer" => matches!(self, Value::Integer(_)),
             "Real" => matches!(self, Value::Real(_)),
+            "Rational" => matches!(self, Value::Rational(_)),
             "Complex" => matches!(self, Value::Complex { .. }),
             "String" => matches!(self, Value::Str(_)),
             "Boolean" => matches!(self, Value::Bool(_)),
@@ -606,6 +629,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Integer(n) => !n.is_zero(),
             Value::Real(r) => !r.is_zero(),
+            Value::Rational(r) => !r.is_zero(),
             Value::Null => false,
             Value::List(l) => !l.is_empty(),
             _ => true,
@@ -618,6 +642,13 @@ impl Value {
             Value::Formatted { value, .. } => value.to_integer(),
             Value::Integer(n) => Some(n.to_i64().unwrap_or(0)),
             Value::Real(r) => Some(r.to_f64() as i64),
+            Value::Rational(r) => {
+                if *r.denom() == Integer::from(1) {
+                    r.numer().to_i64()
+                } else {
+                    Some(r.to_f64() as i64)
+                }
+            }
             _ => None,
         }
     }
@@ -628,6 +659,7 @@ impl Value {
             Value::Formatted { value, .. } => value.to_real(),
             Value::Integer(n) => Some(n.to_f64()),
             Value::Real(r) => Some(r.to_f64()),
+            Value::Rational(r) => Some(r.to_f64()),
             Value::Complex { re, im } if *im == 0.0 => Some(*re),
             _ => None,
         }
@@ -648,6 +680,7 @@ impl Value {
             (other, Value::Formatted { value, .. }) => other.struct_eq(value),
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Real(a), Value::Real(b)) => a == b,
+            (Value::Rational(a), Value::Rational(b)) => a == b,
             (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
                 a1 == b1 && a2 == b2
             }
@@ -892,6 +925,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Integer(n) => write!(f, "{}", n),
+            Value::Rational(r) => write!(f, "{}", r),
             Value::Real(r) => {
                 // Use to_string_radix for precise control: gives "d.ddd@exp" format.
                 // We convert that to standard decimal notation.
@@ -988,9 +1022,9 @@ impl fmt::Display for Value {
                 let color_space = match img.color() {
                     image::ColorType::L8 | image::ColorType::L16 => "Grayscale",
                     image::ColorType::La8 | image::ColorType::La16 => "GrayAlpha",
-                    image::ColorType::Rgb8
-                    | image::ColorType::Rgb16
-                    | image::ColorType::Rgb32F => "RGB",
+                    image::ColorType::Rgb8 | image::ColorType::Rgb16 | image::ColorType::Rgb32F => {
+                        "RGB"
+                    }
                     image::ColorType::Rgba8
                     | image::ColorType::Rgba16
                     | image::ColorType::Rgba32F => "RGBA",
@@ -1289,6 +1323,7 @@ fn is_negative_number(v: &Value) -> bool {
     match v {
         Value::Integer(n) => n < &rug::Integer::from(0),
         Value::Real(r) => r.is_sign_negative(),
+        Value::Rational(r) => r.is_negative(),
         _ => false,
     }
 }
@@ -1375,16 +1410,16 @@ fn format_number_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> f
             let formatted = rug_radix_to_decimal(&raw);
             write!(f, "{}", formatted)
         }
+        Value::Rational(r) => {
+            let f_val = Float::with_val(64, r.numer()) / Float::with_val(64, r.denom());
+            format_number_form(&Value::Real(f_val), digits, f)
+        }
         _ => write!(f, "{}", v),
     }
 }
 
 /// Format a number in scientific notation with the given significant digits.
-fn format_scientific_form(
-    v: &Value,
-    digits: usize,
-    f: &mut fmt::Formatter<'_>,
-) -> fmt::Result {
+fn format_scientific_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match v {
         Value::Integer(n) => {
             let s = n.to_string();
@@ -1413,6 +1448,10 @@ fn format_scientific_form(
                 write!(f, "{}·10^{}", raw, 0)
             }
         }
+        Value::Rational(r) => {
+            let f_val = Float::with_val(64, r.numer()) / Float::with_val(64, r.denom());
+            format_scientific_form(&Value::Real(f_val), digits, f)
+        }
         _ => write!(f, "{}", v),
     }
 }
@@ -1429,6 +1468,10 @@ fn format_base_form(v: &Value, base: u32, f: &mut fmt::Formatter<'_>) -> fmt::Re
             let integer_part = r.clone().floor().to_integer().unwrap();
             let int_str = integer_part.to_string_radix(base as i32);
             write!(f, "{}(base {})", int_str, base)
+        }
+        Value::Rational(r) => {
+            let f_val = Float::with_val(64, r.numer()) / Float::with_val(64, r.denom());
+            format_base_form(&Value::Real(f_val), base, f)
         }
         _ => write!(f, "{}", v),
     }

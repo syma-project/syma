@@ -19,12 +19,13 @@ pub(super) fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() == 2 {
         // Check if second arg is a plain integer (not a list)
         if let Expr::Integer(_) = &args[1] {
-            let n = super::eval(&args[1], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
+            let n =
+                super::eval(&args[1], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
             if n < 0 {
                 return Err(EvalError::Error(
                     "Table count must be non-negative".to_string(),
@@ -44,7 +45,10 @@ pub(super) fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
 }
 
 /// Parse an iterator spec list and generate iteration values.
-pub(super) fn eval_iterator_spec(items: &[Expr], env: &Env) -> Result<(String, Vec<Value>), EvalError> {
+pub(super) fn eval_iterator_spec(
+    items: &[Expr],
+    env: &Env,
+) -> Result<(String, Vec<Value>), EvalError> {
     let var_name = match &items[0] {
         Expr::Symbol(s) => s.clone(),
         _ => {
@@ -67,12 +71,12 @@ pub(super) fn eval_iterator_spec(items: &[Expr], env: &Env) -> Result<(String, V
                     }),
                 }
             } else {
-                let n = super::eval(&items[1], env)?
-                    .to_integer()
-                    .ok_or_else(|| EvalError::TypeError {
+                let n = super::eval(&items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: "non-Integer".to_string(),
-                    })?;
+                    }
+                })?;
                 let values: Vec<Value> =
                     (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
                 Ok((var_name, values))
@@ -80,42 +84,48 @@ pub(super) fn eval_iterator_spec(items: &[Expr], env: &Env) -> Result<(String, V
         }
         3 => {
             // {var, min, max}
-            let min = super::eval(&items[1], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
-            let max = super::eval(&items[2], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
-            let values: Vec<Value> =
-                (min..=max).map(|i| Value::Integer(Integer::from(i))).collect();
+            let min =
+                super::eval(&items[1], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
+            let max =
+                super::eval(&items[2], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
+            let values: Vec<Value> = (min..=max)
+                .map(|i| Value::Integer(Integer::from(i)))
+                .collect();
             Ok((var_name, values))
         }
         4 => {
             // {var, min, max, step}
-            let min = super::eval(&items[1], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
-            let max = super::eval(&items[2], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
-            let step = super::eval(&items[3], env)?
-                .to_integer()
-                .ok_or_else(|| EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                })?;
+            let min =
+                super::eval(&items[1], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
+            let max =
+                super::eval(&items[2], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
+            let step =
+                super::eval(&items[3], env)?
+                    .to_integer()
+                    .ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    })?;
             if step == 0 {
                 return Err(EvalError::Error("iterator step cannot be zero".to_string()));
             }
@@ -277,19 +287,15 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
 
     // Evaluate iterator bounds to get nmin and nmax
     let nmin = match iter_items.get(1) {
-        Some(expr) => super::eval(expr, env)?
-            .to_integer()
-            .ok_or_else(|| EvalError::Error(
-                "RecurrenceTable: nmin must be an integer".to_string(),
-            ))?,
+        Some(expr) => super::eval(expr, env)?.to_integer().ok_or_else(|| {
+            EvalError::Error("RecurrenceTable: nmin must be an integer".to_string())
+        })?,
         None => 1,
     };
     let nmax = match iter_items.get(2) {
-        Some(expr) => super::eval(expr, env)?
-            .to_integer()
-            .ok_or_else(|| EvalError::Error(
-                "RecurrenceTable: nmax must be an integer".to_string(),
-            ))?,
+        Some(expr) => super::eval(expr, env)?.to_integer().ok_or_else(|| {
+            EvalError::Error("RecurrenceTable: nmax must be an integer".to_string())
+        })?,
         None => nmin,
     };
 
@@ -314,7 +320,9 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
     for eqn in eqns {
         // Each equation should be Equal[lhs, rhs]
         let (lhs, rhs) = match eqn {
-            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Equal") && args.len() == 2 => {
+            Expr::Call { head, args }
+                if matches!(head.as_ref(), Expr::Symbol(s) if s == "Equal") && args.len() == 2 =>
+            {
                 (&args[0], &args[1])
             }
             _ => {
@@ -326,18 +334,22 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
 
         // LHS should be func_name[...]
         let lhs_args = match lhs {
-            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if *s == func_name) => args,
+            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if *s == func_name) => {
+                args
+            }
             _ => {
-                return Err(EvalError::Error(
-                    format!("RecurrenceTable: LHS of equation must be {}[...]", func_name),
-                ));
+                return Err(EvalError::Error(format!(
+                    "RecurrenceTable: LHS of equation must be {}[...]",
+                    func_name
+                )));
             }
         };
 
         if lhs_args.len() != 1 {
-            return Err(EvalError::Error(
-                format!("RecurrenceTable: {}[...] takes exactly 1 argument", func_name),
-            ));
+            return Err(EvalError::Error(format!(
+                "RecurrenceTable: {}[...] takes exactly 1 argument",
+                func_name
+            )));
         }
 
         let arg = &lhs_args[0];
@@ -353,7 +365,9 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
 
         // Check if this is a recurrence: f[var + 1] or f[1 + var]
         let is_recurrence = match arg {
-            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Plus") && args.len() == 2 => {
+            Expr::Call { head, args }
+                if matches!(head.as_ref(), Expr::Symbol(s) if s == "Plus") && args.len() == 2 =>
+            {
                 let has_var = matches!(&args[0], Expr::Symbol(v) if *v == var_name)
                     || matches!(&args[1], Expr::Symbol(v) if *v == var_name);
                 let has_one = matches!(&args[0], Expr::Integer(n) if *n == 1)
@@ -407,8 +421,12 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
                             _ => {
                                 // Unknown index form — recurse and return a call
                                 return Expr::Call {
-                                    head: Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed)),
-                                    args: vec![substitute_fn_refs(&args[0], func_name, var_name, current_i, computed)],
+                                    head: Box::new(substitute_fn_refs(
+                                        head, func_name, var_name, current_i, computed,
+                                    )),
+                                    args: vec![substitute_fn_refs(
+                                        &args[0], func_name, var_name, current_i, computed,
+                                    )],
                                 };
                             }
                         };
@@ -422,21 +440,36 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
                     }
                 }
                 // Not a func_name call — recurse into head and args
-                let new_head = Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed));
-                let new_args: Vec<Expr> = args.iter()
+                let new_head = Box::new(substitute_fn_refs(
+                    head, func_name, var_name, current_i, computed,
+                ));
+                let new_args: Vec<Expr> = args
+                    .iter()
                     .map(|a| substitute_fn_refs(a, func_name, var_name, current_i, computed))
                     .collect();
-                Expr::Call { head: new_head, args: new_args }
+                Expr::Call {
+                    head: new_head,
+                    args: new_args,
+                }
             }
             Expr::Call { head, args } => {
-                let new_head = Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed));
-                let new_args: Vec<Expr> = args.iter()
+                let new_head = Box::new(substitute_fn_refs(
+                    head, func_name, var_name, current_i, computed,
+                ));
+                let new_args: Vec<Expr> = args
+                    .iter()
                     .map(|a| substitute_fn_refs(a, func_name, var_name, current_i, computed))
                     .collect();
-                Expr::Call { head: new_head, args: new_args }
+                Expr::Call {
+                    head: new_head,
+                    args: new_args,
+                }
             }
             Expr::List(items) => Expr::List(
-                items.iter().map(|i| substitute_fn_refs(i, func_name, var_name, current_i, computed)).collect()
+                items
+                    .iter()
+                    .map(|i| substitute_fn_refs(i, func_name, var_name, current_i, computed))
+                    .collect(),
             ),
             other => other.clone(),
         }
@@ -453,7 +486,8 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
         } else {
             // The recurrence is a[n+1] == body; to compute a[i], evaluate body at n = i-1
             let n_val = i - 1;
-            let substituted_body = substitute_fn_refs(&body, &func_name, &var_name, n_val, &computed);
+            let substituted_body =
+                substitute_fn_refs(&body, &func_name, &var_name, n_val, &computed);
             child_env.set(var_name.clone(), Value::Integer(Integer::from(n_val)));
             let val = super::eval(&substituted_body, &child_env)?;
             computed.insert(i, val.clone());
@@ -688,7 +722,9 @@ pub(super) fn eval_parallel_try(args: &[Expr], env: &Env) -> Result<Value, EvalE
 
     let results = crate::builtins::parallel::parallel_batch(jobs);
     results.into_iter().next().unwrap_or_else(|| {
-        Err(EvalError::Error("ParallelTry: no results available".to_string()))
+        Err(EvalError::Error(
+            "ParallelTry: no results available".to_string(),
+        ))
     })
 }
 

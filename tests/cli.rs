@@ -126,7 +126,11 @@ fn test_run_math_example() {
 fn test_cli_format_flag_inputform() {
     // --format inputform should show infix notation for Plus[a, b]
     let output = syma_run(&["-e", "Plus[a, b]", "--format", "inputform"]);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("a + b"),
@@ -138,7 +142,11 @@ fn test_cli_format_flag_inputform() {
 fn test_cli_format_flag_fullform() {
     // --format fullform should show head notation for a + b with symbolic args
     let output = syma_run(&["-e", "Plus[a, b]", "--format", "fullform"]);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Plus"),
@@ -156,15 +164,24 @@ fn test_eval_syntax_q() {
 fn test_short_builtin_via_eval() {
     // Short of a long list should show <<...>>
     let out = syma_eval("Short[Range[20]]");
-    assert!(out.contains("<<"), "Short[Range[20]] should contain <<, got: {out}");
+    assert!(
+        out.contains("<<"),
+        "Short[Range[20]] should contain <<, got: {out}"
+    );
 }
 
 #[test]
 fn test_grid_builtin_via_eval() {
     // Grid of a 2D list should produce tabular output
     let out = syma_eval("Grid[{{1, 2, 3}, {10, 20, 30}}]");
-    assert!(out.contains("1"), "Grid output should contain values, got: {out}");
-    assert!(out.contains("10"), "Grid output should contain values, got: {out}");
+    assert!(
+        out.contains("1"),
+        "Grid output should contain values, got: {out}"
+    );
+    assert!(
+        out.contains("10"),
+        "Grid output should contain values, got: {out}"
+    );
 }
 
 #[test]
@@ -180,16 +197,14 @@ fn test_base_form_via_eval() {
 
 #[test]
 fn test_local_symbol_write_then_read() {
-    let (out, _) = syma_eval_with_temp_home(
-        r#"LocalSymbol["test_int"] = 42; LocalSymbol["test_int"]"#,
-    );
+    let (out, _) =
+        syma_eval_with_temp_home(r#"LocalSymbol["test_int"] = 42; LocalSymbol["test_int"]"#);
     assert!(out.contains("42"), "Should read back 42, got: {out}");
 }
 
 #[test]
 fn test_local_symbol_read_missing_null() {
-    let (out, _) =
-        syma_eval_with_temp_home(r#"LocalSymbol["nonexistent"]"#);
+    let (out, _) = syma_eval_with_temp_home(r#"LocalSymbol["nonexistent"]"#);
     assert!(
         out.contains("Null") || out.is_empty(),
         "Missing key should yield Null, got: {out}"
@@ -198,9 +213,7 @@ fn test_local_symbol_read_missing_null() {
 
 #[test]
 fn test_local_symbol_read_missing_default() {
-    let (out, _) = syma_eval_with_temp_home(
-        r#"LocalSymbol["nope", "fallback"]"#,
-    );
+    let (out, _) = syma_eval_with_temp_home(r#"LocalSymbol["nope", "fallback"]"#);
     assert!(
         out.contains("fallback"),
         "Default value should be returned, got: {out}"
@@ -225,7 +238,14 @@ fn test_local_symbol_persists_across_calls() {
 
     // First call: write
     let output1 = Command::new("cargo")
-        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"] = 99"#])
+        .args([
+            "run",
+            "--bin",
+            "syma",
+            "--",
+            "-e",
+            r#"LocalSymbol["persist_key"] = 99"#,
+        ])
         .env("SYMA_HOME", &tmp)
         .output()
         .expect("failed first call");
@@ -237,7 +257,14 @@ fn test_local_symbol_persists_across_calls() {
 
     // Second call: read (separate process, should read from disk)
     let output2 = Command::new("cargo")
-        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"]"#])
+        .args([
+            "run",
+            "--bin",
+            "syma",
+            "--",
+            "-e",
+            r#"LocalSymbol["persist_key"]"#,
+        ])
         .env("SYMA_HOME", &tmp)
         .output()
         .expect("failed second call");
@@ -254,4 +281,70 @@ fn test_local_symbol_persists_across_calls() {
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Pattern/Attribute tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_pattern_test_integer_q() {
+    // _?IntegerQ matches only integers
+    let out = syma_eval("MatchQ[5, _?IntegerQ]");
+    assert!(out.contains("True"), "5 should match _?IntegerQ, got: {out}");
+}
+
+#[test]
+fn test_pattern_test_not_integer_q() {
+    // _?IntegerQ should not match a real
+    let out = syma_eval("MatchQ[3.14, _?IntegerQ]");
+    assert!(out.contains("False"), "3.14 should not match _?IntegerQ, got: {out}");
+}
+
+#[test]
+fn test_optional_default_value() {
+    // f[x_:5] := x; f[] should return 5
+    let out = syma_eval("f[x_:5] := x; f[]");
+    assert!(out.contains("5"), "f[] should return 5, got: {out}");
+}
+
+#[test]
+fn test_flat_attribute_matching() {
+    // With Flat, f[1, f[2, 3]] should match f[x_, y_, z_]
+    let out = syma_eval("SetAttributes[f, Flat]; MatchQ[f[1, f[2, 3]], f[x_, y_, z_]]");
+    assert!(
+        out.contains("True"),
+        "f[1, f[2, 3]] should match f[x_, y_, z_] with Flat, got: {out}"
+    );
+}
+
+#[test]
+fn test_orderless_attribute_matching() {
+    // With Orderless, f[2, 1] should match f[x_, y_]
+    let out = syma_eval("SetAttributes[f, Orderless]; MatchQ[f[2, 1], f[x_, y_]]");
+    assert!(
+        out.contains("True"),
+        "f[2, 1] should match f[x_, y_] with Orderless, got: {out}"
+    );
+}
+
+#[test]
+fn test_one_identity_attribute_matching() {
+    // With OneIdentity, f[42] should match _Integer
+    let out = syma_eval("SetAttributes[f, OneIdentity]; MatchQ[f[42], _Integer]");
+    assert!(
+        out.contains("True"),
+        "f[42] should match _Integer with OneIdentity, got: {out}"
+    );
+}
+
+#[test]
+fn test_integrate_basic() {
+    let out = syma_eval("Integrate[x^2 + Sin[x], x]");
+    assert!(
+        out.contains("Cos[x]"),
+        "Integrate[x^2 + Sin[x], x] should contain Cos[x], got: {out}"
+    );
+    assert!(
+        out.contains("x^3"),
+        "Integrate[x^2 + Sin[x], x] should contain x^3, got: {out}"
+    );
 }

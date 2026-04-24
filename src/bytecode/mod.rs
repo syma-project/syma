@@ -9,8 +9,8 @@ pub mod compiler;
 pub mod instruction;
 pub mod vm;
 
-use std::sync::atomic::{AtomicPtr, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 use crate::value::Value;
 

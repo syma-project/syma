@@ -83,7 +83,22 @@ fn is_directive(val: &Value) -> bool {
                 | "Thick"
                 | "Thin"
         ),
-        Value::Symbol(s) => matches!(s.as_str(), "Red" | "Green" | "Blue" | "Black" | "White" | "Gray" | "Yellow" | "Cyan" | "Magenta" | "Orange" | "Purple" | "Brown" | "Pink"),
+        Value::Symbol(s) => matches!(
+            s.as_str(),
+            "Red"
+                | "Green"
+                | "Blue"
+                | "Black"
+                | "White"
+                | "Gray"
+                | "Yellow"
+                | "Cyan"
+                | "Magenta"
+                | "Orange"
+                | "Purple"
+                | "Brown"
+                | "Pink"
+        ),
         _ => false,
     }
 }
@@ -106,8 +121,16 @@ fn color_call_to_svg(val: &Value) -> Option<String> {
         }
         "Hue" if !args.is_empty() => {
             let h = to_f64(&args[0])?;
-            let s = if args.len() > 1 { to_f64(&args[1])? } else { 1.0 };
-            let v = if args.len() > 2 { to_f64(&args[2])? } else { 1.0 };
+            let s = if args.len() > 1 {
+                to_f64(&args[1])?
+            } else {
+                1.0
+            };
+            let v = if args.len() > 2 {
+                to_f64(&args[2])?
+            } else {
+                1.0
+            };
             Some(hsv_to_svg(h, s, v))
         }
         _ => None,
@@ -205,7 +228,10 @@ fn apply_directive(style: &mut GraphicsStyle, directive: &Value) {
 
 /// Build the SVG attribute string for stroked primitives (Line, Circle, Rectangle).
 fn svg_stroke_attrs(style: &GraphicsStyle) -> String {
-    let mut a = format!("stroke=\"{}\" stroke-width=\"{:.1}\"", style.color, style.stroke_width);
+    let mut a = format!(
+        "stroke=\"{}\" stroke-width=\"{:.1}\"",
+        style.color, style.stroke_width
+    );
     if let Some(ref dashes) = style.dash_array {
         let d: Vec<String> = dashes.iter().map(|x| format!("{:.1}", x)).collect();
         a.push_str(&format!(" stroke-dasharray=\"{}\"", d.join(",")));
@@ -498,7 +524,8 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
             Value::Call { head, args } if head == "DensityRaster" && args.len() >= 4 => {
                 // DensityRaster[vals, {xmin,xmax}, {ymin,ymax}, {nx,ny}, ...]
                 if let (Value::List(xr), Value::List(yr)) = (&args[1], &args[2])
-                    && xr.len() >= 2 && yr.len() >= 2
+                    && xr.len() >= 2
+                    && yr.len() >= 2
                 {
                     x_min = x_min.min(to_f64(&xr[0]).unwrap_or(x_min));
                     x_max = x_max.max(to_f64(&xr[1]).unwrap_or(x_max));
@@ -577,7 +604,11 @@ fn render_axes(
     let stroke = "stroke-width=\"1\"";
 
     // X-axis line (at y=0 in data space, or at y_min for log y)
-    let x_axis_y_data = if y_scale == ScaleType::Log { y_min } else { 0.0 };
+    let x_axis_y_data = if y_scale == ScaleType::Log {
+        y_min
+    } else {
+        0.0
+    };
     if y_min <= x_axis_y_data && y_max >= x_axis_y_data {
         let y_svg = ty(x_axis_y_data);
         s.push_str(&format!(
@@ -592,7 +623,11 @@ fn render_axes(
     }
 
     // Y-axis line (at x=0 in data space, or at x_min for log x)
-    let y_axis_x_data = if x_scale == ScaleType::Log { x_min } else { 0.0 };
+    let y_axis_x_data = if x_scale == ScaleType::Log {
+        x_min
+    } else {
+        0.0
+    };
     if x_min <= y_axis_x_data && x_max >= y_axis_x_data {
         let x_svg = tx(y_axis_x_data);
         s.push_str(&format!(
@@ -616,7 +651,12 @@ fn render_axes(
         let sx = tx(x_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
-            sx, y_axis_y - 4.0, sx, y_axis_y + 4.0, color, stroke
+            sx,
+            y_axis_y - 4.0,
+            sx,
+            y_axis_y + 4.0,
+            color,
+            stroke
         ));
         let label = if x_scale == ScaleType::Log {
             format_log_tick(x_tick)
@@ -640,7 +680,12 @@ fn render_axes(
         let sy = ty(y_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
-            x_axis_x - 4.0, sy, x_axis_x + 4.0, sy, color, stroke
+            x_axis_x - 4.0,
+            sy,
+            x_axis_x + 4.0,
+            sy,
+            color,
+            stroke
         ));
         let label = if y_scale == ScaleType::Log {
             format_log_tick(y_tick)
@@ -709,7 +754,9 @@ fn format_log_tick(log_val: f64) -> String {
 
 /// Compute a "nice" step size for axis ticks.
 fn nice_step(range: f64) -> f64 {
-    if range <= 0.0 { return 1.0; }
+    if range <= 0.0 {
+        return 1.0;
+    }
     let rough = range / 6.0;
     let exp = rough.log10().floor();
     let base = 10.0_f64.powf(exp);
@@ -887,7 +934,10 @@ fn render_rectangle(
         return Ok(format!(
             "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" \
              fill=\"none\" {}/>\n",
-            sx, sy, w, h,
+            sx,
+            sy,
+            w,
+            h,
             svg_stroke_attrs(style),
         ));
     }
@@ -941,7 +991,11 @@ fn render_density_raster(
             let x_lo = xmin + (xmax - xmin) * i as f64 / nx as f64;
             let x_hi = xmin + (xmax - xmin) * (i + 1) as f64 / nx as f64;
             let v = to_f64(&flat[j * nx + i]).unwrap_or(val_min);
-            let t = if range > 0.0 { (v - val_min) / range } else { 0.5 };
+            let t = if range > 0.0 {
+                (v - val_min) / range
+            } else {
+                0.5
+            };
             let (r, g, b) = viridis_color(t);
             let sx = tx(x_lo);
             let sy = ty(y_hi); // SVG y is flipped
@@ -1219,7 +1273,11 @@ mod tests {
         let path = "/tmp/test_syma_graphics_export.svg";
         let line = Value::Call {
             head: "Line".to_string(),
-            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)])],
+            args: vec![list(vec![
+                point(0.0, 0.0),
+                point(1.0, 1.0),
+                point(2.0, 4.0),
+            ])],
         };
         let primitives = Value::List(vec![line]);
         let options = Value::Assoc(std::collections::HashMap::new());
@@ -1228,10 +1286,7 @@ mod tests {
             args: vec![primitives, options],
         };
 
-        let result = crate::builtins::io::builtin_export(&[
-            Value::Str(path.to_string()),
-            graphics,
-        ]);
+        let result = crate::builtins::io::builtin_export(&[Value::Str(path.to_string()), graphics]);
         assert!(result.is_ok(), "Export failed: {:?}", result);
 
         let content = fs::read_to_string(path).unwrap();
@@ -1254,10 +1309,7 @@ mod tests {
             ],
         };
 
-        let result = crate::builtins::io::builtin_export(&[
-            Value::Str(path.to_string()),
-            graphics,
-        ]);
+        let result = crate::builtins::io::builtin_export(&[Value::Str(path.to_string()), graphics]);
         assert!(result.is_ok());
 
         let content = fs::read_to_string(path).unwrap();
@@ -1279,7 +1331,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![red, line]), &opts).unwrap();
-        assert!(svg.contains("stroke=\"#ff0000\""), "Expected red stroke, got: {}", svg);
+        assert!(
+            svg.contains("stroke=\"#ff0000\""),
+            "Expected red stroke, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1291,7 +1347,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![blue, line]), &opts).unwrap();
-        assert!(svg.contains("stroke=\"#2563eb\""), "Expected blue stroke, got: {}", svg);
+        assert!(
+            svg.contains("stroke=\"#2563eb\""),
+            "Expected blue stroke, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1306,7 +1366,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
-        assert!(svg.contains("stroke-width=\"1.0\""), "Expected stroke-width 1.0, got: {}", svg);
+        assert!(
+            svg.contains("stroke-width=\"1.0\""),
+            "Expected stroke-width 1.0, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1321,7 +1385,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
-        assert!(svg.contains("stroke-width=\"5.0\""), "Expected stroke-width 5.0, got: {}", svg);
+        assert!(
+            svg.contains("stroke-width=\"5.0\""),
+            "Expected stroke-width 5.0, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1351,7 +1419,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![half, line]), &opts).unwrap();
-        assert!(svg.contains("opacity"), "Expected opacity attribute, got: {}", svg);
+        assert!(
+            svg.contains("opacity"),
+            "Expected opacity attribute, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1367,7 +1439,11 @@ mod tests {
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![hue, line]), &opts).unwrap();
         // Hue[0] should produce red-ish
-        assert!(svg.contains("stroke=\"#"), "Expected stroke attribute, got: {}", svg);
+        assert!(
+            svg.contains("stroke=\"#"),
+            "Expected stroke attribute, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1392,7 +1468,11 @@ mod tests {
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![comp, line]), &opts).unwrap();
         assert!(svg.contains("#00ff00"), "Expected green, got: {}", svg);
-        assert!(svg.contains("stroke-width=\"3.0\""), "Expected width 3.0, got: {}", svg);
+        assert!(
+            svg.contains("stroke-width=\"3.0\""),
+            "Expected width 3.0, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1413,7 +1493,11 @@ mod tests {
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![red, line1, line2]), &opts).unwrap();
         // Both lines should be red
-        assert_eq!(svg.matches("stroke=\"#ff0000\"").count(), 2, "Both lines should be red");
+        assert_eq!(
+            svg.matches("stroke=\"#ff0000\"").count(),
+            2,
+            "Both lines should be red"
+        );
     }
 
     #[test]
@@ -1453,7 +1537,11 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![dashed, line]), &opts).unwrap();
-        assert!(svg.contains("stroke-dasharray"), "Expected dasharray, got: {}", svg);
+        assert!(
+            svg.contains("stroke-dasharray"),
+            "Expected dasharray, got: {}",
+            svg
+        );
     }
 
     #[test]
@@ -1468,6 +1556,10 @@ mod tests {
         };
         let opts = Value::Assoc(std::collections::HashMap::new());
         let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
-        assert!(svg.contains("stroke-width=\"4.0\""), "Thick should be 4.0, got: {}", svg);
+        assert!(
+            svg.contains("stroke-width=\"4.0\""),
+            "Thick should be 4.0, got: {}",
+            svg
+        );
     }
 }

@@ -12,7 +12,7 @@
 /// - `KERNEL_POOL` — global pool instance (Arc-based for safe shared access)
 /// - `parallel_batch()` — submit batch jobs to the pool (or sequential fallback)
 use std::collections::VecDeque;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -156,8 +156,7 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
         #[allow(clippy::type_complexity)]
         let results: Arc<Mutex<Vec<Option<Result<Value, EvalError>>>>> =
             Arc::new(Mutex::new(vec![None; n]));
-        let completion: Arc<(Mutex<usize>, Condvar)> =
-            Arc::new((Mutex::new(0), Condvar::new()));
+        let completion: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
 
         for (i, job) in jobs.into_iter().enumerate() {
             let results = Arc::clone(&results);
@@ -175,10 +174,7 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
                         } else {
                             "Unknown panic".to_string()
                         };
-                        Err(EvalError::Error(format!(
-                            "Parallel job panicked: {}",
-                            msg
-                        )))
+                        Err(EvalError::Error(format!("Parallel job panicked: {}", msg)))
                     }
                 };
                 {

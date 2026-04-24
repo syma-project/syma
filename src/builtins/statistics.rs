@@ -25,9 +25,7 @@ fn ln_gamma(x: f64) -> f64 {
         1.505632735149312e-7,
     ];
     if x < 0.5 {
-        std::f64::consts::PI.ln()
-            - (std::f64::consts::PI * x).sin().ln()
-            - ln_gamma(1.0 - x)
+        std::f64::consts::PI.ln() - (std::f64::consts::PI * x).sin().ln() - ln_gamma(1.0 - x)
     } else {
         let z = x - 1.0;
         let mut a = C[0];
@@ -118,7 +116,11 @@ fn beta_cf(x: f64, a: f64, b: f64) -> f64 {
     let qab = a + b;
     let mut c = 1.0_f64;
     let raw_d = 1.0 - qab * x / qap;
-    let mut d = if raw_d.abs() < FPMIN { FPMIN } else { 1.0 / raw_d };
+    let mut d = if raw_d.abs() < FPMIN {
+        FPMIN
+    } else {
+        1.0 / raw_d
+    };
     let mut h = d;
     for m in 1u32..200 {
         let mf = m as f64;
@@ -366,7 +368,11 @@ fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
         }
         "StudentT" => {
             let nu = dist.get("Nu").and_then(to_f64)?;
-            if nu > 2.0 { Some(nu / (nu - 2.0)) } else { None }
+            if nu > 2.0 {
+                Some(nu / (nu - 2.0))
+            } else {
+                None
+            }
         }
         "Beta" => {
             let a = dist.get("Alpha").and_then(to_f64)?;
@@ -400,7 +406,9 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+    if let Value::Assoc(map) = &args[0]
+        && map.contains_key("Distribution")
+    {
         return match distribution_mean_f64(map) {
             Some(v) => Ok(real(v)),
             None => Err(EvalError::Error(
@@ -451,7 +459,9 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+    if let Value::Assoc(map) = &args[0]
+        && map.contains_key("Distribution")
+    {
         return match distribution_variance_f64(map) {
             Some(v) => Ok(real(v)),
             None => Err(EvalError::Error(
@@ -480,7 +490,9 @@ pub fn builtin_standard_deviation(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+    if let Value::Assoc(map) = &args[0]
+        && map.contains_key("Distribution")
+    {
         return match distribution_variance_f64(map) {
             Some(v) => Ok(real(v.sqrt())),
             None => Err(EvalError::Error(
@@ -585,8 +597,8 @@ pub fn builtin_correlation(args: &[Value]) -> Result<Value, EvalError> {
                 ));
             }
             let prec = c.prec().max(s1.prec()).max(s2.prec());
-            let result = Float::with_val(prec, c)
-                / (Float::with_val(prec, s1) * Float::with_val(prec, s2));
+            let result =
+                Float::with_val(prec, c) / (Float::with_val(prec, s1) * Float::with_val(prec, s2));
             Ok(Value::Real(result))
         }
         _ => Err(EvalError::Error(
@@ -907,33 +919,33 @@ pub fn builtin_bin_counts(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::List(spec) => match spec.len() {
             1 => {
-                let dx = to_f64(&spec[0]).ok_or_else(|| EvalError::Error(
-                    "BinCounts: bin spec must contain numbers".to_string(),
-                ))?;
+                let dx = to_f64(&spec[0]).ok_or_else(|| {
+                    EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
+                })?;
                 (data_min, data_max, dx)
             }
             3 => {
-                let lo = to_f64(&spec[0]).ok_or_else(|| EvalError::Error(
-                    "BinCounts: bin spec must contain numbers".to_string(),
-                ))?;
-                let hi = to_f64(&spec[1]).ok_or_else(|| EvalError::Error(
-                    "BinCounts: bin spec must contain numbers".to_string(),
-                ))?;
-                let dx = to_f64(&spec[2]).ok_or_else(|| EvalError::Error(
-                    "BinCounts: bin spec must contain numbers".to_string(),
-                ))?;
+                let lo = to_f64(&spec[0]).ok_or_else(|| {
+                    EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
+                })?;
+                let hi = to_f64(&spec[1]).ok_or_else(|| {
+                    EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
+                })?;
+                let dx = to_f64(&spec[2]).ok_or_else(|| {
+                    EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
+                })?;
                 (lo, hi, dx)
             }
             _ => {
                 return Err(EvalError::Error(
                     "BinCounts: bin spec must be {dx} or {min, max, dx}".to_string(),
-                ))
+                ));
             }
         },
         _ => {
             return Err(EvalError::Error(
                 "BinCounts: second argument must be a number or list".to_string(),
-            ))
+            ));
         }
     };
 
@@ -987,7 +999,7 @@ pub fn builtin_histogram_list(args: &[Value]) -> Result<Value, EvalError> {
             _ => {
                 return Err(EvalError::Error(
                     "HistogramList: second argument must be an integer".to_string(),
-                ))
+                ));
             }
         }
     } else {
@@ -996,7 +1008,11 @@ pub fn builtin_histogram_list(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     let range = data_max - data_min;
-    let dx = if range == 0.0 { 1.0 } else { range / n_bins as f64 };
+    let dx = if range == 0.0 {
+        1.0
+    } else {
+        range / n_bins as f64
+    };
 
     let edges: Vec<Value> = (0..=n_bins)
         .map(|i| real(data_min + i as f64 * dx))
@@ -1047,7 +1063,10 @@ pub fn builtin_binomial_distribution(args: &[Value]) -> Result<Value, EvalError>
         ));
     }
     let mut map = HashMap::new();
-    map.insert("Distribution".to_string(), Value::Str("Binomial".to_string()));
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Binomial".to_string()),
+    );
     map.insert("N".to_string(), int(n as i64));
     map.insert("P".to_string(), real(p));
     Ok(Value::Assoc(map))
@@ -1404,7 +1423,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "Distribution (Association)".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     let x = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
@@ -1429,7 +1448,11 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
         "Uniform" => {
             let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
             let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
-            if x >= lo && x <= hi { 1.0 / (hi - lo) } else { 0.0 }
+            if x >= lo && x <= hi {
+                1.0 / (hi - lo)
+            } else {
+                0.0
+            }
         }
         "Poisson" => {
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
@@ -1458,11 +1481,21 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
         }
         "Bernoulli" => {
             let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
-            if x == 0.0 { 1.0 - p } else if x == 1.0 { p } else { 0.0 }
+            if x == 0.0 {
+                1.0 - p
+            } else if x == 1.0 {
+                p
+            } else {
+                0.0
+            }
         }
         "Exponential" => {
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
-            if x < 0.0 { 0.0 } else { lambda * (-lambda * x).exp() }
+            if x < 0.0 {
+                0.0
+            } else {
+                lambda * (-lambda * x).exp()
+            }
         }
         "Gamma" => {
             let alpha = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
@@ -1470,9 +1503,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             if x <= 0.0 {
                 0.0
             } else {
-                let ln_pdf = alpha * lambda.ln() + (alpha - 1.0) * x.ln()
-                    - lambda * x
-                    - ln_gamma(alpha);
+                let ln_pdf =
+                    alpha * lambda.ln() + (alpha - 1.0) * x.ln() - lambda * x - ln_gamma(alpha);
                 ln_pdf.exp()
             }
         }
@@ -1483,9 +1515,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             } else {
                 let alpha = k / 2.0;
                 let lambda = 0.5_f64;
-                let ln_pdf = alpha * lambda.ln() + (alpha - 1.0) * x.ln()
-                    - lambda * x
-                    - ln_gamma(alpha);
+                let ln_pdf =
+                    alpha * lambda.ln() + (alpha - 1.0) * x.ln() - lambda * x - ln_gamma(alpha);
                 ln_pdf.exp()
             }
         }
@@ -1503,8 +1534,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             if x <= 0.0 || x >= 1.0 {
                 0.0
             } else {
-                let ln_pdf = (a - 1.0) * x.ln()
-                    + (b - 1.0) * (1.0 - x).ln()
+                let ln_pdf = (a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln()
                     - (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b));
                 ln_pdf.exp()
             }
@@ -1538,7 +1568,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::Error(format!(
                 "PDF: unknown distribution '{}'",
                 other
-            )))
+            )));
         }
     };
     Ok(real(density))
@@ -1557,7 +1587,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "Distribution (Association)".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     let x = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
@@ -1581,7 +1611,13 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
         "Uniform" => {
             let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
             let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
-            if x <= lo { 0.0 } else if x >= hi { 1.0 } else { (x - lo) / (hi - lo) }
+            if x <= lo {
+                0.0
+            } else if x >= hi {
+                1.0
+            } else {
+                (x - lo) / (hi - lo)
+            }
         }
         "Poisson" => {
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
@@ -1590,9 +1626,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             } else {
                 let k = x.floor() as u64;
                 (0..=k)
-                    .map(|i| {
-                        (i as f64 * lambda.ln() - lambda - ln_gamma(i as f64 + 1.0)).exp()
-                    })
+                    .map(|i| (i as f64 * lambda.ln() - lambda - ln_gamma(i as f64 + 1.0)).exp())
                     .sum::<f64>()
                     .min(1.0)
             }
@@ -1621,27 +1655,49 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
         }
         "Bernoulli" => {
             let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
-            if x < 0.0 { 0.0 } else if x < 1.0 { 1.0 - p } else { 1.0 }
+            if x < 0.0 {
+                0.0
+            } else if x < 1.0 {
+                1.0 - p
+            } else {
+                1.0
+            }
         }
         "Exponential" => {
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
-            if x <= 0.0 { 0.0 } else { 1.0 - (-lambda * x).exp() }
+            if x <= 0.0 {
+                0.0
+            } else {
+                1.0 - (-lambda * x).exp()
+            }
         }
         "Gamma" => {
             let alpha = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
-            if x <= 0.0 { 0.0 } else { regularized_gamma_p(alpha, lambda * x) }
+            if x <= 0.0 {
+                0.0
+            } else {
+                regularized_gamma_p(alpha, lambda * x)
+            }
         }
         "ChiSquare" => {
             let k = dist.get("K").and_then(to_f64).unwrap_or(1.0);
-            if x <= 0.0 { 0.0 } else { regularized_gamma_p(k / 2.0, x / 2.0) }
+            if x <= 0.0 {
+                0.0
+            } else {
+                regularized_gamma_p(k / 2.0, x / 2.0)
+            }
         }
         "StudentT" => {
             let nu = dist.get("Nu").and_then(to_f64).unwrap_or(1.0);
             // CDF via regularized incomplete beta: I_x(nu/2, 1/2) where x = nu/(nu+t^2)
             let xb = nu / (nu + x * x);
             let ibeta = regularized_beta(xb, nu / 2.0, 0.5);
-            if x >= 0.0 { 1.0 - ibeta / 2.0 } else { ibeta / 2.0 }
+            if x >= 0.0 {
+                1.0 - ibeta / 2.0
+            } else {
+                ibeta / 2.0
+            }
         }
         "Beta" => {
             let a = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
@@ -1651,7 +1707,11 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
         "LogNormal" => {
             let mu = dist.get("Mu").and_then(to_f64).unwrap_or(0.0);
             let sigma = dist.get("Sigma").and_then(to_f64).unwrap_or(1.0);
-            if x <= 0.0 { 0.0 } else { normal_cdf((x.ln() - mu) / sigma) }
+            if x <= 0.0 {
+                0.0
+            } else {
+                normal_cdf((x.ln() - mu) / sigma)
+            }
         }
         "Cauchy" => {
             let x0 = dist.get("Location").and_then(to_f64).unwrap_or(0.0);
@@ -1661,7 +1721,11 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
         "DiscreteUniform" => {
             let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
             let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
-            if x < lo { 0.0 } else if x >= hi { 1.0 } else {
+            if x < lo {
+                0.0
+            } else if x >= hi {
+                1.0
+            } else {
                 (x.floor() - lo + 1.0) / (hi - lo + 1.0)
             }
         }
@@ -1669,7 +1733,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::Error(format!(
                 "CDF: unknown distribution '{}'",
                 other
-            )))
+            )));
         }
     };
     Ok(real(cdf_val))
@@ -1700,9 +1764,7 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         match &args[1] {
             Value::Integer(i) => i.to_usize().ok_or_else(|| {
-                EvalError::Error(
-                    "RandomVariate: count must be a non-negative integer".to_string(),
-                )
+                EvalError::Error("RandomVariate: count must be a non-negative integer".to_string())
             })?,
             _ => {
                 return Err(EvalError::TypeError {
@@ -1827,9 +1889,7 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
             let x0 = dist.get("Location").and_then(to_f64).unwrap_or(0.0);
             let gamma = dist.get("Scale").and_then(to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| {
-                    real(x0 + gamma * (std::f64::consts::PI * (rng.f64() - 0.5)).tan())
-                })
+                .map(|_| real(x0 + gamma * (std::f64::consts::PI * (rng.f64() - 0.5)).tan()))
                 .collect()
         }
         "DiscreteUniform" => {
@@ -1888,12 +1948,24 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "PoissonDistribution", builtin_poisson_distribution);
     register_builtin(env, "BinomialDistribution", builtin_binomial_distribution);
     register_builtin(env, "BernoulliDistribution", builtin_bernoulli_distribution);
-    register_builtin(env, "ExponentialDistribution", builtin_exponential_distribution);
+    register_builtin(
+        env,
+        "ExponentialDistribution",
+        builtin_exponential_distribution,
+    );
     register_builtin(env, "GammaDistribution", builtin_gamma_distribution);
-    register_builtin(env, "ChiSquareDistribution", builtin_chi_square_distribution);
+    register_builtin(
+        env,
+        "ChiSquareDistribution",
+        builtin_chi_square_distribution,
+    );
     register_builtin(env, "StudentTDistribution", builtin_student_t_distribution);
     register_builtin(env, "BetaDistribution", builtin_beta_distribution);
-    register_builtin(env, "LogNormalDistribution", builtin_log_normal_distribution);
+    register_builtin(
+        env,
+        "LogNormalDistribution",
+        builtin_log_normal_distribution,
+    );
     register_builtin(env, "CauchyDistribution", builtin_cauchy_distribution);
     register_builtin(
         env,
@@ -1982,7 +2054,13 @@ mod tests {
 
     #[test]
     fn test_mean_integers() {
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         assert_eq!(builtin_mean(&[data]).unwrap(), int_val(3));
     }
 
@@ -2008,8 +2086,14 @@ mod tests {
     #[test]
     fn test_variance() {
         let data = list(vec![
-            int_val(2), int_val(4), int_val(4), int_val(4),
-            int_val(5), int_val(5), int_val(7), int_val(9),
+            int_val(2),
+            int_val(4),
+            int_val(4),
+            int_val(4),
+            int_val(5),
+            int_val(5),
+            int_val(7),
+            int_val(9),
         ]);
         let r = builtin_variance(&[data]).unwrap();
         assert!(approx(&r, 32.0 / 7.0, 1e-10));
@@ -2018,8 +2102,14 @@ mod tests {
     #[test]
     fn test_standard_deviation() {
         let data = list(vec![
-            int_val(2), int_val(4), int_val(4), int_val(4),
-            int_val(5), int_val(5), int_val(7), int_val(9),
+            int_val(2),
+            int_val(4),
+            int_val(4),
+            int_val(4),
+            int_val(5),
+            int_val(5),
+            int_val(7),
+            int_val(9),
         ]);
         let r = builtin_standard_deviation(&[data]).unwrap();
         assert!(approx(&r, (32.0f64 / 7.0).sqrt(), 1e-10));
@@ -2027,7 +2117,13 @@ mod tests {
 
     #[test]
     fn test_quantile() {
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         let r = builtin_quantile(&[data, real_val(0.5)]).unwrap();
         assert!(approx(&r, 3.0, 1e-10));
     }
@@ -2068,7 +2164,13 @@ mod tests {
     #[test]
     fn test_skewness_symmetric() {
         // Symmetric data → skewness ≈ 0
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         let r = builtin_skewness(&[data]).unwrap();
         assert!(approx(&r, 0.0, 1e-10));
     }
@@ -2077,8 +2179,13 @@ mod tests {
     fn test_kurtosis_normal_approx() {
         // Normal-like data should have kurtosis close to 3
         let data = list(vec![
-            real_val(-2.0), real_val(-1.0), real_val(-0.5),
-            real_val(0.0), real_val(0.5), real_val(1.0), real_val(2.0),
+            real_val(-2.0),
+            real_val(-1.0),
+            real_val(-0.5),
+            real_val(0.0),
+            real_val(0.5),
+            real_val(1.0),
+            real_val(2.0),
         ]);
         let r = builtin_kurtosis(&[data]).unwrap();
         // Just check it's a positive real number
@@ -2101,7 +2208,13 @@ mod tests {
 
     #[test]
     fn test_interquartile_range() {
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         let r = builtin_interquartile_range(&[data]).unwrap();
         // Q1 = 1.5*(5-1)*0.25 + 1 = 2, Q3 = 4, IQR = 2
         assert!(approx(&r, 2.0, 1e-10));
@@ -2142,7 +2255,16 @@ mod tests {
 
     #[test]
     fn test_standardize() {
-        let data = list(vec![int_val(2), int_val(4), int_val(4), int_val(4), int_val(5), int_val(5), int_val(7), int_val(9)]);
+        let data = list(vec![
+            int_val(2),
+            int_val(4),
+            int_val(4),
+            int_val(4),
+            int_val(5),
+            int_val(5),
+            int_val(7),
+            int_val(9),
+        ]);
         let r = builtin_standardize(&[data]).unwrap();
         if let Value::List(items) = r {
             assert_eq!(items.len(), 8);
@@ -2151,7 +2273,11 @@ mod tests {
                 assert!(matches!(v, Value::Real(_)));
             }
             // First element: (2-5)/sqrt(4.5714) ≈ -1.404
-            assert!(approx(&items[0], (2.0 - 5.0) / (32.0f64 / 7.0).sqrt(), 1e-6));
+            assert!(approx(
+                &items[0],
+                (2.0 - 5.0) / (32.0f64 / 7.0).sqrt(),
+                1e-6
+            ));
         } else {
             panic!("Expected List");
         }
@@ -2162,7 +2288,12 @@ mod tests {
     #[test]
     fn test_bin_counts_width() {
         let data = list(vec![
-            int_val(1), int_val(1), int_val(2), int_val(3), int_val(4), int_val(5),
+            int_val(1),
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
         ]);
         let r = builtin_bin_counts(&[data, int_val(2)]).unwrap();
         if let Value::List(counts) = r {
@@ -2176,7 +2307,11 @@ mod tests {
     #[test]
     fn test_bin_counts_explicit() {
         let data = list(vec![
-            int_val(1), int_val(2), int_val(3), int_val(4), int_val(5),
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
         ]);
         let spec = Value::List(vec![int_val(1), int_val(5), int_val(2)]);
         let r = builtin_bin_counts(&[data, spec]).unwrap();
@@ -2191,7 +2326,11 @@ mod tests {
     #[test]
     fn test_histogram_list() {
         let data = list(vec![
-            int_val(1), int_val(2), int_val(3), int_val(4), int_val(5),
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
         ]);
         let r = builtin_histogram_list(&[data, int_val(5)]).unwrap();
         if let Value::List(parts) = r {
@@ -2213,7 +2352,10 @@ mod tests {
     fn test_normal_distribution() {
         let dist = builtin_normal_distribution(&[real_val(0.0), real_val(1.0)]).unwrap();
         if let Value::Assoc(map) = dist {
-            assert_eq!(map.get("Distribution"), Some(&Value::Str("Normal".to_string())));
+            assert_eq!(
+                map.get("Distribution"),
+                Some(&Value::Str("Normal".to_string()))
+            );
         } else {
             panic!("Expected Assoc");
         }
@@ -2223,7 +2365,10 @@ mod tests {
     fn test_exponential_distribution() {
         let dist = builtin_exponential_distribution(&[real_val(2.0)]).unwrap();
         if let Value::Assoc(map) = &dist {
-            assert_eq!(map.get("Distribution"), Some(&Value::Str("Exponential".to_string())));
+            assert_eq!(
+                map.get("Distribution"),
+                Some(&Value::Str("Exponential".to_string()))
+            );
         }
         // Mean = 1/lambda = 0.5
         let m = builtin_mean(&[dist]).unwrap();

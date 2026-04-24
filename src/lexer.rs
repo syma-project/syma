@@ -77,9 +77,9 @@ pub enum Token {
     Or,              // ||
     Not,             // !
     FatArrow,        // =>
-    StringJoinOp, // <>
-    PipeAlt,       // | (pattern alternatives)
-    FuncRef,       // & (function reference / pure function)
+    StringJoinOp,    // <>
+    PipeAlt,         // | (pattern alternatives)
+    FuncRef,         // & (function reference / pure function)
 
     // ── Special ──
     Quote,        // ' (quote)

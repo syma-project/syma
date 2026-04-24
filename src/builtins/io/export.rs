@@ -2,8 +2,8 @@
 //!
 //! Delegates format detection and conversion to the `formats` module.
 
-use crate::value::{EvalError, Value};
 use super::formats::ExportOutput;
+use crate::value::{EvalError, Value};
 
 /// Export[path, data] — export data to a file, detecting format from extension.
 ///

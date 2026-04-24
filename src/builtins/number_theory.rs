@@ -1,9 +1,9 @@
 use crate::env::Env;
 use crate::eval::apply_function;
-use crate::value::{EvalError, Value, DEFAULT_PRECISION};
-use rug::ops::Pow;
+use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+use rug::ops::Pow;
 
 // ── Primality ─────────────────────────────────────────────────────────────
 
@@ -59,7 +59,10 @@ pub fn is_prime_u64(n: u64) -> bool {
     if n == 2 || n == 3 || n == 5 || n == 7 {
         return true;
     }
-    if n % 2 == 0 || (n.clone() % Integer::from(3)).is_zero() || (n.clone() % Integer::from(5)).is_zero() {
+    if n % 2 == 0
+        || (n.clone() % Integer::from(3)).is_zero()
+        || (n.clone() % Integer::from(5)).is_zero()
+    {
         return false;
     }
     WITNESSES.iter().all(|&a| miller_rabin(n, a))
@@ -84,7 +87,9 @@ pub fn builtin_prime_q(args: &[Value]) -> Result<Value, EvalError> {
                 // Trial division up to sqrt for large integers (slow but correct)
                 trial_prime_check(n)
             };
-            Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+            Ok(Value::Symbol(
+                if result { "True" } else { "False" }.to_string(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -152,10 +157,7 @@ pub fn builtin_factor_integer(args: &[Value]) -> Result<Value, EvalError> {
             let list = factors
                 .into_iter()
                 .map(|(p, e)| {
-                    Value::List(vec![
-                        Value::Integer(p),
-                        Value::Integer(Integer::from(e)),
-                    ])
+                    Value::List(vec![Value::Integer(p), Value::Integer(Integer::from(e))])
                 })
                 .collect();
             Ok(Value::List(list))
@@ -218,9 +220,9 @@ pub fn builtin_prime(args: &[Value]) -> Result<Value, EvalError> {
                     "Prime: argument must be a positive integer".to_string(),
                 ));
             }
-            let k = k.to_usize().ok_or_else(|| {
-                EvalError::Error("Prime: argument too large".to_string())
-            })?;
+            let k = k
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("Prime: argument too large".to_string()))?;
             let mut count = 0usize;
             let mut n = 1u64;
             loop {
@@ -255,7 +257,7 @@ pub fn builtin_prime_pi(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "Number".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     let count = (2..=x).filter(|&n| is_prime_u64(n)).count();
@@ -277,7 +279,7 @@ pub fn builtin_next_prime(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "Number".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     let mut n = start + 1;
@@ -298,7 +300,9 @@ pub fn builtin_power_mod(args: &[Value]) -> Result<Value, EvalError> {
     match (&args[0], &args[1], &args[2]) {
         (Value::Integer(a), Value::Integer(b), Value::Integer(n)) => {
             if n.is_zero() {
-                return Err(EvalError::Error("PowerMod: modulus cannot be zero".to_string()));
+                return Err(EvalError::Error(
+                    "PowerMod: modulus cannot be zero".to_string(),
+                ));
             }
             if b.is_negative() {
                 // Modular inverse: find x such that a*x ≡ 1 (mod n)
@@ -443,7 +447,7 @@ pub fn builtin_divisor_sigma(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "Integer".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     match &args[1] {
@@ -491,7 +495,9 @@ pub fn builtin_divisible(args: &[Value]) -> Result<Value, EvalError> {
                 ));
             }
             let r = m.clone() % n.clone();
-            Ok(Value::Symbol(if r.is_zero() { "True" } else { "False" }.to_string()))
+            Ok(Value::Symbol(
+                if r.is_zero() { "True" } else { "False" }.to_string(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -519,7 +525,7 @@ pub fn builtin_coprime_q(args: &[Value]) -> Result<Value, EvalError> {
                     return Err(EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: args[i].type_name().to_string(),
-                    })
+                    });
                 }
             }
         }
@@ -565,7 +571,9 @@ pub fn builtin_integer_digits(args: &[Value]) -> Result<Value, EvalError> {
                 m /= base_int.clone();
             }
             digits.reverse();
-            Ok(Value::List(digits.into_iter().map(Value::Integer).collect()))
+            Ok(Value::List(
+                digits.into_iter().map(Value::Integer).collect(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -598,8 +606,7 @@ fn compute_power_mod_int(base: &Integer, exp: &Integer, modulus: &Integer) -> In
 pub fn builtin_modular_inverse(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "ModularInverse requires exactly 2 arguments: ModularInverse[a, m]"
-                .to_string(),
+            "ModularInverse requires exactly 2 arguments: ModularInverse[a, m]".to_string(),
         ));
     }
     match (&args[0], &args[1]) {
@@ -677,19 +684,16 @@ pub fn builtin_prime_nu(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 3 {
         return Err(EvalError::Error(
-            "DigitCount requires 1 to 3 arguments: DigitCount[n, base, digit]"
-                .to_string(),
+            "DigitCount requires 1 to 3 arguments: DigitCount[n, base, digit]".to_string(),
         ));
     }
     let base: u32 = if args.len() >= 2 {
         match &args[1] {
-            Value::Integer(b) if *b >= Integer::from(2) => {
-                b.to_u32().unwrap_or(10)
-            }
+            Value::Integer(b) if *b >= Integer::from(2) => b.to_u32().unwrap_or(10),
             _ => {
                 return Err(EvalError::Error(
                     "DigitCount: base must be an integer >= 2".to_string(),
-                ))
+                ));
             }
         }
     } else {
@@ -697,14 +701,13 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
     };
     let specific_digit = if args.len() == 3 {
         match &args[2] {
-            Value::Integer(d) if *d >= Integer::from(0) && *d < Integer::from(base) =>
-            {
+            Value::Integer(d) if *d >= Integer::from(0) && *d < Integer::from(base) => {
                 d.to_u32().unwrap()
             }
             _ => {
                 return Err(EvalError::Error(
                     "DigitCount: invalid digit for this base".to_string(),
-                ))
+                ));
             }
         }
     } else {
@@ -715,7 +718,11 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             if n.is_zero() {
                 if specific_digit != u32::MAX {
-                    return Ok(Value::Integer(Integer::from(if specific_digit == 0 { 1 } else { 0 })));
+                    return Ok(Value::Integer(Integer::from(if specific_digit == 0 {
+                        1
+                    } else {
+                        0
+                    })));
                 }
                 let mut counts = vec![0u32; base as usize];
                 counts[0] = 1;
@@ -759,16 +766,14 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_jacobi_symbol(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "JacobiSymbol requires exactly 2 arguments: JacobiSymbol[a, n]"
-                .to_string(),
+            "JacobiSymbol requires exactly 2 arguments: JacobiSymbol[a, n]".to_string(),
         ));
     }
     match (&args[0], &args[1]) {
         (Value::Integer(a), Value::Integer(n)) => {
             if n <= &Integer::from(0) || (n.clone() % Integer::from(2)).is_zero() {
                 return Err(EvalError::Error(
-                    "JacobiSymbol: second argument must be a positive odd integer"
-                        .to_string(),
+                    "JacobiSymbol: second argument must be a positive odd integer".to_string(),
                 ));
             }
             let result = jacobi_symbol(a, n);
@@ -813,11 +818,7 @@ fn jacobi_symbol(a: &Integer, n: &Integer) -> i32 {
         a = n % tmp.clone();
         n = tmp;
     }
-    if n == Integer::from(1) {
-        t
-    } else {
-        0
-    }
+    if n == Integer::from(1) { t } else { 0 }
 }
 
 // ── ChineseRemainder ──────────────────────────────────────────────────
@@ -834,8 +835,7 @@ pub fn builtin_chinese_remainder(args: &[Value]) -> Result<Value, EvalError> {
         (Value::List(remainders), Value::List(moduli)) => {
             if remainders.len() != moduli.len() || remainders.is_empty() {
                 return Err(EvalError::Error(
-                    "ChineseRemainder: both lists must have the same non-zero length"
-                        .to_string(),
+                    "ChineseRemainder: both lists must have the same non-zero length".to_string(),
                 ));
             }
             let n_eqns = remainders.len();
@@ -859,7 +859,7 @@ pub fn builtin_chinese_remainder(args: &[Value]) -> Result<Value, EvalError> {
                         return Err(EvalError::TypeError {
                             expected: "Integer".to_string(),
                             got: r.type_name().to_string(),
-                        })
+                        });
                     }
                 }
             }
@@ -885,8 +885,7 @@ pub fn builtin_chinese_remainder(args: &[Value]) -> Result<Value, EvalError> {
             let mut result = Integer::from(0);
             for i in 0..n_eqns {
                 let ni = n_total.clone() / mod_int[i].clone();
-                let xi = mod_inverse(&ni, &mod_int[i])
-                    .expect("pairwise coprime");
+                let xi = mod_inverse(&ni, &mod_int[i]).expect("pairwise coprime");
                 result += rem_int[i].clone() * ni * xi;
             }
             result %= &n_total;
@@ -986,8 +985,7 @@ pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
             };
             // Distinct prime factors of φ
             let phi_factors = factor_integer(&phi);
-            let distinct: Vec<Integer> =
-                phi_factors.iter().map(|(p, _)| p.clone()).collect();
+            let distinct: Vec<Integer> = phi_factors.iter().map(|(p, _)| p.clone()).collect();
 
             // Search for smallest primitive root
             let mut g = Integer::from(2);
@@ -1011,8 +1009,7 @@ pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
                 g += Integer::from(1);
             }
             Err(EvalError::Error(
-                "PrimitiveRoot: no primitive root exists for this modulus"
-                    .to_string(),
+                "PrimitiveRoot: no primitive root exists for this modulus".to_string(),
             ))
         }
         _ => Err(EvalError::TypeError {
@@ -1049,7 +1046,9 @@ pub fn builtin_perfect_number_q(args: &[Value]) -> Result<Value, EvalError> {
                 d += Integer::from(1);
             }
             let perfect = sum == Integer::from(2) * &n_abs;
-            Ok(Value::Symbol(if perfect { "True" } else { "False" }.to_string()))
+            Ok(Value::Symbol(
+                if perfect { "True" } else { "False" }.to_string(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -1119,8 +1118,7 @@ pub fn builtin_liouville_lambda(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_divisor_sum(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "DivisorSum requires exactly 2 arguments: DivisorSum[n, form]"
-                .to_string(),
+            "DivisorSum requires exactly 2 arguments: DivisorSum[n, form]".to_string(),
         ));
     }
     let n = match &args[0] {
@@ -1129,7 +1127,7 @@ pub fn builtin_divisor_sum(args: &[Value], env: &Env) -> Result<Value, EvalError
             return Err(EvalError::TypeError {
                 expected: "Integer".to_string(),
                 got: args[0].type_name().to_string(),
-            })
+            });
         }
     };
     let form = &args[1];
@@ -1149,20 +1147,19 @@ pub fn builtin_divisor_sum(args: &[Value], env: &Env) -> Result<Value, EvalError
                     return Err(EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: val1.type_name().to_string(),
-                    })
+                    });
                 }
             }
             let other = n.clone() / d.clone();
             if other != d {
-                let val2 =
-                    apply_function(form, &[Value::Integer(other.clone())], env)?;
+                let val2 = apply_function(form, &[Value::Integer(other.clone())], env)?;
                 match &val2 {
                     Value::Integer(i) => sum += i.clone(),
                     _ => {
                         return Err(EvalError::TypeError {
                             expected: "Integer".to_string(),
                             got: val2.type_name().to_string(),
-                        })
+                        });
                     }
                 }
             }
@@ -1182,10 +1179,22 @@ mod tests {
 
     #[test]
     fn test_prime_q() {
-        assert_eq!(builtin_prime_q(&[int(2)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_prime_q(&[int(17)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_prime_q(&[int(4)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_prime_q(&[int(1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(
+            builtin_prime_q(&[int(2)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_prime_q(&[int(17)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_prime_q(&[int(4)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_prime_q(&[int(1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
     }
 
     #[test]
@@ -1247,7 +1256,10 @@ mod tests {
     #[test]
     fn test_power_mod() {
         // 2^10 mod 100 = 1024 mod 100 = 24
-        assert_eq!(builtin_power_mod(&[int(2), int(10), int(100)]).unwrap(), int(24));
+        assert_eq!(
+            builtin_power_mod(&[int(2), int(10), int(100)]).unwrap(),
+            int(24)
+        );
         // 3^(-1) mod 7 = 5 (since 3*5 = 15 ≡ 1 mod 7)
         let inv = builtin_power_mod(&[int(3), int(-1), int(7)]).unwrap();
         assert_eq!(inv, int(5));

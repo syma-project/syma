@@ -53,9 +53,11 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Real(x), Value::Real(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Integer(x), Value::Real(y)) => rug::Float::with_val(crate::value::DEFAULT_PRECISION, x)
-            .partial_cmp(y)
-            .unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Integer(x), Value::Real(y)) => {
+            rug::Float::with_val(crate::value::DEFAULT_PRECISION, x)
+                .partial_cmp(y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Real(x), Value::Integer(y)) => x
             .partial_cmp(&rug::Float::with_val(crate::value::DEFAULT_PRECISION, y))
             .unwrap_or(std::cmp::Ordering::Equal),
@@ -186,9 +188,10 @@ fn extract_column(data: &Value, key: &str) -> Result<Value, EvalError> {
                 .collect();
             Ok(Value::List(values?))
         }
-        Value::Assoc(map) => map.get(key).cloned().ok_or_else(|| {
-            EvalError::Error(format!("Key '{}' not found in association", key))
-        }),
+        Value::Assoc(map) => map
+            .get(key)
+            .cloned()
+            .ok_or_else(|| EvalError::Error(format!("Key '{}' not found in association", key))),
         _ => Err(EvalError::TypeError {
             expected: "List or Assoc".to_string(),
             got: data.type_name().to_string(),
@@ -251,8 +254,7 @@ pub fn builtin_sort_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             let mut pairs: Vec<(Value, Value)> = items
                 .iter()
                 .map(|item| {
-                    let key = apply_function(f, &[item.clone()], env)
-                        .unwrap_or(Value::Null);
+                    let key = apply_function(f, &[item.clone()], env).unwrap_or(Value::Null);
                     (item.clone(), key)
                 })
                 .collect();
@@ -318,8 +320,10 @@ pub fn builtin_join_across(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     // Build a hash map from key value to assocs in list2 for efficient lookup
-    let mut key_to_assocs: std::collections::HashMap<String, Vec<&std::collections::HashMap<String, Value>>> =
-        std::collections::HashMap::new();
+    let mut key_to_assocs: std::collections::HashMap<
+        String,
+        Vec<&std::collections::HashMap<String, Value>>,
+    > = std::collections::HashMap::new();
 
     for item in list2 {
         match item {
@@ -434,19 +438,23 @@ mod tests {
     #[test]
     fn test_query_row() {
         // ds[1] should return first assoc
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->10, \"b\"->20|>, <|\"a\"->30, \"b\"->40|>}];
             ds[1]
-        )");
+        )",
+        );
         assert_eq!(result, assoc(vec![("a", int(10)), ("b", int(20))]));
     }
 
     #[test]
     fn test_query_row_negative() {
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>, <|\"a\"->3|>}];
             ds[-1]
-        )");
+        )",
+        );
         assert_eq!(result, assoc(vec![("a", int(3))]));
     }
 
@@ -454,29 +462,35 @@ mod tests {
 
     #[test]
     fn test_query_column() {
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->10, \"b\"->20|>, <|\"a\"->30, \"b\"->40|>}];
             ds[All, \"a\"]
-        )");
+        )",
+        );
         assert_eq!(result, Value::List(vec![int(10), int(30)]));
     }
 
     #[test]
     fn test_query_cell() {
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->10, \"b\"->20|>, <|\"a\"->30, \"b\"->40|>}];
             ds[2, \"a\"]
-        )");
+        )",
+        );
         assert_eq!(result, int(30));
     }
 
     #[test]
     fn test_query_column_subset() {
         // ds[All, {"a"}] should return list of assocs with only key "a"
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->10, \"b\"->20|>, <|\"a\"->30, \"b\"->40|>}];
             ds[All, {\"a\"}]
-        )");
+        )",
+        );
         assert_eq!(
             result,
             Value::List(vec![
@@ -489,17 +503,16 @@ mod tests {
     #[test]
     fn test_query_all_identity() {
         // ds[All] should return the inner data as-is
-        let result = eval_str("(
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>}];
             ds[All]
-        )");
+        )",
+        );
         // All is transparent, so we get the inner list
         assert_eq!(
             result,
-            Value::List(vec![
-                assoc(vec![("a", int(1))]),
-                assoc(vec![("a", int(2))]),
-            ])
+            Value::List(vec![assoc(vec![("a", int(1))]), assoc(vec![("a", int(2))]),])
         );
     }
 
@@ -541,7 +554,9 @@ mod tests {
     #[test]
     fn test_sort_by_assoc() {
         // Sort list of assocs by the "a" key
-        let result = eval_str("key[x_] := Lookup[x, \"a\"]; SortBy[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}, key]");
+        let result = eval_str(
+            "key[x_] := Lookup[x, \"a\"]; SortBy[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}, key]",
+        );
         assert_eq!(
             result,
             Value::List(vec![
@@ -584,17 +599,13 @@ mod tests {
 
     #[test]
     fn test_join_across_no_match() {
-        let result = eval_str(
-            "JoinAcross[{<|\"id\"->1|>}, {<|\"id\"->99|>}, \"id\"]",
-        );
+        let result = eval_str("JoinAcross[{<|\"id\"->1|>}, {<|\"id\"->99|>}, \"id\"]");
         assert_eq!(result, Value::List(vec![]));
     }
 
     #[test]
     fn test_join_across_empty_first() {
-        let result = eval_str(
-            "JoinAcross[{}, {<|\"id\"->1|>}, \"id\"]",
-        );
+        let result = eval_str("JoinAcross[{}, {<|\"id\"->1|>}, \"id\"]");
         assert_eq!(result, Value::List(vec![]));
     }
 
