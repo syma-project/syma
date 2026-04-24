@@ -574,6 +574,133 @@ withBackend[module_] := {
 
 ---
 
+## 8.4 Module Resolution
+
+When `import Foo` is evaluated, the runtime searches in order:
+
+1. **Session registry** — any `module Foo { ... }` already evaluated in this session.
+2. **Search paths** — directories listed in the module search path (default: the directory of the currently running file, then `.`).
+   - `Foo.syma` (exact case), then `foo.syma` (lowercase fallback).
+   - The file must contain a top-level `module Foo { ... }` definition.
+3. **Installed packages** — (future) packages installed under `.syma/deps/`.
+
+The search path can be extended at runtime or via the `SYMA_PATH` environment variable (planned).
+
+---
+
+## 8.5 Package System
+
+Syma's package system is modelled after Cargo (Rust) and `pyproject.toml` (Python).
+
+### 8.5.1 Package Manifest — `syma.toml`
+
+Every package has a `syma.toml` at its root:
+
+```toml
+[package]
+name        = "my-package"
+version     = "0.1.0"
+description = "A Syma package"
+authors     = ["Alice <alice@example.com>"]
+license     = "MIT"
+entry       = "src/main.syma"   # omit for library packages (default: src/lib.syma)
+
+[dependencies]
+LinearAlgebra = "^1.0"
+Statistics    = { version = "^2.0", path = "../statistics" }   # local path dep
+
+[dev-dependencies]
+TestUtils = "^0.1"
+```
+
+Version constraints follow semver:
+- `"1.0"` — exactly 1.0
+- `"^1.0"` — compatible with 1.0 (any 1.x)
+- `"~1.2"` — patch-level compatible (any 1.2.x)
+- `">=1.0, <2.0"` — explicit range
+
+### 8.5.2 Standard Package Layout
+
+```
+my-package/
+├── syma.toml          # package manifest (required)
+├── syma.lock          # dependency lock file (auto-generated, commit to VCS)
+├── src/
+│   ├── main.syma      # binary entry point  (or lib.syma for libraries)
+│   └── utils/
+│       └── helpers.syma
+├── tests/
+│   └── integration.syma
+└── examples/
+    └── demo.syma
+```
+
+Module name resolution within a package maps path segments to directories:
+- `import Utils.Helpers` → `src/utils/helpers.syma`
+- `import Helpers`       → `src/helpers.syma`
+
+### 8.5.3 Lock File — `syma.lock`
+
+`syma.lock` pins exact versions and checksums for reproducible builds.
+It is generated automatically and should be committed to version control.
+
+```toml
+# This file is auto-generated. Do not edit manually.
+
+[[package]]
+name     = "LinearAlgebra"
+version  = "1.2.3"
+checksum = "sha256:a3b1c2d4..."
+source   = "registry+https://packages.syma-lang.org"
+
+[[package]]
+name   = "Statistics"
+version = "2.0.1"
+path   = "../statistics"
+```
+
+### 8.5.4 CLI — `syma` Package Commands
+
+```
+syma new <name>           Create a new package in directory <name>
+syma new --lib <name>     Create a new library package
+
+syma build                Compile / type-check the package
+syma run                  Run src/main.syma
+syma test                 Run all files in tests/
+syma check                Fast semantic check without full build
+
+syma add <dep>            Add a dependency (updates syma.toml + syma.lock)
+syma add <dep>@1.2        Add a specific version
+syma remove <dep>         Remove a dependency
+syma update               Update dependencies within semver constraints
+syma install              Install all dependencies listed in syma.toml
+
+syma publish              Publish to the central registry (packages.syma-lang.org)
+syma search <query>       Search the registry
+syma info <package>       Show package metadata
+```
+
+### 8.5.5 Dependency Installation Layout
+
+Installed dependencies live in:
+
+```
+.syma/
+└── deps/
+    ├── LinearAlgebra-1.2.3/
+    │   ├── syma.toml
+    │   └── src/
+    │       └── lib.syma
+    └── Statistics-2.0.1/
+        └── ...
+```
+
+The evaluator adds `<package>/src/` to the search path for each installed dependency,
+so `import LinearAlgebra` resolves to `.syma/deps/LinearAlgebra-1.2.3/src/lib.syma`.
+
+---
+
 ## 9. Control Flow
 
 All control flow constructs are expressions that return values.

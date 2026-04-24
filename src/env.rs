@@ -4,10 +4,15 @@
 /// Variables are looked up from innermost to outermost scope.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::cell::RefCell;
 
 use crate::value::Value;
+
+/// Global module registry shared across all scopes in a session.
+/// Maps module names (e.g. `"LinearAlgebra"`, `"Math.Stats"`) to their `Value::Module`.
+pub type ModuleRegistry = Rc<RefCell<HashMap<String, Value>>>;
 
 /// A scope frame containing variable bindings.
 #[derive(Debug, Clone)]
@@ -21,6 +26,10 @@ pub struct Scope {
 pub struct Env {
     /// Current scope chain.
     scope: Rc<RefCell<Scope>>,
+    /// Module registry — shared (by `Rc` clone) across all child envs in a session.
+    pub registry: ModuleRegistry,
+    /// Directories searched when resolving `import Name` to a `.syma` file.
+    pub search_paths: Rc<RefCell<Vec<PathBuf>>>,
 }
 
 impl Scope {
@@ -56,14 +65,33 @@ impl Env {
     pub fn new() -> Self {
         Env {
             scope: Rc::new(RefCell::new(Scope::new(None))),
+            registry: Rc::new(RefCell::new(HashMap::new())),
+            search_paths: Rc::new(RefCell::new(vec![PathBuf::from(".")])),
         }
     }
 
-    /// Create a child environment (new scope).
+    /// Create a child environment (new scope, shared registry and search paths).
     pub fn child(&self) -> Self {
         Env {
             scope: Rc::new(RefCell::new(Scope::new(Some(self.scope.clone())))),
+            registry: self.registry.clone(),
+            search_paths: self.search_paths.clone(),
         }
+    }
+
+    /// Register a module in the session-wide registry.
+    pub fn register_module(&self, name: String, module: Value) {
+        self.registry.borrow_mut().insert(name, module);
+    }
+
+    /// Look up a module by its qualified name (e.g. `"LinearAlgebra"`).
+    pub fn get_module(&self, name: &str) -> Option<Value> {
+        self.registry.borrow().get(name).cloned()
+    }
+
+    /// Prepend a directory to the module search path.
+    pub fn add_search_path(&self, path: PathBuf) {
+        self.search_paths.borrow_mut().insert(0, path);
     }
 
     /// Look up a variable by name.

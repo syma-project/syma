@@ -144,6 +144,14 @@ pub enum Value {
     // ── Pattern (for internal use) ──
     Pattern(Expr),
 
+    // ── Module ──
+    /// A first-class module value produced by a `module Foo { ... }` definition.
+    Module {
+        name: String,
+        /// The exported symbols and their evaluated values.
+        exports: HashMap<String, Value>,
+    },
+
     // ── Hold ──
     Hold(Box<Value>),
     HoldComplete(Box<Value>),
@@ -242,6 +250,7 @@ impl PartialEq for Value {
             (Value::Assoc(a), Value::Assoc(b)) => a == b,
             (Value::Rule { lhs: l1, rhs: r1, delayed: d1 }, Value::Rule { lhs: l2, rhs: r2, delayed: d2 }) => d1 == d2 && l1 == l2 && r1 == r2,
             (Value::RuleSet { name: n1, rules: r1 }, Value::RuleSet { name: n2, rules: r2 }) => n1 == n2 && r1 == r2,
+            (Value::Module { name: n1, exports: e1 }, Value::Module { name: n2, exports: e2 }) => n1 == n2 && e1 == e2,
             _ => false,
         }
     }
@@ -269,6 +278,7 @@ impl Value {
             Value::Object { class_name, .. } => class_name,
             Value::RuleSet { .. } => "RuleSet",
             Value::Pattern(_) => "Pattern",
+            Value::Module { .. } => "Module",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
         }
@@ -288,6 +298,7 @@ impl Value {
             "Assoc" => matches!(self, Value::Assoc(_)),
             "Rule" => matches!(self, Value::Rule { .. }),
             "Function" => matches!(self, Value::Function(_) | Value::Builtin(_, _) | Value::PureFunction { .. }),
+            "Module" => matches!(self, Value::Module { .. }),
             "Object" => matches!(self, Value::Object { .. }),
             "Expr" => true,
             _ => {
@@ -608,6 +619,10 @@ impl fmt::Display for Value {
             }
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
+            Value::Module { name, exports } => {
+                write!(f, "Module[{}, {{{}}}]", name,
+                    exports.keys().cloned().collect::<Vec<_>>().join(", "))
+            }
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),
         }

@@ -81,25 +81,6 @@ fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
     }
 }
 
-fn eval_input_silent(input: &str, env: &env::Env) {
-    let tokens = match lexer::tokenize(input) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            print_error("LexError", &e.to_string(), input);
-            return;
-        }
-    };
-    let ast = match parser::parse(tokens) {
-        Ok(ast) => ast,
-        Err(e) => {
-            print_error("ParseError", &e.to_string(), input);
-            return;
-        }
-    };
-    if let Err(e) = eval::eval_program(&ast, env) {
-        print_error("Error", &e.to_string(), input);
-    }
-}
 
 fn run_file(path: &str) {
     let source = match fs::read_to_string(path) {
@@ -113,18 +94,29 @@ fn run_file(path: &str) {
     let env = env::Env::new();
     builtins::register_builtins(&env);
 
-    for line in source.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("(*") {
-            continue;
+    // Add the file's directory to the module search path so that
+    // `import Foo` can find sibling files (e.g. `Foo.syma`).
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if parent != std::path::Path::new("") {
+            env.add_search_path(parent.to_path_buf());
         }
-        // Suppress output for lines ending with ';'
-        if line.ends_with(';') {
-            eval_input_silent(line, &env);
-        } else if let Some(value) = eval_input(line, &env) {
-            if value != value::Value::Null {
-                println!("{}", value);
-            }
+    }
+
+    let tokens = match lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => { print_error("LexError", &e.to_string(), path); std::process::exit(1); }
+    };
+    let stmts = match parser::parse_with_suppress(tokens) {
+        Ok(s) => s,
+        Err(e) => { print_error("ParseError", &e.to_string(), path); std::process::exit(1); }
+    };
+
+    for (stmt, suppress) in &stmts {
+        match eval::eval(stmt, &env) {
+            Ok(value::Value::Null) => {}
+            Ok(value) if !suppress => println!("{}", value),
+            Ok(_) => {}
+            Err(e) => print_error("Error", &e.to_string(), path),
         }
     }
 }

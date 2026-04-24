@@ -1571,6 +1571,26 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expr>, ParseError> {
     Parser::new(tokens).parse_program()
 }
 
+/// Parse tokens into `(statement, had_semicolon)` pairs.
+///
+/// `had_semicolon == true` means the statement was followed by `;`, which is
+/// the convention for suppressing output in the REPL and file runner.
+pub fn parse_with_suppress(tokens: Vec<Token>) -> Result<Vec<(Expr, bool)>, ParseError> {
+    let mut p = Parser::new(tokens);
+    let mut stmts = Vec::new();
+    while p.peek() != &Token::Eof {
+        let stmt = p.parse_statement()?;
+        let had_semicolon = if p.at(&Token::Semicolon) {
+            p.advance();
+            true
+        } else {
+            false
+        };
+        stmts.push((stmt, had_semicolon));
+    }
+    Ok(stmts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

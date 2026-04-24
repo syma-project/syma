@@ -374,22 +374,79 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Module definition ──
-        Expr::ModuleDef { name: _, exports: _, body } => {
+        Expr::ModuleDef { name, exports, body } => {
             let child_env = env.child();
             for stmt in body {
                 eval(stmt, &child_env)?;
             }
-            // TODO: export symbols to parent scope
-            Ok(Value::Null)
+            // Collect the explicitly exported symbols from the module's scope.
+            let mut export_map = HashMap::new();
+            for sym in exports {
+                match child_env.get(sym) {
+                    Some(val) => { export_map.insert(sym.clone(), val); }
+                    None => return Err(EvalError::Error(
+                        format!("Module '{}' exports '{}' but it is not defined", name, sym)
+                    )),
+                }
+            }
+            let module_val = Value::Module {
+                name: name.clone(),
+                exports: export_map,
+            };
+            // Register in the shared session registry so `import` can find it by name.
+            env.register_module(name.clone(), module_val.clone());
+            // Also bind in the current scope so the module can be stored in a variable.
+            env.set(name.clone(), module_val.clone());
+            Ok(module_val)
         }
 
         // ── Import ──
-        Expr::Import { module, selective: _, alias: _ } => {
-            // TODO: implement module loading
-            Err(EvalError::Error(format!("Import not yet implemented: {}", module.join("."))))
+        Expr::Import { module, selective, alias } => {
+            let module_name = module.join(".");
+            // 1. Try in-memory registry (covers same-file and previously loaded modules).
+            let module_val = if let Some(m) = env.get_module(&module_name) {
+                m
+            } else if module.len() == 1 {
+                // 2. Try file-based loading.
+                load_module_from_file(&module[0], env)?
+            } else {
+                return Err(EvalError::Error(format!("Module not found: '{}'", module_name)));
+            };
+
+            match &module_val {
+                Value::Module { name: mod_name, exports } => {
+                    match (selective.as_deref(), alias.as_deref()) {
+                        (Some(names), _) => {
+                            // import Foo.{A, B}  — bind only the listed names
+                            for sym in names {
+                                match exports.get(sym) {
+                                    Some(val) => env.set(sym.clone(), val.clone()),
+                                    None => return Err(EvalError::Error(
+                                        format!("Module '{}' does not export '{}'", mod_name, sym)
+                                    )),
+                                }
+                            }
+                        }
+                        (None, Some(alias_name)) => {
+                            // import Foo as F  — bind the module value under the alias
+                            env.set(alias_name.to_string(), module_val.clone());
+                        }
+                        (None, None) => {
+                            // import Foo  — bind all exports into current scope
+                            for (sym, val) in exports {
+                                env.set(sym.clone(), val.clone());
+                            }
+                        }
+                    }
+                }
+                _ => return Err(EvalError::Error(format!("'{}' is not a module", module_name))),
+            }
+            Ok(Value::Null)
         }
 
         // ── Export ──
+        // `export` inside a module body is handled by ModuleDef; a bare `export`
+        // outside a module is a no-op (it was already recorded by the parser).
         Expr::Export(_) => Ok(Value::Null),
 
         // ── Sequence ──
@@ -1207,6 +1264,59 @@ fn builtin_fixed_point_eval(args: &[Value], env: &Env) -> Result<Value, EvalErro
         val = new_val;
     }
     Ok(val)
+}
+
+/// Try to load a module from a `.syma` file on disk.
+///
+/// Searches `env.search_paths` for `{Name}.syma` (then `{name}.syma`).
+/// The file must contain a top-level `module <Name> { ... }` definition.
+fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
+    use crate::{lexer, parser};
+
+    // Candidates: exact case first, then lowercase fallback.
+    let candidates = [
+        format!("{}.syma", name),
+        format!("{}.syma", name.to_lowercase()),
+    ];
+
+    let mut source: Option<String> = None;
+    'outer: for candidate in &candidates {
+        for dir in env.search_paths.borrow().iter() {
+            let path = dir.join(candidate);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                source = Some(content);
+                break 'outer;
+            }
+        }
+    }
+
+    let src = source.ok_or_else(|| {
+        EvalError::Error(format!(
+            "Module '{}' not found.\nSearched for '{}.syma' in: {}",
+            name, name,
+            env.search_paths.borrow()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
+
+    let tokens = lexer::tokenize(&src).map_err(|e| EvalError::Error(e.to_string()))?;
+    let ast = parser::parse(tokens).map_err(|e| EvalError::Error(e.to_string()))?;
+
+    // Eval the file in a child env so its internals don't pollute the caller's scope.
+    // `ModuleDef` evaluation will register the module in the shared registry.
+    let file_env = env.child();
+    eval_program(&ast, &file_env)?;
+
+    env.get_module(name).ok_or_else(|| {
+        EvalError::Error(format!(
+            "File '{}.syma' was loaded but did not define a module named '{}'.\n\
+             Tip: wrap its contents in `module {} {{ export ...; ... }}`",
+            name, name, name
+        ))
+    })
 }
 
 #[cfg(test)]

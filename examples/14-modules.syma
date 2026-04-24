@@ -1,0 +1,44 @@
+(* 14-modules.syma — first-class module system demo *)
+
+(* ── Define a module ─────────────────────────────────────────── *)
+
+module MathUtils {
+    export square, cube, clamp
+
+    square[x_] := x ^ 2
+    cube[x_]   := x ^ 3
+
+    (* clamp[v, lo, hi] — keep v in [lo, hi] *)
+    clamp[v_, lo_, hi_] := If[v < lo, lo, If[v > hi, hi, v]]
+}
+
+(* ── Import all exports ───────────────────────────────────────── *)
+
+import MathUtils
+square[5]        (* 25 *)
+cube[3]          (* 27 *)
+clamp[15, 0, 10] (* 10 *)
+
+(* ── Selective import ─────────────────────────────────────────── *)
+
+module Geometry {
+    export circleArea, rectArea
+
+    circleArea[r_] := 3.14159265358979 * r ^ 2
+    rectArea[w_, h_] := w * h
+}
+
+import Geometry.{circleArea}
+circleArea[5]   (* ~78.5 *)
+
+(* ── Alias import ─────────────────────────────────────────────── *)
+
+module StringOps {
+    export shout, whisper
+
+    shout[s_]   := ToUpperCase[s]
+    whisper[s_] := ToLowerCase[s]
+}
+
+import StringOps as S
+S                (* Module[StringOps, {shout, whisper}] *)

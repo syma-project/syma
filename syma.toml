@@ -1,0 +1,26 @@
+# syma.toml — Syma package manifest
+#
+# This is the template/reference manifest for the Syma language itself.
+# Copy this file to the root of your own package and edit as needed.
+
+[package]
+name        = "syma"
+version     = "0.1.0"
+description = "Syma standard library and runtime"
+authors     = ["Syma Contributors"]
+license     = "MIT"
+# entry     = "src/main.syma"   # binary entry point (omit for library-only packages)
+
+# ── Runtime dependencies ───────────────────────────────────────────────────────
+# List packages your code needs at runtime.
+# Version strings follow semver: "^1.0" = compatible with 1.x, "~1.2" = 1.2.x
+[dependencies]
+# example:
+# LinearAlgebra = "^1.0"
+# Statistics    = { version = "^2.0", path = "../statistics" }   # local path
+
+# ── Development dependencies ───────────────────────────────────────────────────
+# Packages needed only for testing / development, not included in published builds.
+[dev-dependencies]
+# example:
+# TestUtils = "^0.1"
