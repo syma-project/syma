@@ -2,6 +2,220 @@ use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
 
+// ── Pi-multiple detection for exact trig results ──
+
+/// Known special angle as (numerator, denominator) in [0, 2π) range.
+type PiFrac = (i64, u32);
+
+/// Tolerance for comparing `r / pi` to a known rational.
+fn trig_epsilon() -> Float {
+    Float::with_val(DEFAULT_PRECISION, 1e-30)
+}
+
+/// Try to extract a Pi-multiple from a symbolic expression.
+/// Returns Some((num, den)) if the expression is Pi, Pi/n, n*Pi, or n*Pi/m.
+fn extract_pi_multiple(val: &Value) -> Option<(i64, u32)> {
+    match val {
+        // Pi itself → 1*Pi
+        Value::Symbol(s) if s == "Pi" => Some((1, 1)),
+        // Divide[Pi, n] or Times[Pi, Power[n, -1]]
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            if let (Value::Symbol(s), Value::Integer(d)) = (&args[0], &args[1]) {
+                if s == "Pi" && !d.is_zero() && !d.is_negative() {
+                    return d.to_u32().map(|den| (1, den));
+                }
+            }
+            None
+        }
+        // Times[n, Pi] or Times[Pi, n]
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+            match (&args[0], &args[1]) {
+                (Value::Integer(n), Value::Symbol(s))
+                | (Value::Symbol(s), Value::Integer(n))
+                    if s == "Pi" =>
+                {
+                    if !n.is_negative() && !n.is_zero() {
+                        return n.to_u32().map(|num| (num as i64, 1));
+                    }
+                    None
+                }
+                // Times[n, Divide[Pi, d]] or similar — skip for now
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Check if `r` is any rational multiple of Pi (not just special angles).
+fn is_pi_multiple(r: &Float) -> bool {
+    let prec = r.prec().max(DEFAULT_PRECISION);
+    let pi = Float::with_val(prec, rug::float::Constant::Pi);
+    let ratio = Float::with_val(prec, r) / &pi;
+    // Check if ratio is close to a rational with small denominator
+    let eps = trig_epsilon();
+    for den in [1u32, 2, 3, 4, 6, 5, 8, 10, 12] {
+        let scaled = Float::with_val(prec, &ratio * Float::with_val(prec, den));
+        let rounded = Float::with_val(prec, &scaled).round();
+        let diff = Float::with_val(prec, &scaled - &rounded).abs();
+        if diff < eps {
+            return true;
+        }
+    }
+    false
+}
+
+/// If `r` is a known rational multiple of Pi, return `Some((num, den))`
+/// where the equivalent angle is `num/den * Pi` in [0, 2π).
+fn pi_multiple(r: &Float) -> Option<PiFrac> {
+    let prec = r.prec().max(DEFAULT_PRECISION);
+    let pi = Float::with_val(prec, rug::float::Constant::Pi);
+    let ratio = Float::with_val(prec, r) / &pi;
+
+    // Reduce to [0, 2) range: ratio = 2*k + frac, frac ∈ [0, 2)
+    let two = Float::with_val(prec, 2u32);
+    let k = Float::with_val(prec, &ratio / &two).floor();
+    let kt = Float::with_val(prec, &k * &two);
+    let frac = Float::with_val(prec, &ratio - &kt);
+
+    let eps = trig_epsilon();
+    let candidates: &[(i64, u32)] = &[
+        (0, 1),  // 0
+        (1, 6),  // 1/6
+        (1, 4),  // 1/4
+        (1, 3),  // 1/3
+        (1, 2),  // 1/2
+        (2, 3),  // 2/3
+        (3, 4),  // 3/4
+        (5, 6),  // 5/6
+        (1, 1),  // 1
+        (7, 6),  // 7/6
+        (5, 4),  // 5/4
+        (4, 3),  // 4/3
+        (3, 2),  // 3/2
+        (5, 3),  // 5/3
+        (7, 4),  // 7/4
+        (11, 6), // 11/6
+    ];
+
+    for &(num, den) in candidates {
+        let target = Float::with_val(prec, num) / Float::with_val(prec, den);
+        let diff_val = Float::with_val(prec, &frac - &target);
+        let diff = diff_val.abs();
+        if diff < eps {
+            return Some((num, den));
+        }
+    }
+
+    None
+}
+
+// ── Symbolic value constructors for exact trig results ──
+
+fn val_int(n: i64) -> Value {
+    Value::Integer(Integer::from(n))
+}
+
+/// Sqrt[n] as a symbolic Call
+fn val_sqrt(n: i64) -> Value {
+    Value::Call {
+        head: "Sqrt".to_string(),
+        args: vec![val_int(n)],
+    }
+}
+
+/// Divide[a, b] as a symbolic Call
+fn val_div(a: Value, b: Value) -> Value {
+    Value::Call {
+        head: "Divide".to_string(),
+        args: vec![a, b],
+    }
+}
+
+/// -v as Times[-1, v] (or Integer for simple cases)
+fn val_neg(v: Value) -> Value {
+    match v {
+        Value::Integer(n) => Value::Integer(-n),
+        other => Value::Call {
+            head: "Times".to_string(),
+            args: vec![val_int(-1), other],
+        },
+    }
+}
+
+/// Sqrt[n] / d  →  Divide[Sqrt[n], d]
+fn sqrt_over(n: i64, d: i64) -> Value {
+    val_div(val_sqrt(n), val_int(d))
+}
+
+/// 1 / d  →  Divide[1, d]
+fn one_over(d: i64) -> Value {
+    val_div(val_int(1), val_int(d))
+}
+
+/// -Sqrt[n] / d
+fn neg_sqrt_over(n: i64, d: i64) -> Value {
+    val_neg(sqrt_over(n, d))
+}
+
+/// -1 / d
+fn neg_one_over(d: i64) -> Value {
+    val_neg(one_over(d))
+}
+
+/// Compute exact sin for a known Pi fraction. (num, den) is in [0, 2) range.
+fn exact_sin(num: i64, den: u32) -> Option<Value> {
+    let result = match (num, den) {
+        (0, _) | (1, 1) => val_int(0),           // sin(0) = sin(π) = 0
+        (1, 6) | (5, 6) => one_over(2),           // sin(π/6) = sin(5π/6) = 1/2
+        (1, 4) | (3, 4) => sqrt_over(2, 2),       // sin(π/4) = sin(3π/4) = √2/2
+        (1, 3) | (2, 3) => sqrt_over(3, 2),       // sin(π/3) = sin(2π/3) = √3/2
+        (1, 2) => val_int(1),                      // sin(π/2) = 1
+        (7, 6) | (11, 6) => neg_one_over(2),       // sin(7π/6) = sin(11π/6) = -1/2
+        (5, 4) | (7, 4) => neg_sqrt_over(2, 2),   // sin(5π/4) = sin(7π/4) = -√2/2
+        (4, 3) | (5, 3) => neg_sqrt_over(3, 2),   // sin(4π/3) = sin(5π/3) = -√3/2
+        (3, 2) => val_int(-1),                     // sin(3π/2) = -1
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Compute exact cos for a known Pi fraction. (num, den) is in [0, 2) range.
+fn exact_cos(num: i64, den: u32) -> Option<Value> {
+    let result = match (num, den) {
+        (0, _) => val_int(1),                      // cos(0) = 1
+        (1, 6) | (11, 6) => sqrt_over(3, 2),       // cos(π/6) = cos(11π/6) = √3/2
+        (1, 4) | (7, 4) => sqrt_over(2, 2),        // cos(π/4) = cos(7π/4) = √2/2
+        (1, 3) | (5, 3) => one_over(2),            // cos(π/3) = cos(5π/3) = 1/2
+        (1, 2) | (3, 2) => val_int(0),             // cos(π/2) = cos(3π/2) = 0
+        (2, 3) | (4, 3) => neg_one_over(2),        // cos(2π/3) = cos(4π/3) = -1/2
+        (3, 4) | (5, 4) => neg_sqrt_over(2, 2),    // cos(3π/4) = cos(5π/4) = -√2/2
+        (5, 6) | (7, 6) => neg_sqrt_over(3, 2),    // cos(5π/6) = cos(7π/6) = -√3/2
+        (1, 1) => val_int(-1),                     // cos(π) = -1
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Compute exact tan for a known Pi fraction. (num, den) is in [0, 2) range.
+fn exact_tan(num: i64, den: u32) -> Option<Value> {
+    // tan is undefined at π/2 + kπ
+    if den == 2 && (num == 1 || num == 3) {
+        return None;
+    }
+    let result = match (num, den) {
+        (0, _) | (1, 1) => val_int(0),             // tan(0) = tan(π) = 0
+        (1, 6) | (7, 6) => val_div(val_int(1), val_sqrt(3)),   // 1/√3
+        (1, 4) | (5, 4) => val_int(1),             // tan(π/4) = tan(5π/4) = 1
+        (1, 3) | (4, 3) => val_sqrt(3),            // tan(π/3) = tan(4π/3) = √3
+        (2, 3) | (5, 3) => val_neg(val_sqrt(3)),   // -√3
+        (3, 4) | (7, 4) => val_int(-1),            // -1
+        (5, 6) | (11, 6) => val_neg(val_div(val_int(1), val_sqrt(3))),  // -1/√3
+        _ => return None,
+    };
+    Some(result)
+}
+
 // ── Trigonometric ──
 
 pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
@@ -10,13 +224,37 @@ pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
             "Sin requires exactly 1 argument".to_string(),
         ));
     }
+    // Symbolic Pi-multiple detection (before numerical eval)
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_sin(num, den) {
+            return Ok(result);
+        }
+        // Pi-multiple but not a special angle — keep symbolic
+        return Ok(Value::Call {
+            head: "Sin".to_string(),
+            args: args.to_vec(),
+        });
+    }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(_) => Ok(Value::Call {
             head: "Sin".to_string(),
             args: args.to_vec(),
         }),
-        Value::Real(r) => Ok(Value::Real(r.clone().sin())),
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_sin(num, den) {
+                    return Ok(result);
+                }
+            }
+            if is_pi_multiple(r) {
+                return Ok(Value::Call {
+                    head: "Sin".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+            Ok(Value::Real(r.clone().sin()))
+        }
         _ => Ok(Value::Call {
             head: "Sin".to_string(),
             args: args.to_vec(),
@@ -30,13 +268,35 @@ pub fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
             "Cos requires exactly 1 argument".to_string(),
         ));
     }
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_cos(num, den) {
+            return Ok(result);
+        }
+        return Ok(Value::Call {
+            head: "Cos".to_string(),
+            args: args.to_vec(),
+        });
+    }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
         Value::Integer(_) => Ok(Value::Call {
             head: "Cos".to_string(),
             args: args.to_vec(),
         }),
-        Value::Real(r) => Ok(Value::Real(r.clone().cos())),
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_cos(num, den) {
+                    return Ok(result);
+                }
+            }
+            if is_pi_multiple(r) {
+                return Ok(Value::Call {
+                    head: "Cos".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+            Ok(Value::Real(r.clone().cos()))
+        }
         _ => Ok(Value::Call {
             head: "Cos".to_string(),
             args: args.to_vec(),
@@ -50,13 +310,35 @@ pub fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
             "Tan requires exactly 1 argument".to_string(),
         ));
     }
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_tan(num, den) {
+            return Ok(result);
+        }
+        return Ok(Value::Call {
+            head: "Tan".to_string(),
+            args: args.to_vec(),
+        });
+    }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(_) => Ok(Value::Call {
             head: "Tan".to_string(),
             args: args.to_vec(),
         }),
-        Value::Real(r) => Ok(Value::Real(r.clone().tan())),
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_tan(num, den) {
+                    return Ok(result);
+                }
+            }
+            if is_pi_multiple(r) {
+                return Ok(Value::Call {
+                    head: "Tan".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+            Ok(Value::Real(r.clone().tan()))
+        }
         _ => Ok(Value::Call {
             head: "Tan".to_string(),
             args: args.to_vec(),
@@ -318,7 +600,11 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                     let i = r.to_f64() as i64;
                     return Ok(Value::Integer(Integer::from(i)));
                 }
-                Ok(Value::Real(r))
+                // Keep symbolic: Sqrt[n]
+                Ok(Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![args[0].clone()],
+                })
             }
         }
         Value::Real(r) => {
@@ -581,24 +867,167 @@ mod tests {
     fn real(r: f64) -> Value {
         Value::Real(Float::with_val(DEFAULT_PRECISION, r))
     }
+    fn pi() -> Value {
+        Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi))
+    }
 
     #[test]
-    fn test_sin() {
-        let result = builtin_sin(&[real(0.0)]).unwrap();
+    fn test_sin_zero_real() {
+        // sin(0.0) now returns Integer(0) via pi-multiple detection
+        assert_eq!(builtin_sin(&[real(0.0)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_sin_pi() {
+        assert_eq!(builtin_sin(&[pi()]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_sin_pi_over_2() {
+        // sin(π/2) = 1
+        let half_pi = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_sin(&[half_pi]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_sin_pi_over_6() {
+        // sin(π/6) = 1/2 → Divide[1, 2]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
+        );
+        let result = builtin_sin(&[arg]).unwrap();
+        assert_eq!(result, val_div(val_int(1), val_int(2)));
+    }
+
+    #[test]
+    fn test_sin_pi_over_4() {
+        // sin(π/4) = √2/2 → Divide[Sqrt[2], 2]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        let result = builtin_sin(&[arg]).unwrap();
+        assert_eq!(result, sqrt_over(2, 2));
+    }
+
+    #[test]
+    fn test_sin_pi_over_3() {
+        // sin(π/3) = √3/2 → Divide[Sqrt[3], 2]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
+        );
+        let result = builtin_sin(&[arg]).unwrap();
+        assert_eq!(result, sqrt_over(3, 2));
+    }
+
+    #[test]
+    fn test_sin_negative_pi() {
+        let pi_val = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi);
+        let neg_pi = Value::Real(Float::with_val(DEFAULT_PRECISION, -pi_val));
+        assert_eq!(builtin_sin(&[neg_pi]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_sin_negative_pi_over_2() {
+        // sin(-π/2) = -1
+        let neg_half_pi = Value::Real(
+            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_sin(&[neg_half_pi]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_cos_zero_real() {
+        assert_eq!(builtin_cos(&[real(0.0)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_cos_pi() {
+        assert_eq!(builtin_cos(&[pi()]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_cos_pi_over_2() {
+        let half_pi = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_cos(&[half_pi]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_cos_pi_over_3() {
+        // cos(π/3) = 1/2 → Divide[1, 2]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
+        );
+        let result = builtin_cos(&[arg]).unwrap();
+        assert_eq!(result, one_over(2));
+    }
+
+    #[test]
+    fn test_cos_pi_over_4() {
+        // cos(π/4) = √2/2 → Divide[Sqrt[2], 2]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        let result = builtin_cos(&[arg]).unwrap();
+        assert_eq!(result, sqrt_over(2, 2));
+    }
+
+    #[test]
+    fn test_tan_pi() {
+        assert_eq!(builtin_tan(&[pi()]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_tan_pi_over_4() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        assert_eq!(builtin_tan(&[arg]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_tan_negative_pi_over_4() {
+        // tan(-π/4) = -1
+        let arg = Value::Real(
+            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        assert_eq!(builtin_tan(&[arg]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_tan_pi_over_3() {
+        // tan(π/3) = √3 → Sqrt[3]
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
+        );
+        let result = builtin_tan(&[arg]).unwrap();
+        assert_eq!(result, val_sqrt(3));
+    }
+
+    #[test]
+    fn test_sin_non_special_angle() {
+        // sin(1.0) should still return a numerical Real
+        let result = builtin_sin(&[real(1.0)]).unwrap();
         if let Value::Real(r) = result {
-            assert!(r.to_f64().abs() < f64::EPSILON);
+            assert!((r.to_f64() - 1.0_f64.sin()).abs() < 1e-10);
         } else {
-            panic!("Expected Real");
+            panic!("Expected Real for sin(1.0)");
         }
     }
 
     #[test]
-    fn test_cos() {
-        let result = builtin_cos(&[real(0.0)]).unwrap();
-        if let Value::Real(r) = result {
-            assert!((r.to_f64() - 1.0).abs() < f64::EPSILON);
-        } else {
-            panic!("Expected Real");
+    fn test_sin_pi_over_5_symbolic() {
+        // sin(π/5) is not a special angle — should stay symbolic
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 5u32,
+        );
+        let result = builtin_sin(&[arg]).unwrap();
+        match result {
+            Value::Call { head, .. } => assert_eq!(head, "Sin"),
+            _ => panic!("Expected symbolic Sin[...] for sin(π/5), got {:?}", result),
         }
     }
 

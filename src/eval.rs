@@ -1813,8 +1813,8 @@ mod tests {
     fn test_pi() {
         let val = eval_str("Pi");
         match val {
-            Value::Real(r) => assert!((r.to_f64() - std::f64::consts::PI).abs() < 1e-15),
-            _ => panic!("Expected Real, got {:?}", val),
+            Value::Symbol(s) => assert_eq!(s, "Pi"),
+            _ => panic!("Expected Symbol, got {:?}", val),
         }
     }
 
@@ -1822,16 +1822,8 @@ mod tests {
     fn test_e() {
         let val = eval_str("E");
         match val {
-            Value::Real(r) => {
-                let e = r.to_f64();
-                // Check first 15 digits of Euler's number
-                assert!(
-                    (e - 2.718281828459045).abs() < 1e-10,
-                    "Expected ~e, got {}",
-                    e
-                );
-            }
-            _ => panic!("Expected Real, got {:?}", val),
+            Value::Symbol(s) => assert_eq!(s, "E"),
+            _ => panic!("Expected Symbol, got {:?}", val),
         }
     }
 

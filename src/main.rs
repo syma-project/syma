@@ -4,6 +4,7 @@
 mod ast;
 mod builtins;
 mod cli;
+mod debug;
 mod env;
 mod eval;
 mod lexer;
@@ -28,6 +29,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  syma                       Start the interactive REPL");
     println!("  syma <file>                Evaluate a Syma source file");
+    println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --help                Show this help");
     println!("  syma --version             Show version");
     println!();
@@ -266,6 +268,24 @@ fn dirs_or_default() -> Option<std::path::PathBuf> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for --dap flag (can be first or second arg)
+    let has_dap = args.iter().any(|a| a == "--dap");
+    let file_arg = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-') && a.as_str() != "new" && a.as_str() != "run" && a.as_str() != "build" && a.as_str() != "check" && a.as_str() != "test" && a.as_str() != "add" && a.as_str() != "remove" && a.as_str() != "rm" && a.as_str() != "install" && a.as_str() != "update" && a.as_str() != "publish" && a.as_str() != "search" && a.as_str() != "info")
+        .map(|s| s.as_str());
+
+    if has_dap {
+        if let Some(path) = file_arg {
+            debug::run_debug(path);
+        } else {
+            eprintln!("Usage: syma --dap <file>");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     match args.get(1).map(|s| s.as_str()) {
         // ── Meta ──────────────────────────────────────────────────────────────

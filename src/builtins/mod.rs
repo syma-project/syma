@@ -12,8 +12,7 @@ pub mod string;
 pub mod symbolic;
 
 use crate::env::Env;
-use crate::value::{DEFAULT_PRECISION, EvalError, Value};
-use rug::Float;
+use crate::value::{EvalError, Value};
 
 /// Register all built-in functions in the environment.
 pub fn register_builtins(env: &Env) {
@@ -169,14 +168,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "StringStartsQ", string::builtin_string_starts_q);
     register_builtin(env, "StringEndsQ", string::builtin_string_ends_q);
 
-    // ── Constants ──
-    env.set(
-        "Pi".to_string(),
-        Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi)),
-    );
-    // Euler's number e = exp(1); rug::float::Constant::Euler is the Euler-Mascheroni constant
-    let one = Float::with_val(DEFAULT_PRECISION, 1);
-    env.set("E".to_string(), Value::Real(one.exp()));
+    // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
+    env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
+    env.set("E".to_string(), Value::Symbol("E".to_string()));
     env.set("I".to_string(), Value::Complex { re: 0.0, im: 1.0 });
 }
 

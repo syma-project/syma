@@ -114,6 +114,34 @@ impl Env {
     pub fn has_local(&self, name: &str) -> bool {
         self.scope.borrow().bindings.contains_key(name)
     }
+
+    /// Return all bindings in the current scope (not parents), as a Vec of (name, value) pairs.
+    pub fn bindings(&self) -> Vec<(String, Value)> {
+        self.scope
+            .borrow()
+            .bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Return all bindings including parent scopes, as a Vec of (name, value) pairs.
+    /// Later entries shadow earlier ones.
+    pub fn all_bindings(&self) -> Vec<(String, Value)> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut scope_opt = Some(self.scope.clone());
+        while let Some(scope) = scope_opt {
+            let s = scope.borrow();
+            for (k, v) in &s.bindings {
+                if seen.insert(k.clone()) {
+                    result.push((k.clone(), v.clone()));
+                }
+            }
+            scope_opt = s.parent.clone();
+        }
+        result
+    }
 }
 
 impl Default for Env {

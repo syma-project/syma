@@ -1748,6 +1748,29 @@ pub fn parse_with_suppress(tokens: Vec<SpannedToken>) -> Result<Vec<(Expr, bool)
     Ok(stmts)
 }
 
+/// Parse tokens into `(statement, had_semicolon, line)` triples.
+///
+/// The `line` field records the 1-based source line where each statement starts,
+/// used by the debugger for breakpoint matching.
+pub fn parse_with_debug_info(
+    tokens: Vec<SpannedToken>,
+) -> Result<Vec<(Expr, bool, usize)>, ParseError> {
+    let mut p = Parser::new(tokens);
+    let mut stmts = Vec::new();
+    while p.peek() != &Token::Eof {
+        let line = p.peek_span().map(|s| s.line).unwrap_or(1);
+        let stmt = p.parse_statement()?;
+        let had_semicolon = if p.at(&Token::Semicolon) {
+            p.advance();
+            true
+        } else {
+            false
+        };
+        stmts.push((stmt, had_semicolon, line));
+    }
+    Ok(stmts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
