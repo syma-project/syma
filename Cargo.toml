@@ -13,6 +13,7 @@ default = []
 [dependencies]
 fastrand = "2"
 rug = "1.29"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rustyline = "18.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -330,6 +330,8 @@ fn format_value(val: &Value) -> String {
             format!("Sequence[{}]", parts.join(", "))
         }
         Value::Formatted { value, .. } => format_value(value),
+        Value::Image(img) => format!("<image {}x{}>", img.width(), img.height()),
+        Value::BytecodeFunction(bc) => format!("<bytecode {}>", bc.name),
     }
 }
 

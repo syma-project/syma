@@ -13,10 +13,12 @@ use std::sync::Arc;
 use rug::Integer;
 
 use crate::ast::*;
+use crate::bytecode;
 use crate::env::Env;
 use crate::env::LazyProvider;
 use crate::ffi;
 use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
+use crate::profiler;
 use crate::value::*;
 
 pub(crate) mod rules;
@@ -896,6 +898,18 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // ParallelTable[expr, {i, min, max}] — parallel version of Table
                 table::eval_parallel_table(args, env)
             }
+            "ParallelSum" => {
+                // ParallelSum[expr, {i, min, max}] — parallel version of Sum
+                table::eval_parallel_sum(args, env)
+            }
+            "ParallelEvaluate" => {
+                // ParallelEvaluate[expr] — evaluate expr on all workers in parallel
+                table::eval_parallel_evaluate(args, env)
+            }
+            "ParallelTry" => {
+                // ParallelTry[list] or ParallelTry[f, list] — return first result
+                table::eval_parallel_try(args, env)
+            }
             "Sum" => {
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 table::eval_sum(args, env)
@@ -1053,7 +1067,34 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             fn_ptr, signature, ..
         } => ffi::loader::call_native(*fn_ptr, signature, args),
 
+        Value::BytecodeFunction(bc_def) => {
+            bytecode::vm::execute_bytecode(&bc_def.bytecode, args, env)
+        }
+
         Value::Function(func_def) => {
+            // ── Hotness check: compile to bytecode if frequently called ──
+            if profiler::Profiler::check_hot(&func_def.name) {
+                if let Ok(bc) = bytecode::compiler::BytecodeCompiler::compile_multi(
+                    &func_def.definitions,
+                    &func_def.name,
+                ) {
+                    let bc_val = Value::BytecodeFunction(std::sync::Arc::new(
+                        crate::bytecode::BytecodeFunctionDef {
+                            name: func_def.name.clone(),
+                            bytecode: bc,
+                            call_count: std::sync::Arc::new(
+                                std::sync::atomic::AtomicU64::new(0),
+                            ),
+                        },
+                    ));
+                    env.set(func_def.name.clone(), bc_val.clone());
+                    profiler::Profiler::reset(&func_def.name);
+                    return apply_function(&bc_val, args, env);
+                }
+                // If compilation fails, reset counter and fall back to tree-walk
+                profiler::Profiler::reset(&func_def.name);
+            }
+
             // Try each definition in order
             for def in &func_def.definitions {
                 if let Some(bindings) = try_match_params(&def.params, args, env)? {
@@ -2220,6 +2261,94 @@ mod tests {
             Value::Integer(n) => assert!(n.to_i64().unwrap() >= 1),
             _ => panic!("Expected Integer, got {:?}", result),
         }
+    }
+
+    // ── New parallel builtins ──
+
+    #[test]
+    fn test_parallel_sum() {
+        let result = eval_str("ParallelSum[i, {i, 1, 10}]");
+        assert_eq!(result, Value::Integer(Integer::from(55)));
+    }
+
+    #[test]
+    fn test_parallel_sum_squares() {
+        let result = eval_str("ParallelSum[i^2, {i, 1, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(55)));
+    }
+
+    #[test]
+    fn test_parallel_sum_small() {
+        // Small range (< 8) takes sequential path
+        let result = eval_str("ParallelSum[i, {i, 1, 3}]");
+        assert_eq!(result, Value::Integer(Integer::from(6)));
+    }
+
+    #[test]
+    fn test_parallel_sum_empty_range() {
+        let result = eval_str("ParallelSum[i, {i, 1, 0}]");
+        assert_eq!(result, Value::Integer(Integer::from(0)));
+    }
+
+    #[test]
+    fn test_parallel_evaluate() {
+        // With pool_size = 1 (no pool active), returns single-element list
+        let result = eval_str("ParallelEvaluate[42]");
+        assert_eq!(result, Value::List(vec![Value::Integer(Integer::from(42))]));
+    }
+
+    #[test]
+    fn test_parallel_evaluate_expr() {
+        let result = eval_str("ParallelEvaluate[1 + 2]");
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Integer(Integer::from(3))])
+        );
+    }
+
+    #[test]
+    fn test_parallel_try_simple() {
+        let result = eval_str("ParallelTry[{10, 20, 30}]");
+        assert_eq!(result, Value::Integer(Integer::from(10)));
+    }
+
+    #[test]
+    fn test_parallel_try_with_func() {
+        let result = eval_str("ParallelTry[Sqrt, {4, 9, 16}]");
+        assert_eq!(result, Value::Integer(Integer::from(2)));
+    }
+
+    #[test]
+    fn test_parallel_try_single() {
+        let result = eval_str("ParallelTry[{42}]");
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_processor_count() {
+        let result = eval_str("ProcessorCount[]");
+        match result {
+            Value::Integer(n) => assert!(n.to_i64().unwrap() >= 1),
+            _ => panic!("Expected Integer, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_abort_kernels() {
+        let result = eval_str("AbortKernels[]");
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    #[should_panic(expected = "ParallelTry requires a non-empty list")]
+    fn test_parallel_try_empty_list() {
+        eval_str("ParallelTry[{}]");
+    }
+
+    #[test]
+    #[should_panic(expected = "ParallelSum requires exactly 2 arguments")]
+    fn test_parallel_sum_error_no_iter() {
+        eval_str("ParallelSum[42]");
     }
 
     // ── Hold / HoldComplete / ReleaseHold ──

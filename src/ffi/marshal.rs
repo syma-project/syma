@@ -113,6 +113,17 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
 pub fn value_to_json_full(v: &Value) -> serde_json::Value {
     use serde_json::{Map, Number, Value as JVal};
     match v {
+        Value::Image(img) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("img".into()));
+            m.insert("w".into(), JVal::Number((img.width() as u64).into()));
+            m.insert("h".into(), JVal::Number((img.height() as u64).into()));
+            m.insert(
+                "c".into(),
+                JVal::String(format!("{:?}", img.color())),
+            );
+            JVal::Object(m)
+        }
         Value::Integer(n) => {
             // Serialise as a string to avoid i64 precision loss for huge integers.
             // The frontend can parse small values as numbers when needed.
@@ -316,6 +327,12 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             JVal::Array(vs)
         }
         Value::Formatted { value, .. } => value_to_json_full(value),
+        Value::BytecodeFunction(bc) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("bytecode".into()));
+            m.insert("name".into(), JVal::String(bc.name.clone()));
+            JVal::Object(m)
+        }
     }
 }
 
@@ -423,7 +440,7 @@ pub fn json_val_to_value_full(jv: &serde_json::Value) -> Result<Value, EvalError
             })
         }
         "func" | "builtin" | "purefn" | "method" | "class" | "ruleset" | "pat" | "mod"
-        | "nativelib" | "nativefn" | "obj" | "hold" | "holdc" => {
+        | "nativelib" | "nativefn" | "obj" | "hold" | "holdc" | "img" => {
             // These types are useful as output but generally shouldn't be
             // round-tripped through JSON. Return a display-string representation.
             Ok(Value::Str(format!("{jv}")))

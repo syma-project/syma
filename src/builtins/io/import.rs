@@ -1,24 +1,20 @@
-//! Import builtin and format-specific import converters.
+//! Import builtin.
 //!
-//! `builtin_import` detects the source format from the file extension and
-//! dispatches to the appropriate converter.
+//! Delegates format detection and conversion to the `formats` module.
 
-use crate::ffi::marshal::json_to_value;
 use crate::value::{EvalError, Value};
 
-use super::nb;
-
-/// Import[path] — import data from a file.
+/// Import[path] — import data from a file, detecting format from extension.
 ///
-/// Format is detected by file extension:
-/// - `.json` — parse JSON into Value
-/// - `.nb` — extract Wolfram Language code from a Mathematica notebook
-/// - `.m` — read Wolfram Language source as code text
-/// - everything else — return as `Value::Str`
+/// Import[path, "format"] — import using an explicit format name.
+///
+/// Supported formats:
+///   JSON, CSV, TSV, Table, HTML, PNG, SVG, WL, NB, Text
 pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "Import requires exactly 1 argument".to_string(),
+            "Import requires 1 or 2 arguments: Import[path] or Import[path, \"format\"]"
+                .to_string(),
         ));
     }
     let path = match &args[0] {
@@ -30,19 +26,17 @@ pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let contents = std::fs::read_to_string(&path)
+
+    let format_name = args.get(1).and_then(|v| match v {
+        Value::Str(s) => Some(s.as_str()),
+        _ => None,
+    });
+
+    let format = super::formats::detect_format(&path, format_name)?;
+
+    // Always read as bytes; binary formats decode directly, text formats
+    // decode as UTF-8 inside format_import_binary.
+    let data = std::fs::read(&path)
         .map_err(|e| EvalError::Error(format!("Import failed: {}", e)))?;
-    if path.ends_with(".json") {
-        let parsed = json_to_value(&contents)
-            .map_err(|e| EvalError::Error(format!("Import JSON error: {}", e)))?;
-        Ok(parsed)
-    } else if path.ends_with(".nb") {
-        let code = nb::notebook_to_code(&contents)
-            .map_err(|e| EvalError::Error(format!("Import notebook error: {}", e)))?;
-        Ok(Value::Str(code))
-    } else if path.ends_with(".m") {
-        Ok(Value::Str(nb::wl_source_to_code(&contents)))
-    } else {
-        Ok(Value::Str(contents))
-    }
+    super::formats::format_import_binary(&format, &data)
 }

@@ -266,6 +266,53 @@ pub fn builtin_parallel_table(_args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Direct builtins ──
 
+/// Stub for ParallelSum — actual implementation is in the evaluator special form.
+pub fn builtin_parallel_sum(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "ParallelSum should be handled by evaluator".to_string(),
+    ))
+}
+
+/// Stub for ParallelEvaluate — actual implementation is in the evaluator special form.
+pub fn builtin_parallel_evaluate(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "ParallelEvaluate should be handled by evaluator".to_string(),
+    ))
+}
+
+/// Stub for ParallelTry — actual implementation is in the evaluator special form.
+pub fn builtin_parallel_try(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "ParallelTry should be handled by evaluator".to_string(),
+    ))
+}
+
+/// `ProcessorCount[]` — returns the number of processor cores on the current computer.
+pub fn builtin_processor_count(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Err(EvalError::Error(
+            "ProcessorCount takes no arguments".to_string(),
+        ));
+    }
+    let n = std::thread::available_parallelism()
+        .map(|p| p.get() as i64)
+        .unwrap_or(1);
+    Ok(Value::Integer(rug::Integer::from(n)))
+}
+
+/// `AbortKernels[]` — aborts all running kernel evaluations.
+///
+/// Currently a no-op — workers complete their current jobs.
+/// Use `CloseKernels[]` and `LaunchKernels[]` to reset the pool.
+pub fn builtin_abort_kernels(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Err(EvalError::Error(
+            "AbortKernels takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::Null)
+}
+
 /// `$KernelCount` — returns the number of available parallel workers.
 /// By default this is the number of CPU cores reported by the OS.
 pub fn builtin_kernel_count(args: &[Value]) -> Result<Value, EvalError> {

@@ -5,6 +5,7 @@
 //! - `import.rs` — Import dispatcher and format converters
 
 pub mod export;
+pub mod formats;
 pub mod import;
 pub mod nb;
 
@@ -137,6 +138,92 @@ pub fn builtin_read_string(args: &[Value]) -> Result<Value, EvalError> {
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| EvalError::Error(format!("ReadString failed: {}", e)))?;
     Ok(Value::Str(contents))
+}
+
+/// ImportString[data, "format"] — import from a string using the specified format.
+pub fn builtin_import_string(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ImportString requires exactly 2 arguments: ImportString[data, \"format\"]"
+                .to_string(),
+        ));
+    }
+    let data = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let format_name = match &args[1] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let format = formats::detect_format("", Some(&format_name))?;
+    if format.is_binary() {
+        return Err(EvalError::Error(format!(
+            "ImportString does not support binary format '{}'",
+            format_name
+        )));
+    }
+    formats::format_import_text(&format, &data)
+}
+
+/// ExportString[data, "format"] — export to a string using the specified format.
+pub fn builtin_export_string(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ExportString requires exactly 2 arguments: ExportString[data, \"format\"]"
+                .to_string(),
+        ));
+    }
+    let data = &args[0];
+    let format_name = match &args[1] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let format = formats::detect_format("", Some(&format_name))?;
+    match formats::format_export(&format, data)? {
+        formats::ExportOutput::Text(s) => Ok(Value::Str(s)),
+        formats::ExportOutput::Binary(_) => Err(EvalError::Error(format!(
+            "ExportString does not support binary format '{}'",
+            format_name
+        ))),
+    }
+}
+
+/// ReadList[path] — read all lines from a file into a list of strings.
+pub fn builtin_read_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ReadList requires exactly 1 argument: ReadList[path]".to_string(),
+        ));
+    }
+    let path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| EvalError::Error(format!("ReadList failed: {}", e)))?;
+    let lines: Vec<Value> = text.lines().map(|s| Value::Str(s.to_string())).collect();
+    Ok(Value::List(lines))
 }
 
 #[cfg(test)]

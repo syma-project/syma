@@ -15,6 +15,50 @@ pub fn add_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
     add_values(a, b)
 }
 
+pub fn sub_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    sub_values(a, b)
+}
+
+fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() - y)),
+        (Value::Real(x), Value::Real(y)) => Ok(Value::Real(x.clone() - y)),
+        (Value::Integer(x), Value::Real(y)) => {
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, x) - y))
+        }
+        (Value::Real(x), Value::Integer(y)) => {
+            Ok(Value::Real(x - Float::with_val(DEFAULT_PRECISION, y)))
+        }
+        (Value::List(xs), Value::List(ys)) => {
+            if xs.len() == ys.len() {
+                let result: Result<Vec<Value>, _> = xs
+                    .iter()
+                    .zip(ys.iter())
+                    .map(|(x, y)| sub_values(x, y))
+                    .collect();
+                Ok(Value::List(result?))
+            } else {
+                Err(EvalError::Error(
+                    "Lists must have same length for subtraction".to_string(),
+                ))
+            }
+        }
+        _ => {
+            // Return symbolic: Plus[a, Times[-1, b]]
+            Ok(Value::Call {
+                head: "Plus".to_string(),
+                args: vec![
+                    a.clone(),
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(Integer::from(-1)), b.clone()],
+                    },
+                ],
+            })
+        }
+    }
+}
+
 pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
     // Identity: 0 + x = x
     if matches!(a, Value::Integer(n) if n.is_zero()) {

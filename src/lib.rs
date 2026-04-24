@@ -3,6 +3,7 @@
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
 pub mod ast;
+pub mod bytecode;
 pub mod builtins;
 pub mod cli;
 pub mod debug;
@@ -15,6 +16,7 @@ pub mod lexer;
 pub mod manifest;
 pub mod parser;
 pub mod pattern;
+pub mod profiler;
 pub mod value;
 
 use std::fs;

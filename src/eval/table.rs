@@ -265,3 +265,176 @@ pub(super) fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, Eva
     }
     Ok(Value::List(out))
 }
+
+/// ParallelSum[expr, {i, min, max}] — parallel version of Sum.
+pub(super) fn eval_parallel_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelSum requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let iter_items = match &args[1] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelSum iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+
+    let (var_name, values) = eval_iterator_spec(iter_items, env)?;
+
+    if values.is_empty() {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+
+    if values.len() < 8 {
+        // Sequential for small iteration counts
+        let child_env = env.child();
+        let mut acc = Value::Integer(Integer::from(0));
+        for val in values {
+            child_env.set(var_name.clone(), val);
+            let v = super::eval(&args[0], &child_env)?;
+            acc = crate::builtins::add_values_public(&acc, &v)?;
+        }
+        return Ok(acc);
+    }
+
+    // Parallel: chunk values by number of workers
+    let n_workers = crate::builtins::parallel::pool_size();
+    let chunk_size = values.len().div_ceil(n_workers);
+
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = values
+        .chunks(chunk_size)
+        .map(|chunk| {
+            let expr = args[0].clone();
+            let var_name = var_name.clone();
+            let chunk_vec = chunk.to_vec();
+            let env = env.clone();
+            Box::new(move || {
+                let child_env = env.child();
+                let mut acc = Value::Integer(Integer::from(0));
+                for val in chunk_vec {
+                    child_env.set(var_name.clone(), val);
+                    let v = super::eval(&expr, &child_env)?;
+                    acc = crate::builtins::add_values_public(&acc, &v)?;
+                }
+                Ok(acc)
+            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
+
+    let results = crate::builtins::parallel::parallel_batch(jobs);
+    let mut total = Value::Integer(Integer::from(0));
+    for r in results {
+        let v = r?;
+        total = crate::builtins::add_values_public(&total, &v)?;
+    }
+    Ok(total)
+}
+
+/// ParallelEvaluate[expr] — evaluate expr on each worker, collecting results.
+pub(super) fn eval_parallel_evaluate(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ParallelEvaluate requires exactly 1 argument".to_string(),
+        ));
+    }
+
+    let expr = &args[0];
+    let n = crate::builtins::parallel::pool_size();
+
+    if n <= 1 {
+        // Single worker: just evaluate once
+        return Ok(Value::List(vec![super::eval(expr, env)?]));
+    }
+
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = (0..n)
+        .map(|_| {
+            let expr = expr.clone();
+            let env = env.clone();
+            Box::new(move || super::eval(&expr, &env))
+                as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
+
+    let results = crate::builtins::parallel::parallel_batch(jobs);
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        out.push(r?);
+    }
+    Ok(Value::List(out))
+}
+
+/// ParallelTry[list] or ParallelTry[f, list] — evaluate in parallel, return first result.
+pub(super) fn eval_parallel_try(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    let (items, f_val_opt) = match args.len() {
+        1 => {
+            let items = match &args[0] {
+                Expr::List(items) => items,
+                _ => {
+                    return Err(EvalError::Error(
+                        "ParallelTry[list] requires a list argument".to_string(),
+                    ));
+                }
+            };
+            (items, None)
+        }
+        2 => {
+            let f_val = super::eval(&args[0], env)?;
+            let items = match &args[1] {
+                Expr::List(items) => items,
+                _ => {
+                    return Err(EvalError::Error(
+                        "ParallelTry[f, list] requires a list as second argument".to_string(),
+                    ));
+                }
+            };
+            (items, Some(f_val))
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelTry requires 1 or 2 arguments".to_string(),
+            ));
+        }
+    };
+
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "ParallelTry requires a non-empty list".to_string(),
+        ));
+    }
+
+    // Sequential for small lists
+    if items.len() < 4 {
+        if let Some(f) = &f_val_opt {
+            let first_arg = super::eval(&items[0], env)?;
+            return super::apply_function(f, &[first_arg], env);
+        }
+        return super::eval(&items[0], env);
+    }
+
+    // Parallel: evaluate all, return first result
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = items
+        .iter()
+        .map(|item| {
+            let env = env.clone();
+            let item = item.clone();
+            let f = f_val_opt.clone();
+            Box::new(move || {
+                if let Some(f) = f {
+                    let arg = super::eval(&item, &env)?;
+                    super::apply_function(&f, &[arg], &env)
+                } else {
+                    super::eval(&item, &env)
+                }
+            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
+
+    let results = crate::builtins::parallel::parallel_batch(jobs);
+    results.into_iter().next().unwrap_or_else(|| {
+        Err(EvalError::Error("ParallelTry: no results available".to_string()))
+    })
+}

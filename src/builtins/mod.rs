@@ -6,6 +6,7 @@ pub mod ffi;
 pub mod format;
 pub mod filesystem;
 pub mod graphics;
+pub mod image;
 pub mod io;
 pub mod linalg;
 pub mod localsymbol;
@@ -81,6 +82,27 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Transpose", list::builtin_transpose);
     register_builtin(env, "Total", list::builtin_total);
     register_builtin(env, "Sum", list::builtin_sum);
+    // Extended list operations
+    register_builtin(env, "Partition", list::builtin_partition);
+    register_builtin(env, "Split", list::builtin_split);
+    register_builtin(env, "Gather", list::builtin_gather);
+    register_builtin(env, "DeleteDuplicates", list::builtin_delete_duplicates);
+    register_builtin(env, "Insert", list::builtin_insert);
+    register_builtin(env, "Delete", list::builtin_delete);
+    register_builtin(env, "ReplacePart", list::builtin_replace_part);
+    register_builtin(env, "RotateLeft", list::builtin_rotate_left);
+    register_builtin(env, "RotateRight", list::builtin_rotate_right);
+    register_builtin(env, "Ordering", list::builtin_ordering);
+    register_builtin(env, "ConstantArray", list::builtin_constant_array);
+    register_builtin(env, "Diagonal", list::builtin_diagonal);
+    register_builtin(env, "Accumulate", list::builtin_accumulate);
+    register_builtin(env, "Differences", list::builtin_differences);
+    register_builtin(env, "Clip", list::builtin_clip);
+    register_builtin_env(env, "Array", list::builtin_array);
+    register_builtin_env(env, "SplitBy", list::builtin_split_by);
+    register_builtin_env(env, "GatherBy", list::builtin_gather_by);
+    register_builtin_env(env, "FoldList", list::builtin_fold_list);
+    register_builtin_env(env, "NestList", list::builtin_nest_list);
 
     // ── Pattern ──
     register_builtin(env, "MatchQ", pattern::builtin_match_q);
@@ -215,6 +237,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "ReadString", io::builtin_read_string);
     register_builtin(env, "Export", io::builtin_export);
     register_builtin(env, "Import", io::builtin_import);
+    register_builtin(env, "ImportString", io::builtin_import_string);
+    register_builtin(env, "ExportString", io::builtin_export_string);
+    register_builtin(env, "ReadList", io::builtin_read_list);
 
     // ── Error handling ──
     register_builtin(env, "Throw", error::builtin_throw);
@@ -229,12 +254,34 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "StringStartsQ", string::builtin_string_starts_q);
     register_builtin(env, "StringEndsQ", string::builtin_string_ends_q);
 
+    // ── Extended string (StringPart, StringPosition, etc.) ──
+    register_builtin(env, "StringPart", string::builtin_string_part);
+    register_builtin(env, "StringPosition", string::builtin_string_position);
+    register_builtin(env, "StringCount", string::builtin_string_count);
+    register_builtin(env, "StringRepeat", string::builtin_string_repeat);
+    register_builtin(env, "StringDelete", string::builtin_string_delete);
+    register_builtin(env, "StringInsert", string::builtin_string_insert);
+    register_builtin(env, "StringRiffle", string::builtin_string_riffle);
+    register_builtin(env, "StringFreeQ", string::builtin_string_free_q);
+    register_builtin(env, "LetterQ", string::builtin_letter_q);
+    register_builtin(env, "DigitQ", string::builtin_digit_q);
+    register_builtin(env, "UpperCaseQ", string::builtin_upper_case_q);
+    register_builtin(env, "LowerCaseQ", string::builtin_lower_case_q);
+    register_builtin(env, "TextWords", string::builtin_text_words);
+    register_builtin(env, "CharacterCounts", string::builtin_character_counts);
+    register_builtin(env, "Alphabet", string::builtin_alphabet);
+
     // ── Parallel computation ──
     register_builtin_env(env, "ParallelMap", parallel::builtin_parallel_map);
     register_builtin(env, "ParallelTable", parallel::builtin_parallel_table);
+    register_builtin(env, "ParallelSum", parallel::builtin_parallel_sum);
+    register_builtin(env, "ParallelEvaluate", parallel::builtin_parallel_evaluate);
+    register_builtin(env, "ParallelTry", parallel::builtin_parallel_try);
     register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
     register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
     register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
+    register_builtin(env, "ProcessorCount", parallel::builtin_processor_count);
+    register_builtin(env, "AbortKernels", parallel::builtin_abort_kernels);
 
     // ── FFI ──
     register_builtin_env(env, "LoadLibrary", ffi::builtin_load_library);
@@ -273,6 +320,20 @@ pub fn register_builtins(env: &Env) {
 
     // ── Persistent storage ──
     register_builtin(env, "LocalSymbol", localsymbol::builtin_local_symbol);
+
+    // ── Image Processing ──
+    register_builtin(env, "Image", image::builtin_image);
+    register_builtin(env, "ImageData", image::builtin_image_data);
+    register_builtin(env, "ImageDimensions", image::builtin_image_dimensions);
+    register_builtin(env, "ImageType", image::builtin_image_type);
+    register_builtin(env, "ImageResize", image::builtin_image_resize);
+    register_builtin(env, "ImageRotate", image::builtin_image_rotate);
+    register_builtin(env, "ImageAdjust", image::builtin_image_adjust);
+    register_builtin(env, "Binarize", image::builtin_binarize);
+    register_builtin(env, "ColorConvert", image::builtin_color_convert);
+    register_builtin(env, "GaussianFilter", image::builtin_gaussian_filter);
+    register_builtin(env, "EdgeDetect", image::builtin_edge_detect);
+    register_builtin(env, "ImageConvolve", image::builtin_image_convolve);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
@@ -490,6 +551,7 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
 /// Re-export for use by eval.rs
 pub use arithmetic::add_values_public;
+pub use arithmetic::sub_values_public;
 
 // ── Help documentation ──
 
@@ -585,15 +647,43 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Scan" => "Scan[f, expr] evaluates f applied to each element of expr, returning Null.",
         "Nest" => "Nest[f, expr, n] applies f to expr n times.",
         "Take" => {
-            "Take[list, n] gives the first n elements of list.\nTake[list, -n] gives the last n elements."
+            "Take[list, n] gives the first n elements of list.\nTake[list, -n] gives the last n elements.\nTake[list, {m, n}] gives elements m through n (inclusive)."
         }
         "Drop" => {
-            "Drop[list, n] gives list with the first n elements removed.\nDrop[list, -n] removes the last n elements."
+            "Drop[list, n] gives list with the first n elements removed.\nDrop[list, -n] removes the last n elements.\nDrop[list, {m, n}] removes elements m through n (inclusive)."
         }
         "Riffle" => "Riffle[list, x] inserts x between consecutive elements of list.",
         "Transpose" => "Transpose[list] transposes the first two levels of list.",
         "Total" => "Total[list] gives the total of all elements in list.",
         "Sum" => "Sum[expr, {i, min, max}] evaluates the sum of expr as i goes from min to max.",
+        "Partition" => {
+            "Partition[list, n] splits list into sublists of length n.\nPartition[list, n, d] uses offset d between successive sublists."
+        }
+        "Split" => "Split[list] splits list into runs of identical adjacent elements.",
+        "Gather" => "Gather[list] groups identical elements into sublists.",
+        "DeleteDuplicates" => "DeleteDuplicates[list] deletes all duplicates from list, keeping the first occurrence.",
+        "Insert" => "Insert[list, elem, n] inserts elem at position n in list (1-indexed, negative counts from end).",
+        "Delete" => "Delete[list, n] deletes the element at position n in list (1-indexed, negative counts from end).",
+        "ReplacePart" => "ReplacePart[list, n, new] replaces the element at position n in list with new.",
+        "RotateLeft" => "RotateLeft[list, n] rotates the elements of list n positions to the left.",
+        "RotateRight" => "RotateRight[list, n] rotates the elements of list n positions to the right.",
+        "Ordering" => {
+            "Ordering[list] returns the positions that would sort list.\nOrdering[list, n] returns the first n positions.\nOrdering[list, -n] returns the last n positions."
+        }
+        "ConstantArray" => "ConstantArray[val, n] creates a list of n copies of val.",
+        "Diagonal" => "Diagonal[matrix] extracts the diagonal elements from a matrix.",
+        "Accumulate" => "Accumulate[list] computes the running total (cumulative sum) of list elements.",
+        "Differences" => "Differences[list] computes the adjacent differences of list elements.",
+        "Clip" => {
+            "Clip[val] clamps val to the range [0, 1].\nClip[val, {min, max}] clamps val to the range [min, max]."
+        }
+        "Array" => {
+            "Array[f, n] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n}] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n, m}] generates {f[n], f[n+1], ..., f[m]}."
+        }
+        "SplitBy" => "SplitBy[list, f] splits list into runs where f applied to each element gives identical values.",
+        "GatherBy" => "GatherBy[list, f] groups elements by the values of f applied to each element.",
+        "FoldList" => "FoldList[f, init, list] gives all intermediate results of folding f from the left.",
+        "NestList" => "NestList[f, expr, n] gives all intermediate results of applying f to expr n times.",
 
         // ── Pattern ──
         "MatchQ" => "MatchQ[expr, pattern] returns True if expr matches pattern.",
@@ -621,6 +711,39 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "StringTrim" => "StringTrim[s] removes whitespace from the beginning and end of s.",
         "StringStartsQ" => "StringStartsQ[s, prefix] returns True if s starts with prefix.",
         "StringEndsQ" => "StringEndsQ[s, suffix] returns True if s ends with suffix.",
+
+        // ── Extended string operations ──
+        "StringPart" => {
+            "StringPart[s, n] gives the n-th character in string s (1-indexed).\nStringPart[s, -n] counts from the end."
+        }
+        "StringPosition" => {
+            "StringPosition[s, sub] gives a list of the starting positions where sub appears in s."
+        }
+        "StringCount" => {
+            "StringCount[s, sub] gives the number of times sub appears as a substring of s."
+        }
+        "StringRepeat" => "StringRepeat[s, n] repeats string s n times.",
+        "StringDelete" => "StringDelete[s, sub] deletes all occurrences of sub from s.",
+        "StringInsert" => {
+            "StringInsert[s, ins, n] inserts string ins into s at position n (1-indexed).\nStringInsert[s, ins, -n] counts from the end."
+        }
+        "StringRiffle" => {
+            "StringRiffle[list, sep] joins the string representations of the elements in list, inserting sep between each."
+        }
+        "StringFreeQ" => {
+            "StringFreeQ[s, sub] returns True if s does NOT contain the substring sub."
+        }
+        "LetterQ" => "LetterQ[s] returns True if all characters in s are letters.",
+        "DigitQ" => "DigitQ[s] returns True if all characters in s are digits.",
+        "UpperCaseQ" => "UpperCaseQ[s] returns True if all letters in s are uppercase.",
+        "LowerCaseQ" => "LowerCaseQ[s] returns True if all letters in s are lowercase.",
+        "TextWords" => "TextWords[s] gives the list of words in string s (split by whitespace).",
+        "CharacterCounts" => {
+            "CharacterCounts[s] returns a list of {character, count} pairs for each distinct character in s."
+        }
+        "Alphabet" => {
+            "Alphabet[] gives the list of lowercase letters a–z.\nAlphabet[\"Latin\"] gives the same."
+        }
 
         // ── Math ──
         "Sin" => "Sin[z] gives the sine of z.",
@@ -787,15 +910,25 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "Export" => {
             "Export[path, data] exports data to a file.\n\
-             Format is detected by extension:\n\
-             1. `.json` — serialises the value to JSON.\n\
-             2. Everything else — writes data.to_string() as plain text."
+             Format is detected by extension, or provide an explicit 3rd argument:\n\
+             Export[path, data, \"format\"].\n\
+             Supported formats: JSON, CSV, TSV, Table, SVG, PNG, Text, WL."
         }
         "Import" => {
-            "Import[path] imports data from a file.\n\
-             Format is detected by extension:\n\
-             1. `.json` — parses JSON into a Syma value.\n\
-             2. Everything else — returns the file contents as a string."
+            "Import[path] imports data from a file, detecting format from extension.\n\
+             Import[path, \"format\"] specifies the format explicitly.\n\
+             Supported formats: JSON, CSV, TSV, Table, HTML, PNG, SVG, WL, NB, Text."
+        }
+        "ImportString" => {
+            "ImportString[data, \"format\"] imports string data using the specified format.\n\
+             Supported formats: JSON, CSV, TSV, Table, HTML, SVG, Text."
+        }
+        "ExportString" => {
+            "ExportString[data, \"format\"] exports data to a string using the specified format.\n\
+             Supported formats: JSON, CSV, TSV, Table, SVG, Text."
+        }
+        "ReadList" => {
+            "ReadList[path] reads all lines from a file and returns them as a list of strings."
         }
 
         // ── Error handling ──
@@ -870,6 +1003,19 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "LaunchKernels[] returns the current kernel count.\nLaunchKernels[n] sets the number of parallel workers to n."
         }
         "CloseKernels" => "CloseKernels[] resets the parallel worker pool. Returns Null.",
+        "ParallelSum" => {
+            "ParallelSum[expr, {i, min, max}] evaluates a parallel sum of expr as i goes from min to max.\n\
+             ParallelSum[expr, {i, max}] evaluates a parallel sum of expr for i from 1 to max."
+        }
+        "ParallelEvaluate" => {
+            "ParallelEvaluate[expr] evaluates expr on each parallel worker, returning a list of results."
+        }
+        "ParallelTry" => {
+            "ParallelTry[list] evaluates each element of list in parallel, returning the first result obtained.\n\
+             ParallelTry[f, list] applies f to each element of list in parallel, returning the first result."
+        }
+        "ProcessorCount" => "ProcessorCount returns the number of processor cores on the current computer.",
+        "AbortKernels" => "AbortKernels[] aborts all running kernel evaluations. (Currently a no-op.)",
 
         // ── Format/display ──
         "InputForm" => {
@@ -929,6 +1075,49 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "DirectoryQ" => "DirectoryQ[\"path\"] returns True if the path is an existing directory.",
         "FileNames" => {
             "FileNames[] lists files in the current directory.\nFileNames[\"pattern\"] lists files matching the glob pattern.\nFileNames[\"pattern\", {\"dir1\", \"dir2\"}] searches in the given directories."
+        }
+
+        // ── Image Processing ──
+        "Image" => {
+            "Image[data] creates an image from a 2D (grayscale) or 3D (RGB/RGBA) list of values in [0,1].\n\
+             Image[data, \"type\"] specifies the storage type (e.g., \"Byte\")."
+        }
+        "ImageData" => {
+            "ImageData[image] extracts pixel data as a list of lists with values in [0,1]."
+        }
+        "ImageDimensions" => {
+            "ImageDimensions[image] returns {width, height} of the image."
+        }
+        "ImageType" => {
+            "ImageType[image] returns the image type as a string: \"Byte\", \"Bit16\", or \"Real32\"."
+        }
+        "ImageResize" => {
+            "ImageResize[image, {w, h}] resizes image to the given dimensions using Lanczos3 filter.\n\
+             ImageResize[image, n] scales width to n pixels preserving aspect ratio."
+        }
+        "ImageRotate" => {
+            "ImageRotate[image, angle] rotates the image by the given angle in degrees (90, 180, 270 supported natively)."
+        }
+        "ImageAdjust" => {
+            "ImageAdjust[image] auto-stretches contrast to the full range.\n\
+             ImageAdjust[image, {c, b, g}] adjusts contrast (c), brightness (b), and gamma (g)."
+        }
+        "Binarize" => {
+            "Binarize[image] converts to black and white (threshold at 0.5).\n\
+             Binarize[image, t] uses threshold t in [0,1]."
+        }
+        "ColorConvert" => {
+            "ColorConvert[image, \"Grayscale\"] converts an image to grayscale.\n\
+             ColorConvert[image, \"RGB\"] converts to RGB."
+        }
+        "GaussianFilter" => {
+            "GaussianFilter[image, r] applies Gaussian blur with sigma = r."
+        }
+        "EdgeDetect" => {
+            "EdgeDetect[image] applies Sobel edge detection, returning an edge magnitude image."
+        }
+        "ImageConvolve" => {
+            "ImageConvolve[image, kernel] convolves image with a 2D kernel (list of lists, odd dimensions)."
         }
 
         _ => return None,

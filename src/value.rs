@@ -10,6 +10,7 @@ use rug::Float;
 use rug::Integer;
 
 use crate::ast::Expr;
+use crate::bytecode::BytecodeFunctionDef;
 use crate::env::Env;
 
 // ── FFI types ─────────────────────────────────────────────────────────────────
@@ -236,6 +237,9 @@ pub enum Value {
     /// A user-defined function with pattern-matched definitions.
     Function(Arc<FunctionDef>),
 
+    /// A function compiled to bytecode.
+    BytecodeFunction(Arc<BytecodeFunctionDef>),
+
     /// A built-in function.
     Builtin(String, BuiltinFn),
 
@@ -278,6 +282,11 @@ pub enum Value {
         /// The exported symbols and their evaluated values.
         exports: HashMap<String, Value>,
     },
+
+    // ── Image ──
+    /// A raster image. Uses the `image` crate's DynamicImage internally.
+    /// Wrapped in `Arc` for zero-cost sharing (images are immutable).
+    Image(Arc<image::DynamicImage>),
 
     // ── Hold ──
     Hold(Box<Value>),
@@ -484,6 +493,10 @@ impl PartialEq for Value {
             (Value::Formatted { value, .. }, other) | (other, Value::Formatted { value, .. }) => {
                 value.as_ref() == other
             }
+            // Image: compare by pixel data (using byte representation)
+            (Value::Image(a), Value::Image(b)) => a.as_bytes() == b.as_bytes(),
+            // BytecodeFunction: never equal (like other function types)
+            (Value::BytecodeFunction(_), Value::BytecodeFunction(_)) => false,
             _ => false,
         }
     }
@@ -506,6 +519,7 @@ impl Value {
             Value::Assoc(_) => "Assoc",
             Value::Rule { .. } => "Rule",
             Value::Function(_) => "Function",
+            Value::BytecodeFunction(_) => "BytecodeFunction",
             Value::Builtin(_, _) => "Builtin",
             Value::PureFunction { .. } => "PureFunction",
             Value::Method { .. } => "Method",
@@ -514,6 +528,7 @@ impl Value {
             Value::RuleSet { .. } => "RuleSet",
             Value::Pattern(_) => "Pattern",
             Value::Module { .. } => "Module",
+            Value::Image(_) => "Image",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
             Value::NativeLib { .. } => "NativeLib",
@@ -550,7 +565,10 @@ impl Value {
             "Rule" => matches!(self, Value::Rule { .. }),
             "Function" => matches!(
                 self,
-                Value::Function(_) | Value::Builtin(_, _) | Value::PureFunction { .. }
+                Value::Function(_)
+                    | Value::BytecodeFunction(_)
+                    | Value::Builtin(_, _)
+                    | Value::PureFunction { .. }
             ),
             "Module" => matches!(self, Value::Module { .. }),
             "Object" => matches!(self, Value::Object { .. }),
@@ -622,6 +640,7 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Image(a), Value::Image(b)) => a.as_bytes() == b.as_bytes(),
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
@@ -922,6 +941,7 @@ impl fmt::Display for Value {
                 write!(f, "{} {} {}", lhs, op, rhs)
             }
             Value::Function(func) => write!(f, "Function[{}]", func.name),
+            Value::BytecodeFunction(bc) => write!(f, "BytecodeFunction[{}]", bc.name),
             Value::Builtin(name, _) => write!(f, "Builtin[{}]", name),
             Value::PureFunction { .. } => write!(f, "PureFunction[...]"),
             Value::Method { name, .. } => write!(f, "Method[{}]", name),
@@ -944,6 +964,26 @@ impl fmt::Display for Value {
                     "Module[{}, {{{}}}]",
                     name,
                     exports.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+            Value::Image(img) => {
+                let color_space = match img.color() {
+                    image::ColorType::L8 | image::ColorType::L16 => "Grayscale",
+                    image::ColorType::La8 | image::ColorType::La16 => "GrayAlpha",
+                    image::ColorType::Rgb8
+                    | image::ColorType::Rgb16
+                    | image::ColorType::Rgb32F => "RGB",
+                    image::ColorType::Rgba8
+                    | image::ColorType::Rgba16
+                    | image::ColorType::Rgba32F => "RGBA",
+                    _ => "Unknown",
+                };
+                write!(
+                    f,
+                    "Image[{{{}, {}}}, {}]",
+                    img.width(),
+                    img.height(),
+                    color_space
                 )
             }
             Value::Hold(v) => write!(f, "Hold[{}]", v),

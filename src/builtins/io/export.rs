@@ -1,23 +1,21 @@
-//! Export builtin and format-specific export converters.
+//! Export builtin.
 //!
-//! `builtin_export` detects the target format from the file extension and
-//! dispatches to the appropriate converter. Adding a new format requires:
-//! 1. Writing a converter function
-//! 2. Adding a `path.ends_with(".ext")` arm in `builtin_export`
+//! Delegates format detection and conversion to the `formats` module.
 
-use crate::ffi::marshal::value_to_json;
 use crate::value::{EvalError, Value};
+use super::formats::ExportOutput;
 
-/// Export[path, data] — export data to a file.
+/// Export[path, data] — export data to a file, detecting format from extension.
 ///
-/// Format is detected by file extension:
-/// - `.svg` — if data is a `Graphics` object, render to SVG
-/// - `.json` — serialise Value to JSON
-/// - everything else — write `data.to_string()` as text
+/// Export[path, data, "format"] — export using an explicit format name.
+///
+/// Supported formats:
+///   JSON, CSV, TSV, Table, SVG, PNG, Text, WL
 pub fn builtin_export(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "Export requires exactly 2 arguments".to_string(),
+            "Export requires 2 or 3 arguments: Export[path, data] or Export[path, data, \"format\"]"
+                .to_string(),
         ));
     }
     let path = match &args[0] {
@@ -29,34 +27,20 @@ pub fn builtin_export(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
+    let data = &args[1];
 
-    let data = if path.ends_with(".svg")
-        && let Value::Call {
-            head,
-            args: g_args,
-        } = &args[1]
-        && head == "Graphics"
-        && !g_args.is_empty()
-    {
-        let primitives = &g_args[0];
-        let options = if g_args.len() >= 2 {
-            g_args[1].clone()
-        } else {
-            Value::Assoc(std::collections::HashMap::new())
-        };
-        crate::builtins::graphics::render_svg(primitives, &options)?
-    } else if path.ends_with(".json") {
-        let json_val = value_to_json(&args[1])
-            .map_err(|e| EvalError::Error(format!("Export JSON error: {}", e)))?;
-        serde_json::to_string_pretty(&json_val)
-            .map_err(|e| EvalError::Error(format!("Export JSON serialisation: {}", e)))?
-    } else {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            other => format!("{}", other),
-        }
-    };
+    let format_name = args.get(2).and_then(|v| match v {
+        Value::Str(s) => Some(s.as_str()),
+        _ => None,
+    });
 
-    std::fs::write(&path, &data).map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?;
+    let format = super::formats::detect_format(&path, format_name)?;
+
+    match super::formats::format_export(&format, data)? {
+        ExportOutput::Text(s) => std::fs::write(&path, &s)
+            .map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?,
+        ExportOutput::Binary(bytes) => std::fs::write(&path, &bytes)
+            .map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?,
+    }
     Ok(Value::Null)
 }

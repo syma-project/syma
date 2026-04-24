@@ -137,15 +137,9 @@ impl<'a> WlParser<'a> {
         let mut node = self.parse_primary()?;
         // Handle -> (rule) and :> (delayed rule) — can follow any expression.
         self.skip_trivia();
-        if self.peek() == Some(b'-') && self.peek_n(1) == Some(b'>') {
-            self.advance();
-            self.advance();
-            let rhs = self.parse_expr()?;
-            node = WlNode::Rule {
-                lhs: Box::new(node),
-                rhs: Box::new(rhs),
-            };
-        } else if self.peek() == Some(b':') && self.peek_n(1) == Some(b'>') {
+        let is_rule = self.peek() == Some(b'-') && self.peek_n(1) == Some(b'>')
+            || self.peek() == Some(b':') && self.peek_n(1) == Some(b'>');
+        if is_rule {
             self.advance();
             self.advance();
             let rhs = self.parse_expr()?;
@@ -177,10 +171,8 @@ impl<'a> WlParser<'a> {
                             self.advance();
                             break;
                         }
-                        if !items.is_empty() {
-                            if self.peek() == Some(b',') {
-                                self.advance();
-                            }
+                        if !items.is_empty() && self.peek() == Some(b',') {
+                            self.advance();
                         }
                         self.skip_trivia();
                         if self.peek() == Some(b'|') && self.peek_n(1) == Some(b'>') {
@@ -197,7 +189,7 @@ impl<'a> WlParser<'a> {
             }
             Some(c)
                 if c.is_ascii_digit()
-                    || c == b'-' && self.peek_n(1).map_or(false, |n| n.is_ascii_digit()) =>
+                    || c == b'-' && self.peek_n(1).is_some_and(|n| n.is_ascii_digit()) =>
             {
                 self.parse_number()
             }
@@ -253,13 +245,13 @@ impl<'a> WlParser<'a> {
             self.advance();
         }
         // Integer part
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
         // Fractional part
         if self.peek() == Some(b'.') {
             self.advance();
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -270,7 +262,7 @@ impl<'a> WlParser<'a> {
             if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
                 self.advance();
             }
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -280,7 +272,7 @@ impl<'a> WlParser<'a> {
             if self.peek() == Some(b'+') || self.peek() == Some(b'-') {
                 self.advance();
             }
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -296,12 +288,12 @@ impl<'a> WlParser<'a> {
                 if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
                     self.advance();
                 }
-                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
             } else {
                 // Just precision digits (or nothing = machine precision)
-                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
                 // Some numbers have trailing . after precision: "3.14`30."
@@ -315,7 +307,7 @@ impl<'a> WlParser<'a> {
                     if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
                         self.advance();
                     }
-                    while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                         self.advance();
                     }
                 }
@@ -340,10 +332,8 @@ impl<'a> WlParser<'a> {
                     self.advance();
                     break;
                 }
-                if !args.is_empty() {
-                    if self.peek() == Some(b',') {
-                        self.advance();
-                    }
+                if !args.is_empty() && self.peek() == Some(b',') {
+                    self.advance();
                 }
                 self.skip_trivia();
                 if self.peek() == Some(b']') {
@@ -415,10 +405,10 @@ impl<'a> WlParser<'a> {
             }
             let expr = self.parse_expr()?;
             // Look for Notebook[{...}]
-            if let WlNode::Call { head, .. } = &expr {
-                if is_sym(head, "Notebook") {
-                    return Ok(expr);
-                }
+            if let WlNode::Call { head, .. } = &expr
+                && is_sym(head, "Notebook")
+            {
+                return Ok(expr);
             }
             // Skip non-Notebook expressions (metadata, etc.)
         }
@@ -509,7 +499,7 @@ fn box_to_code(node: &WlNode) -> String {
 
                 // Sqrt: Sqrt[arg]
                 "SqrtBox" => {
-                    if args.len() >= 1 {
+                    if !args.is_empty() {
                         format!("Sqrt[{}]", box_to_code(&args[0]))
                     } else {
                         generic_call(head, args)
@@ -612,7 +602,7 @@ fn box_to_code(node: &WlNode) -> String {
 
                 // Inline Cell[TextData[...], "None"] — unwrap to text
                 "Cell" => {
-                    if args.len() >= 1 {
+                    if !args.is_empty() {
                         // If it's a Cell[TextData[...], label], extract text
                         box_to_code(&args[0])
                     } else {
@@ -679,27 +669,25 @@ pub fn notebook_to_code(contents: &str) -> Result<String, String> {
     let notebook = parser.parse_notebook()?;
 
     // Walk the Notebook[...] expression to find Input cells
-    if let WlNode::Call { head, args } = &notebook {
-        if is_sym(head, "Notebook") && !args.is_empty() {
-            // The first argument is the cell list; subsequent args are
-            // notebook-level options (PageFooters, PrintingOptions, etc.).
-            if let WlNode::List(cells) = &args[0] {
-                let mut code_parts: Vec<String> = Vec::new();
-                for cell in cells {
-                    if let WlNode::Call { head: cell_head, args: cell_args } = cell {
-                        if is_sym(cell_head, "Cell") && cell_args.len() >= 2 {
-                            let is_input = matches!(&cell_args[1], WlNode::Str(s) if s == "Input");
-                            if is_input {
-                                let cell_code = box_to_code(&cell_args[0]);
-                                if !cell_code.trim().is_empty() {
-                                    code_parts.push(cell_code);
-                                }
-                            }
+    if let WlNode::Call { head, args } = &notebook
+        && is_sym(head, "Notebook") && !args.is_empty()
+    {
+        // The first argument is the cell list; subsequent args are
+        // notebook-level options (PageFooters, PrintingOptions, etc.).
+        if let WlNode::List(cells) = &args[0] {
+            let mut code_parts: Vec<String> = Vec::new();
+            for cell in cells {
+                if let WlNode::Call { head: cell_head, args: cell_args } = cell
+                    && is_sym(cell_head, "Cell") && cell_args.len() >= 2
+                    && matches!(&cell_args[1], WlNode::Str(s) if s == "Input")
+                {
+                        let cell_code = box_to_code(&cell_args[0]);
+                        if !cell_code.trim().is_empty() {
+                            code_parts.push(cell_code);
                         }
-                    }
                 }
-                return Ok(code_parts.join(";\n"));
             }
+            return Ok(code_parts.join(";\n"));
         }
     }
     // Notebook with no Input cells is valid — return empty string.
