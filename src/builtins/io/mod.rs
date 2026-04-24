@@ -219,4 +219,54 @@ mod tests {
         assert_eq!(import_result, Value::Str(data_str.to_string()));
         fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn test_import_nb_with_input_cells() {
+        use std::fs;
+        let path = "/tmp/test_syma_nb_import.nb";
+        let nb_content = r#"Notebook[{
+Cell[BoxData[RowBox[{"1", "+", "2"}]], "Input"],
+Cell[BoxData[RowBox[{"x", "^", "2"}]], "Input"]
+}]"#;
+        fs::write(path, nb_content).ok();
+        let result = builtin_import(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok(), "NB import failed: {:?}", result);
+        let val = result.unwrap();
+        match &val {
+            Value::Str(s) => {
+                assert!(s.contains("1+2"), "Expected code to contain '1+2', got: {}", s);
+                assert!(s.contains("x^2"), "Expected code to contain 'x^2', got: {}", s);
+            }
+            _ => panic!("Expected Value::Str from NB import, got {:?}", val),
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_nb_no_input_cells() {
+        use std::fs;
+        let path = "/tmp/test_syma_nb_empty.nb";
+        let nb_content = r#"Notebook[{
+Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
+}]"#;
+        fs::write(path, nb_content).ok();
+        let result = builtin_import(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok(), "NB import (no Input cells) failed: {:?}", result);
+        let val = result.unwrap();
+        assert_eq!(val, Value::Str(String::new()));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_m_file() {
+        use std::fs;
+        let path = "/tmp/test_syma_m_import.m";
+        let m_content = "(* WL source *)\nf[x_] := x^2\nf[5]";
+        fs::write(path, m_content).ok();
+        let result = builtin_import(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok(), ".m import failed: {:?}", result);
+        let val = result.unwrap();
+        assert_eq!(val, Value::Str(m_content.to_string()));
+        fs::remove_file(path).ok();
+    }
 }

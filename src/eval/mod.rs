@@ -2542,4 +2542,130 @@ mod tests {
         let result = eval_str("Det[{{1, 2}, {3, 4}}]; Needs[\"LinearAlgebra\"]");
         assert_eq!(result, Value::Null);
     }
+
+    // ── Boolean computation integration tests ──
+
+    #[test]
+    fn test_and_true_false() {
+        assert_eq!(eval_str("And[True, False]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_or_true_false() {
+        assert_eq!(eval_str("Or[True, False]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_and_short_circuit() {
+        // And should short-circuit: False && (error) should not evaluate the error
+        assert_eq!(eval_str("And[False, Error[\"should not fire\"]]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_or_short_circuit() {
+        // Or should short-circuit: True || (error) should not evaluate the error
+        assert_eq!(eval_str("Or[True, Error[\"should not fire\"]]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_boole_true() {
+        assert_eq!(eval_str("Boole[True]"), Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_boole_false() {
+        assert_eq!(eval_str("Boole[False]"), Value::Integer(Integer::from(0)));
+    }
+
+    #[test]
+    fn test_boole_non_bool() {
+        assert_eq!(eval_str("Boole[42]"), Value::Integer(Integer::from(0)));
+    }
+
+    #[test]
+    fn test_boolean_q_true() {
+        assert_eq!(eval_str("BooleanQ[True]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_boolean_q_false_for_non_bool() {
+        assert_eq!(eval_str("BooleanQ[42]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_xor_true_false() {
+        assert_eq!(eval_str("Xor[True, False]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_xor_both_true() {
+        assert_eq!(eval_str("Xor[True, True]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_nand_basic() {
+        assert_eq!(eval_str("Nand[True, True]"), Value::Bool(false));
+        assert_eq!(eval_str("Nand[True, False]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_nor_basic() {
+        assert_eq!(eval_str("Nor[False, False]"), Value::Bool(true));
+        assert_eq!(eval_str("Nor[True, False]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_implies_truth_table() {
+        assert_eq!(eval_str("Implies[True, True]"), Value::Bool(true));
+        assert_eq!(eval_str("Implies[True, False]"), Value::Bool(false));
+        assert_eq!(eval_str("Implies[False, True]"), Value::Bool(true));
+        assert_eq!(eval_str("Implies[False, False]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equivalent_basic() {
+        assert_eq!(eval_str("Equivalent[True, True]"), Value::Bool(true));
+        assert_eq!(eval_str("Equivalent[True, False]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_majority_basic() {
+        assert_eq!(eval_str("Majority[True, True, False]"), Value::Bool(true));
+        assert_eq!(eval_str("Majority[True, False, False]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_logical_infix_operators() {
+        // a && b should desugar to And[a, b]
+        assert_eq!(eval_str("True && False"), Value::Bool(false));
+        // a || b should desugar to Or[a, b]
+        assert_eq!(eval_str("True || False"), Value::Bool(true));
+        // !expr should desugar to Not[expr]
+        assert_eq!(eval_str("!True"), Value::Bool(false));
+        assert_eq!(eval_str("!False"), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_listable_boole() {
+        // Boole is Listable, so Boole[{True, False}] should give {1, 0}
+        assert_eq!(
+            eval_str("Boole[{True, False}]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_listable_xor() {
+        // Xor is Listable, so Xor[{True, False}, True] should give {False, True}
+        assert_eq!(
+            eval_str("Xor[{True, False}, True]"),
+            Value::List(vec![
+                Value::Bool(false),
+                Value::Bool(true),
+            ])
+        );
+    }
 }

@@ -43,9 +43,17 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "GreaterEqual", comparison::builtin_greater_equal);
 
     // ── Logical ──
-    register_builtin(env, "And", logical::builtin_and);
-    register_builtin(env, "Or", logical::builtin_or);
+    register_builtin_env(env, "And", logical::builtin_and);
+    register_builtin_env(env, "Or", logical::builtin_or);
     register_builtin(env, "Not", logical::builtin_not);
+    register_builtin_env(env, "Implies", logical::builtin_implies);
+    register_builtin(env, "Xor", logical::builtin_xor);
+    register_builtin(env, "Nand", logical::builtin_nand);
+    register_builtin(env, "Nor", logical::builtin_nor);
+    register_builtin(env, "Equivalent", logical::builtin_equivalent);
+    register_builtin(env, "Majority", logical::builtin_majority);
+    register_builtin(env, "Boole", logical::builtin_boole);
+    register_builtin(env, "BooleanQ", logical::builtin_boolean_q);
 
     // ── List ──
     register_builtin(env, "Length", list::builtin_length);
@@ -509,9 +517,46 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
 
         // ── Logical ──
-        "And" => "And[a, b, ...] or a && b && ... returns True if all arguments are True.",
-        "Or" => "Or[a, b, ...] or a || b || ... returns True if any argument is True.",
+        "And" => {
+            "And[a, b, ...] or a && b && ... evaluates arguments left to right, returning \
+             the first value that is False, or the last value if all are True.\n\
+             And[] = True."
+        }
+        "Or" => {
+            "Or[a, b, ...] or a || b || ... evaluates arguments left to right, returning \
+             the first value that is True, or the last value if none are True.\n\
+             Or[] = False."
+        }
         "Not" => "Not[expr] or !expr returns the logical negation of expr.",
+        "Xor" => {
+            "Xor[a, b, ...] returns True if an odd number of arguments are True.\n\
+             Xor[] = False."
+        }
+        "Nand" => {
+            "Nand[a, b, ...] returns False if all arguments are True, True otherwise.\n\
+             Nand[] = False."
+        }
+        "Nor" => {
+            "Nor[a, b, ...] returns True if no argument is True, False otherwise.\n\
+             Nor[] = True."
+        }
+        "Implies" => {
+            "Implies[p, q] returns True unless p is True and q is False (p → q)."
+        }
+        "Equivalent" => {
+            "Equivalent[a, b, ...] returns True if all arguments have the same truth value.\n\
+             Equivalent[] = True."
+        }
+        "Majority" => {
+            "Majority[a, b, c, ...] returns True if more than half of the arguments are True.\n\
+             Requires an odd number of arguments."
+        }
+        "Boole" => {
+            "Boole[expr] returns 1 if expr is True, 0 otherwise."
+        }
+        "BooleanQ" => {
+            "BooleanQ[expr] returns True if expr is True or False, False otherwise."
+        }
 
         // ── List ──
         "Length" => "Length[expr] gives the number of elements in expr.",
@@ -916,8 +961,16 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
         | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
         "Factorial" => vec!["Listable"],
-        "And" | "Or" => vec!["Flat", "HoldAll", "Listable", "OneIdentity", "Orderless"],
+        "And" | "Or" => vec!["Flat", "HoldAll", "OneIdentity", "Orderless"],
         "Not" => vec!["Listable"],
+        "Xor" => vec!["Flat", "Listable", "OneIdentity", "Orderless"],
+        "Nand" => vec!["Listable"],
+        "Nor" => vec!["Listable"],
+        "Implies" => vec!["HoldFirst"],
+        "Equivalent" => vec!["Flat", "Listable", "OneIdentity", "Orderless"],
+        "Boole" => vec!["Listable"],
+        "Majority" => vec![],
+        "BooleanQ" => vec![],
         "Hold" => vec!["HoldAll"],
         "HoldComplete" => vec!["HoldAllComplete"],
         "Defer" => vec!["HoldAll"],

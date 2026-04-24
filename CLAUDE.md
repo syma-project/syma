@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The full language specification is in `syma-lang.md` (1200+ lines, includes EBNF grammar). That file is the source of truth for syntax and semantics.
 
+> **New to the codebase?** See [`docs/developer-guide.md`](../docs/developer-guide.md) for a comprehensive walkthrough: codebase map, pipeline internals, how to add builtins, how to add language features, pattern matching, testing, and common pitfalls.
+
 ## Build & Test Commands
 
 ```bash

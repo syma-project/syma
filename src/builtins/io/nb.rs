@@ -134,15 +134,39 @@ impl<'a> WlParser<'a> {
 
     /// Parse a complete WL expression.
     fn parse_expr(&mut self) -> Result<WlNode, String> {
+        let mut node = self.parse_primary()?;
+        // Handle -> (rule) and :> (delayed rule) — can follow any expression.
+        self.skip_trivia();
+        if self.peek() == Some(b'-') && self.peek_n(1) == Some(b'>') {
+            self.advance();
+            self.advance();
+            let rhs = self.parse_expr()?;
+            node = WlNode::Rule {
+                lhs: Box::new(node),
+                rhs: Box::new(rhs),
+            };
+        } else if self.peek() == Some(b':') && self.peek_n(1) == Some(b'>') {
+            self.advance();
+            self.advance();
+            let rhs = self.parse_expr()?;
+            node = WlNode::Rule {
+                lhs: Box::new(node),
+                rhs: Box::new(rhs),
+            };
+        }
+        Ok(node)
+    }
+
+    /// Parse a primary expression (no trailing rule operator).
+    fn parse_primary(&mut self) -> Result<WlNode, String> {
         self.skip_trivia();
         match self.peek() {
             Some(b'"') => self.parse_string_literal(),
             Some(b'{') => self.parse_list(),
             Some(b'[') => Err("Unexpected '['".to_string()),
             Some(b'<') => {
-                // Could be <<, <|, or a symbol starting with <
+                // Could be <| (association) or a symbol starting with <
                 if self.peek_n(1) == Some(b'|') {
-                    // <| ... |> — association literal, treat as list-like
                     self.advance(); // <
                     self.advance(); // |
                     let mut items = Vec::new();
@@ -171,7 +195,10 @@ impl<'a> WlParser<'a> {
                     self.parse_symbol_or_call()
                 }
             }
-            Some(c) if c.is_ascii_digit() || c == b'-' && self.peek_n(1).map_or(false, |n| n.is_ascii_digit()) => {
+            Some(c)
+                if c.is_ascii_digit()
+                    || c == b'-' && self.peek_n(1).map_or(false, |n| n.is_ascii_digit()) =>
+            {
                 self.parse_number()
             }
             Some(b')') => Err("Unexpected ')'".to_string()),
@@ -180,7 +207,10 @@ impl<'a> WlParser<'a> {
             Some(b',') => Err("Unexpected ','".to_string()),
             Some(c) if is_ident_start(c) => self.parse_symbol_or_call(),
             None => Err("Unexpected end of input".to_string()),
-            Some(b) => Err(format!("Unexpected byte 0x{:02x} ('{}') at position {}", b, b as char, self.pos)),
+            Some(b) => Err(format!(
+                "Unexpected byte 0x{:02x} ('{}') at position {}",
+                b, b as char, self.pos
+            )),
         }
     }
 
@@ -214,7 +244,8 @@ impl<'a> WlParser<'a> {
         Ok(WlNode::Str(s))
     }
 
-    /// Parse a numeric literal (integer or real, including `*^` notation).
+    /// Parse a numeric literal (integer or real, including `*^` notation and
+    /// WL backtick precision markers like `` 3.14` `` or `` 3.14`30 ``).
     fn parse_number(&mut self) -> Result<WlNode, String> {
         let start = self.pos;
         // Optional leading minus
@@ -226,9 +257,7 @@ impl<'a> WlParser<'a> {
             self.advance();
         }
         // Fractional part
-        let mut _is_real = false;
         if self.peek() == Some(b'.') {
-            _is_real = true;
             self.advance();
             while self.peek().map_or(false, |c| c.is_ascii_digit()) {
                 self.advance();
@@ -236,7 +265,6 @@ impl<'a> WlParser<'a> {
         }
         // WL scientific notation: *^ (e.g., "1.5*^3")
         if self.peek() == Some(b'*') && self.peek_n(1) == Some(b'^') {
-            _is_real = true;
             self.advance(); // *
             self.advance(); // ^
             if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
@@ -248,13 +276,49 @@ impl<'a> WlParser<'a> {
         }
         // Regular E-notation (also check)
         if self.peek() == Some(b'e') || self.peek() == Some(b'E') {
-            _is_real = true;
             self.advance();
             if self.peek() == Some(b'+') || self.peek() == Some(b'-') {
                 self.advance();
             }
             while self.peek().map_or(false, |c| c.is_ascii_digit()) {
                 self.advance();
+            }
+        }
+        // WL backtick precision mark: "3.14`" or "3.14`30"
+        if self.peek() == Some(b'`') {
+            self.advance(); // skip backtick
+            // Optional precision digits (or *^ after the backtick)
+            if self.peek() == Some(b'*') && self.peek_n(1) == Some(b'^') {
+                // Handle `*^ (backtick followed by exponent)
+                // Already consumed the backtick
+                self.advance(); // *
+                self.advance(); // ^
+                if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
+                    self.advance();
+                }
+                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    self.advance();
+                }
+            } else {
+                // Just precision digits (or nothing = machine precision)
+                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    self.advance();
+                }
+                // Some numbers have trailing . after precision: "3.14`30."
+                if self.peek() == Some(b'.') {
+                    self.advance();
+                }
+                // And optional *^ after that
+                if self.peek() == Some(b'*') && self.peek_n(1) == Some(b'^') {
+                    self.advance(); // *
+                    self.advance(); // ^
+                    if self.peek() == Some(b'-') || self.peek() == Some(b'+') {
+                        self.advance();
+                    }
+                    while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                        self.advance();
+                    }
+                }
             }
         }
         let num_str = std::str::from_utf8(&self.src[start..self.pos])
@@ -265,27 +329,6 @@ impl<'a> WlParser<'a> {
     /// Parse a symbol or a function call `head[args...]`.
     fn parse_symbol_or_call(&mut self) -> Result<WlNode, String> {
         let name = self.parse_ident()?;
-        // Check for `->` (rule)
-        self.skip_trivia();
-        if self.peek() == Some(b'-') && self.peek_n(1) == Some(b'>') {
-            self.advance();
-            self.advance();
-            let rhs = self.parse_expr()?;
-            return Ok(WlNode::Rule {
-                lhs: Box::new(WlNode::Sym(name)),
-                rhs: Box::new(rhs),
-            });
-        }
-        // Check for `:>` (delayed rule)
-        if self.peek() == Some(b':') && self.peek_n(1) == Some(b'>') {
-            self.advance();
-            self.advance();
-            let rhs = self.parse_expr()?;
-            return Ok(WlNode::Rule {
-                lhs: Box::new(WlNode::Sym(name)),
-                rhs: Box::new(rhs),
-            });
-        }
         // Check for function call: head[...]
         self.skip_trivia();
         if self.peek() == Some(b'[') {
@@ -637,7 +680,9 @@ pub fn notebook_to_code(contents: &str) -> Result<String, String> {
 
     // Walk the Notebook[...] expression to find Input cells
     if let WlNode::Call { head, args } = &notebook {
-        if is_sym(head, "Notebook") && args.len() == 1 {
+        if is_sym(head, "Notebook") && !args.is_empty() {
+            // The first argument is the cell list; subsequent args are
+            // notebook-level options (PageFooters, PrintingOptions, etc.).
             if let WlNode::List(cells) = &args[0] {
                 let mut code_parts: Vec<String> = Vec::new();
                 for cell in cells {
@@ -657,7 +702,8 @@ pub fn notebook_to_code(contents: &str) -> Result<String, String> {
             }
         }
     }
-    Err("Could not extract code from Notebook expression".to_string())
+    // Notebook with no Input cells is valid — return empty string.
+    Ok(String::new())
 }
 
 /// Read a `.m` file (WL source code), returning the content as-is.
