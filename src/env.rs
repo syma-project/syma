@@ -1,38 +1,38 @@
-use std::cell::RefCell;
+use std::sync::Mutex;
 /// Environment (scope) for variable bindings.
 ///
 /// Supports nested scopes with lexical scoping rules.
 /// Variables are looked up from innermost to outermost scope.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::value::Value;
 
 /// Global module registry shared across all scopes in a session.
 /// Maps module names (e.g. `"LinearAlgebra"`, `"Math.Stats"`) to their `Value::Module`.
-pub type ModuleRegistry = Rc<RefCell<HashMap<String, Value>>>;
+pub type ModuleRegistry = Arc<Mutex<HashMap<String, Value>>>;
 
 /// A scope frame containing variable bindings.
 #[derive(Debug, Clone)]
 pub struct Scope {
     bindings: HashMap<String, Value>,
-    parent: Option<Rc<RefCell<Scope>>>,
+    parent: Option<Arc<Mutex<Scope>>>,
 }
 
 /// The evaluation environment, managing scopes.
 #[derive(Debug, Clone)]
 pub struct Env {
     /// Current scope chain.
-    scope: Rc<RefCell<Scope>>,
-    /// Module registry — shared (by `Rc` clone) across all child envs in a session.
+    scope: Arc<Mutex<Scope>>,
+    /// Module registry — shared (by `Arc` clone) across all child envs in a session.
     pub registry: ModuleRegistry,
     /// Directories searched when resolving `import Name` to a `.syma` file.
-    pub search_paths: Rc<RefCell<Vec<PathBuf>>>,
+    pub search_paths: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Scope {
-    pub fn new(parent: Option<Rc<RefCell<Scope>>>) -> Self {
+    pub fn new(parent: Option<Arc<Mutex<Scope>>>) -> Self {
         Scope {
             bindings: HashMap::new(),
             parent,
@@ -43,7 +43,7 @@ impl Scope {
         if let Some(val) = self.bindings.get(name) {
             Some(val.clone())
         } else if let Some(ref parent) = self.parent {
-            parent.borrow().get(name)
+            parent.lock().unwrap().get(name)
         } else {
             None
         }
@@ -63,16 +63,16 @@ impl Env {
     /// Create a new environment with a global scope.
     pub fn new() -> Self {
         Env {
-            scope: Rc::new(RefCell::new(Scope::new(None))),
-            registry: Rc::new(RefCell::new(HashMap::new())),
-            search_paths: Rc::new(RefCell::new(vec![PathBuf::from(".")])),
+            scope: Arc::new(Mutex::new(Scope::new(None))),
+            registry: Arc::new(Mutex::new(HashMap::new())),
+            search_paths: Arc::new(Mutex::new(vec![PathBuf::from(".")])),
         }
     }
 
     /// Create a child environment (new scope, shared registry and search paths).
     pub fn child(&self) -> Self {
         Env {
-            scope: Rc::new(RefCell::new(Scope::new(Some(self.scope.clone())))),
+            scope: Arc::new(Mutex::new(Scope::new(Some(self.scope.clone())))),
             registry: self.registry.clone(),
             search_paths: self.search_paths.clone(),
         }
@@ -80,45 +80,46 @@ impl Env {
 
     /// Register a module in the session-wide registry.
     pub fn register_module(&self, name: String, module: Value) {
-        self.registry.borrow_mut().insert(name, module);
+        self.registry.lock().unwrap().insert(name, module);
     }
 
     /// Look up a module by its qualified name (e.g. `"LinearAlgebra"`).
     pub fn get_module(&self, name: &str) -> Option<Value> {
-        self.registry.borrow().get(name).cloned()
+        self.registry.lock().unwrap().get(name).cloned()
     }
 
     /// Prepend a directory to the module search path.
     pub fn add_search_path(&self, path: PathBuf) {
-        self.search_paths.borrow_mut().insert(0, path);
+        self.search_paths.lock().unwrap().insert(0, path);
     }
 
     /// Look up a variable by name.
     pub fn get(&self, name: &str) -> Option<Value> {
-        self.scope.borrow().get(name)
+        self.scope.lock().unwrap().get(name)
     }
 
     /// Set a variable in the current scope.
     pub fn set(&self, name: String, value: Value) {
-        self.scope.borrow_mut().set(name, value);
+        self.scope.lock().unwrap().set(name, value);
     }
 
     /// Set a variable in the current (local) scope only.
     #[allow(dead_code)]
     pub fn set_local(&self, name: String, value: Value) {
-        self.scope.borrow_mut().set_local(name, value);
+        self.scope.lock().unwrap().set_local(name, value);
     }
 
     /// Check if a variable exists in the current scope (not parents).
     #[allow(dead_code)]
     pub fn has_local(&self, name: &str) -> bool {
-        self.scope.borrow().bindings.contains_key(name)
+        self.scope.lock().unwrap().bindings.contains_key(name)
     }
 
     /// Return all bindings in the current scope (not parents), as a Vec of (name, value) pairs.
     pub fn bindings(&self) -> Vec<(String, Value)> {
         self.scope
-            .borrow()
+            .lock()
+            .unwrap()
             .bindings
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -132,7 +133,7 @@ impl Env {
         let mut seen = std::collections::HashSet::new();
         let mut scope_opt = Some(self.scope.clone());
         while let Some(scope) = scope_opt {
-            let s = scope.borrow();
+            let s = scope.lock().unwrap();
             for (k, v) in &s.bindings {
                 if seen.insert(k.clone()) {
                     result.push((k.clone(), v.clone()));

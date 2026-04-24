@@ -6,6 +6,7 @@ pub mod io;
 pub mod list;
 pub mod logical;
 pub mod math;
+pub mod parallel;
 pub mod pattern;
 pub mod random;
 pub mod string;
@@ -119,6 +120,36 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "LCM", math::builtin_lcm);
     register_builtin(env, "Factorial", math::builtin_factorial);
 
+    // ── Reciprocal trig ──
+    register_builtin(env, "Csc", math::builtin_csc);
+    register_builtin(env, "Sec", math::builtin_sec);
+    register_builtin(env, "Cot", math::builtin_cot);
+
+    // ── Inverse reciprocal trig ──
+    register_builtin(env, "ArcCsc", math::builtin_arccsc);
+    register_builtin(env, "ArcSec", math::builtin_arcsec);
+    register_builtin(env, "ArcCot", math::builtin_arccot);
+
+    // ── Haversine ──
+    register_builtin(env, "Haversine", math::builtin_haversine);
+    register_builtin(env, "InverseHaversine", math::builtin_inverse_haversine);
+
+    // ── Degree-based trig ──
+    register_builtin(env, "SinDegrees", math::builtin_sin_degrees);
+    register_builtin(env, "CosDegrees", math::builtin_cos_degrees);
+    register_builtin(env, "TanDegrees", math::builtin_tan_degrees);
+    register_builtin(env, "CscDegrees", math::builtin_csc_degrees);
+    register_builtin(env, "SecDegrees", math::builtin_sec_degrees);
+    register_builtin(env, "CotDegrees", math::builtin_cot_degrees);
+
+    // ── Inverse trig (degrees) ──
+    register_builtin(env, "ArcSinDegrees", math::builtin_arcsin_degrees);
+    register_builtin(env, "ArcCosDegrees", math::builtin_arccos_degrees);
+    register_builtin(env, "ArcTanDegrees", math::builtin_arctan_degrees);
+    register_builtin(env, "ArcCscDegrees", math::builtin_arccsc_degrees);
+    register_builtin(env, "ArcSecDegrees", math::builtin_arcsec_degrees);
+    register_builtin(env, "ArcCotDegrees", math::builtin_arccot_degrees);
+
     // ── Random ──
     register_builtin(env, "RandomInteger", random::builtin_random_integer);
     register_builtin(env, "RandomReal", random::builtin_random_real);
@@ -168,10 +199,25 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "StringStartsQ", string::builtin_string_starts_q);
     register_builtin(env, "StringEndsQ", string::builtin_string_ends_q);
 
+    // ── Parallel computation ──
+    register_builtin(env, "ParallelMap", parallel::builtin_parallel_map);
+    register_builtin(env, "ParallelTable", parallel::builtin_parallel_table);
+    register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
+    register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
+    register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
+
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
     env.set("E".to_string(), Value::Symbol("E".to_string()));
     env.set("I".to_string(), Value::Complex { re: 0.0, im: 1.0 });
+    // Degree = Pi / 180  (radians per degree)
+    env.set(
+        "Degree".to_string(),
+        Value::Real(rug::Float::with_val(
+            crate::value::DEFAULT_PRECISION,
+            rug::float::Constant::Pi,
+        ) / 180u32),
+    );
 }
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
@@ -228,7 +274,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Range[n] gives {1, 2, ..., n}.\nRange[min, max] gives {min, min+1, ..., max}.\nRange[min, max, step] uses the given step."
         }
         "Table" => {
-            "Table[expr, {i, n}] generates a list of n copies of expr.\nTable[expr, {i, min, max}] evaluates expr for i from min to max.\nTable[expr, {i, min, max, step}] uses the given step."
+            "Table[expr, n] generates a list of n copies of expr.\nTable[expr, {i, max}] evaluates expr for i from 1 to max.\nTable[expr, {i, min, max}] evaluates expr for i from min to max.\nTable[expr, {i, min, max, step}] uses the given step.\nTable[expr, {i, {val1, val2, ...}}] uses successive values from the list.\nTable[expr, {i, imin, imax}, {j, jmin, jmax}, ...] gives a nested list."
         }
         "Map" => "Map[f, expr] or f /@ expr applies f to each element at level 1 of expr.",
         "Fold" => {
@@ -292,6 +338,26 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ArcSin" => "ArcSin[z] gives the inverse sine of z.",
         "ArcCos" => "ArcCos[z] gives the inverse cosine of z.",
         "ArcTan" => "ArcTan[z] gives the inverse tangent of z.",
+        "Csc" => "Csc[z] gives the cosecant of z (1/Sin[z]).",
+        "Sec" => "Sec[z] gives the secant of z (1/Cos[z]).",
+        "Cot" => "Cot[z] gives the cotangent of z (1/Tan[z]).",
+        "ArcCsc" => "ArcCsc[z] gives the inverse cosecant of z.",
+        "ArcSec" => "ArcSec[z] gives the inverse secant of z.",
+        "ArcCot" => "ArcCot[z] gives the inverse cotangent of z.",
+        "Haversine" => "Haversine[z] gives the haversine of z, (1 - Cos[z])/2.",
+        "InverseHaversine" => "InverseHaversine[z] gives the inverse haversine of z, 2 ArcSin[Sqrt[z]].",
+        "SinDegrees" => "SinDegrees[θ] gives the sine of θ degrees.",
+        "CosDegrees" => "CosDegrees[θ] gives the cosine of θ degrees.",
+        "TanDegrees" => "TanDegrees[θ] gives the tangent of θ degrees.",
+        "CscDegrees" => "CscDegrees[θ] gives the cosecant of θ degrees.",
+        "SecDegrees" => "SecDegrees[θ] gives the secant of θ degrees.",
+        "CotDegrees" => "CotDegrees[θ] gives the cotangent of θ degrees.",
+        "ArcSinDegrees" => "ArcSinDegrees[z] gives the inverse sine of z in degrees.",
+        "ArcCosDegrees" => "ArcCosDegrees[z] gives the inverse cosine of z in degrees.",
+        "ArcTanDegrees" => "ArcTanDegrees[z] gives the inverse tangent of z in degrees.",
+        "ArcCscDegrees" => "ArcCscDegrees[z] gives the inverse cosecant of z in degrees.",
+        "ArcSecDegrees" => "ArcSecDegrees[z] gives the inverse secant of z in degrees.",
+        "ArcCotDegrees" => "ArcCotDegrees[z] gives the inverse cotangent of z in degrees.",
         "Log2" => "Log2[z] gives the base-2 logarithm of z.",
         "Log10" => "Log10[z] gives the base-10 logarithm of z.",
         "Mod" => "Mod[m, n] gives the remainder when m is divided by n.",
@@ -347,6 +413,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "E" => "E is Euler's number e (2.71828...), the base of the natural logarithm.",
         "I" => "I is the imaginary unit, satisfying I^2 = -1.",
+        "Degree" => "Degree is the constant Pi/180, used to convert degrees to radians. E.g., 30 Degree = Pi/6.",
         "Null" => "Null represents the absence of an expression or result.",
         "True" => "True represents the logical value true.",
         "False" => "False represents the logical value false.",
@@ -376,6 +443,18 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "N[expr] evaluates expr numerically.\nN[expr, prec] uses prec decimal digits of precision."
         }
 
+        // ── Parallel ──
+        "ParallelMap" => "ParallelMap[f, list] applies f to each element of list in parallel, returning a list of results.",
+        "ParallelTable" => {
+            "ParallelTable[expr, {i, min, max}] evaluates expr for i from min to max in parallel.\n\
+             ParallelTable[expr, {i, max}] evaluates expr for i from 1 to max in parallel."
+        }
+        "KernelCount" => "KernelCount returns the number of available parallel worker threads.",
+        "LaunchKernels" => {
+            "LaunchKernels[] returns the current kernel count.\nLaunchKernels[n] sets the number of parallel workers to n."
+        }
+        "CloseKernels" => "CloseKernels[] resets the parallel worker pool. Returns Null.",
+
         _ => return None,
     })
 }
@@ -396,6 +475,14 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
             vec!["Listable", "NumericFunction"]
         }
         "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => vec!["Listable", "NumericFunction"],
+        "Csc" | "Sec" | "Cot" | "ArcCsc" | "ArcSec" | "ArcCot" => {
+            vec!["Listable", "NumericFunction"]
+        }
+        "Haversine" | "InverseHaversine" => vec!["Listable", "NumericFunction"],
+        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees"
+        | "CotDegrees" => vec!["Listable", "NumericFunction"],
+        "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees"
+        | "ArcSecDegrees" | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
         "Factorial" => vec!["Listable"],
         "Max" | "Min" => vec!["Flat", "NumericFunction", "OneIdentity", "Orderless"],
         "And" | "Or" => vec!["Flat", "HoldAll", "Listable", "OneIdentity", "Orderless"],

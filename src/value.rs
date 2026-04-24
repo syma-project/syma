@@ -4,7 +4,7 @@
 /// representation of symbolic expressions.
 use std::collections::HashMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rug::Float;
 use rug::Integer;
@@ -115,7 +115,7 @@ pub enum Value {
 
     // ── Callable ──
     /// A user-defined function with pattern-matched definitions.
-    Function(Rc<FunctionDef>),
+    Function(Arc<FunctionDef>),
 
     /// A built-in function.
     Builtin(String, BuiltinFn),

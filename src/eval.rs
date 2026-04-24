@@ -7,7 +7,7 @@
 /// - Class instantiation and method dispatch
 /// - Control flow (If, Which, Switch, match, loops)
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rug::float::Constant;
 use rug::ops::Pow;
@@ -295,7 +295,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         } => {
             // Check if function already exists
             let func = if let Some(Value::Function(f)) = env.get(name) {
-                Rc::try_unwrap(f).unwrap_or_else(|rc| (*rc).clone())
+                Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
             } else {
                 FunctionDef {
                     name: name.clone(),
@@ -310,7 +310,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 delayed: *delayed,
             });
 
-            env.set(name.clone(), Value::Function(Rc::new(func)));
+            env.set(name.clone(), Value::Function(Arc::new(func)));
             Ok(Value::Null)
         }
 
@@ -598,6 +598,10 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // Table[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 eval_table(args, env)
             }
+            "ParallelTable" => {
+                // ParallelTable[expr, {i, min, max}] — parallel version of Table
+                eval_parallel_table(args, env)
+            }
             "Sum" => {
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 eval_sum(args, env)
@@ -661,6 +665,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 "MatchQ" => return builtin_match_q_eval(args),
                 "FreeQ" => return builtin_free_q_eval(args),
                 "FixedPoint" => return builtin_fixed_point_eval(args, env),
+                "ParallelMap" => return builtin_parallel_map_eval(args, env),
                 _ => {}
             }
             f(args).map_err(|e| match e {
@@ -1238,15 +1243,56 @@ fn builtin_free_q_eval(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(!contains_pattern(&args[0], &args[1])))
 }
 
-/// Table[expr, {i, n}] or Table[expr, {i, min, max}] or Table[expr, {i, min, max, step}].
+/// Table[expr, n] or Table[expr, {i, ...}] or Table[expr, {i, ...}, {j, ...}, ...].
 /// Called from eval_call as a special form (iterator spec has unevaluated symbols).
 fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Table requires exactly 2 arguments".to_string(),
+            "Table requires at least 2 arguments".to_string(),
         ));
     }
-    let iter_items = match &args[1] {
+
+    let expr = &args[0];
+
+    // Case 1: Table[expr, n] — n copies of expr (no variable binding)
+    if args.len() == 2 {
+        // Check if second arg is a plain integer (not a list)
+        if let Expr::Integer(_) = &args[1] {
+            let n = eval(&args[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: "non-Integer".to_string(),
+            })?;
+            if n < 0 {
+                return Err(EvalError::Error(
+                    "Table count must be non-negative".to_string(),
+                ));
+            }
+            let mut result = Vec::new();
+            for _ in 0..n {
+                result.push(eval(expr, env)?);
+            }
+            return Ok(Value::List(result));
+        }
+    }
+
+    // Case 2: Table[expr, {i, ...}] or Table[expr, {i, ...}, {j, ...}, ...]
+    let iter_specs = &args[1..];
+    eval_table_recursive(expr, iter_specs, env, 0)
+}
+
+/// Recursive helper for nested Table iteration.
+fn eval_table_recursive(
+    expr: &Expr,
+    iter_specs: &[Expr],
+    env: &Env,
+    depth: usize,
+) -> Result<Value, EvalError> {
+    if depth >= iter_specs.len() {
+        // Base case: all iterators processed, evaluate expression
+        return eval(expr, env);
+    }
+
+    let iter_items = match &iter_specs[depth] {
         Expr::List(items) => items,
         _ => {
             return Err(EvalError::Error(
@@ -1255,106 +1301,128 @@ fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         }
     };
 
-    // Parse iterator spec: {var, n} or {var, min, max} or {var, min, max, step}
-    let (var_name, min, max, step) =
-        match iter_items.len() {
-            2 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
+    // Parse the iterator spec and generate values
+    let (var_name, values) = match iter_items.len() {
+        2 => {
+            // {var, n} or {var, {values}}
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "Table iterator variable must be a symbol".to_string(),
+                    ));
+                }
+            };
+
+            // Check if second element is a list (explicit values)
+            if let Expr::List(_) = &iter_items[1] {
+                let list_val = eval(&iter_items[1], env)?;
+                match list_val {
+                    Value::List(items) => (var, items),
                     _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
+                        return Err(EvalError::TypeError {
+                            expected: "List".to_string(),
+                            got: list_val.type_name().to_string(),
+                        });
                     }
-                };
+                }
+            } else {
+                // {var, n} — iterate 1..=n
                 let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
                     EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: "non-Integer".to_string(),
                     }
                 })?;
-                (var, 1i64, n, 1i64)
+                let values: Vec<Value> = (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                (var, values)
             }
-            3 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                (var, min, max, 1i64)
-            }
-            4 => {
-                let var = match &iter_items[0] {
-                    Expr::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "Table iterator variable must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
-                if step == 0 {
-                    return Err(EvalError::Error("Table step cannot be zero".to_string()));
+        }
+        3 => {
+            // {var, min, max}
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "Table iterator variable must be a symbol".to_string(),
+                    ));
                 }
-                (var, min, max, step)
+            };
+            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let values: Vec<Value> = (min..=max).map(|i| Value::Integer(Integer::from(i))).collect();
+            (var, values)
+        }
+        4 => {
+            // {var, min, max, step}
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "Table iterator variable must be a symbol".to_string(),
+                    ));
+                }
+            };
+            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            if step == 0 {
+                return Err(EvalError::Error("Table step cannot be zero".to_string()));
             }
-            _ => {
-                return Err(EvalError::Error(
-                    "Table iterator spec must have 2-4 elements".to_string(),
-                ));
+            let mut values = Vec::new();
+            if step > 0 {
+                let mut i = min;
+                while i <= max {
+                    values.push(Value::Integer(Integer::from(i)));
+                    i += step;
+                }
+            } else {
+                let mut i = min;
+                while i >= max {
+                    values.push(Value::Integer(Integer::from(i)));
+                    i += step;
+                }
             }
-        };
+            (var, values)
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "Table iterator spec must have 2-4 elements".to_string(),
+            ));
+        }
+    };
 
-    let expr = &args[0];
+    // Generate results for this iterator level
     let child_env = env.child();
     let mut result = Vec::new();
-
-    if step > 0 {
-        let mut i = min;
-        while i <= max {
-            child_env.set(var_name.clone(), Value::Integer(Integer::from(i)));
-            result.push(eval(expr, &child_env)?);
-            i += step;
-        }
-    } else {
-        let mut i = min;
-        while i >= max {
-            child_env.set(var_name.clone(), Value::Integer(Integer::from(i)));
-            result.push(eval(expr, &child_env)?);
-            i += step;
-        }
+    for val in values {
+        child_env.set(var_name.clone(), val);
+        result.push(eval_table_recursive(expr, iter_specs, &child_env, depth + 1)?);
     }
 
     Ok(Value::List(result))
@@ -1420,6 +1488,235 @@ fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     }
 
     Ok(acc)
+}
+
+// ── Parallel evaluation builtins ──
+
+/// ParallelMap[f, list] — apply f to each element of list using multiple threads.
+fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelMap requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    match &args[1] {
+        Value::List(items) if items.is_empty() => Ok(Value::List(vec![])),
+        Value::List(items) => {
+            // For small lists, sequential is faster than thread overhead
+            if items.len() < 4 {
+                let mut result = Vec::with_capacity(items.len());
+                for item in items {
+                    result.push(apply_function(f, &[item.clone()], env)?);
+                }
+                return Ok(Value::List(result));
+            }
+
+            let mut results: Vec<Option<Value>> = vec![None; items.len()];
+            std::thread::scope(|s| {
+                let handles: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(_i, item)| {
+                        let item = item.clone();
+                        let f = f.clone();
+                        let env = env.clone();
+                        s.spawn(move || -> Result<Value, EvalError> {
+                            apply_function(&f, &[item], &env)
+                        })
+                    })
+                    .collect();
+
+                for (i, handle) in handles.into_iter().enumerate() {
+                    let val = handle.join().map_err(|_| {
+                        EvalError::Error("ParallelMap worker panicked".to_string())
+                    })??;
+                    results[i] = Some(val);
+                }
+                Ok::<(), EvalError>(())
+            })?;
+
+            Ok(Value::List(results.into_iter().map(|r| r.unwrap()).collect()))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
+    }
+}
+
+/// ParallelTable[expr, {i, ...}] — evaluate expr for each iterator value in parallel.
+fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelTable requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let expr = &args[0];
+
+    // Parse the iterator spec (reuse the same logic as eval_table)
+    let iter_items = match &args[1] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelTable iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+
+    let (var_name, values) = match iter_items.len() {
+        2 => {
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "ParallelTable iterator variable must be a symbol".to_string(),
+                    ));
+                }
+            };
+            if let Expr::List(_) = &iter_items[1] {
+                let list_val = eval(&iter_items[1], env)?;
+                match list_val {
+                    Value::List(items) => (var, items),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "List".to_string(),
+                            got: list_val.type_name().to_string(),
+                        });
+                    }
+                }
+            } else {
+                let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let values: Vec<Value> =
+                    (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                (var, values)
+            }
+        }
+        3 => {
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "ParallelTable iterator variable must be a symbol".to_string(),
+                    ));
+                }
+            };
+            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let values: Vec<Value> = (min..=max)
+                .map(|i| Value::Integer(Integer::from(i)))
+                .collect();
+            (var, values)
+        }
+        4 => {
+            let var = match &iter_items[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "ParallelTable iterator variable must be a symbol".to_string(),
+                    ));
+                }
+            };
+            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
+                EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                }
+            })?;
+            if step == 0 {
+                return Err(EvalError::Error(
+                    "ParallelTable step cannot be zero".to_string(),
+                ));
+            }
+            let mut values = Vec::new();
+            if step > 0 {
+                let mut i = min;
+                while i <= max {
+                    values.push(Value::Integer(Integer::from(i)));
+                    i += step;
+                }
+            } else {
+                let mut i = min;
+                while i >= max {
+                    values.push(Value::Integer(Integer::from(i)));
+                    i += step;
+                }
+            }
+            (var, values)
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelTable iterator spec must have 2-4 elements".to_string(),
+            ));
+        }
+    };
+
+    // For small iteration counts, sequential is faster
+    if values.len() < 4 {
+        let child_env = env.child();
+        let mut result = Vec::with_capacity(values.len());
+        for val in values {
+            child_env.set(var_name.clone(), val);
+            result.push(eval(expr, &child_env)?);
+        }
+        return Ok(Value::List(result));
+    }
+
+    // Parallel evaluation using scoped threads
+    let mut results: Vec<Option<Value>> = vec![None; values.len()];
+    std::thread::scope(|s| {
+        let handles: Vec<_> = values
+            .into_iter()
+            .map(|val| {
+                let expr = expr.clone();
+                let var_name = var_name.clone();
+                let env = env.clone();
+                s.spawn(move || -> Result<Value, EvalError> {
+                    let child_env = env.child();
+                    child_env.set(var_name, val);
+                    eval(&expr, &child_env)
+                })
+            })
+            .collect();
+
+        for (i, handle) in handles.into_iter().enumerate() {
+            let val = handle
+                .join()
+                .map_err(|_| EvalError::Error("ParallelTable worker panicked".to_string()))??;
+            results[i] = Some(val);
+        }
+        Ok::<(), EvalError>(())
+    })?;
+
+    Ok(Value::List(results.into_iter().map(|r| r.unwrap()).collect()))
 }
 
 /// FixedPoint[f, x] — apply f until result stops changing.
@@ -1529,7 +1826,8 @@ fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
 
     let mut source: Option<String> = None;
     'outer: for candidate in &candidates {
-        for dir in env.search_paths.borrow().iter() {
+        let paths = env.search_paths.lock().unwrap();
+        for dir in paths.iter() {
             let path = dir.join(candidate);
             if let Ok(content) = std::fs::read_to_string(&path) {
                 source = Some(content);
@@ -1539,12 +1837,12 @@ fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
     }
 
     let src = source.ok_or_else(|| {
+        let paths = env.search_paths.lock().unwrap();
         EvalError::Error(format!(
             "Module '{}' not found.\nSearched for '{}.syma' in: {}",
             name,
             name,
-            env.search_paths
-                .borrow()
+            paths
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -1827,6 +2125,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_degree_constant() {
+        // Degree = Pi/180 ≈ 0.017453292519943295
+        let val = eval_str("Degree");
+        match val {
+            Value::Real(r) => {
+                let expected = std::f64::consts::PI / 180.0;
+                assert!((r.to_f64() - expected).abs() < 1e-15);
+            }
+            _ => panic!("Expected Real, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_sin_degrees_eval() {
+        // SinDegrees[30] = 1/2
+        assert_eq!(
+            eval_str("SinDegrees[30]"),
+            Value::Call {
+                head: "Divide".to_string(),
+                args: vec![
+                    Value::Integer(rug::Integer::from(1)),
+                    Value::Integer(rug::Integer::from(2)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_cos_degrees_eval() {
+        // CosDegrees[60] = 1/2
+        assert_eq!(
+            eval_str("CosDegrees[60]"),
+            Value::Call {
+                head: "Divide".to_string(),
+                args: vec![
+                    Value::Integer(rug::Integer::from(1)),
+                    Value::Integer(rug::Integer::from(2)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_csc_pi_over_6_eval() {
+        // Csc[Pi/6] = 2
+        assert_eq!(
+            eval_str("Csc[Pi / 6]"),
+            Value::Integer(rug::Integer::from(2))
+        );
+    }
+
+    #[test]
+    fn test_sec_pi_over_3_eval() {
+        // Sec[Pi/3] = 2
+        assert_eq!(
+            eval_str("Sec[Pi / 3]"),
+            Value::Integer(rug::Integer::from(2))
+        );
+    }
+
+    #[test]
+    fn test_cot_pi_over_4_eval() {
+        // Cot[Pi/4] = 1
+        assert_eq!(
+            eval_str("Cot[Pi / 4]"),
+            Value::Integer(rug::Integer::from(1))
+        );
+    }
+
     // ── String operations ──
 
     #[test]
@@ -1967,6 +2335,66 @@ mod tests {
     }
 
     #[test]
+    fn test_table_n_copies() {
+        let result = eval_str("Table[0, 5]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(0)),
+                Value::Integer(Integer::from(0)),
+                Value::Integer(Integer::from(0)),
+                Value::Integer(Integer::from(0)),
+                Value::Integer(Integer::from(0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_table_n_copies_expr() {
+        let result = eval_str("Table[x^2, 3]");
+        match &result {
+            Value::List(items) => assert_eq!(items.len(), 3),
+            _ => panic!("Expected List, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_table_explicit_values() {
+        let result = eval_str("Table[i^2, {i, {1, 3, 5, 7}}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(25)),
+                Value::Integer(Integer::from(49)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_table_nested() {
+        let result = eval_str("Table[i + j, {i, 1, 3}, {j, 1, 2}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![
+                    Value::Integer(Integer::from(2)),
+                    Value::Integer(Integer::from(3)),
+                ]),
+                Value::List(vec![
+                    Value::Integer(Integer::from(3)),
+                    Value::Integer(Integer::from(4)),
+                ]),
+                Value::List(vec![
+                    Value::Integer(Integer::from(4)),
+                    Value::Integer(Integer::from(5)),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
     fn test_sum() {
         let result = eval_str("Sum[i^2, {i, 1, 4}]");
         assert_eq!(result, Value::Integer(Integer::from(30))); // 1 + 4 + 9 + 16 = 30
@@ -2021,5 +2449,97 @@ mod tests {
     fn test_catch_no_throw() {
         let result = eval_str("Catch[1 + 2]");
         assert_eq!(result, Value::Integer(Integer::from(3)));
+    }
+
+    // ── Parallel computation ──
+
+    #[test]
+    fn test_parallel_map() {
+        let result = eval_str("ParallelMap[Sqrt, {1, 4, 9, 16, 25}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(5)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parallel_map_user_func() {
+        let result = eval_str("sq[x_] := x^2; ParallelMap[sq, {1, 2, 3, 4, 5}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(16)),
+                Value::Integer(Integer::from(25)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parallel_map_small_list() {
+        // Lists with < 4 elements should still work (sequential fallback)
+        let result = eval_str("ParallelMap[Sqrt, {1, 4, 9}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parallel_map_empty() {
+        let result = eval_str("ParallelMap[Sqrt, {}]");
+        assert_eq!(result, Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_parallel_table() {
+        let result = eval_str("ParallelTable[i^2, {i, 1, 6}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(16)),
+                Value::Integer(Integer::from(25)),
+                Value::Integer(Integer::from(36)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parallel_table_short_form() {
+        let result = eval_str("ParallelTable[i, {i, 5}]");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(5)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_kernel_count() {
+        let result = eval_str("KernelCount[]");
+        match result {
+            Value::Integer(n) => assert!(n.to_i64().unwrap() >= 1),
+            _ => panic!("Expected Integer, got {:?}", result),
+        }
     }
 }

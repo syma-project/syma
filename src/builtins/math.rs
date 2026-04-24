@@ -1,3 +1,4 @@
+use crate::builtins::arithmetic::{builtin_divide, builtin_plus};
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
@@ -400,6 +401,431 @@ pub fn builtin_arctan(args: &[Value]) -> Result<Value, EvalError> {
             head: "ArcTan".to_string(),
             args: args.to_vec(),
         }),
+    }
+}
+
+// ── Reciprocal Trigonometric (exact results for special angles) ──
+
+/// Compute exact csc for a known Pi fraction.
+fn exact_csc(num: i64, den: u32) -> Option<Value> {
+    match (num, den) {
+        (0, _) | (1, 1) => None,                       // csc(0), csc(π) undefined
+        (1, 2) | (3, 2) => Some(val_int(1)),            // csc(±π/2) = 1 or -1
+        (1, 6) | (5, 6) => Some(val_int(2)),            // csc(π/6) = csc(5π/6) = 2
+        (1, 4) | (3, 4) => Some(val_sqrt(2)),           // csc(π/4) = csc(3π/4) = √2
+        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3 = 2/√3
+        (7, 6) | (11, 6) => Some(val_int(-2)),
+        (5, 4) | (7, 4) => Some(val_neg(val_sqrt(2))),
+        (4, 3) | (5, 3) => Some(neg_sqrt_over(2, 3)),
+        _ => None,
+    }
+}
+
+/// Compute exact sec for a known Pi fraction.
+fn exact_sec(num: i64, den: u32) -> Option<Value> {
+    match (num, den) {
+        (0, _) => Some(val_int(1)),                     // sec(0) = 1
+        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = sec(11π/6) = 2√3/3
+        (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = sec(7π/4) = √2
+        (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = sec(5π/3) = 2
+        (1, 2) | (3, 2) => None,                        // sec(±π/2) undefined
+        (2, 3) | (4, 3) => Some(val_int(-2)),
+        (3, 4) | (5, 4) => Some(val_neg(val_sqrt(2))),
+        (5, 6) | (7, 6) => Some(neg_sqrt_over(2, 3)),
+        (1, 1) => Some(val_int(-1)),                    // sec(π) = -1
+        _ => None,
+    }
+}
+
+/// Compute exact cot for a known Pi fraction.
+fn exact_cot(num: i64, den: u32) -> Option<Value> {
+    match (num, den) {
+        (0, _) | (1, 1) => None,                       // cot(0), cot(π) undefined
+        (1, 2) | (3, 2) => Some(val_int(0)),            // cot(π/2) = cot(3π/2) = 0
+        (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = cot(7π/6) = √3
+        (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = cot(5π/4) = 1
+        (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // cot(π/3) = √3/3
+        (2, 3) | (5, 3) => Some(val_neg(val_div(val_sqrt(3), val_int(3)))),
+        (3, 4) | (7, 4) => Some(val_int(-1)),
+        (5, 6) | (11, 6) => Some(val_neg(val_sqrt(3))),
+        _ => None,
+    }
+}
+
+pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Csc requires exactly 1 argument".to_string()));
+    }
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_csc(num, den) {
+            return Ok(result);
+        }
+        return Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() });
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => {
+            Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() })
+        }
+        Value::Integer(_) => {
+            Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() })
+        }
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_csc(num, den) {
+                    return Ok(result);
+                }
+            }
+            let sin_val = r.clone().sin();
+            if sin_val.is_zero() {
+                return Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() });
+            }
+            let prec = r.prec();
+            Ok(Value::Real(Float::with_val(prec, 1.0) / sin_val))
+        }
+        _ => Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Sec requires exactly 1 argument".to_string()));
+    }
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_sec(num, den) {
+            return Ok(result);
+        }
+        return Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() });
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Integer(_) => {
+            Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() })
+        }
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_sec(num, den) {
+                    return Ok(result);
+                }
+            }
+            let cos_val = r.clone().cos();
+            if cos_val.is_zero() {
+                return Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() });
+            }
+            let prec = r.prec();
+            Ok(Value::Real(Float::with_val(prec, 1.0) / cos_val))
+        }
+        _ => Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Cot requires exactly 1 argument".to_string()));
+    }
+    if let Some((num, den)) = extract_pi_multiple(&args[0]) {
+        if let Some(result) = exact_cot(num, den) {
+            return Ok(result);
+        }
+        return Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() });
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => {
+            Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() })
+        }
+        Value::Integer(_) => {
+            Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() })
+        }
+        Value::Real(r) => {
+            if let Some((num, den)) = pi_multiple(r) {
+                if let Some(result) = exact_cot(num, den) {
+                    return Ok(result);
+                }
+            }
+            let sin_val = r.clone().sin();
+            if sin_val.is_zero() {
+                return Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() });
+            }
+            let cos_val = r.clone().cos();
+            let prec = r.prec();
+            Ok(Value::Real(Float::with_val(prec, cos_val) / Float::with_val(prec, sin_val)))
+        }
+        _ => Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() }),
+    }
+}
+
+// ── Inverse Reciprocal Trigonometric ──
+
+pub fn builtin_arccsc(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcCsc requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => {
+            Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() })
+        }
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let inv = Float::with_val(DEFAULT_PRECISION, 1.0) / f;
+            Ok(Value::Real(inv.asin()))
+        }
+        Value::Real(r) if r.is_zero() => {
+            Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() })
+        }
+        Value::Real(r) => {
+            let prec = r.prec();
+            let inv = Float::with_val(prec, 1.0) / r;
+            Ok(Value::Real(inv.asin()))
+        }
+        _ => Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_arcsec(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcSec requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => {
+            Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() })
+        }
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let inv = Float::with_val(DEFAULT_PRECISION, 1.0) / f;
+            Ok(Value::Real(inv.acos()))
+        }
+        Value::Real(r) if r.is_zero() => {
+            Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() })
+        }
+        Value::Real(r) => {
+            let prec = r.prec();
+            let inv = Float::with_val(prec, 1.0) / r;
+            Ok(Value::Real(inv.acos()))
+        }
+        _ => Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcCot requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => {
+            // ArcCot[0] = π/2
+            let pi_half = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32;
+            Ok(Value::Real(pi_half))
+        }
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let inv = Float::with_val(DEFAULT_PRECISION, 1.0) / f;
+            Ok(Value::Real(inv.atan()))
+        }
+        Value::Real(r) if r.is_zero() => {
+            let pi_half = Float::with_val(r.prec(), rug::float::Constant::Pi) / 2u32;
+            Ok(Value::Real(pi_half))
+        }
+        Value::Real(r) => {
+            let prec = r.prec();
+            let inv = Float::with_val(prec, 1.0) / r;
+            Ok(Value::Real(inv.atan()))
+        }
+        _ => Ok(Value::Call { head: "ArcCot".to_string(), args: args.to_vec() }),
+    }
+}
+
+// ── Haversine ──
+
+pub fn builtin_haversine(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Haversine requires exactly 1 argument".to_string()));
+    }
+    // Haversine[x] = Sin[x/2]^2 = (1 - Cos[x]) / 2
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(_) => {
+            // Try symbolic: (1 - Cos[x]) / 2
+            let cos_x = builtin_cos(&[args[0].clone()])?;
+            let one_minus_cos = builtin_plus(&[Value::Integer(Integer::from(1)), val_neg(cos_x)])?;
+            builtin_divide(&[one_minus_cos, Value::Integer(Integer::from(2))])
+        }
+        Value::Real(r) => {
+            let cos_val = r.clone().cos();
+            let prec = r.prec();
+            let one = Float::with_val(prec, 1u32);
+            let two = Float::with_val(prec, 2u32);
+            Ok(Value::Real((one - cos_val) / two))
+        }
+        _ => Ok(Value::Call { head: "Haversine".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("InverseHaversine requires exactly 1 argument".to_string()));
+    }
+    // InverseHaversine[x] = 2 * ArcSin[Sqrt[x]]
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            if f.is_sign_negative() {
+                return Err(EvalError::Error("InverseHaversine: argument must be >= 0".to_string()));
+            }
+            let sqrt_val = f.sqrt();
+            let asin_val = sqrt_val.asin();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 2) * asin_val))
+        }
+        Value::Real(r) => {
+            if r.is_sign_negative() {
+                return Err(EvalError::Error("InverseHaversine: argument must be >= 0".to_string()));
+            }
+            let prec = r.prec();
+            let sqrt_val = r.clone().sqrt();
+            let asin_val = sqrt_val.asin();
+            Ok(Value::Real(Float::with_val(prec, 2u32) * asin_val))
+        }
+        _ => Ok(Value::Call { head: "InverseHaversine".to_string(), args: args.to_vec() }),
+    }
+}
+
+// ── Degree-based Trigonometric ──
+
+pub fn builtin_sin_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("SinDegrees requires exactly 1 argument".to_string()));
+    }
+    // SinDegrees[θ] = Sin[θ * π/180]
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_sin(&[rad])
+}
+
+pub fn builtin_cos_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("CosDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_cos(&[rad])
+}
+
+pub fn builtin_tan_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("TanDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_tan(&[rad])
+}
+
+pub fn builtin_csc_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("CscDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_csc(&[rad])
+}
+
+pub fn builtin_sec_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("SecDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_sec(&[rad])
+}
+
+pub fn builtin_cot_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("CotDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = degrees_to_radians(&args[0])?;
+    builtin_cot(&[rad])
+}
+
+// ── Inverse Trigonometric (Degrees) ──
+
+pub fn builtin_arcsin_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcSinDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arcsin(args)?;
+    radians_to_degrees(&rad)
+}
+
+pub fn builtin_arccos_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcCosDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arccos(args)?;
+    radians_to_degrees(&rad)
+}
+
+pub fn builtin_arctan_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcTanDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arctan(args)?;
+    radians_to_degrees(&rad)
+}
+
+pub fn builtin_arccsc_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcCscDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arccsc(args)?;
+    radians_to_degrees(&rad)
+}
+
+pub fn builtin_arcsec_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcSecDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arcsec(args)?;
+    radians_to_degrees(&rad)
+}
+
+pub fn builtin_arccot_degrees(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ArcCotDegrees requires exactly 1 argument".to_string()));
+    }
+    let rad = builtin_arccot(args)?;
+    radians_to_degrees(&rad)
+}
+
+/// Convert degrees (integer or real) to radians value.
+fn degrees_to_radians(val: &Value) -> Result<Value, EvalError> {
+    let pi_over_180 = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 180u32;
+    match val {
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            Ok(Value::Real(f * pi_over_180))
+        }
+        Value::Real(r) => {
+            let prec = r.prec();
+            let pi = Float::with_val(prec, rug::float::Constant::Pi);
+            Ok(Value::Real(r.clone() * pi / 180u32))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: val.type_name().to_string(),
+        }),
+    }
+}
+
+/// Convert a radian value (Real) to degrees.
+fn radians_to_degrees(val: &Value) -> Result<Value, EvalError> {
+    let factor = Float::with_val(DEFAULT_PRECISION, 180u32)
+        / Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi);
+    match val {
+        Value::Real(r) => {
+            let prec = r.prec();
+            let f180 = Float::with_val(prec, 180u32);
+            let pi = Float::with_val(prec, rug::float::Constant::Pi);
+            Ok(Value::Real(r.clone() * f180 / pi))
+        }
+        Value::Integer(n) => {
+            // Rare: integer radians → degrees
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            Ok(Value::Real(f * factor))
+        }
+        _ => Ok(val.clone()),
     }
 }
 
@@ -1103,5 +1529,321 @@ mod tests {
     #[test]
     fn test_min() {
         assert_eq!(builtin_min(&[int(3), int(1), int(2)]).unwrap(), int(1));
+    }
+
+    // ── Reciprocal trig ──
+
+    #[test]
+    fn test_csc_pi_over_6() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
+        );
+        assert_eq!(builtin_csc(&[arg]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_csc_pi_over_2() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_csc(&[arg]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_csc_pi_over_4() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        assert_eq!(builtin_csc(&[arg]).unwrap(), val_sqrt(2));
+    }
+
+    #[test]
+    fn test_csc_zero_symbolic() {
+        // Csc[0] stays symbolic (ComplexInfinity in Wolfram)
+        let result = builtin_csc(&[real(0.0)]).unwrap();
+        match result {
+            Value::Call { head, .. } => assert_eq!(head, "Csc"),
+            _ => panic!("Expected symbolic Csc[...], got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sec_pi_over_3() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
+        );
+        assert_eq!(builtin_sec(&[arg]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_sec_zero() {
+        assert_eq!(builtin_sec(&[real(0.0)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_sec_pi() {
+        assert_eq!(builtin_sec(&[pi()]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_cot_pi_over_4() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
+        );
+        assert_eq!(builtin_cot(&[arg]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_cot_pi_over_6() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
+        );
+        assert_eq!(builtin_cot(&[arg]).unwrap(), val_sqrt(3));
+    }
+
+    #[test]
+    fn test_cot_pi_over_2() {
+        let arg = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_cot(&[arg]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_csc_negative_pi_over_6() {
+        let arg = Value::Real(
+            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
+        );
+        assert_eq!(builtin_csc(&[arg]).unwrap(), int(-2));
+    }
+
+    #[test]
+    fn test_sec_negative_pi_over_3() {
+        let arg = Value::Real(
+            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
+        );
+        assert_eq!(builtin_sec(&[arg]).unwrap(), int(2));
+    }
+
+    // ── Inverse reciprocal trig ──
+
+    #[test]
+    fn test_arccsc_integer() {
+        let result = builtin_arccsc(&[int(2)]).unwrap();
+        if let Value::Real(r) = result {
+            // ArcCsc[2] = ArcSin[1/2] = π/6 ≈ 0.5236
+            assert!((r.to_f64() - std::f64::consts::FRAC_PI_6).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arcsec_integer() {
+        let result = builtin_arcsec(&[int(2)]).unwrap();
+        if let Value::Real(r) = result {
+            // ArcSec[2] = ArcCos[1/2] = π/3 ≈ 1.0472
+            assert!((r.to_f64() - std::f64::consts::FRAC_PI_3).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arccot_zero() {
+        let result = builtin_arccot(&[int(0)]).unwrap();
+        if let Value::Real(r) = result {
+            // ArcCot[0] = π/2
+            assert!((r.to_f64() - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arccot_one() {
+        let result = builtin_arccot(&[int(1)]).unwrap();
+        if let Value::Real(r) = result {
+            // ArcCot[1] = ArcTan[1] = π/4
+            assert!((r.to_f64() - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    // ── Haversine ──
+
+    #[test]
+    fn test_haversine_zero() {
+        assert_eq!(builtin_haversine(&[int(0)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_haversine_pi() {
+        // Haversine[π] = (1 - Cos[π]) / 2 = (1 - (-1)) / 2 = 1
+        assert_eq!(builtin_haversine(&[pi()]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_haversine_pi_over_2() {
+        // Haversine[π/2] = (1 - Cos[π/2]) / 2 = (1 - 0) / 2 = 1/2
+        let half_pi = Value::Real(
+            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
+        );
+        assert_eq!(builtin_haversine(&[half_pi]).unwrap(), one_over(2));
+    }
+
+    #[test]
+    fn test_inverse_haversine_zero() {
+        assert_eq!(builtin_inverse_haversine(&[int(0)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_inverse_haversine_one() {
+        // InverseHaversine[1] = 2 * ArcSin[1] = 2 * π/2 = π
+        let result = builtin_inverse_haversine(&[int(1)]).unwrap();
+        if let Value::Real(r) = result {
+            let pi_val = std::f64::consts::PI;
+            assert!((r.to_f64() - pi_val).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_inverse_haversine_negative_err() {
+        assert!(builtin_inverse_haversine(&[int(-1)]).is_err());
+    }
+
+    // ── Degree-based trig ──
+
+    #[test]
+    fn test_sin_degrees_30() {
+        // SinDegrees[30] = Sin[π/6] = 1/2
+        assert_eq!(builtin_sin_degrees(&[int(30)]).unwrap(), one_over(2));
+    }
+
+    #[test]
+    fn test_sin_degrees_90() {
+        // SinDegrees[90] = Sin[π/2] = 1
+        assert_eq!(builtin_sin_degrees(&[int(90)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_cos_degrees_60() {
+        // CosDegrees[60] = Cos[π/3] = 1/2
+        assert_eq!(builtin_cos_degrees(&[int(60)]).unwrap(), one_over(2));
+    }
+
+    #[test]
+    fn test_cos_degrees_0() {
+        assert_eq!(builtin_cos_degrees(&[int(0)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_tan_degrees_45() {
+        // TanDegrees[45] = Tan[π/4] = 1
+        assert_eq!(builtin_tan_degrees(&[int(45)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_tan_degrees_0() {
+        assert_eq!(builtin_tan_degrees(&[int(0)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_csc_degrees_30() {
+        // CscDegrees[30] = Csc[π/6] = 2
+        assert_eq!(builtin_csc_degrees(&[int(30)]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_sec_degrees_60() {
+        // SecDegrees[60] = Sec[π/3] = 2
+        assert_eq!(builtin_sec_degrees(&[int(60)]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_cot_degrees_45() {
+        // CotDegrees[45] = Cot[π/4] = 1
+        assert_eq!(builtin_cot_degrees(&[int(45)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_sin_degrees_real() {
+        let result = builtin_sin_degrees(&[real(30.0)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 0.5).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    // ── Inverse trig (degrees) ──
+
+    #[test]
+    fn test_arcsin_degrees() {
+        // ArcSinDegrees[0.5] should be 30.0
+        let result = builtin_arcsin_degrees(&[real(0.5)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 30.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arccos_degrees() {
+        // ArcCosDegrees[0.5] should be 60.0
+        let result = builtin_arccos_degrees(&[real(0.5)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 60.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arctan_degrees() {
+        // ArcTanDegrees[1.0] should be 45.0
+        let result = builtin_arctan_degrees(&[real(1.0)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 45.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arccsc_degrees() {
+        // ArcCscDegrees[2] = ArcSinDegrees[1/2] = 30.0
+        let result = builtin_arccsc_degrees(&[int(2)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 30.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arcsec_degrees() {
+        // ArcSecDegrees[2] = ArcCosDegrees[1/2] = 60.0
+        let result = builtin_arcsec_degrees(&[int(2)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 60.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
+    }
+
+    #[test]
+    fn test_arccot_degrees() {
+        // ArcCotDegrees[1] = ArcTanDegrees[1] = 45.0
+        let result = builtin_arccot_degrees(&[int(1)]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 45.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Real");
+        }
     }
 }

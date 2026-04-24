@@ -271,13 +271,25 @@ pub fn run_debug(path: &str) {
 fn collect_variables(env: &Env) -> Vec<VariableInfo> {
     env.all_bindings()
         .into_iter()
-        .filter(|(name, _)| !name.starts_with("__"))
+        .filter(|(name, val)| {
+            // Filter out built-in functions, internal symbols, and constants
+            !matches!(val, Value::Builtin(_, _))
+                && !name.starts_with("__")
+                && !is_constant(name)
+        })
         .map(|(name, val)| VariableInfo {
             var_type: val.type_name().to_string(),
             value: format_value(&val),
             name,
         })
         .collect()
+}
+
+fn is_constant(name: &str) -> bool {
+    matches!(
+        name,
+        "True" | "False" | "Null" | "Pi" | "E" | "I" | "Infinity"
+    )
 }
 
 fn format_value(val: &Value) -> String {
