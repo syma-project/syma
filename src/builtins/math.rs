@@ -413,7 +413,6 @@ fn exact_csc(num: i64, den: u32) -> Option<Value> {
         (1, 2) | (3, 2) => Some(val_int(1)),            // csc(±π/2) = 1 or -1
         (1, 6) | (5, 6) => Some(val_int(2)),            // csc(π/6) = csc(5π/6) = 2
         (1, 4) | (3, 4) => Some(val_sqrt(2)),           // csc(π/4) = csc(3π/4) = √2
-        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3 = 2/√3
         (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3
         (7, 6) | (11, 6) => Some(val_int(-2)),
         (5, 4) | (7, 4) => Some(val_neg(val_sqrt(2))),
