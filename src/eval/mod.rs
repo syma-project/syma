@@ -926,6 +926,13 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // Plot[f, {x, xmin, xmax}] — needs unevaluated expr for sampling
                 plot::eval_plot(args, env)
             }
+            "LogPlot" => plot::eval_log_plot(args, env),
+            "LogLogPlot" => plot::eval_log_log_plot(args, env),
+            "LogLinearPlot" => plot::eval_log_linear_plot(args, env),
+            "ParametricPlot" => plot::eval_parametric_plot(args, env),
+            "PolarPlot" => plot::eval_polar_plot(args, env),
+            "DiscretePlot" => plot::eval_discrete_plot(args, env),
+            "DensityPlot" => plot::eval_density_plot(args, env),
             "Catch" => {
                 // Catch[expr] — evaluate expr, catching any Throw[val]
                 if args.len() != 1 {
@@ -2919,6 +2926,58 @@ mod tests {
              add[20, 22]",
         );
         assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    // ── JIT comparison/logical/loop tests ──────────────────────────────
+
+    #[test]
+    fn test_jit_comparison_equal() {
+        // Equal comparison inside a hot function
+        let result = eval_str(
+            "f[x_] := If[x == 42, 1, 0];
+             Do[f[i], {i, 1, 100}];
+             f[42]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_jit_comparison_greater() {
+        // Greater-than comparison inside a hot function
+        let result = eval_str(
+            "f[x_] := If[x > 0, x, 0];
+             Do[f[i], {i, -50, 50}];
+             f[42]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_jit_and_or() {
+        // And/Or predicates inside a hot function
+        let result = eval_str(
+            "f[x_, y_] := If[x > 0 && y > 0, 1, 0];
+             Do[f[i, i], {i, 1, 100}];
+             f[3, 5]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_jit_map_desugar() {
+        // Map desugaring inside a hot function
+        let result = eval_str(
+            "f[x_] := Length /@ x;
+             Do[f[{i}], {i, 1, 100}];
+             f[{{1, 2}, {3, 4, 5}}]",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     #[test]

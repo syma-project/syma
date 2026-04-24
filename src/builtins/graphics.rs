@@ -251,10 +251,58 @@ fn hsv_to_svg(h: f64, s: f64, v: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", ri, gi, bi)
 }
 
+// ── Colormap ─────────────────────────────────────────────────────────────────
+
+/// Map a normalized value t ∈ [0,1] to an RGB color using a viridis-like colormap.
+fn viridis_color(t: f64) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    const KEYS: &[(f64, (u8, u8, u8))] = &[
+        (0.0, (68, 1, 84)),
+        (0.25, (59, 82, 139)),
+        (0.5, (33, 145, 140)),
+        (0.75, (94, 201, 98)),
+        (1.0, (253, 231, 37)),
+    ];
+    for w in KEYS.windows(2) {
+        let (t0, c0) = w[0];
+        let (t1, c1) = w[1];
+        if t <= t1 {
+            let f = (t - t0) / (t1 - t0);
+            let r = c0.0 as f64 + f * (c1.0 as f64 - c0.0 as f64);
+            let g = c0.1 as f64 + f * (c1.1 as f64 - c0.1 as f64);
+            let b = c0.2 as f64 + f * (c1.2 as f64 - c0.2 as f64);
+            return (r.round() as u8, g.round() as u8, b.round() as u8);
+        }
+    }
+    KEYS.last().unwrap().1
+}
+
+// ── Axis scale type ───────────────────────────────────────────────────────────
+
+/// Linear or logarithmic axis scale.
+#[derive(Clone, Copy, PartialEq)]
+enum ScaleType {
+    Linear,
+    Log,
+}
+
+impl ScaleType {
+    fn from_str(s: &str) -> Self {
+        if s == "Log" { Self::Log } else { Self::Linear }
+    }
+}
+
 // ── SVG Renderer ────────────────────────────────────────────────────────────
 
-/// Parsed graphics options: (width, height, plot_range, show_axes).
-type GraphicsOptions = (f64, f64, Option<((f64, f64), (f64, f64))>, bool);
+/// Parsed graphics options: (width, height, plot_range, show_axes, x_scale, y_scale).
+type GraphicsOptions = (
+    f64,
+    f64,
+    Option<((f64, f64), (f64, f64))>,
+    bool,
+    ScaleType,
+    ScaleType,
+);
 
 /// Default image dimensions.
 const DEFAULT_WIDTH: f64 = 600.0;
@@ -281,7 +329,7 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
     let prims = as_list(primitives)?;
 
     // Extract options
-    let (width, height, plot_range, show_axes) = parse_options(options)?;
+    let (width, height, plot_range, show_axes, x_scale, y_scale) = parse_options(options)?;
 
     // Compute data bounds for auto-ranging (skip directives)
     let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &plot_range {
@@ -329,7 +377,7 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
     // Draw axes
     if show_axes {
         svg.push_str(&render_axes(
-            x_min, x_max, y_min, y_max, width, height, &tx, &ty,
+            x_min, x_max, y_min, y_max, width, height, &tx, &ty, x_scale, y_scale,
         ));
     }
 
@@ -352,6 +400,8 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
     let mut height = DEFAULT_HEIGHT;
     let mut plot_range: Option<((f64, f64), (f64, f64))> = None;
     let mut show_axes = true;
+    let mut x_scale = ScaleType::Linear;
+    let mut y_scale = ScaleType::Linear;
 
     if let Value::Assoc(map) = options {
         if let Some(v) = map.get("ImageSize")
@@ -386,9 +436,19 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
                 ),
             ));
         }
+        if let Some(Value::List(scales)) = map.get("AxesScale")
+            && scales.len() >= 2
+        {
+            if let Value::Str(s) = &scales[0] {
+                x_scale = ScaleType::from_str(s);
+            }
+            if let Value::Str(s) = &scales[1] {
+                y_scale = ScaleType::from_str(s);
+            }
+        }
     }
 
-    Ok((width, height, plot_range, show_axes))
+    Ok((width, height, plot_range, show_axes, x_scale, y_scale))
 }
 
 fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
@@ -434,6 +494,17 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
             Value::Call { head, args } if head == "Rectangle" && args.len() >= 2 => {
                 expand_bounds_from_point(&args[0], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
                 expand_bounds_from_point(&args[1], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+            }
+            Value::Call { head, args } if head == "DensityRaster" && args.len() >= 4 => {
+                // DensityRaster[vals, {xmin,xmax}, {ymin,ymax}, {nx,ny}, ...]
+                if let (Value::List(xr), Value::List(yr)) = (&args[1], &args[2]) {
+                    if xr.len() >= 2 && yr.len() >= 2 {
+                        x_min = x_min.min(to_f64(&xr[0]).unwrap_or(x_min));
+                        x_max = x_max.max(to_f64(&xr[1]).unwrap_or(x_max));
+                        y_min = y_min.min(to_f64(&yr[0]).unwrap_or(y_min));
+                        y_max = y_max.max(to_f64(&yr[1]).unwrap_or(y_max));
+                    }
+                }
             }
             Value::List(items) => {
                 // Could be a flat list of points
@@ -498,14 +569,17 @@ fn render_axes(
     height: f64,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    x_scale: ScaleType,
+    y_scale: ScaleType,
 ) -> String {
     let mut s = String::new();
     let color = "#888";
     let stroke = "stroke-width=\"1\"";
 
-    // X-axis (y=0)
-    if y_min <= 0.0 && y_max >= 0.0 {
-        let y_svg = ty(0.0);
+    // X-axis line (at y=0 in data space, or at y_min for log y)
+    let x_axis_y_data = if y_scale == ScaleType::Log { y_min } else { 0.0 };
+    if y_min <= x_axis_y_data && y_max >= x_axis_y_data {
+        let y_svg = ty(x_axis_y_data);
         s.push_str(&format!(
             "<line x1=\"{}\" y1=\"{:.1}\" x2=\"{}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
             MARGIN as i32,
@@ -517,9 +591,10 @@ fn render_axes(
         ));
     }
 
-    // Y-axis (x=0)
-    if x_min <= 0.0 && x_max >= 0.0 {
-        let x_svg = tx(0.0);
+    // Y-axis line (at x=0 in data space, or at x_min for log x)
+    let y_axis_x_data = if x_scale == ScaleType::Log { x_min } else { 0.0 };
+    if x_min <= y_axis_x_data && x_max >= y_axis_x_data {
+        let x_svg = tx(y_axis_x_data);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{}\" x2=\"{:.1}\" y2=\"{}\" stroke=\"{}\" {}/>\n",
             x_svg,
@@ -532,63 +607,51 @@ fn render_axes(
     }
 
     // Tick marks on X-axis
-    let x_step = nice_step(x_max - x_min);
-    let y_axis_y = if y_min <= 0.0 && y_max >= 0.0 {
-        ty(0.0)
+    let y_axis_y = if y_min <= x_axis_y_data && y_max >= x_axis_y_data {
+        ty(x_axis_y_data)
     } else {
         height - MARGIN
     };
-    let mut x_tick = (x_min / x_step).ceil() * x_step;
-    while x_tick <= x_max {
+    for x_tick in axis_ticks(x_min, x_max, x_scale) {
         let sx = tx(x_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
-            sx,
-            y_axis_y - 4.0,
-            sx,
-            y_axis_y + 4.0,
-            color,
-            stroke
+            sx, y_axis_y - 4.0, sx, y_axis_y + 4.0, color, stroke
         ));
+        let label = if x_scale == ScaleType::Log {
+            format_log_tick(x_tick)
+        } else {
+            let tmp = format!("{:.4}", x_tick);
+            tmp.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
         s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
-             font-size=\"10\" fill=\"{}\">{:.4}</text>\n",
-            sx,
-            y_axis_y + 16.0,
-            color,
-            x_tick
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" fill=\"{}\">{}</text>\n",
+            sx, y_axis_y + 16.0, color, label
         ));
-        x_tick += x_step;
     }
 
     // Tick marks on Y-axis
-    let y_step = nice_step(y_max - y_min);
-    let x_axis_x = if x_min <= 0.0 && x_max >= 0.0 {
-        tx(0.0)
+    let x_axis_x = if x_min <= y_axis_x_data && x_max >= y_axis_x_data {
+        tx(y_axis_x_data)
     } else {
         MARGIN
     };
-    let mut y_tick = (y_min / y_step).ceil() * y_step;
-    while y_tick <= y_max {
+    for y_tick in axis_ticks(y_min, y_max, y_scale) {
         let sy = ty(y_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
-            x_axis_x - 4.0,
-            sy,
-            x_axis_x + 4.0,
-            sy,
-            color,
-            stroke
+            x_axis_x - 4.0, sy, x_axis_x + 4.0, sy, color, stroke
         ));
+        let label = if y_scale == ScaleType::Log {
+            format_log_tick(y_tick)
+        } else {
+            let tmp = format!("{:.4}", y_tick);
+            tmp.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
         s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" \
-             font-size=\"10\" fill=\"{}\" dominant-baseline=\"middle\">{:.4}</text>\n",
-            x_axis_x - 8.0,
-            sy,
-            color,
-            y_tick
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-size=\"10\" fill=\"{}\" dominant-baseline=\"middle\">{}</text>\n",
+            x_axis_x - 8.0, sy, color, label
         ));
-        y_tick += y_step;
     }
 
     // Border
@@ -606,8 +669,47 @@ fn render_axes(
     s
 }
 
+/// Produce tick positions (in data/log-space coordinates) for one axis.
+fn axis_ticks(min: f64, max: f64, scale: ScaleType) -> Vec<f64> {
+    match scale {
+        ScaleType::Linear => {
+            let step = nice_step(max - min);
+            if step <= 0.0 {
+                return vec![];
+            }
+            let mut ticks = Vec::new();
+            let mut t = (min / step).ceil() * step;
+            while t <= max + step * 1e-9 {
+                ticks.push(t);
+                t += step;
+            }
+            ticks
+        }
+        ScaleType::Log => {
+            let lo = min.floor() as i32;
+            let hi = max.ceil() as i32;
+            (lo..=hi)
+                .map(|n| n as f64)
+                .filter(|&t| t >= min - 1e-9 && t <= max + 1e-9)
+                .collect()
+        }
+    }
+}
+
+/// Format a tick label for log-scale axes (coordinate is log10 of the actual value).
+fn format_log_tick(log_val: f64) -> String {
+    let actual = 10.0_f64.powf(log_val);
+    if actual >= 0.001 && actual < 100_000.0 {
+        let s = format!("{:.5}", actual);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        format!("10^{}", log_val.round() as i32)
+    }
+}
+
 /// Compute a "nice" step size for axis ticks.
 fn nice_step(range: f64) -> f64 {
+    if range <= 0.0 { return 1.0; }
     let rough = range / 6.0;
     let exp = rough.log10().floor();
     let base = 10.0_f64.powf(exp);
@@ -666,6 +768,7 @@ fn render_primitive(
                     Ok(String::new())
                 }
             }
+            "DensityRaster" => render_density_raster(args, tx, ty),
             _ => Ok(String::new()),
         },
         // Handle bare lists of points (e.g., from ListPlot)
@@ -789,6 +892,70 @@ fn render_rectangle(
         ));
     }
     Ok(String::new())
+}
+
+fn render_density_raster(
+    args: &[Value],
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+) -> Result<String, EvalError> {
+    // DensityRaster[flat_vals, {xmin,xmax}, {ymin,ymax}, {nx,ny}, val_min, val_max]
+    if args.len() < 6 {
+        return Ok(String::new());
+    }
+    let flat = as_list(&args[0])?;
+    let xr = as_list(&args[1])?;
+    let yr = as_list(&args[2])?;
+    let dims = as_list(&args[3])?;
+    let val_min = to_f64(&args[4]).unwrap_or(0.0);
+    let val_max = to_f64(&args[5]).unwrap_or(1.0);
+
+    if xr.len() < 2 || yr.len() < 2 || dims.len() < 2 {
+        return Ok(String::new());
+    }
+
+    let xmin = to_f64(&xr[0]).unwrap_or(0.0);
+    let xmax = to_f64(&xr[1]).unwrap_or(1.0);
+    let ymin = to_f64(&yr[0]).unwrap_or(0.0);
+    let ymax = to_f64(&yr[1]).unwrap_or(1.0);
+    let nx = match &dims[0] {
+        Value::Integer(n) => n.to_usize().unwrap_or(50),
+        _ => 50,
+    };
+    let ny = match &dims[1] {
+        Value::Integer(n) => n.to_usize().unwrap_or(50),
+        _ => 50,
+    };
+
+    if nx == 0 || ny == 0 || flat.len() < nx * ny {
+        return Ok(String::new());
+    }
+
+    let range = val_max - val_min;
+    let mut s = String::new();
+
+    for j in 0..ny {
+        let y_lo = ymin + (ymax - ymin) * j as f64 / ny as f64;
+        let y_hi = ymin + (ymax - ymin) * (j + 1) as f64 / ny as f64;
+        for i in 0..nx {
+            let x_lo = xmin + (xmax - xmin) * i as f64 / nx as f64;
+            let x_hi = xmin + (xmax - xmin) * (i + 1) as f64 / nx as f64;
+            let v = to_f64(&flat[j * nx + i]).unwrap_or(val_min);
+            let t = if range > 0.0 { (v - val_min) / range } else { 0.5 };
+            let (r, g, b) = viridis_color(t);
+            let sx = tx(x_lo);
+            let sy = ty(y_hi); // SVG y is flipped
+            let sw = (tx(x_hi) - tx(x_lo)).abs();
+            let sh = (ty(y_lo) - ty(y_hi)).abs();
+            s.push_str(&format!(
+                "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" \
+                 fill=\"#{:02x}{:02x}{:02x}\" stroke=\"none\"/>\n",
+                sx, sy, sw, sh, r, g, b
+            ));
+        }
+    }
+
+    Ok(s)
 }
 
 // ── Builtins ────────────────────────────────────────────────────────────────
@@ -928,6 +1095,13 @@ pub const SYMBOLS: &[&str] = &[
     "Graphics",
     // Evaluator-dependent (handled in eval.rs):
     "Plot",
+    "LogPlot",
+    "LogLogPlot",
+    "LogLinearPlot",
+    "ParametricPlot",
+    "PolarPlot",
+    "DiscretePlot",
+    "DensityPlot",
     // Syma-side wrappers (loaded from .syma file):
     "Show",
     "GraphicsGrid",

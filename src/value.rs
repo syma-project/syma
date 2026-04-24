@@ -288,6 +288,12 @@ pub enum Value {
     /// Wrapped in `Arc` for zero-cost sharing (images are immutable).
     Image(Arc<image::DynamicImage>),
 
+    // ── Dataset ──
+    /// A Dataset wrapping a structured value.
+    /// Wrapped in Arc for cheap clone and thread-safe sharing.
+    /// Primarily useful for tabular data (lists of associations).
+    Dataset(Arc<Value>),
+
     // ── Hold ──
     Hold(Box<Value>),
     HoldComplete(Box<Value>),
@@ -495,6 +501,8 @@ impl PartialEq for Value {
             }
             // Image: compare by pixel data (using byte representation)
             (Value::Image(a), Value::Image(b)) => a.as_bytes() == b.as_bytes(),
+            // Dataset: compare by inner data
+            (Value::Dataset(a), Value::Dataset(b)) => a.as_ref() == b.as_ref(),
             // BytecodeFunction: never equal (like other function types)
             (Value::BytecodeFunction(_), Value::BytecodeFunction(_)) => false,
             _ => false,
@@ -529,6 +537,7 @@ impl Value {
             Value::Pattern(_) => "Pattern",
             Value::Module { .. } => "Module",
             Value::Image(_) => "Image",
+            Value::Dataset(_) => "Dataset",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
             Value::NativeLib { .. } => "NativeLib",
@@ -571,6 +580,7 @@ impl Value {
                     | Value::PureFunction { .. }
             ),
             "Module" => matches!(self, Value::Module { .. }),
+            "Dataset" => matches!(self, Value::Dataset(_)),
             "Object" => matches!(self, Value::Object { .. }),
             "Expr" => true,
             _ => {
@@ -641,6 +651,9 @@ impl Value {
             (Value::Null, Value::Null) => true,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Image(a), Value::Image(b)) => a.as_bytes() == b.as_bytes(),
+            (Value::Dataset(a), Value::Dataset(b)) => a.as_ref().struct_eq(b.as_ref()),
+            (Value::Dataset(a), other) => a.as_ref().struct_eq(other),
+            (other, Value::Dataset(a)) => other.struct_eq(a.as_ref()),
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
@@ -986,6 +999,7 @@ impl fmt::Display for Value {
                     color_space
                 )
             }
+            Value::Dataset(inner) => format_dataset(inner, f),
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),
             Value::NativeLib { name, .. } => write!(f, "NativeLib[\"{}\"]", name),
@@ -1005,6 +1019,76 @@ impl fmt::Display for Value {
                 Format::Grid => format_grid(value, f),
                 Format::Deferred => write!(f, "{}", value),
             },
+        }
+    }
+}
+
+/// Format a Dataset value as a pretty-printed table (for list-of-assoc) or fallback.
+fn format_dataset(data: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match data {
+        Value::List(items) if items.iter().all(|v| matches!(v, Value::Assoc(_))) => {
+            // Collect column union (preserve first-occurrence order across all rows)
+            let mut columns: Vec<String> = Vec::new();
+            for item in items {
+                if let Value::Assoc(map) = item {
+                    for key in map.keys() {
+                        if !columns.contains(key) {
+                            columns.push(key.clone());
+                        }
+                    }
+                }
+            }
+            if columns.is_empty() {
+                return write!(f, "Dataset[{{}}]");
+            }
+            // Measure column widths (header + values)
+            let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+            for item in items {
+                if let Value::Assoc(map) = item {
+                    for (i, key) in columns.iter().enumerate() {
+                        let val_str = map.get(key).map(|v| v.to_string()).unwrap_or_default();
+                        let val_len = val_str.len();
+                        widths[i] = widths[i].max(val_len);
+                    }
+                }
+            }
+            // Helper to write a padded cell
+            let write_cell = |f: &mut fmt::Formatter<'_>, s: &str, width: usize| -> fmt::Result {
+                write!(f, " {:<width$} ", s, width = width)
+            };
+            // Header
+            write!(f, "|")?;
+            for (i, col) in columns.iter().enumerate() {
+                write!(f, " ")?;
+                write_cell(f, col, widths[i])?;
+                write!(f, "|")?;
+            }
+            writeln!(f)?;
+            // Separator
+            write!(f, "|")?;
+            for w in &widths {
+                write!(f, "{}", "-".repeat(w + 2))?;
+                write!(f, "|")?;
+            }
+            writeln!(f)?;
+            // Rows
+            for item in items {
+                if let Value::Assoc(map) = item {
+                    write!(f, "|")?;
+                    for (i, key) in columns.iter().enumerate() {
+                        write!(f, " ")?;
+                        let val_str = map.get(key).map(|v| v.to_string()).unwrap_or_default();
+                        write_cell(f, &val_str, widths[i])?;
+                        write!(f, "|")?;
+                    }
+                    writeln!(f)?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            // Fallback: display as Dataset[inner]
+            write!(f, "Dataset[{}]", data)
         }
     }
 }

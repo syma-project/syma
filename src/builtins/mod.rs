@@ -416,7 +416,7 @@ pub fn register_builtins(env: &Env) {
     // (Plot is already registered as a builtin stub + special form in eval.rs)
     register_lazy_package(
         env,
-        &["ListPlot", "ListLinePlot", "ExportGraphics", "Graphics"],
+        graphics::SYMBOLS,
         graphics::SYMBOLS,
         "Graphics",
         graphics::register,

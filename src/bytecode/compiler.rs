@@ -6,7 +6,10 @@
 ///
 use std::collections::HashMap;
 
+use rug::Integer;
+
 use crate::ast::Expr;
+use crate::ast::IteratorSpec;
 use crate::bytecode::instruction::*;
 use crate::bytecode::CompiledBytecode;
 use crate::value::{FunctionDefinition, Value};
@@ -254,6 +257,25 @@ impl BytecodeCompiler {
             Expr::While { condition, body } => self.compile_while(condition, body),
             Expr::Sequence(stmts) => self.compile_sequence(stmts),
             Expr::Assign { lhs, rhs } => self.compile_assign(lhs, rhs),
+            // ── Desugar Map to Call["Map", ...] ──
+            Expr::Map { func, list } => self.compile_expr(&Expr::Call {
+                head: Box::new(Expr::Symbol("Map".to_string())),
+                args: vec![*func.clone(), *list.clone()],
+            }),
+            // ── Desugar Pipe[expr, func] to Call[func, expr] ──
+            Expr::Pipe { expr, func } => self.compile_expr(&Expr::Call {
+                head: func.clone(),
+                args: vec![*expr.clone()],
+            }),
+            // ── Desugar Prefix[func, arg] to Call[func, arg] ──
+            Expr::Prefix { func, arg } => self.compile_expr(&Expr::Call {
+                head: func.clone(),
+                args: vec![*arg.clone()],
+            }),
+            // ── For loop ──
+            Expr::For { init, condition, step, body } => self.compile_for(init, condition, step, body),
+            // ── Do loop (range iterator only) ──
+            Expr::Do { body, iterator } => self.compile_do(body, iterator),
             _ => Err(CompileError::UnsupportedFeature(format!(
                 "expression: {expr:?}"
             ))),
@@ -568,6 +590,80 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Compile a For loop: For[init, condition, step, body]
+    fn compile_for(
+        &mut self,
+        init: &Expr,
+        condition: &Expr,
+        step: &Expr,
+        body: &Expr,
+    ) -> Result<u16, CompileError> {
+        // Init (e.g., i = 1)
+        let init_reg = self.compile_expr(init)?;
+        self.regs._free(init_reg);
+
+        let loop_start = self.code.len() as i32;
+
+        // Condition check
+        let cond_reg = self.compile_expr(condition)?;
+        let exit_jz = self.emit(Instruction::JumpIfZero(cond_reg, 0));
+        self.regs._free(cond_reg);
+
+        // Body
+        let body_reg = self.compile_expr(body)?;
+        self.regs._free(body_reg);
+
+        // Step (e.g., i = i + 1)
+        let step_reg = self.compile_expr(step)?;
+        self.regs._free(step_reg);
+
+        // Jump back to condition
+        let jump_back = self.code.len();
+        self.emit(Instruction::Jump(loop_start - jump_back as i32 - 1));
+
+        self.patch_jump(exit_jz, self.code.len() as i32);
+        let dst = self.regs.alloc()?;
+        self.emit(Instruction::LoadNull(dst));
+        Ok(dst)
+    }
+
+    /// Compile a Do loop with range iterator: Do[body, {var, min, max}]
+    fn compile_do(&mut self, body: &Expr, iterator: &IteratorSpec) -> Result<u16, CompileError> {
+        match iterator {
+            IteratorSpec::Range { var, min, max } => {
+                let var_expr = Expr::Symbol(var.clone());
+
+                // Construct: var = min
+                let init = Expr::Assign {
+                    lhs: Box::new(var_expr.clone()),
+                    rhs: min.clone(),
+                };
+
+                // Construct: var <= max
+                let condition = Expr::Call {
+                    head: Box::new(Expr::Symbol("LessEqual".to_string())),
+                    args: vec![var_expr.clone(), *max.clone()],
+                };
+
+                // Construct: var = var + 1
+                let step_rhs = Expr::Call {
+                    head: Box::new(Expr::Symbol("Plus".to_string())),
+                    args: vec![var_expr.clone(), Expr::Integer(Integer::from(1))],
+                };
+                let step = Expr::Assign {
+                    lhs: Box::new(var_expr.clone()),
+                    rhs: Box::new(step_rhs),
+                };
+
+                // Compile as For-equivalent loop
+                self.compile_for(&init, &condition, &step, body)
+            }
+            IteratorSpec::List { .. } => Err(CompileError::UnsupportedFeature(
+                "Do loop with list iterator".to_string(),
+            )),
+        }
+    }
+
     fn symbol_idx(&mut self, name: &str) -> u32 {
         if let Some(&idx) = self.symbol_cache.get(name) {
             return idx;
@@ -583,7 +679,8 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Expr;
+    use crate::ast::{Expr, IteratorSpec};
+    use rug::Integer;
 
     fn compile(params: Vec<Expr>, body: Expr) -> CompiledBytecode {
         BytecodeCompiler::compile_function(&params, &body, "f").unwrap()
@@ -700,5 +797,88 @@ mod tests {
         let bc = compile(params, body);
         assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Not(..))),
             "Not[x] should emit Not instruction");
+    }
+
+    #[test]
+    fn test_compile_for() {
+        // For[Null, Symbol("x"), Null, Null] should produce a loop structure
+        let body = Expr::For {
+            init: Box::new(Expr::Null),
+            condition: Box::new(Expr::Symbol("x".to_string())),
+            step: Box::new(Expr::Null),
+            body: Box::new(Expr::Null),
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "For loop should contain JumpIfZero");
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Jump(..))),
+            "For loop should contain Jump");
+    }
+
+    #[test]
+    fn test_compile_do_range() {
+        // Do[Null, {x, 1, 10}] should compile (range iterator)
+        let body = Expr::Do {
+            body: Box::new(Expr::Null),
+            iterator: IteratorSpec::Range {
+                var: "x".to_string(),
+                min: Box::new(Expr::Integer(1.into())),
+                max: Box::new(Expr::Integer(10.into())),
+            },
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "Do loop should contain JumpIfZero");
+    }
+
+    #[test]
+    fn test_compile_for_registers() {
+        // For[Null, Symbol("x"), Null, Null] should compile without errors
+        let body = Expr::For {
+            init: Box::new(Expr::Null),
+            condition: Box::new(Expr::Symbol("x".to_string())),
+            step: Box::new(Expr::Null),
+            body: Box::new(Expr::Null),
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.nregs > 0, "Should allocate at least one register");
+        assert!(bc.nparams == 0, "Should have 0 parameters");
+    }
+
+    #[test]
+    fn test_compile_map_desugar() {
+        // Map[Length, {1, 2}] desugars to Call["Map", Length, {1, 2}]
+        let body = Expr::Map {
+            func: Box::new(Expr::Symbol("Length".to_string())),
+            list: Box::new(Expr::List(vec![
+                Expr::Integer(1.into()),
+                Expr::Integer(2.into()),
+            ])),
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
+            "Map desugaring should produce Apply instruction");
+    }
+
+    #[test]
+    fn test_compile_pipe_desugar() {
+        let body = Expr::Pipe {
+            expr: Box::new(Expr::Integer(10.into())),
+            func: Box::new(Expr::Symbol("f".to_string())),
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
+            "Pipe desugaring should produce Apply instruction");
+    }
+
+    #[test]
+    fn test_compile_prefix_desugar() {
+        let body = Expr::Prefix {
+            func: Box::new(Expr::Symbol("f".to_string())),
+            arg: Box::new(Expr::Integer(10.into())),
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
+            "Prefix desugaring should produce Apply instruction");
     }
 }

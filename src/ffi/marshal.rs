@@ -327,6 +327,12 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             JVal::Array(vs)
         }
         Value::Formatted { value, .. } => value_to_json_full(value),
+        Value::Dataset(inner) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("dataset".into()));
+            m.insert("v".into(), value_to_json_full(inner));
+            JVal::Object(m)
+        }
         Value::BytecodeFunction(bc) => {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("bytecode".into()));
