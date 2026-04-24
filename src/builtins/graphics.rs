@@ -52,12 +52,11 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
     let (width, height, plot_range, show_axes) = parse_options(options)?;
 
     // Compute data bounds for auto-ranging
-    let (mut x_min, mut x_max, mut y_min, mut y_max) =
-        if let Some((xr, yr)) = &plot_range {
-            (xr.0, xr.1, yr.0, yr.1)
-        } else {
-            compute_bounds(prims)?
-        };
+    let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &plot_range {
+        (xr.0, xr.1, yr.0, yr.1)
+    } else {
+        compute_bounds(prims)?
+    };
 
     // Add padding if auto-ranged
     if plot_range.is_none() {
@@ -97,7 +96,9 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
 
     // Draw axes
     if show_axes {
-        svg.push_str(&render_axes(x_min, x_max, y_min, y_max, width, height, &tx, &ty));
+        svg.push_str(&render_axes(
+            x_min, x_max, y_min, y_max, width, height, &tx, &ty,
+        ));
     }
 
     // Draw primitives
@@ -118,10 +119,11 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
     if let Value::Assoc(map) = options {
         if let Some(v) = map.get("ImageSize")
             && let Value::List(size) = v
-                && size.len() >= 2 {
-                    width = to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-                    height = to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
-                }
+            && size.len() >= 2
+        {
+            width = to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
+            height = to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+        }
         if let Some(v) = map.get("Axes") {
             show_axes = match v {
                 Value::Bool(b) => *b,
@@ -131,28 +133,28 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
         }
         if let Some(v) = map.get("PlotRange")
             && let Value::List(range) = v
-                && range.len() >= 2
-                    && let (Value::List(xr), Value::List(yr)) = (&range[0], &range[1])
-                        && xr.len() >= 2 && yr.len() >= 2 {
-                            plot_range = Some((
-                                (
-                                    to_f64(&xr[0]).unwrap_or(-1.0),
-                                    to_f64(&xr[1]).unwrap_or(1.0),
-                                ),
-                                (
-                                    to_f64(&yr[0]).unwrap_or(-1.0),
-                                    to_f64(&yr[1]).unwrap_or(1.0),
-                                ),
-                            ));
-                        }
+            && range.len() >= 2
+            && let (Value::List(xr), Value::List(yr)) = (&range[0], &range[1])
+            && xr.len() >= 2
+            && yr.len() >= 2
+        {
+            plot_range = Some((
+                (
+                    to_f64(&xr[0]).unwrap_or(-1.0),
+                    to_f64(&xr[1]).unwrap_or(1.0),
+                ),
+                (
+                    to_f64(&yr[0]).unwrap_or(-1.0),
+                    to_f64(&yr[1]).unwrap_or(1.0),
+                ),
+            ));
+        }
     }
 
     Ok((width, height, plot_range, show_axes))
 }
 
-fn compute_bounds(
-    prims: &[Value],
-) -> Result<(f64, f64, f64, f64), EvalError> {
+fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
     let mut x_min = f64::INFINITY;
     let mut x_max = f64::NEG_INFINITY;
     let mut y_min = f64::INFINITY;
@@ -178,21 +180,21 @@ fn compute_bounds(
                         1.0
                     };
                     if let Value::List(c) = center
-                        && c.len() >= 2 {
-                            let cx = to_f64(&c[0]).unwrap_or(0.0);
-                            let cy = to_f64(&c[1]).unwrap_or(0.0);
-                            x_min = x_min.min(cx - r);
-                            x_max = x_max.max(cx + r);
-                            y_min = y_min.min(cy - r);
-                            y_max = y_max.max(cy + r);
-                        }
+                        && c.len() >= 2
+                    {
+                        let cx = to_f64(&c[0]).unwrap_or(0.0);
+                        let cy = to_f64(&c[1]).unwrap_or(0.0);
+                        x_min = x_min.min(cx - r);
+                        x_max = x_max.max(cx + r);
+                        y_min = y_min.min(cy - r);
+                        y_max = y_max.max(cy + r);
+                    }
                 }
             }
-            Value::Call { head, args } if head == "Rectangle"
-                && args.len() >= 2 => {
-                    expand_bounds_from_point(&args[0], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
-                    expand_bounds_from_point(&args[1], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
-                }
+            Value::Call { head, args } if head == "Rectangle" && args.len() >= 2 => {
+                expand_bounds_from_point(&args[0], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+                expand_bounds_from_point(&args[1], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+            }
             Value::List(items) => {
                 // Could be a flat list of points
                 for item in items {
@@ -234,14 +236,15 @@ fn expand_bounds_from_point(
     y_max: &mut f64,
 ) -> Result<(), EvalError> {
     if let Value::List(coords) = pt
-        && coords.len() >= 2 {
-            let x = to_f64(&coords[0]).unwrap_or(0.0);
-            let y = to_f64(&coords[1]).unwrap_or(0.0);
-            *x_min = x_min.min(x);
-            *x_max = x_max.max(x);
-            *y_min = y_min.min(y);
-            *y_max = y_max.max(y);
-        }
+        && coords.len() >= 2
+    {
+        let x = to_f64(&coords[0]).unwrap_or(0.0);
+        let y = to_f64(&coords[1]).unwrap_or(0.0);
+        *x_min = x_min.min(x);
+        *x_max = x_max.max(x);
+        *y_min = y_min.min(y);
+        *y_max = y_max.max(y);
+    }
     Ok(())
 }
 
@@ -265,7 +268,12 @@ fn render_axes(
         let y_svg = ty(0.0);
         s.push_str(&format!(
             "<line x1=\"{}\" y1=\"{:.1}\" x2=\"{}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
-            MARGIN as i32, y_svg, (width - MARGIN) as i32, y_svg, color, stroke
+            MARGIN as i32,
+            y_svg,
+            (width - MARGIN) as i32,
+            y_svg,
+            color,
+            stroke
         ));
     }
 
@@ -274,7 +282,12 @@ fn render_axes(
         let x_svg = tx(0.0);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{}\" x2=\"{:.1}\" y2=\"{}\" stroke=\"{}\" {}/>\n",
-            x_svg, MARGIN as i32, x_svg, (height - MARGIN) as i32, color, stroke
+            x_svg,
+            MARGIN as i32,
+            x_svg,
+            (height - MARGIN) as i32,
+            color,
+            stroke
         ));
     }
 
@@ -417,14 +430,15 @@ fn render_primitive(
         // Handle bare lists of points (e.g., from ListPlot)
         Value::List(items) if !items.is_empty() => {
             if let Value::List(coords) = &items[0]
-                && coords.len() >= 2 {
-                    // It's a list of points
-                    let mut s = String::new();
-                    for pt in items {
-                        s.push_str(&render_point(pt, tx, ty)?);
-                    }
-                    return Ok(s);
+                && coords.len() >= 2
+            {
+                // It's a list of points
+                let mut s = String::new();
+                for pt in items {
+                    s.push_str(&render_point(pt, tx, ty)?);
                 }
+                return Ok(s);
+            }
             Ok(String::new())
         }
         _ => Ok(String::new()),
@@ -443,14 +457,15 @@ fn render_line(
     let mut points_str = String::new();
     for pt in pts {
         if let Value::List(coords) = pt
-            && coords.len() >= 2 {
-                let x = to_f64(&coords[0]).unwrap_or(0.0);
-                let y = to_f64(&coords[1]).unwrap_or(0.0);
-                if !points_str.is_empty() {
-                    points_str.push(' ');
-                }
-                points_str.push_str(&format!("{:.2},{:.2}", tx(x), ty(y)));
+            && coords.len() >= 2
+        {
+            let x = to_f64(&coords[0]).unwrap_or(0.0);
+            let y = to_f64(&coords[1]).unwrap_or(0.0);
+            if !points_str.is_empty() {
+                points_str.push(' ');
             }
+            points_str.push_str(&format!("{:.2},{:.2}", tx(x), ty(y)));
+        }
     }
     Ok(format!(
         "<polyline points=\"{}\" fill=\"none\" stroke=\"#1a73e8\" stroke-width=\"2\"/>\n",
@@ -464,15 +479,16 @@ fn render_point(
     ty: &dyn Fn(f64) -> f64,
 ) -> Result<String, EvalError> {
     if let Value::List(coords) = pt
-        && coords.len() >= 2 {
-            let x = to_f64(&coords[0]).unwrap_or(0.0);
-            let y = to_f64(&coords[1]).unwrap_or(0.0);
-            return Ok(format!(
-                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"3\" fill=\"#1a73e8\"/>\n",
-                tx(x),
-                ty(y)
-            ));
-        }
+        && coords.len() >= 2
+    {
+        let x = to_f64(&coords[0]).unwrap_or(0.0);
+        let y = to_f64(&coords[1]).unwrap_or(0.0);
+        return Ok(format!(
+            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"3\" fill=\"#1a73e8\"/>\n",
+            tx(x),
+            ty(y)
+        ));
+    }
     Ok(String::new())
 }
 
@@ -483,19 +499,20 @@ fn render_circle(
     ty: &dyn Fn(f64) -> f64,
 ) -> Result<String, EvalError> {
     if let Value::List(coords) = center
-        && coords.len() >= 2 {
-            let cx = to_f64(&coords[0]).unwrap_or(0.0);
-            let cy = to_f64(&coords[1]).unwrap_or(0.0);
-            // Scale radius using the x scale factor
-            let scale = tx(1.0) - tx(0.0);
-            return Ok(format!(
-                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" \
+        && coords.len() >= 2
+    {
+        let cx = to_f64(&coords[0]).unwrap_or(0.0);
+        let cy = to_f64(&coords[1]).unwrap_or(0.0);
+        // Scale radius using the x scale factor
+        let scale = tx(1.0) - tx(0.0);
+        return Ok(format!(
+            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" \
                  fill=\"none\" stroke=\"#1a73e8\" stroke-width=\"2\"/>\n",
-                tx(cx),
-                ty(cy),
-                r * scale.abs()
-            ));
-        }
+            tx(cx),
+            ty(cy),
+            r * scale.abs()
+        ));
+    }
     Ok(String::new())
 }
 
@@ -650,20 +667,31 @@ pub fn register(env: &crate::env::Env) {
 
 /// Symbol names exported by the Graphics package.
 pub const SYMBOLS: &[&str] = &[
-    "ListPlot", "ListLinePlot", "ExportGraphics", "Graphics",
+    "ListPlot",
+    "ListLinePlot",
+    "ExportGraphics",
+    "Graphics",
     // Evaluator-dependent (handled in eval.rs):
     "Plot",
     // Syma-side wrappers (loaded from .syma file):
-    "Show", "GraphicsGrid",
-    "Line", "Point", "Circle", "Rectangle",
-    "RGBColor", "Hue", "Thickness", "PointSize", "Opacity", "Directive",
+    "Show",
+    "GraphicsGrid",
+    "Line",
+    "Point",
+    "Circle",
+    "Rectangle",
+    "RGBColor",
+    "Hue",
+    "Thickness",
+    "PointSize",
+    "Opacity",
+    "Directive",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rug::Float;
-    use rug::Integer;
 
     fn real_val(v: f64) -> Value {
         Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
@@ -679,11 +707,7 @@ mod tests {
 
     #[test]
     fn test_list_plot() {
-        let data = list(vec![
-            point(0.0, 0.0),
-            point(1.0, 1.0),
-            point(2.0, 4.0),
-        ]);
+        let data = list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)]);
         let result = builtin_list_plot(&[data]).unwrap();
         if let Value::Str(svg) = result {
             assert!(svg.contains("<svg"));
@@ -696,11 +720,7 @@ mod tests {
 
     #[test]
     fn test_list_line_plot() {
-        let data = list(vec![
-            point(0.0, 0.0),
-            point(1.0, 1.0),
-            point(2.0, 4.0),
-        ]);
+        let data = list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)]);
         let result = builtin_list_line_plot(&[data]).unwrap();
         if let Value::Str(svg) = result {
             assert!(svg.contains("<svg"));
@@ -753,7 +773,8 @@ mod tests {
     fn test_export_graphics() {
         use std::fs;
         let path = "/tmp/test_syma_graphics.svg";
-        let svg_content = "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"10\" cy=\"10\" r=\"5\"/></svg>";
+        let svg_content =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"10\" cy=\"10\" r=\"5\"/></svg>";
         let result = builtin_export_graphics(&[
             Value::Str(path.to_string()),
             Value::Str(svg_content.to_string()),

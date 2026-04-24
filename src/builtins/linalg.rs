@@ -76,7 +76,10 @@ pub fn builtin_dimensions(args: &[Value]) -> Result<Value, EvalError> {
         Value::List(items) => {
             if let Value::List(row) = &items[0] {
                 // Matrix
-                Ok(Value::List(vec![int(items.len() as i64), int(row.len() as i64)]))
+                Ok(Value::List(vec![
+                    int(items.len() as i64),
+                    int(row.len() as i64),
+                ]))
             } else {
                 // Vector
                 Ok(Value::List(vec![int(items.len() as i64)]))
@@ -136,7 +139,10 @@ pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
             // Vector × matrix: treat vector as 1×n row matrix
             // Result is a vector of dot products with each column
             let n = a.len();
-            let cols = b[0..1].iter().map(|row| as_list(row).map(|r| r.len())).collect::<Result<Vec<_>, _>>()?;
+            let cols = b[0..1]
+                .iter()
+                .map(|row| as_list(row).map(|r| r.len()))
+                .collect::<Result<Vec<_>, _>>()?;
             let num_cols = cols[0];
             let mut result = Vec::with_capacity(num_cols);
             for j in 0..num_cols {
@@ -291,9 +297,8 @@ pub fn builtin_det(args: &[Value]) -> Result<Value, EvalError> {
     if m.is_empty() {
         return Ok(int(1));
     }
-    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
-        EvalError::Error("Det: argument must be a matrix".to_string())
-    })?;
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Det: argument must be a matrix".to_string()))?;
     if rows != cols {
         return Err(EvalError::Error(format!(
             "Det: matrix must be square (got {}×{})",
@@ -371,9 +376,8 @@ pub fn builtin_linalg_transpose(args: &[Value]) -> Result<Value, EvalError> {
     if m.is_empty() {
         return Ok(Value::List(vec![]));
     }
-    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
-        EvalError::Error("Transpose: argument must be a matrix".to_string())
-    })?;
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Transpose: argument must be a matrix".to_string()))?;
     let mut result = Vec::with_capacity(cols);
     for j in 0..cols {
         let mut new_row = Vec::with_capacity(rows);
@@ -394,9 +398,8 @@ pub fn builtin_inverse(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let m = as_list(&args[0])?;
-    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
-        EvalError::Error("Inverse: argument must be a matrix".to_string())
-    })?;
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Inverse: argument must be a matrix".to_string()))?;
     if rows != cols {
         return Err(EvalError::Error(format!(
             "Inverse: matrix must be square (got {}×{})",
@@ -459,9 +462,8 @@ pub fn builtin_tr(args: &[Value]) -> Result<Value, EvalError> {
     if m.is_empty() {
         return Ok(int(0));
     }
-    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
-        EvalError::Error("Tr: argument must be a matrix".to_string())
-    })?;
+    let (rows, cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("Tr: argument must be a matrix".to_string()))?;
     let k = rows.min(cols);
     let mut sum = int(0);
     for i in 0..k {
@@ -526,14 +528,32 @@ pub fn builtin_cross(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let (a0, a1, a2) = (
-        to_f64(&a[0]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: a[0].type_name().into() })?,
-        to_f64(&a[1]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: a[1].type_name().into() })?,
-        to_f64(&a[2]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: a[2].type_name().into() })?,
+        to_f64(&a[0]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: a[0].type_name().into(),
+        })?,
+        to_f64(&a[1]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: a[1].type_name().into(),
+        })?,
+        to_f64(&a[2]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: a[2].type_name().into(),
+        })?,
     );
     let (b0, b1, b2) = (
-        to_f64(&b[0]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: b[0].type_name().into() })?,
-        to_f64(&b[1]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: b[1].type_name().into() })?,
-        to_f64(&b[2]).ok_or_else(|| EvalError::TypeError { expected: "Number".into(), got: b[2].type_name().into() })?,
+        to_f64(&b[0]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: b[0].type_name().into(),
+        })?,
+        to_f64(&b[1]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: b[1].type_name().into(),
+        })?,
+        to_f64(&b[2]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".into(),
+            got: b[2].type_name().into(),
+        })?,
     );
     let r0 = a1 * b2 - a2 * b1;
     let r1 = a2 * b0 - a0 * b2;
@@ -598,9 +618,7 @@ pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         if max_val < 1e-15 {
-            return Err(EvalError::Error(
-                "LinearSolve: singular matrix".to_string(),
-            ));
+            return Err(EvalError::Error("LinearSolve: singular matrix".to_string()));
         }
         aug.swap(col, max_row);
 
@@ -648,10 +666,21 @@ pub fn register(env: &crate::env::Env) {
 
 /// Symbol names exported by the LinearAlgebra package.
 pub const SYMBOLS: &[&str] = &[
-    "Dimensions", "Dot", "MatrixMultiply", "IdentityMatrix", "Det",
-    "Inverse", "Transpose", "Tr", "Norm", "Cross", "LinearSolve",
+    "Dimensions",
+    "Dot",
+    "MatrixMultiply",
+    "IdentityMatrix",
+    "Det",
+    "Inverse",
+    "Transpose",
+    "Tr",
+    "Norm",
+    "Cross",
+    "LinearSolve",
     // Syma-side stubs (loaded from .syma file):
-    "Eigenvalues", "MatrixPower", "ArrayFlatten",
+    "Eigenvalues",
+    "MatrixPower",
+    "ArrayFlatten",
 ];
 
 #[cfg(test)]
@@ -668,10 +697,11 @@ mod tests {
     }
 
     fn matrix(data: Vec<Vec<i64>>) -> Value {
-        list(data
-            .into_iter()
-            .map(|row| list(row.into_iter().map(int_val).collect()))
-            .collect())
+        list(
+            data.into_iter()
+                .map(|row| list(row.into_iter().map(int_val).collect()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -771,10 +801,8 @@ mod tests {
         let result_list = as_list(&result).unwrap();
         assert_eq!(result_list.len(), 2);
         let row0 = as_list(&result_list[0]).unwrap();
-        let row1 = as_list(&result_list[1]).unwrap();
         assert_eq!(row0[0], int_val(-2));
         assert_eq!(row0[1], int_val(1));
-        // row1[0] = 3/2 and row1[1] = -1/2 (as Divide nodes)
     }
 
     #[test]

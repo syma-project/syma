@@ -17,8 +17,10 @@ pub mod statistics;
 pub mod string;
 pub mod symbolic;
 
-use crate::env::Env;
+use crate::env::{Env, LazyProvider};
 use crate::value::{EvalError, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Register all built-in functions in the environment.
 pub fn register_builtins(env: &Env) {
@@ -261,6 +263,63 @@ pub fn register_builtins(env: &Env) {
                 / 180u32,
         ),
     );
+
+    // ── Lazy package auto-loading ──────────────────────────────────────
+    // Register lazy providers so that symbols from loadable packages
+    // (LinearAlgebra, Statistics, Graphics) auto-load on first use
+    // without requiring an explicit Needs[] call.
+
+    // LinearAlgebra — symbols backed by Rust builtins in linalg.rs
+    register_lazy_package(
+        env,
+        &[
+            "Dimensions",
+            "Dot",
+            "MatrixMultiply",
+            "IdentityMatrix",
+            "Det",
+            "Inverse",
+            "Transpose",
+            "Tr",
+            "Norm",
+            "Cross",
+            "LinearSolve",
+        ],
+        linalg::SYMBOLS,
+        "LinearAlgebra",
+        linalg::register,
+    );
+
+    // Statistics — symbols backed by Rust builtins in statistics.rs
+    register_lazy_package(
+        env,
+        &[
+            "Mean",
+            "Median",
+            "Variance",
+            "StandardDeviation",
+            "Quantile",
+            "Covariance",
+            "Correlation",
+            "RandomVariate",
+            "NormalDistribution",
+            "UniformDistribution",
+            "PoissonDistribution",
+        ],
+        statistics::SYMBOLS,
+        "Statistics",
+        statistics::register,
+    );
+
+    // Graphics — symbols backed by Rust builtins in graphics.rs
+    // (Plot is already registered as a builtin stub + special form in eval.rs)
+    register_lazy_package(
+        env,
+        &["ListPlot", "ListLinePlot", "ExportGraphics", "Graphics"],
+        graphics::SYMBOLS,
+        "Graphics",
+        graphics::register,
+    );
 }
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
@@ -268,6 +327,57 @@ fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, E
     let attrs = get_attributes(name);
     if !attrs.is_empty() {
         env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
+    }
+}
+
+/// Register lazy providers so that symbols from load-on-use packages
+/// auto-load the first time they are used as a function.
+///
+/// `symbol_names` are the symbols backed by Rust builtins (registered by `register_fn`).
+/// `all_symbols` is the full SYMBOLS list for the package (used for module registration).
+fn register_lazy_package(
+    env: &Env,
+    symbol_names: &[&str],
+    all_symbols: &[&str],
+    package_name: &str,
+    register_fn: fn(&Env),
+) {
+    let all_syms: Vec<String> = all_symbols.iter().map(|s| s.to_string()).collect();
+    let pkg_name = package_name.to_string();
+
+    for &sym in symbol_names {
+        let sym_owned = sym.to_string();
+        let all_syms_clone = all_syms.clone();
+        let pkg_name_clone = pkg_name.clone();
+        env.register_lazy_provider(
+            sym,
+            LazyProvider::Custom(Arc::new(move |env| {
+                // Register all Rust-builtin symbols for this package (idempotent)
+                register_fn(env);
+
+                // Register the module so Needs[] idempotency works
+                let exports: HashMap<String, Value> = all_syms_clone
+                    .iter()
+                    .filter_map(|s| env.get(s).map(|v| (s.clone(), v)))
+                    .collect();
+                env.register_module(
+                    pkg_name_clone.clone(),
+                    Value::Module {
+                        name: pkg_name_clone.clone(),
+                        exports,
+                    },
+                );
+
+                // Return the value of the requested symbol
+                // (Sibling lazy providers remain in the map but will never
+                // fire since the symbols are now bound in the environment.)
+                env.get(&sym_owned).ok_or_else(|| {
+                    EvalError::Error(format!(
+                        "Symbol '{sym_owned}' not found after loading package '{pkg_name_clone}'"
+                    ))
+                })
+            })),
+        );
     }
 }
 
@@ -443,7 +553,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
 
         // ── LinearAlgebra ──
-        "Dimensions" => "Dimensions[m] gives the dimensions of a matrix or vector as a list {rows, cols}.",
+        "Dimensions" => {
+            "Dimensions[m] gives the dimensions of a matrix or vector as a list {rows, cols}."
+        }
         "Dot" => "Dot[a, b] or a . b computes the dot product of vectors or matrix multiplication.",
         "MatrixMultiply" => "MatrixMultiply[a, b] is an alias for Dot[a, b].",
         "IdentityMatrix" => "IdentityMatrix[n] gives the n×n identity matrix.",
@@ -455,26 +567,42 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "LinearSolve" => "LinearSolve[A, b] solves the linear system A·x = b for x.",
         "Eigenvalues" => "Eigenvalues[m] gives the eigenvalues of matrix m. (Symbolic stub.)",
         "MatrixPower" => "MatrixPower[m, n] gives the n-th matrix power of m.",
-        "ArrayFlatten" => "ArrayFlatten[{{m11, m12}, {m21, m22}}] flattens a matrix of matrices into a single matrix.",
+        "ArrayFlatten" => {
+            "ArrayFlatten[{{m11, m12}, {m21, m22}}] flattens a matrix of matrices into a single matrix."
+        }
 
         // ── Statistics ──
         "Mean" => "Mean[list] gives the arithmetic mean of the elements in list.",
         "Median" => "Median[list] gives the median of the elements in list.",
-        "Variance" => "Variance[list] gives the sample variance (with Bessel's correction, n-1 denominator).",
+        "Variance" => {
+            "Variance[list] gives the sample variance (with Bessel's correction, n-1 denominator)."
+        }
         "StandardDeviation" => "StandardDeviation[list] gives the sample standard deviation.",
         "Quantile" => "Quantile[list, q] gives the q-th quantile of list (0 ≤ q ≤ 1).",
         "Covariance" => "Covariance[list1, list2] gives the sample covariance of two lists.",
-        "Correlation" => "Correlation[list1, list2] gives the Pearson correlation coefficient of two lists.",
-        "RandomVariate" => "RandomVariate[dist, n] generates n random values from distribution dist.",
-        "NormalDistribution" => "NormalDistribution[μ, σ] represents a normal distribution with mean μ and standard deviation σ.",
-        "UniformDistribution" => "UniformDistribution[min, max] represents a uniform distribution on [min, max].",
-        "PoissonDistribution" => "PoissonDistribution[λ] represents a Poisson distribution with rate λ.",
+        "Correlation" => {
+            "Correlation[list1, list2] gives the Pearson correlation coefficient of two lists."
+        }
+        "RandomVariate" => {
+            "RandomVariate[dist, n] generates n random values from distribution dist."
+        }
+        "NormalDistribution" => {
+            "NormalDistribution[μ, σ] represents a normal distribution with mean μ and standard deviation σ."
+        }
+        "UniformDistribution" => {
+            "UniformDistribution[min, max] represents a uniform distribution on [min, max]."
+        }
+        "PoissonDistribution" => {
+            "PoissonDistribution[λ] represents a Poisson distribution with rate λ."
+        }
         "GeometricMean" => "GeometricMean[list] gives the geometric mean of the elements in list.",
         "HarmonicMean" => "HarmonicMean[list] gives the harmonic mean of the elements in list.",
         "Skewness" => "Skewness[list] gives the skewness of the elements in list.",
         "Kurtosis" => "Kurtosis[list] gives the excess kurtosis of the elements in list.",
         "BinCounts" => "BinCounts[list, width] counts elements in bins of the given width.",
-        "HistogramList" => "HistogramList[list, n] gives {binEdges, counts} for n equal-width bins.",
+        "HistogramList" => {
+            "HistogramList[list, n] gives {binEdges, counts} for n equal-width bins."
+        }
 
         // ── Graphics ──
         "Plot" => {
@@ -493,12 +621,16 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ExportGraphics" => "ExportGraphics[path, svg] writes an SVG string to the file at path.",
         "Graphics" => "Graphics[primitives, options] wraps graphical primitives for rendering.",
         "Show" => "Show[graphics, options] displays graphics with updated options.",
-        "Line" => "Line[{{x1,y1}, {x2,y2}, ...}] represents a line primitive connecting the given points.",
+        "Line" => {
+            "Line[{{x1,y1}, {x2,y2}, ...}] represents a line primitive connecting the given points."
+        }
         "Point" => "Point[{x, y}] represents a point primitive at the given coordinates.",
         "Circle" => "Circle[{cx, cy}, r] represents a circle primitive with center and radius.",
         "Rectangle" => "Rectangle[{xmin, ymin}, {xmax, ymax}] represents a rectangle primitive.",
         "RGBColor" => "RGBColor[r, g, b] specifies a color with red, green, blue components (0–1).",
-        "Hue" => "Hue[h] specifies a color with hue h (0–1), saturation and brightness default to 1.",
+        "Hue" => {
+            "Hue[h] specifies a color with hue h (0–1), saturation and brightness default to 1."
+        }
         "Thickness" => "Thickness[t] specifies line thickness.",
         "PointSize" => "PointSize[r] specifies point radius.",
         "Opacity" => "Opacity[a] specifies opacity (0 = transparent, 1 = opaque).",

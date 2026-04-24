@@ -2655,7 +2655,11 @@ fn to_f64_val(v: &Value) -> Option<f64> {
         Value::Integer(n) => Some(n.to_f64()),
         Value::Real(r) => Some(r.to_f64()),
         Value::Complex { re, im } => {
-            if *im == 0.0 { Some(*re) } else { None }
+            if *im == 0.0 {
+                Some(*re)
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -3780,5 +3784,26 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_det_auto_loads() {
+        // Det should auto-load the LinearAlgebra package via lazy provider
+        let result = eval_str("Det[{{1, 2}, {3, 4}}]");
+        assert_eq!(result, Value::Integer(Integer::from(-2)));
+    }
+
+    #[test]
+    fn test_mean_auto_loads() {
+        // Mean should auto-load the Statistics package via lazy provider
+        let result = eval_str("Mean[{1, 2, 3, 4, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(3)));
+    }
+
+    #[test]
+    fn test_auto_load_works_with_needs() {
+        // Verify that after auto-load, Needs returns Null (already loaded)
+        let result = eval_str("Det[{{1, 2}, {3, 4}}]; Needs[\"LinearAlgebra\"]");
+        assert_eq!(result, Value::Null);
     }
 }

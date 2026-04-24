@@ -371,12 +371,8 @@ impl PartialEq for Expr {
                 },
             ) => p1 == p2 && c1 == c2,
             (
-                Expr::OptionalBlank {
-                    type_constraint: a,
-                },
-                Expr::OptionalBlank {
-                    type_constraint: b,
-                },
+                Expr::OptionalBlank { type_constraint: a },
+                Expr::OptionalBlank { type_constraint: b },
             ) => a == b,
             (
                 Expr::OptionalNamedBlank {

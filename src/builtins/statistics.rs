@@ -64,9 +64,7 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     }
     let items = as_list(&args[0])?;
     if items.is_empty() {
-        return Err(EvalError::Error(
-            "Mean: list must not be empty".to_string(),
-        ));
+        return Err(EvalError::Error("Mean: list must not be empty".to_string()));
     }
     let nums = extract_numbers(items)?;
     let sum: f64 = nums.iter().sum();
@@ -234,7 +232,8 @@ pub fn builtin_correlation(args: &[Value]) -> Result<Value, EvalError> {
                 ));
             }
             let prec = c.prec().max(s1.prec()).max(s2.prec());
-            let result = Float::with_val(prec, c) / (Float::with_val(prec, s1) * Float::with_val(prec, s2));
+            let result =
+                Float::with_val(prec, c) / (Float::with_val(prec, s1) * Float::with_val(prec, s2));
             Ok(Value::Real(result))
         }
         _ => Err(EvalError::Error(
@@ -286,14 +285,8 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
     let mut rng = fastrand::Rng::new();
     let samples: Vec<Value> = match dist_type {
         "Normal" => {
-            let mean = dist
-                .get("Mean")
-                .and_then(to_f64)
-                .unwrap_or(0.0);
-            let sd = dist
-                .get("SD")
-                .and_then(to_f64)
-                .unwrap_or(1.0);
+            let mean = dist.get("Mean").and_then(to_f64).unwrap_or(0.0);
+            let sd = dist.get("SD").and_then(to_f64).unwrap_or(1.0);
             (0..n)
                 .map(|_| {
                     // Box-Muller transform
@@ -307,15 +300,10 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
         "Uniform" => {
             let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
             let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
-            (0..n)
-                .map(|_| real(lo + (hi - lo) * rng.f64()))
-                .collect()
+            (0..n).map(|_| real(lo + (hi - lo) * rng.f64())).collect()
         }
         "Poisson" => {
-            let lambda = dist
-                .get("Lambda")
-                .and_then(to_f64)
-                .unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
             (0..n)
                 .map(|_| {
                     // Knuth's algorithm
@@ -446,12 +434,24 @@ pub fn register(env: &crate::env::Env) {
 
 /// Symbol names exported by the Statistics package.
 pub const SYMBOLS: &[&str] = &[
-    "Mean", "Median", "Variance", "StandardDeviation", "Quantile",
-    "Covariance", "Correlation", "RandomVariate",
-    "NormalDistribution", "UniformDistribution", "PoissonDistribution",
+    "Mean",
+    "Median",
+    "Variance",
+    "StandardDeviation",
+    "Quantile",
+    "Covariance",
+    "Correlation",
+    "RandomVariate",
+    "NormalDistribution",
+    "UniformDistribution",
+    "PoissonDistribution",
     // Syma-side wrappers (loaded from .syma file):
-    "GeometricMean", "HarmonicMean", "Skewness", "Kurtosis",
-    "BinCounts", "HistogramList",
+    "GeometricMean",
+    "HarmonicMean",
+    "Skewness",
+    "Kurtosis",
+    "BinCounts",
+    "HistogramList",
 ];
 
 #[cfg(test)]
@@ -473,7 +473,13 @@ mod tests {
 
     #[test]
     fn test_mean_integers() {
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         let result = builtin_mean(&[data]).unwrap();
         assert_eq!(result, int_val(3));
     }
@@ -519,7 +525,16 @@ mod tests {
 
     #[test]
     fn test_variance() {
-        let data = list(vec![int_val(2), int_val(4), int_val(4), int_val(4), int_val(5), int_val(5), int_val(7), int_val(9)]);
+        let data = list(vec![
+            int_val(2),
+            int_val(4),
+            int_val(4),
+            int_val(4),
+            int_val(5),
+            int_val(5),
+            int_val(7),
+            int_val(9),
+        ]);
         let result = builtin_variance(&[data]).unwrap();
         if let Value::Real(r) = result {
             // Sample variance of {2,4,4,4,5,5,7,9} = 4.5714...
@@ -531,7 +546,16 @@ mod tests {
 
     #[test]
     fn test_standard_deviation() {
-        let data = list(vec![int_val(2), int_val(4), int_val(4), int_val(4), int_val(5), int_val(5), int_val(7), int_val(9)]);
+        let data = list(vec![
+            int_val(2),
+            int_val(4),
+            int_val(4),
+            int_val(4),
+            int_val(5),
+            int_val(5),
+            int_val(7),
+            int_val(9),
+        ]);
         let result = builtin_standard_deviation(&[data]).unwrap();
         if let Value::Real(r) = result {
             assert!((r.to_f64() - (32.0f64 / 7.0).sqrt()).abs() < 1e-10);
@@ -542,7 +566,13 @@ mod tests {
 
     #[test]
     fn test_quantile() {
-        let data = list(vec![int_val(1), int_val(2), int_val(3), int_val(4), int_val(5)]);
+        let data = list(vec![
+            int_val(1),
+            int_val(2),
+            int_val(3),
+            int_val(4),
+            int_val(5),
+        ]);
         // 0.5 quantile = median = 3
         let result = builtin_quantile(&[data, real_val(0.5)]).unwrap();
         if let Value::Real(r) = result {
