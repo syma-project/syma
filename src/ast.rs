@@ -1,11 +1,10 @@
+use rug::Float;
+use rug::Integer;
 /// AST node definitions for Syma language.
 ///
 /// Everything in Syma is an expression. The AST mirrors the expression
 /// structure: `head[arg1, arg2, ...]`.
-
 use std::fmt;
-use rug::Integer;
-use rug::Float;
 
 /// A symbol identifier.
 pub type Symbol = String;
@@ -17,7 +16,10 @@ pub enum Expr {
     Integer(Integer),
     Real(Float),
     #[allow(dead_code)]
-    Complex { re: f64, im: f64 },
+    Complex {
+        re: f64,
+        im: f64,
+    },
     Str(String),
     Bool(bool),
     Symbol(Symbol),
@@ -222,6 +224,10 @@ pub enum Expr {
     HoldComplete(Box<Expr>),
     #[allow(dead_code)]
     ReleaseHold(Box<Expr>),
+
+    // ── Help ──
+    /// ?expr — information/help query
+    Information(Box<Expr>),
 }
 
 /// A branch in a match expression: pattern => result
@@ -283,48 +289,256 @@ impl PartialEq for Expr {
         match (self, other) {
             (Expr::Integer(a), Expr::Integer(b)) => a == b,
             (Expr::Real(a), Expr::Real(b)) => a == b,
-            (Expr::Complex { re: a1, im: a2 }, Expr::Complex { re: b1, im: b2 }) => a1 == b1 && a2 == b2,
+            (Expr::Complex { re: a1, im: a2 }, Expr::Complex { re: b1, im: b2 }) => {
+                a1 == b1 && a2 == b2
+            }
             (Expr::Str(a), Expr::Str(b)) => a == b,
             (Expr::Bool(a), Expr::Bool(b)) => a == b,
             (Expr::Symbol(a), Expr::Symbol(b)) => a == b,
             (Expr::Null, Expr::Null) => true,
-            (Expr::Call { head: h1, args: a1 }, Expr::Call { head: h2, args: a2 }) => h1 == h2 && a1 == a2,
+            (Expr::Call { head: h1, args: a1 }, Expr::Call { head: h2, args: a2 }) => {
+                h1 == h2 && a1 == a2
+            }
             (Expr::List(a), Expr::List(b)) => a == b,
             (Expr::Assoc(a), Expr::Assoc(b)) => a == b,
-            (Expr::Rule { lhs: l1, rhs: r1 }, Expr::Rule { lhs: l2, rhs: r2 }) => l1 == l2 && r1 == r2,
-            (Expr::RuleDelayed { lhs: l1, rhs: r1 }, Expr::RuleDelayed { lhs: l2, rhs: r2 }) => l1 == l2 && r1 == r2,
+            (Expr::Rule { lhs: l1, rhs: r1 }, Expr::Rule { lhs: l2, rhs: r2 }) => {
+                l1 == l2 && r1 == r2
+            }
+            (Expr::RuleDelayed { lhs: l1, rhs: r1 }, Expr::RuleDelayed { lhs: l2, rhs: r2 }) => {
+                l1 == l2 && r1 == r2
+            }
             (Expr::Slot(a), Expr::Slot(b)) => a == b,
-            (Expr::Function { params: p1, body: b1 }, Expr::Function { params: p2, body: b2 }) => p1 == p2 && b1 == b2,
+            (
+                Expr::Function {
+                    params: p1,
+                    body: b1,
+                },
+                Expr::Function {
+                    params: p2,
+                    body: b2,
+                },
+            ) => p1 == p2 && b1 == b2,
             (Expr::Blank { type_constraint: a }, Expr::Blank { type_constraint: b }) => a == b,
-            (Expr::NamedBlank { name: n1, type_constraint: t1 }, Expr::NamedBlank { name: n2, type_constraint: t2 }) => n1 == n2 && t1 == t2,
-            (Expr::BlankSequence { name: n1, type_constraint: t1 }, Expr::BlankSequence { name: n2, type_constraint: t2 }) => n1 == n2 && t1 == t2,
-            (Expr::BlankNullSequence { name: n1, type_constraint: t1 }, Expr::BlankNullSequence { name: n2, type_constraint: t2 }) => n1 == n2 && t1 == t2,
-            (Expr::PatternGuard { pattern: p1, condition: c1 }, Expr::PatternGuard { pattern: p2, condition: c2 }) => p1 == p2 && c1 == c2,
-            (Expr::ReplaceAll { expr: e1, rules: r1 }, Expr::ReplaceAll { expr: e2, rules: r2 }) => e1 == e2 && r1 == r2,
-            (Expr::ReplaceRepeated { expr: e1, rules: r1 }, Expr::ReplaceRepeated { expr: e2, rules: r2 }) => e1 == e2 && r1 == r2,
-            (Expr::Map { func: f1, list: l1 }, Expr::Map { func: f2, list: l2 }) => f1 == f2 && l1 == l2,
-            (Expr::Apply { func: f1, expr: e1 }, Expr::Apply { func: f2, expr: e2 }) => f1 == f2 && e1 == e2,
-            (Expr::Pipe { expr: e1, func: f1 }, Expr::Pipe { expr: e2, func: f2 }) => e1 == e2 && f1 == f2,
-            (Expr::Prefix { func: f1, arg: a1 }, Expr::Prefix { func: f2, arg: a2 }) => f1 == f2 && a1 == a2,
-            (Expr::If { condition: c1, then_branch: t1, else_branch: e1 }, Expr::If { condition: c2, then_branch: t2, else_branch: e2 }) => c1 == c2 && t1 == t2 && e1 == e2,
+            (
+                Expr::NamedBlank {
+                    name: n1,
+                    type_constraint: t1,
+                },
+                Expr::NamedBlank {
+                    name: n2,
+                    type_constraint: t2,
+                },
+            ) => n1 == n2 && t1 == t2,
+            (
+                Expr::BlankSequence {
+                    name: n1,
+                    type_constraint: t1,
+                },
+                Expr::BlankSequence {
+                    name: n2,
+                    type_constraint: t2,
+                },
+            ) => n1 == n2 && t1 == t2,
+            (
+                Expr::BlankNullSequence {
+                    name: n1,
+                    type_constraint: t1,
+                },
+                Expr::BlankNullSequence {
+                    name: n2,
+                    type_constraint: t2,
+                },
+            ) => n1 == n2 && t1 == t2,
+            (
+                Expr::PatternGuard {
+                    pattern: p1,
+                    condition: c1,
+                },
+                Expr::PatternGuard {
+                    pattern: p2,
+                    condition: c2,
+                },
+            ) => p1 == p2 && c1 == c2,
+            (
+                Expr::ReplaceAll {
+                    expr: e1,
+                    rules: r1,
+                },
+                Expr::ReplaceAll {
+                    expr: e2,
+                    rules: r2,
+                },
+            ) => e1 == e2 && r1 == r2,
+            (
+                Expr::ReplaceRepeated {
+                    expr: e1,
+                    rules: r1,
+                },
+                Expr::ReplaceRepeated {
+                    expr: e2,
+                    rules: r2,
+                },
+            ) => e1 == e2 && r1 == r2,
+            (Expr::Map { func: f1, list: l1 }, Expr::Map { func: f2, list: l2 }) => {
+                f1 == f2 && l1 == l2
+            }
+            (Expr::Apply { func: f1, expr: e1 }, Expr::Apply { func: f2, expr: e2 }) => {
+                f1 == f2 && e1 == e2
+            }
+            (Expr::Pipe { expr: e1, func: f1 }, Expr::Pipe { expr: e2, func: f2 }) => {
+                e1 == e2 && f1 == f2
+            }
+            (Expr::Prefix { func: f1, arg: a1 }, Expr::Prefix { func: f2, arg: a2 }) => {
+                f1 == f2 && a1 == a2
+            }
+            (
+                Expr::If {
+                    condition: c1,
+                    then_branch: t1,
+                    else_branch: e1,
+                },
+                Expr::If {
+                    condition: c2,
+                    then_branch: t2,
+                    else_branch: e2,
+                },
+            ) => c1 == c2 && t1 == t2 && e1 == e2,
             (Expr::Which { pairs: p1 }, Expr::Which { pairs: p2 }) => p1 == p2,
-            (Expr::Switch { expr: e1, cases: c1 }, Expr::Switch { expr: e2, cases: c2 }) => e1 == e2 && c1 == c2,
-            (Expr::Match { expr: e1, branches: b1 }, Expr::Match { expr: e2, branches: b2 }) => e1 == e2 && b1 == b2,
-            (Expr::For { init: i1, condition: c1, step: s1, body: b1 }, Expr::For { init: i2, condition: c2, step: s2, body: b2 }) => i1 == i2 && c1 == c2 && s1 == s2 && b1 == b2,
-            (Expr::While { condition: c1, body: b1 }, Expr::While { condition: c2, body: b2 }) => c1 == c2 && b1 == b2,
-            (Expr::Do { body: b1, iterator: i1 }, Expr::Do { body: b2, iterator: i2 }) => b1 == b2 && i1 == i2,
-            (Expr::FuncDef { name: n1, params: p1, body: b1, delayed: d1 }, Expr::FuncDef { name: n2, params: p2, body: b2, delayed: d2 }) => n1 == n2 && p1 == p2 && b1 == b2 && d1 == d2,
-            (Expr::Assign { lhs: l1, rhs: r1 }, Expr::Assign { lhs: l2, rhs: r2 }) => l1 == l2 && r1 == r2,
-            (Expr::DestructAssign { patterns: p1, rhs: r1 }, Expr::DestructAssign { patterns: p2, rhs: r2 }) => p1 == p2 && r1 == r2,
-            (Expr::RuleDef { name: n1, rules: r1 }, Expr::RuleDef { name: n2, rules: r2 }) => n1 == n2 && r1 == r2,
-            (Expr::ClassDef { name: n1, parent: p1, mixins: m1, members: me1 }, Expr::ClassDef { name: n2, parent: p2, mixins: m2, members: me2 }) => n1 == n2 && p1 == p2 && m1 == m2 && me1 == me2,
-            (Expr::ModuleDef { name: n1, exports: e1, body: b1 }, Expr::ModuleDef { name: n2, exports: e2, body: b2 }) => n1 == n2 && e1 == e2 && b1 == b2,
-            (Expr::Import { module: m1, selective: s1, alias: a1 }, Expr::Import { module: m2, selective: s2, alias: a2 }) => m1 == m2 && s1 == s2 && a1 == a2,
+            (
+                Expr::Switch {
+                    expr: e1,
+                    cases: c1,
+                },
+                Expr::Switch {
+                    expr: e2,
+                    cases: c2,
+                },
+            ) => e1 == e2 && c1 == c2,
+            (
+                Expr::Match {
+                    expr: e1,
+                    branches: b1,
+                },
+                Expr::Match {
+                    expr: e2,
+                    branches: b2,
+                },
+            ) => e1 == e2 && b1 == b2,
+            (
+                Expr::For {
+                    init: i1,
+                    condition: c1,
+                    step: s1,
+                    body: b1,
+                },
+                Expr::For {
+                    init: i2,
+                    condition: c2,
+                    step: s2,
+                    body: b2,
+                },
+            ) => i1 == i2 && c1 == c2 && s1 == s2 && b1 == b2,
+            (
+                Expr::While {
+                    condition: c1,
+                    body: b1,
+                },
+                Expr::While {
+                    condition: c2,
+                    body: b2,
+                },
+            ) => c1 == c2 && b1 == b2,
+            (
+                Expr::Do {
+                    body: b1,
+                    iterator: i1,
+                },
+                Expr::Do {
+                    body: b2,
+                    iterator: i2,
+                },
+            ) => b1 == b2 && i1 == i2,
+            (
+                Expr::FuncDef {
+                    name: n1,
+                    params: p1,
+                    body: b1,
+                    delayed: d1,
+                },
+                Expr::FuncDef {
+                    name: n2,
+                    params: p2,
+                    body: b2,
+                    delayed: d2,
+                },
+            ) => n1 == n2 && p1 == p2 && b1 == b2 && d1 == d2,
+            (Expr::Assign { lhs: l1, rhs: r1 }, Expr::Assign { lhs: l2, rhs: r2 }) => {
+                l1 == l2 && r1 == r2
+            }
+            (
+                Expr::DestructAssign {
+                    patterns: p1,
+                    rhs: r1,
+                },
+                Expr::DestructAssign {
+                    patterns: p2,
+                    rhs: r2,
+                },
+            ) => p1 == p2 && r1 == r2,
+            (
+                Expr::RuleDef {
+                    name: n1,
+                    rules: r1,
+                },
+                Expr::RuleDef {
+                    name: n2,
+                    rules: r2,
+                },
+            ) => n1 == n2 && r1 == r2,
+            (
+                Expr::ClassDef {
+                    name: n1,
+                    parent: p1,
+                    mixins: m1,
+                    members: me1,
+                },
+                Expr::ClassDef {
+                    name: n2,
+                    parent: p2,
+                    mixins: m2,
+                    members: me2,
+                },
+            ) => n1 == n2 && p1 == p2 && m1 == m2 && me1 == me2,
+            (
+                Expr::ModuleDef {
+                    name: n1,
+                    exports: e1,
+                    body: b1,
+                },
+                Expr::ModuleDef {
+                    name: n2,
+                    exports: e2,
+                    body: b2,
+                },
+            ) => n1 == n2 && e1 == e2 && b1 == b2,
+            (
+                Expr::Import {
+                    module: m1,
+                    selective: s1,
+                    alias: a1,
+                },
+                Expr::Import {
+                    module: m2,
+                    selective: s2,
+                    alias: a2,
+                },
+            ) => m1 == m2 && s1 == s2 && a1 == a2,
             (Expr::Export(a), Expr::Export(b)) => a == b,
             (Expr::Sequence(a), Expr::Sequence(b)) => a == b,
             (Expr::Hold(a), Expr::Hold(b)) => a == b,
             (Expr::HoldComplete(a), Expr::HoldComplete(b)) => a == b,
             (Expr::ReleaseHold(a), Expr::ReleaseHold(b)) => a == b,
+            (Expr::Information(a), Expr::Information(b)) => a == b,
             _ => false,
         }
     }
@@ -339,8 +553,22 @@ impl PartialEq for MatchBranch {
 impl PartialEq for IteratorSpec {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (IteratorSpec::Range { var: v1, min: m1, max: x1 }, IteratorSpec::Range { var: v2, min: m2, max: x2 }) => v1 == v2 && m1 == m2 && x1 == x2,
-            (IteratorSpec::List { var: v1, list: l1 }, IteratorSpec::List { var: v2, list: l2 }) => v1 == v2 && l1 == l2,
+            (
+                IteratorSpec::Range {
+                    var: v1,
+                    min: m1,
+                    max: x1,
+                },
+                IteratorSpec::Range {
+                    var: v2,
+                    min: m2,
+                    max: x2,
+                },
+            ) => v1 == v2 && m1 == m2 && x1 == x2,
+            (
+                IteratorSpec::List { var: v1, list: l1 },
+                IteratorSpec::List { var: v2, list: l2 },
+            ) => v1 == v2 && l1 == l2,
             _ => false,
         }
     }
@@ -349,10 +577,52 @@ impl PartialEq for IteratorSpec {
 impl PartialEq for MemberDef {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (MemberDef::Field { name: n1, type_hint: t1, default: d1 }, MemberDef::Field { name: n2, type_hint: t2, default: d2 }) => n1 == n2 && t1 == t2 && d1 == d2,
-            (MemberDef::Method { name: n1, params: p1, return_type: r1, body: b1 }, MemberDef::Method { name: n2, params: p2, return_type: r2, body: b2 }) => n1 == n2 && p1 == p2 && r1 == r2 && b1 == b2,
-            (MemberDef::Constructor { params: p1, body: b1 }, MemberDef::Constructor { params: p2, body: b2 }) => p1 == p2 && b1 == b2,
-            (MemberDef::Transform { name: n1, rules: r1 }, MemberDef::Transform { name: n2, rules: r2 }) => n1 == n2 && r1 == r2,
+            (
+                MemberDef::Field {
+                    name: n1,
+                    type_hint: t1,
+                    default: d1,
+                },
+                MemberDef::Field {
+                    name: n2,
+                    type_hint: t2,
+                    default: d2,
+                },
+            ) => n1 == n2 && t1 == t2 && d1 == d2,
+            (
+                MemberDef::Method {
+                    name: n1,
+                    params: p1,
+                    return_type: r1,
+                    body: b1,
+                },
+                MemberDef::Method {
+                    name: n2,
+                    params: p2,
+                    return_type: r2,
+                    body: b2,
+                },
+            ) => n1 == n2 && p1 == p2 && r1 == r2 && b1 == b2,
+            (
+                MemberDef::Constructor {
+                    params: p1,
+                    body: b1,
+                },
+                MemberDef::Constructor {
+                    params: p2,
+                    body: b2,
+                },
+            ) => p1 == p2 && b1 == b2,
+            (
+                MemberDef::Transform {
+                    name: n1,
+                    rules: r1,
+                },
+                MemberDef::Transform {
+                    name: n2,
+                    rules: r2,
+                },
+            ) => n1 == n2 && r1 == r2,
             _ => false,
         }
     }
@@ -450,19 +720,21 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ", {}]", body)
             }
-            Expr::Blank { type_constraint } => {
-                match type_constraint {
-                    Some(tc) => write!(f, "_{}", tc),
-                    None => write!(f, "_"),
-                }
-            }
-            Expr::NamedBlank { name, type_constraint } => {
-                match type_constraint {
-                    Some(tc) => write!(f, "{}_{}", name, tc),
-                    None => write!(f, "{}_", name),
-                }
-            }
-            Expr::BlankSequence { name, type_constraint } => {
+            Expr::Blank { type_constraint } => match type_constraint {
+                Some(tc) => write!(f, "_{}", tc),
+                None => write!(f, "_"),
+            },
+            Expr::NamedBlank {
+                name,
+                type_constraint,
+            } => match type_constraint {
+                Some(tc) => write!(f, "{}_{}", name, tc),
+                None => write!(f, "{}_", name),
+            },
+            Expr::BlankSequence {
+                name,
+                type_constraint,
+            } => {
                 if let Some(n) = name {
                     write!(f, "{}__", n)?;
                 } else {
@@ -473,7 +745,10 @@ impl fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::BlankNullSequence { name, type_constraint } => {
+            Expr::BlankNullSequence {
+                name,
+                type_constraint,
+            } => {
                 if let Some(n) = name {
                     write!(f, "{}___", n)?;
                 } else {
@@ -493,7 +768,11 @@ impl fmt::Display for Expr {
             Expr::Apply { func, expr } => write!(f, "{} @@ {}", func, expr),
             Expr::Pipe { expr, func } => write!(f, "{} // {}", expr, func),
             Expr::Prefix { func, arg } => write!(f, "{} @ {}", func, arg),
-            Expr::If { condition, then_branch, else_branch } => {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 write!(f, "If[{}, {}", condition, then_branch)?;
                 if let Some(else_b) = else_branch {
                     write!(f, ", {}", else_b)?;
@@ -524,7 +803,12 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "}}")
             }
-            Expr::FuncDef { name, params, body, delayed } => {
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                delayed,
+            } => {
                 let op = if *delayed { ":=" } else { "=" };
                 write!(f, "{}[", name)?;
                 for (i, p) in params.iter().enumerate() {
@@ -565,7 +849,13 @@ impl fmt::Display for Expr {
             Expr::Hold(e) => write!(f, "Hold[{}]", e),
             Expr::HoldComplete(e) => write!(f, "HoldComplete[{}]", e),
             Expr::ReleaseHold(e) => write!(f, "ReleaseHold[{}]", e),
-            Expr::ClassDef { name, parent, mixins, members } => {
+            Expr::Information(e) => write!(f, "Information[{}]", e),
+            Expr::ClassDef {
+                name,
+                parent,
+                mixins,
+                members,
+            } => {
                 write!(f, "class {}", name)?;
                 if let Some(p) = parent {
                     write!(f, " extends {}", p)?;
@@ -579,7 +869,11 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "}}")
             }
-            Expr::ModuleDef { name, exports, body } => {
+            Expr::ModuleDef {
+                name,
+                exports,
+                body,
+            } => {
                 writeln!(f, "module {} {{", name)?;
                 writeln!(f, "    export {}", exports.join(", "))?;
                 for stmt in body {
@@ -587,7 +881,11 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "}}")
             }
-            Expr::Import { module, selective, alias } => {
+            Expr::Import {
+                module,
+                selective,
+                alias,
+            } => {
                 write!(f, "import {}", module.join("."))?;
                 if let Some(sel) = selective {
                     write!(f, ".{{{}}}", sel.join(", "))?;
@@ -598,7 +896,12 @@ impl fmt::Display for Expr {
                 Ok(())
             }
             Expr::Export(names) => write!(f, "export {}", names.join(", ")),
-            Expr::For { init, condition, step, body } => {
+            Expr::For {
+                init,
+                condition,
+                step,
+                body,
+            } => {
                 write!(f, "For[{}, {}, {}, {}]", init, condition, step, body)
             }
             Expr::While { condition, body } => {

@@ -2,13 +2,12 @@
 ///
 /// Everything in Syma evaluates to a Value. Values are the runtime
 /// representation of symbolic expressions.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use rug::Integer;
 use rug::Float;
+use rug::Integer;
 
 use crate::ast::Expr;
 
@@ -34,7 +33,9 @@ pub fn rug_radix_to_decimal(s: &str) -> String {
 
     // digits_part is like "3.14159265..." — collect all digit characters.
     let mut digits: Vec<char> = digits_part.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() { digits.push('0'); }
+    if digits.is_empty() {
+        digits.push('0');
+    }
 
     // The mantissa has 1 digit before the decimal, so the actual integer part
     // ends at index `1 + exp` in the digit sequence.
@@ -57,7 +58,11 @@ pub fn rug_radix_to_decimal(s: &str) -> String {
     };
 
     let result = trim_float_zeros(&result);
-    if negative { format!("-{}", result) } else { result }
+    if negative {
+        format!("-{}", result)
+    } else {
+        result
+    }
 }
 
 fn trim_float_zeros(s: &str) -> String {
@@ -79,7 +84,10 @@ pub enum Value {
     // ── Atoms ──
     Integer(Integer),
     Real(Float),
-    Complex { re: f64, im: f64 },
+    Complex {
+        re: f64,
+        im: f64,
+    },
     Str(String),
     Bool(bool),
     Null,
@@ -180,22 +188,13 @@ pub struct FunctionDefinition {
 #[derive(Debug, Clone)]
 pub enum EvalError {
     /// No matching definition for the given arguments.
-    NoMatch {
-        head: String,
-        args: Vec<Value>,
-    },
+    NoMatch { head: String, args: Vec<Value> },
     /// Type error.
-    TypeError {
-        expected: String,
-        got: String,
-    },
+    TypeError { expected: String, got: String },
     /// Division by zero.
     DivisionByZero,
     /// Index out of bounds.
-    IndexOutOfBounds {
-        index: i64,
-        length: usize,
-    },
+    IndexOutOfBounds { index: i64, length: usize },
     /// Unknown symbol.
     #[allow(dead_code)]
     UnknownSymbol(String),
@@ -240,17 +239,50 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Real(a), Value::Real(b)) => a == b,
-            (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => a1 == b1 && a2 == b2,
+            (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
+                a1 == b1 && a2 == b2
+            }
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
-            (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) => h1 == h2 && a1 == a2,
+            (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) => {
+                h1 == h2 && a1 == a2
+            }
             (Value::Assoc(a), Value::Assoc(b)) => a == b,
-            (Value::Rule { lhs: l1, rhs: r1, delayed: d1 }, Value::Rule { lhs: l2, rhs: r2, delayed: d2 }) => d1 == d2 && l1 == l2 && r1 == r2,
-            (Value::RuleSet { name: n1, rules: r1 }, Value::RuleSet { name: n2, rules: r2 }) => n1 == n2 && r1 == r2,
-            (Value::Module { name: n1, exports: e1 }, Value::Module { name: n2, exports: e2 }) => n1 == n2 && e1 == e2,
+            (
+                Value::Rule {
+                    lhs: l1,
+                    rhs: r1,
+                    delayed: d1,
+                },
+                Value::Rule {
+                    lhs: l2,
+                    rhs: r2,
+                    delayed: d2,
+                },
+            ) => d1 == d2 && l1 == l2 && r1 == r2,
+            (
+                Value::RuleSet {
+                    name: n1,
+                    rules: r1,
+                },
+                Value::RuleSet {
+                    name: n2,
+                    rules: r2,
+                },
+            ) => n1 == n2 && r1 == r2,
+            (
+                Value::Module {
+                    name: n1,
+                    exports: e1,
+                },
+                Value::Module {
+                    name: n2,
+                    exports: e2,
+                },
+            ) => n1 == n2 && e1 == e2,
             _ => false,
         }
     }
@@ -287,7 +319,10 @@ impl Value {
     /// Check if this value matches a type pattern.
     pub fn matches_type(&self, type_name: &str) -> bool {
         match type_name {
-            "Number" => matches!(self, Value::Integer(_) | Value::Real(_) | Value::Complex { .. }),
+            "Number" => matches!(
+                self,
+                Value::Integer(_) | Value::Real(_) | Value::Complex { .. }
+            ),
             "Integer" => matches!(self, Value::Integer(_)),
             "Real" => matches!(self, Value::Real(_)),
             "Complex" => matches!(self, Value::Complex { .. }),
@@ -297,7 +332,10 @@ impl Value {
             "List" => matches!(self, Value::List(_)),
             "Assoc" => matches!(self, Value::Assoc(_)),
             "Rule" => matches!(self, Value::Rule { .. }),
-            "Function" => matches!(self, Value::Function(_) | Value::Builtin(_, _) | Value::PureFunction { .. }),
+            "Function" => matches!(
+                self,
+                Value::Function(_) | Value::Builtin(_, _) | Value::PureFunction { .. }
+            ),
             "Module" => matches!(self, Value::Module { .. }),
             "Object" => matches!(self, Value::Object { .. }),
             "Expr" => true,
@@ -349,7 +387,9 @@ impl Value {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Real(a), Value::Real(b)) => a == b,
-            (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => a1 == b1 && a2 == b2,
+            (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
+                a1 == b1 && a2 == b2
+            }
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -369,7 +409,10 @@ mod tests {
     #[test]
     fn test_type_name() {
         assert_eq!(Value::Integer(Integer::from(1)).type_name(), "Integer");
-        assert_eq!(Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)).type_name(), "Real");
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)).type_name(),
+            "Real"
+        );
         assert_eq!(Value::Complex { re: 1.0, im: 2.0 }.type_name(), "Complex");
         assert_eq!(Value::Str("s".to_string()).type_name(), "String");
         assert_eq!(Value::Bool(true).type_name(), "Boolean");
@@ -436,14 +479,20 @@ mod tests {
     #[test]
     fn test_to_integer() {
         assert_eq!(Value::Integer(Integer::from(42)).to_integer(), Some(42));
-        assert_eq!(Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14)).to_integer(), Some(3));
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14)).to_integer(),
+            Some(3)
+        );
         assert_eq!(Value::Str("s".to_string()).to_integer(), None);
     }
 
     #[test]
     fn test_to_real() {
         assert_eq!(Value::Integer(Integer::from(42)).to_real(), Some(42.0));
-        assert_eq!(Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14)).to_real(), Some(3.14));
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14)).to_real(),
+            Some(3.14)
+        );
         assert_eq!(Value::Complex { re: 1.0, im: 0.0 }.to_real(), Some(1.0));
         assert_eq!(Value::Complex { re: 1.0, im: 2.0 }.to_real(), None);
         assert_eq!(Value::Str("s".to_string()).to_real(), None);
@@ -453,22 +502,44 @@ mod tests {
     fn test_struct_eq() {
         assert!(Value::Integer(Integer::from(1)).struct_eq(&Value::Integer(Integer::from(1))));
         assert!(!Value::Integer(Integer::from(1)).struct_eq(&Value::Integer(Integer::from(2))));
-        assert!(Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)).struct_eq(&Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0))));
+        assert!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0))
+                .struct_eq(&Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)))
+        );
         assert!(Value::Str("a".to_string()).struct_eq(&Value::Str("a".to_string())));
         assert!(!Value::Str("a".to_string()).struct_eq(&Value::Str("b".to_string())));
         assert!(Value::Bool(true).struct_eq(&Value::Bool(true)));
         assert!(Value::Null.struct_eq(&Value::Null));
-        assert!(Value::List(vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2))])
-            .struct_eq(&Value::List(vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2))])));
-        assert!(!Value::List(vec![Value::Integer(Integer::from(1))])
-            .struct_eq(&Value::List(vec![Value::Integer(Integer::from(2))])));
+        assert!(
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2))
+            ])
+            .struct_eq(&Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2))
+            ]))
+        );
+        assert!(
+            !Value::List(vec![Value::Integer(Integer::from(1))])
+                .struct_eq(&Value::List(vec![Value::Integer(Integer::from(2))]))
+        );
     }
 
     #[test]
     fn test_partial_eq() {
-        assert_eq!(Value::Integer(Integer::from(1)), Value::Integer(Integer::from(1)));
-        assert_ne!(Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2)));
-        assert_eq!(Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)), Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)));
+        assert_eq!(
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(1))
+        );
+        assert_ne!(
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2))
+        );
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0))
+        );
         assert_eq!(Value::Str("a".to_string()), Value::Str("a".to_string()));
         assert_eq!(Value::Bool(true), Value::Bool(true));
         assert_eq!(Value::Null, Value::Null);
@@ -477,7 +548,10 @@ mod tests {
             Value::List(vec![Value::Integer(Integer::from(1))])
         );
         // Different types are not equal
-        assert_ne!(Value::Integer(Integer::from(1)), Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)));
+        assert_ne!(
+            Value::Integer(Integer::from(1)),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0))
+        );
     }
 
     #[test]
@@ -488,7 +562,9 @@ mod tests {
 
     #[test]
     fn test_display_real() {
-        let val = Float::parse("3.14").map(|v| Float::with_val(DEFAULT_PRECISION, v)).unwrap();
+        let val = Float::parse("3.14")
+            .map(|v| Float::with_val(DEFAULT_PRECISION, v))
+            .unwrap();
         assert_eq!(format!("{}", Value::Real(val)), "3.14");
     }
 
@@ -515,7 +591,11 @@ mod tests {
 
     #[test]
     fn test_display_list() {
-        let list = Value::List(vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2)), Value::Integer(Integer::from(3))]);
+        let list = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
         assert_eq!(format!("{}", list), "{1, 2, 3}");
     }
 
@@ -620,8 +700,12 @@ impl fmt::Display for Value {
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
             Value::Module { name, exports } => {
-                write!(f, "Module[{}, {{{}}}]", name,
-                    exports.keys().cloned().collect::<Vec<_>>().join(", "))
+                write!(
+                    f,
+                    "Module[{}, {{{}}}]",
+                    name,
+                    exports.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
             }
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),

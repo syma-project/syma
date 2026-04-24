@@ -1,12 +1,11 @@
+use std::cell::RefCell;
 /// Environment (scope) for variable bindings.
 ///
 /// Supports nested scopes with lexical scoping rules.
 /// Variables are looked up from innermost to outermost scope.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use crate::value::Value;
 

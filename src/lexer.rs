@@ -6,8 +6,19 @@
 /// - String literals with escape sequences
 /// - Numeric literals (integer, real, complex)
 /// - Symbols and keywords
-
 use std::fmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub line: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -23,56 +34,57 @@ pub enum Token {
     Ident(String),
 
     // ── Delimiters ──
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    LBrace,     // {
-    RBrace,     // }
-    LAssoc,     // <|
-    RAssoc,     // |>
-    LDoubleBracket,  // [[
-    RDoubleBracket,  // ]]
+    LParen,         // (
+    RParen,         // )
+    LBracket,       // [
+    RBracket,       // ]
+    LBrace,         // {
+    RBrace,         // }
+    LAssoc,         // <|
+    RAssoc,         // |>
+    LDoubleBracket, // [[
+    RDoubleBracket, // ]]
 
     // ── Operators ──
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
-    Caret,      // ^
-    Dot,        // .
-    Comma,      // ,
-    Semicolon,  // ;
-    Colon,      // :
+    Plus,      // +
+    Minus,     // -
+    Star,      // *
+    Slash,     // /
+    Caret,     // ^
+    Dot,       // .
+    Comma,     // ,
+    Semicolon, // ;
+    Colon,     // :
 
     // ── Multi-char operators ──
-    Assign,         // =
-    DelayedAssign,  // :=
-    Rule,           // ->
-    DelayedRule,    // :>
-    ReplaceAll,     // /.
-    ReplaceRepeated,// /.
-    MapOp,          // /@
-    ApplyOp,        // @@
-    At,             // @
-    Pipe,           // //
-    Equal,          // ==
-    Unequal,        // !=
-    Less,           // <
-    Greater,        // >
-    LessEqual,      // <=
-    GreaterEqual,   // >=
-    And,            // &&
-    Or,             // ||
-    Not,            // !
-    FatArrow,       // =>
+    Assign,          // =
+    DelayedAssign,   // :=
+    Rule,            // ->
+    DelayedRule,     // :>
+    ReplaceAll,      // /.
+    ReplaceRepeated, // /.
+    MapOp,           // /@
+    ApplyOp,         // @@
+    At,              // @
+    Pipe,            // //
+    Equal,           // ==
+    Unequal,         // !=
+    Less,            // <
+    Greater,         // >
+    LessEqual,       // <=
+    GreaterEqual,    // >=
+    And,             // &&
+    Or,              // ||
+    Not,             // !
+    FatArrow,        // =>
     #[allow(dead_code)]
-    StringJoinOp,   // <>
+    StringJoinOp, // <>
 
     // ── Special ──
-    Quote,      // ' (quote)
-    Tilde,      // ~ (splice)
-    Slot,       // #
+    Quote,        // ' (quote)
+    Tilde,        // ~ (splice)
+    QuestionMark, // ?
+    Slot,         // #
     SlotN(usize), // #1, #2, ...
 
     // ── Keywords ──
@@ -166,6 +178,7 @@ impl fmt::Display for Token {
             Token::StringJoinOp => write!(f, "<>"),
             Token::Quote => write!(f, "'"),
             Token::Tilde => write!(f, "~"),
+            Token::QuestionMark => write!(f, "?"),
             Token::Slot => write!(f, "#"),
             Token::SlotN(n) => write!(f, "#{}", n),
             Token::If => write!(f, "If"),
@@ -206,21 +219,25 @@ impl fmt::Display for Token {
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
-    tokens: Vec<Token>,
+    tokens: Vec<SpannedToken>,
     /// Tracks nesting depth of [[ ... ]] Part-access brackets.
     /// Only emit RDoubleBracket when depth > 0; otherwise ]] is two RBracket tokens.
     double_bracket_depth: usize,
+    line: usize,
+    col: usize,
 }
 
 #[derive(Debug)]
 pub struct LexError {
     pub message: String,
     pub pos: usize,
+    pub line: usize,
+    pub col: usize,
 }
 
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Lex error at position {}: {}", self.pos, self.message)
+        write!(f, "{}:{}: {}", self.line, self.col, self.message)
     }
 }
 
@@ -231,6 +248,8 @@ impl Lexer {
             pos: 0,
             tokens: Vec::new(),
             double_bracket_depth: 0,
+            line: 1,
+            col: 1,
         }
     }
 
@@ -244,8 +263,14 @@ impl Lexer {
 
     fn advance(&mut self) -> Option<char> {
         let ch = self.input.get(self.pos).copied();
-        if ch.is_some() {
+        if let Some(c) = ch {
             self.pos += 1;
+            if c == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
         }
         ch
     }
@@ -277,6 +302,8 @@ impl Lexer {
                     return Err(LexError {
                         message: "Unterminated comment".to_string(),
                         pos: self.pos,
+                        line: self.line,
+                        col: self.col,
                     });
                 }
                 _ => {}
@@ -290,30 +317,32 @@ impl Lexer {
         loop {
             match self.advance() {
                 Some('"') => return Ok(s),
-                Some('\\') => {
-                    match self.advance() {
-                        Some('n') => s.push('\n'),
-                        Some('t') => s.push('\t'),
-                        Some('r') => s.push('\r'),
-                        Some('\\') => s.push('\\'),
-                        Some('"') => s.push('"'),
-                        Some(c) => {
-                            s.push('\\');
-                            s.push(c);
-                        }
-                        None => {
-                            return Err(LexError {
-                                message: "Unterminated string escape".to_string(),
-                                pos: self.pos,
-                            });
-                        }
+                Some('\\') => match self.advance() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('r') => s.push('\r'),
+                    Some('\\') => s.push('\\'),
+                    Some('"') => s.push('"'),
+                    Some(c) => {
+                        s.push('\\');
+                        s.push(c);
                     }
-                }
+                    None => {
+                        return Err(LexError {
+                            message: "Unterminated string escape".to_string(),
+                            pos: self.pos,
+                            line: self.line,
+                            col: self.col,
+                        });
+                    }
+                },
                 Some(c) => s.push(c),
                 None => {
                     return Err(LexError {
                         message: "Unterminated string literal".to_string(),
                         pos: self.pos,
+                        line: self.line,
+                        col: self.col,
                     });
                 }
             }
@@ -434,17 +463,38 @@ impl Lexer {
         }
     }
 
-    pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
+    pub fn tokenize(&mut self) -> Result<Vec<SpannedToken>, LexError> {
         loop {
             self.skip_whitespace();
 
             let ch = match self.peek() {
                 Some(c) => c,
                 None => {
-                    self.tokens.push(Token::Eof);
+                    self.tokens.push(SpannedToken {
+                        token: Token::Eof,
+                        span: Span {
+                            line: self.line,
+                            col: self.col,
+                        },
+                    });
                     return Ok(self.tokens.clone());
                 }
             };
+
+            let start_line = self.line;
+            let start_col = self.col;
+
+            macro_rules! push {
+                ($tok:expr) => {
+                    self.tokens.push(SpannedToken {
+                        token: $tok,
+                        span: Span {
+                            line: start_line,
+                            col: start_col,
+                        },
+                    })
+                };
+            }
 
             match ch {
                 // Comments: (* ... *)
@@ -458,7 +508,7 @@ impl Lexer {
                 '0'..='9' => {
                     self.advance();
                     let token = self.read_number(ch);
-                    self.tokens.push(token);
+                    push!(token);
                 }
 
                 // Identifiers and keywords
@@ -466,27 +516,33 @@ impl Lexer {
                     self.advance();
                     let ident = self.read_ident(ch);
                     let token = Self::keyword_or_ident(&ident);
-                    self.tokens.push(token);
+                    push!(token);
                 }
 
                 // Strings
                 '"' => {
                     self.advance();
                     let s = self.read_string()?;
-                    self.tokens.push(Token::Str(s));
+                    push!(Token::Str(s));
                 }
 
                 // Single-char tokens
-                '(' => { self.advance(); self.tokens.push(Token::LParen); }
-                ')' => { self.advance(); self.tokens.push(Token::RParen); }
+                '(' => {
+                    self.advance();
+                    push!(Token::LParen);
+                }
+                ')' => {
+                    self.advance();
+                    push!(Token::RParen);
+                }
                 '[' => {
                     self.advance();
                     if self.peek() == Some('[') {
                         self.advance();
                         self.double_bracket_depth += 1;
-                        self.tokens.push(Token::LDoubleBracket);
+                        push!(Token::LDoubleBracket);
                     } else {
-                        self.tokens.push(Token::LBracket);
+                        push!(Token::LBracket);
                     }
                 }
                 ']' => {
@@ -494,23 +550,48 @@ impl Lexer {
                     if self.peek() == Some(']') && self.double_bracket_depth > 0 {
                         self.advance();
                         self.double_bracket_depth -= 1;
-                        self.tokens.push(Token::RDoubleBracket);
+                        push!(Token::RDoubleBracket);
                     } else {
-                        self.tokens.push(Token::RBracket);
+                        push!(Token::RBracket);
                     }
                 }
-                '{' => { self.advance(); self.tokens.push(Token::LBrace); }
-                '}' => { self.advance(); self.tokens.push(Token::RBrace); }
-                ',' => { self.advance(); self.tokens.push(Token::Comma); }
-                ';' => { self.advance(); self.tokens.push(Token::Semicolon); }
-                '^' => { self.advance(); self.tokens.push(Token::Caret); }
-                '\'' => { self.advance(); self.tokens.push(Token::Quote); }
-                '~' => { self.advance(); self.tokens.push(Token::Tilde); }
+                '{' => {
+                    self.advance();
+                    push!(Token::LBrace);
+                }
+                '}' => {
+                    self.advance();
+                    push!(Token::RBrace);
+                }
+                ',' => {
+                    self.advance();
+                    push!(Token::Comma);
+                }
+                ';' => {
+                    self.advance();
+                    push!(Token::Semicolon);
+                }
+                '^' => {
+                    self.advance();
+                    push!(Token::Caret);
+                }
+                '\'' => {
+                    self.advance();
+                    push!(Token::Quote);
+                }
+                '~' => {
+                    self.advance();
+                    push!(Token::Tilde);
+                }
+                '?' => {
+                    self.advance();
+                    push!(Token::QuestionMark);
+                }
 
                 // Dot: member access or decimal
                 '.' => {
                     self.advance();
-                    self.tokens.push(Token::Dot);
+                    push!(Token::Dot);
                 }
 
                 // Slot: # or #N
@@ -528,12 +609,12 @@ impl Lexer {
                                 }
                             }
                             let n: usize = num_str.parse().unwrap_or(1);
-                            self.tokens.push(Token::SlotN(n));
+                            push!(Token::SlotN(n));
                         } else {
-                            self.tokens.push(Token::Slot);
+                            push!(Token::Slot);
                         }
                     } else {
-                        self.tokens.push(Token::Slot);
+                        push!(Token::Slot);
                     }
                 }
 
@@ -543,27 +624,27 @@ impl Lexer {
                     match self.peek() {
                         Some('.') => {
                             self.advance();
-                            self.tokens.push(Token::ReplaceAll);
+                            push!(Token::ReplaceAll);
                         }
                         Some('/') => {
                             self.advance();
                             if self.peek() == Some('.') {
                                 self.advance();
-                                self.tokens.push(Token::ReplaceRepeated);
+                                push!(Token::ReplaceRepeated);
                             } else {
-                                self.tokens.push(Token::Pipe);
+                                push!(Token::Pipe);
                             }
                         }
                         Some('@') => {
                             self.advance();
-                            self.tokens.push(Token::MapOp);
+                            push!(Token::MapOp);
                         }
                         Some(';') => {
                             self.advance();
-                            self.tokens.push(Token::ColonSlashSemicolon);
+                            push!(Token::ColonSlashSemicolon);
                         }
                         _ => {
-                            self.tokens.push(Token::Slash);
+                            push!(Token::Slash);
                         }
                     }
                 }
@@ -574,14 +655,14 @@ impl Lexer {
                     match self.peek() {
                         Some('=') => {
                             self.advance();
-                            self.tokens.push(Token::DelayedAssign);
+                            push!(Token::DelayedAssign);
                         }
                         Some('>') => {
                             self.advance();
-                            self.tokens.push(Token::DelayedRule);
+                            push!(Token::DelayedRule);
                         }
                         _ => {
-                            self.tokens.push(Token::Colon);
+                            push!(Token::Colon);
                         }
                     }
                 }
@@ -591,9 +672,9 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('>') {
                         self.advance();
-                        self.tokens.push(Token::Rule);
+                        push!(Token::Rule);
                     } else {
-                        self.tokens.push(Token::Minus);
+                        push!(Token::Minus);
                     }
                 }
 
@@ -602,12 +683,12 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        self.tokens.push(Token::Equal);
+                        push!(Token::Equal);
                     } else if self.peek() == Some('>') {
                         self.advance();
-                        self.tokens.push(Token::FatArrow);
+                        push!(Token::FatArrow);
                     } else {
-                        self.tokens.push(Token::Assign);
+                        push!(Token::Assign);
                     }
                 }
 
@@ -616,9 +697,9 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        self.tokens.push(Token::Unequal);
+                        push!(Token::Unequal);
                     } else {
-                        self.tokens.push(Token::Not);
+                        push!(Token::Not);
                     }
                 }
 
@@ -627,15 +708,15 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        self.tokens.push(Token::LessEqual);
+                        push!(Token::LessEqual);
                     } else if self.peek() == Some('|') {
                         self.advance();
-                        self.tokens.push(Token::LAssoc);
+                        push!(Token::LAssoc);
                     } else if self.peek() == Some('>') {
                         self.advance();
-                        self.tokens.push(Token::StringJoinOp);
+                        push!(Token::StringJoinOp);
                     } else {
-                        self.tokens.push(Token::Less);
+                        push!(Token::Less);
                     }
                 }
 
@@ -644,9 +725,9 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        self.tokens.push(Token::GreaterEqual);
+                        push!(Token::GreaterEqual);
                     } else {
-                        self.tokens.push(Token::Greater);
+                        push!(Token::Greater);
                     }
                 }
 
@@ -655,11 +736,11 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('&') {
                         self.advance();
-                        self.tokens.push(Token::And);
+                        push!(Token::And);
                     } else {
                         // & is used in pure functions — treat as a special token
                         // For now, just push as a symbol
-                        self.tokens.push(Token::Ident("&".to_string()));
+                        push!(Token::Ident("&".to_string()));
                     }
                 }
 
@@ -668,13 +749,13 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('|') {
                         self.advance();
-                        self.tokens.push(Token::Or);
+                        push!(Token::Or);
                     } else if self.peek() == Some('>') {
                         self.advance();
-                        self.tokens.push(Token::RAssoc);
+                        push!(Token::RAssoc);
                     } else {
                         // | in pattern alternatives
-                        self.tokens.push(Token::Ident("|".to_string()));
+                        push!(Token::Ident("|".to_string()));
                     }
                 }
 
@@ -684,7 +765,7 @@ impl Lexer {
                     // Check for @@
                     if self.peek() == Some('@') {
                         self.advance();
-                        self.tokens.push(Token::ApplyOp);
+                        push!(Token::ApplyOp);
                     } else {
                         // Check for @transform
                         let save_pos = self.pos;
@@ -699,25 +780,33 @@ impl Lexer {
                             }
                         }
                         if ident == "transform" {
-                            self.tokens.push(Token::AtTransform);
+                            push!(Token::AtTransform);
                         } else {
                             // Not @transform, restore and push @
                             self.pos = save_pos;
-                            self.tokens.push(Token::At);
+                            push!(Token::At);
                         }
                     }
                 }
 
                 // + operator
-                '+' => { self.advance(); self.tokens.push(Token::Plus); }
+                '+' => {
+                    self.advance();
+                    push!(Token::Plus);
+                }
 
                 // * operator
-                '*' => { self.advance(); self.tokens.push(Token::Star); }
+                '*' => {
+                    self.advance();
+                    push!(Token::Star);
+                }
 
                 _ => {
                     return Err(LexError {
                         message: format!("Unexpected character: '{}'", ch),
                         pos: self.pos,
+                        line: self.line,
+                        col: self.col,
                     });
                 }
             }
@@ -726,7 +815,7 @@ impl Lexer {
 }
 
 /// Convenience function to tokenize a string.
-pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
+pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, LexError> {
     Lexer::new(input).tokenize()
 }
 
@@ -734,306 +823,377 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
 mod tests {
     use super::*;
 
+    fn tokens(input: &str) -> Vec<Token> {
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect()
+    }
+
     #[test]
     fn test_simple_expression() {
-        let tokens = tokenize("f[x, 1]").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("f".to_string()),
-            Token::LBracket,
-            Token::Ident("x".to_string()),
-            Token::Comma,
-            Token::Integer("1".to_string()),
-            Token::RBracket,
-            Token::Eof,
-        ]);
+        let tokens = tokens("f[x, 1]");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("f".to_string()),
+                Token::LBracket,
+                Token::Ident("x".to_string()),
+                Token::Comma,
+                Token::Integer("1".to_string()),
+                Token::RBracket,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_operators() {
-        let tokens = tokenize("a + b * c").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("a".to_string()),
-            Token::Plus,
-            Token::Ident("b".to_string()),
-            Token::Star,
-            Token::Ident("c".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("a + b * c");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Plus,
+                Token::Ident("b".to_string()),
+                Token::Star,
+                Token::Ident("c".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_rule_operators() {
-        let tokens = tokenize("a /. rules").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("a".to_string()),
-            Token::ReplaceAll,
-            Token::Ident("rules".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("a /. rules");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::ReplaceAll,
+                Token::Ident("rules".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_string() {
-        let tokens = tokenize("\"hello world\"").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Str("hello world".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("\"hello world\"");
+        assert_eq!(
+            tokens,
+            vec![Token::Str("hello world".to_string()), Token::Eof,]
+        );
     }
 
     #[test]
     fn test_comment() {
-        let tokens = tokenize("x (* comment *) y").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("x".to_string()),
-            Token::Ident("y".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("x (* comment *) y");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Ident("y".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_slot() {
-        let tokens = tokenize("# + #1 + #2").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Slot,
-            Token::Plus,
-            Token::SlotN(1),
-            Token::Plus,
-            Token::SlotN(2),
-            Token::Eof,
-        ]);
+        let tokens = tokens("# + #1 + #2");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Slot,
+                Token::Plus,
+                Token::SlotN(1),
+                Token::Plus,
+                Token::SlotN(2),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_keywords() {
-        let tokens = tokenize("If True False Null").unwrap();
-        assert_eq!(tokens, vec![
-            Token::If,
-            Token::True,
-            Token::False,
-            Token::Null,
-            Token::Eof,
-        ]);
+        let tokens = tokens("If True False Null");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::If,
+                Token::True,
+                Token::False,
+                Token::Null,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_more_keywords() {
-        let tokens = tokenize("For While Do Which Switch Function").unwrap();
-        assert_eq!(tokens, vec![
-            Token::For,
-            Token::While,
-            Token::Do,
-            Token::Which,
-            Token::Switch,
-            Token::Function,
-            Token::Eof,
-        ]);
+        let tokens = tokens("For While Do Which Switch Function");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::For,
+                Token::While,
+                Token::Do,
+                Token::Which,
+                Token::Switch,
+                Token::Function,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_delayed_assign() {
-        let tokens = tokenize("f[x_] := x^2").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("f".to_string()),
-            Token::LBracket,
-            Token::Ident("x_".to_string()),
-            Token::RBracket,
-            Token::DelayedAssign,
-            Token::Ident("x".to_string()),
-            Token::Caret,
-            Token::Integer("2".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("f[x_] := x^2");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("f".to_string()),
+                Token::LBracket,
+                Token::Ident("x_".to_string()),
+                Token::RBracket,
+                Token::DelayedAssign,
+                Token::Ident("x".to_string()),
+                Token::Caret,
+                Token::Integer("2".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_delayed_rule() {
-        let tokens = tokenize("x :> y").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("x".to_string()),
-            Token::DelayedRule,
-            Token::Ident("y".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("x :> y");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::DelayedRule,
+                Token::Ident("y".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_replace_repeated() {
-        let tokens = tokenize("x //. rules").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("x".to_string()),
-            Token::ReplaceRepeated,
-            Token::Ident("rules".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("x //. rules");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::ReplaceRepeated,
+                Token::Ident("rules".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_map_apply() {
-        let tokens = tokenize("f /@ list").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("f".to_string()),
-            Token::MapOp,
-            Token::Ident("list".to_string()),
-            Token::Eof,
-        ]);
+        let toks = tokens("f /@ list");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("f".to_string()),
+                Token::MapOp,
+                Token::Ident("list".to_string()),
+                Token::Eof,
+            ]
+        );
 
-        let tokens = tokenize("f @@ args").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("f".to_string()),
-            Token::ApplyOp,
-            Token::Ident("args".to_string()),
-            Token::Eof,
-        ]);
+        let toks = tokens("f @@ args");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("f".to_string()),
+                Token::ApplyOp,
+                Token::Ident("args".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_comparison_ops() {
-        let tokens = tokenize("a == b != c <= d >= e < f > g").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("a".to_string()),
-            Token::Equal,
-            Token::Ident("b".to_string()),
-            Token::Unequal,
-            Token::Ident("c".to_string()),
-            Token::LessEqual,
-            Token::Ident("d".to_string()),
-            Token::GreaterEqual,
-            Token::Ident("e".to_string()),
-            Token::Less,
-            Token::Ident("f".to_string()),
-            Token::Greater,
-            Token::Ident("g".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("a == b != c <= d >= e < f > g");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Equal,
+                Token::Ident("b".to_string()),
+                Token::Unequal,
+                Token::Ident("c".to_string()),
+                Token::LessEqual,
+                Token::Ident("d".to_string()),
+                Token::GreaterEqual,
+                Token::Ident("e".to_string()),
+                Token::Less,
+                Token::Ident("f".to_string()),
+                Token::Greater,
+                Token::Ident("g".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_logical_ops() {
-        let tokens = tokenize("a && b || !c").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("a".to_string()),
-            Token::And,
-            Token::Ident("b".to_string()),
-            Token::Or,
-            Token::Not,
-            Token::Ident("c".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("a && b || !c");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::And,
+                Token::Ident("b".to_string()),
+                Token::Or,
+                Token::Not,
+                Token::Ident("c".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_assoc_delimiters() {
-        let tokens = tokenize("<| \"a\" -> 1 |>").unwrap();
-        assert_eq!(tokens, vec![
-            Token::LAssoc,
-            Token::Str("a".to_string()),
-            Token::Rule,
-            Token::Integer("1".to_string()),
-            Token::RAssoc,
-            Token::Eof,
-        ]);
+        let tokens = tokens("<| \"a\" -> 1 |>");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LAssoc,
+                Token::Str("a".to_string()),
+                Token::Rule,
+                Token::Integer("1".to_string()),
+                Token::RAssoc,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_string_join_op() {
-        let tokens = tokenize("\"a\" <> \"b\"").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Str("a".to_string()),
-            Token::StringJoinOp,
-            Token::Str("b".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("\"a\" <> \"b\"");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Str("a".to_string()),
+                Token::StringJoinOp,
+                Token::Str("b".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_double_brackets() {
-        let tokens = tokenize("list[[1]]").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("list".to_string()),
-            Token::LDoubleBracket,
-            Token::Integer("1".to_string()),
-            Token::RDoubleBracket,
-            Token::Eof,
-        ]);
+        let tokens = tokens("list[[1]]");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("list".to_string()),
+                Token::LDoubleBracket,
+                Token::Integer("1".to_string()),
+                Token::RDoubleBracket,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_real_number() {
-        let tokens = tokenize("3.14").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Real("3.14".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("3.14");
+        assert_eq!(tokens, vec![Token::Real("3.14".to_string()), Token::Eof,]);
     }
 
     #[test]
     fn test_nested_comments() {
-        let tokens = tokenize("a (* outer (* inner *) *) b").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("a".to_string()),
-            Token::Ident("b".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("a (* outer (* inner *) *) b");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Ident("b".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_string_escape() {
-        let tokens = tokenize(r#""hello\nworld""#).unwrap();
-        assert_eq!(tokens, vec![
-            Token::Str("hello\nworld".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens(r#""hello\nworld""#);
+        assert_eq!(
+            tokens,
+            vec![Token::Str("hello\nworld".to_string()), Token::Eof,]
+        );
     }
 
     #[test]
     fn test_fat_arrow() {
-        let tokens = tokenize("x => y").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("x".to_string()),
-            Token::FatArrow,
-            Token::Ident("y".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("x => y");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::FatArrow,
+                Token::Ident("y".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_guard() {
-        let tokens = tokenize("x_ /; x > 0").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Ident("x_".to_string()),
-            Token::ColonSlashSemicolon,
-            Token::Ident("x".to_string()),
-            Token::Greater,
-            Token::Integer("0".to_string()),
-            Token::Eof,
-        ]);
+        let tokens = tokens("x_ /; x > 0");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x_".to_string()),
+                Token::ColonSlashSemicolon,
+                Token::Ident("x".to_string()),
+                Token::Greater,
+                Token::Integer("0".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_class_keywords() {
-        let tokens = tokenize("class Foo extends Bar with Baz").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Class,
-            Token::Ident("Foo".to_string()),
-            Token::Extends,
-            Token::Ident("Bar".to_string()),
-            Token::With,
-            Token::Ident("Baz".to_string()),
-            Token::Eof,
-        ]);
+        let toks = tokens("class Foo extends Bar with Baz");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Class,
+                Token::Ident("Foo".to_string()),
+                Token::Extends,
+                Token::Ident("Bar".to_string()),
+                Token::With,
+                Token::Ident("Baz".to_string()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_module_import_export() {
-        let tokens = tokenize("module import export as").unwrap();
-        assert_eq!(tokens, vec![
-            Token::Module,
-            Token::Import,
-            Token::Export,
-            Token::As,
-            Token::Eof,
-        ]);
+        let toks = tokens("module import export as");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Module,
+                Token::Import,
+                Token::Export,
+                Token::As,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -1050,13 +1210,13 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let tokens = tokenize("").unwrap();
-        assert_eq!(tokens, vec![Token::Eof]);
+        let toks = tokens("");
+        assert_eq!(toks, vec![Token::Eof]);
     }
 
     #[test]
     fn test_whitespace_only() {
-        let tokens = tokenize("   \t\n  ").unwrap();
-        assert_eq!(tokens, vec![Token::Eof]);
+        let toks = tokens("   \t\n  ");
+        assert_eq!(toks, vec![Token::Eof]);
     }
 }

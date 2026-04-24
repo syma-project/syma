@@ -9,7 +9,6 @@
 /// - Compound patterns: x_^n_, a_ + b_
 /// - Guards: pattern /; condition
 /// - Alternatives: (pat1 | pat2)
-
 use std::collections::HashMap;
 
 use rug::Float;
@@ -47,7 +46,10 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             }
         }
 
-        Expr::NamedBlank { name, type_constraint } => {
+        Expr::NamedBlank {
+            name,
+            type_constraint,
+        } => {
             if let Some(tc) = type_constraint {
                 if value.matches_type(tc) {
                     let mut bindings = HashMap::new();
@@ -156,7 +158,10 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
         }
 
         // ── Guard pattern: pattern /; condition ──
-        Expr::PatternGuard { pattern, condition: _ } => {
+        Expr::PatternGuard {
+            pattern,
+            condition: _,
+        } => {
             // For now, just match the inner pattern.
             // Guard evaluation requires the evaluator, so it's handled
             // in the evaluator's dispatch logic.
@@ -198,7 +203,12 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
 
         // ── Rule patterns ──
         Expr::Rule { lhs, rhs } => {
-            if let Value::Rule { lhs: vl, rhs: vr, delayed } = value {
+            if let Value::Rule {
+                lhs: vl,
+                rhs: vr,
+                delayed,
+            } = value
+            {
                 if !delayed {
                     let left_match = match_pattern(lhs, vl);
                     if let MatchResult::Match(mut bindings) = left_match {
@@ -215,7 +225,12 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
         }
 
         Expr::RuleDelayed { lhs, rhs } => {
-            if let Value::Rule { lhs: vl, rhs: vr, delayed } = value {
+            if let Value::Rule {
+                lhs: vl,
+                rhs: vr,
+                delayed,
+            } = value
+            {
                 if *delayed {
                     let left_match = match_pattern(lhs, vl);
                     if let MatchResult::Match(mut bindings) = left_match {
@@ -246,7 +261,10 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
     while pat_idx < patterns.len() && val_idx < items.len() {
         match &patterns[pat_idx] {
             // Sequence blank: matches 1+ remaining elements
-            Expr::BlankSequence { name, type_constraint: _ } => {
+            Expr::BlankSequence {
+                name,
+                type_constraint: _,
+            } => {
                 let remaining = items.len() - val_idx;
                 if remaining == 0 {
                     return MatchResult::NoMatch; // __ needs at least 1
@@ -262,7 +280,10 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
             }
 
             // Optional sequence blank: matches 0+ remaining elements
-            Expr::BlankNullSequence { name, type_constraint: _ } => {
+            Expr::BlankNullSequence {
+                name,
+                type_constraint: _,
+            } => {
                 let seq = Value::List(items[val_idx..].to_vec());
                 if let Some(n) = name {
                     bindings.insert(n.clone(), seq);
@@ -299,7 +320,10 @@ fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
 /// Match a call pattern (e.g., f[x_, y_]) against a value.
 fn match_call_pattern(head: &Expr, args: &[Expr], value: &Value) -> MatchResult {
     match value {
-        Value::Call { head: vhead, args: vargs } => {
+        Value::Call {
+            head: vhead,
+            args: vargs,
+        } => {
             // Match head
             let head_match = match head {
                 Expr::Symbol(s) => {
@@ -374,14 +398,20 @@ fn substitute(expr: &Expr, bindings: &Bindings) -> Value {
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Str(s) => Value::Str(s.clone()),
         Expr::Null => Value::Null,
-        Expr::List(items) => {
-            Value::List(items.iter().map(|item| substitute(item, bindings)).collect())
-        }
+        Expr::List(items) => Value::List(
+            items
+                .iter()
+                .map(|item| substitute(item, bindings))
+                .collect(),
+        ),
         Expr::Call { head, args } => {
             let h = substitute(head, bindings);
             let a: Vec<Value> = args.iter().map(|arg| substitute(arg, bindings)).collect();
             match h {
-                Value::Symbol(name) => Value::Call { head: name, args: a },
+                Value::Symbol(name) => Value::Call {
+                    head: name,
+                    args: a,
+                },
                 _ => Value::Call {
                     head: h.to_string(),
                     args: a,
@@ -401,17 +431,28 @@ mod tests {
     fn test_match_integer() {
         let pattern = Expr::Integer(Integer::from(42));
         let value = Value::Integer(Integer::from(42));
-        assert!(matches!(match_pattern(&pattern, &value), MatchResult::Match(_)));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::Match(_)
+        ));
 
         let value = Value::Integer(Integer::from(43));
-        assert!(matches!(match_pattern(&pattern, &value), MatchResult::NoMatch));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::NoMatch
+        ));
     }
 
     #[test]
     fn test_match_blank() {
-        let pattern = Expr::Blank { type_constraint: None };
+        let pattern = Expr::Blank {
+            type_constraint: None,
+        };
         let value = Value::Integer(Integer::from(42));
-        assert!(matches!(match_pattern(&pattern, &value), MatchResult::Match(_)));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::Match(_)
+        ));
     }
 
     #[test]
@@ -436,19 +477,34 @@ mod tests {
         };
 
         let value = Value::Integer(Integer::from(42));
-        assert!(matches!(match_pattern(&pattern, &value), MatchResult::Match(_)));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::Match(_)
+        ));
 
         let value = Value::Str("hello".to_string());
-        assert!(matches!(match_pattern(&pattern, &value), MatchResult::NoMatch));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::NoMatch
+        ));
     }
 
     #[test]
     fn test_match_list() {
         let pattern = Expr::List(vec![
-            Expr::NamedBlank { name: "a".to_string(), type_constraint: None },
-            Expr::NamedBlank { name: "b".to_string(), type_constraint: None },
+            Expr::NamedBlank {
+                name: "a".to_string(),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
         ]);
-        let value = Value::List(vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2))]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+        ]);
         if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
             assert_eq!(bindings.get("a"), Some(&Value::Integer(Integer::from(1))));
             assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(2))));
@@ -461,9 +517,10 @@ mod tests {
     fn test_match_call() {
         let pattern = Expr::Call {
             head: Box::new(Expr::Symbol("f".to_string())),
-            args: vec![
-                Expr::NamedBlank { name: "x".to_string(), type_constraint: None },
-            ],
+            args: vec![Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
         };
         let value = Value::Call {
             head: "f".to_string(),

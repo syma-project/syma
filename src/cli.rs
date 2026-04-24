@@ -1,16 +1,25 @@
 /// Package management subcommands — `syma new`, `syma run`, `syma test`, etc.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{self, Manifest};
 
 // ── ANSI helpers (local copies — keeps cli.rs self-contained) ─────────────────
-fn green(s: &str) -> String   { format!("\x1b[32m{}\x1b[0m", s) }
-fn red(s: &str) -> String     { format!("\x1b[31m{}\x1b[0m", s) }
-fn cyan(s: &str) -> String    { format!("\x1b[36m{}\x1b[0m", s) }
-fn bold(s: &str) -> String    { format!("\x1b[1m{}\x1b[0m", s) }
-fn dim(s: &str) -> String     { format!("\x1b[2m{}\x1b[0m", s) }
+fn green(s: &str) -> String {
+    format!("\x1b[32m{}\x1b[0m", s)
+}
+fn red(s: &str) -> String {
+    format!("\x1b[31m{}\x1b[0m", s)
+}
+fn cyan(s: &str) -> String {
+    format!("\x1b[36m{}\x1b[0m", s)
+}
+fn bold(s: &str) -> String {
+    format!("\x1b[1m{}\x1b[0m", s)
+}
+fn dim(s: &str) -> String {
+    format!("\x1b[2m{}\x1b[0m", s)
+}
 
 // ── syma new ──────────────────────────────────────────────────────────────────
 
@@ -31,7 +40,11 @@ pub fn cmd_new(name: &str, is_lib: bool) {
     fs::create_dir_all(root.join("examples")).unwrap();
 
     // syma.toml
-    let entry_rel = if is_lib { "src/lib.syma" } else { "src/main.syma" };
+    let entry_rel = if is_lib {
+        "src/lib.syma"
+    } else {
+        "src/main.syma"
+    };
     let toml = format!(
         "[package]\n\
          name        = \"{name}\"\n\
@@ -40,8 +53,12 @@ pub fn cmd_new(name: &str, is_lib: bool) {
          {entry_line}\n\
          \n\
          [dependencies]\n",
-        name       = name,
-        entry_line = if is_lib { String::new() } else { format!("entry       = \"{}\"", entry_rel) },
+        name = name,
+        entry_line = if is_lib {
+            String::new()
+        } else {
+            format!("entry       = \"{}\"", entry_rel)
+        },
     );
     fs::write(root.join("syma.toml"), toml).unwrap();
 
@@ -65,16 +82,27 @@ pub fn cmd_new(name: &str, is_lib: bool) {
     } else {
         (
             "main.syma",
-            format!("(* {name} — main entry point *)\n\nPrint[\"Hello from {name}!\"]\n", name = name),
+            format!(
+                "(* {name} — main entry point *)\n\nPrint[\"Hello from {name}!\"]\n",
+                name = name
+            ),
         )
     };
     fs::write(src_dir.join(entry_file), entry_src).unwrap();
 
-    println!("{} {} `{}`", green("Created"), if is_lib { "library" } else { "binary" }, bold(name));
+    println!(
+        "{} {} `{}`",
+        green("Created"),
+        if is_lib { "library" } else { "binary" },
+        bold(name)
+    );
     println!("   {}", dim(&format!("{}/syma.toml", name)));
     println!("   {}", dim(&format!("{}/src/{}", name, entry_file)));
     println!("   {}", dim(&format!("{}/tests/", name)));
-    println!("\nRun {} to get started.", cyan(&format!("cd {} && syma run", name)));
+    println!(
+        "\nRun {} to get started.",
+        cyan(&format!("cd {} && syma run", name))
+    );
 }
 
 // ── syma run ──────────────────────────────────────────────────────────────────
@@ -123,7 +151,10 @@ pub fn cmd_test() {
         let rel = file.strip_prefix(manifest.root()).unwrap_or(file.as_path());
         print!("test {} ... ", cyan(&rel.display().to_string()));
         match run_file_silent(file) {
-            Ok(()) => { println!("{}", green("ok")); passed += 1; }
+            Ok(()) => {
+                println!("{}", green("ok"));
+                passed += 1;
+            }
             Err(e) => {
                 println!("{}", red("FAILED"));
                 for line in e.lines() {
@@ -134,8 +165,15 @@ pub fn cmd_test() {
         }
     }
 
-    let status = if failed == 0 { green("ok") } else { red("FAILED") };
-    println!("\ntest result: {}. {} passed; {} failed.", status, passed, failed);
+    let status = if failed == 0 {
+        green("ok")
+    } else {
+        red("FAILED")
+    };
+    println!(
+        "\ntest result: {}. {} passed; {} failed.",
+        status, passed, failed
+    );
     if failed > 0 {
         std::process::exit(1);
     }
@@ -164,7 +202,12 @@ fn check_or_build(building: bool) {
     }
 
     let verb = if building { "Building" } else { "Checking" };
-    println!("   {} {} v{}", dim(verb), bold(&manifest.name), manifest.version);
+    println!(
+        "   {} {} v{}",
+        dim(verb),
+        bold(&manifest.name),
+        manifest.version
+    );
 
     let files = collect_syma_files(&src_dir);
     let mut errors = 0usize;
@@ -182,12 +225,28 @@ fn check_or_build(building: bool) {
         let rel = file.strip_prefix(manifest.root()).unwrap_or(file.as_path());
         match crate::lexer::tokenize(&source) {
             Err(e) => {
-                eprintln!("{} [{}]: {}", red("lex error"), rel.display(), e);
+                eprintln!(
+                    "{}:{}:{}: error: {}",
+                    rel.display(),
+                    e.line,
+                    e.col,
+                    e.message
+                );
                 errors += 1;
             }
             Ok(tokens) => {
                 if let Err(e) = crate::parser::parse(tokens) {
-                    eprintln!("{} [{}]: {}", red("parse error"), rel.display(), e);
+                    if let Some(span) = &e.span {
+                        eprintln!(
+                            "{}:{}:{}: error: {}",
+                            rel.display(),
+                            span.line,
+                            span.col,
+                            e.message
+                        );
+                    } else {
+                        eprintln!("{}: error: {}", rel.display(), e.message);
+                    }
                     errors += 1;
                 }
             }
@@ -195,10 +254,19 @@ fn check_or_build(building: bool) {
     }
 
     if errors == 0 {
-        println!("    {} {} v{}", green("Finished"), manifest.name, manifest.version);
+        println!(
+            "    {} {} v{}",
+            green("Finished"),
+            manifest.name,
+            manifest.version
+        );
     } else {
-        eprintln!("\n{}: could not compile `{}` ({} error(s))",
-            red("error"), manifest.name, errors);
+        eprintln!(
+            "\n{}: could not compile `{}` ({} error(s))",
+            red("error"),
+            manifest.name,
+            errors
+        );
         std::process::exit(1);
     }
 }
@@ -218,9 +286,18 @@ pub fn cmd_add(spec: &str, dev: bool) {
         std::process::exit(1);
     });
 
-    let section = if dev { "dev-dependencies" } else { "dependencies" };
-    println!("{} `{}` {} to `{}`",
-        green("Added"), bold(name), dim(&format!("({})", version)), section);
+    let section = if dev {
+        "dev-dependencies"
+    } else {
+        "dependencies"
+    };
+    println!(
+        "{} `{}` {} to `{}`",
+        green("Added"),
+        bold(name),
+        dim(&format!("({})", version)),
+        section
+    );
     println!("  {}", dim("run `syma install` to download the package"));
 }
 
@@ -231,21 +308,33 @@ pub fn cmd_remove(name: &str) {
     let manifest_path = require_manifest();
 
     // Try runtime deps first, then dev-deps.
-    let removed = manifest::remove_dep(&manifest_path, name, false)
-        .unwrap_or_else(|e| { eprintln!("{}: {}", red("error"), e); std::process::exit(1); });
+    let removed = manifest::remove_dep(&manifest_path, name, false).unwrap_or_else(|e| {
+        eprintln!("{}: {}", red("error"), e);
+        std::process::exit(1);
+    });
 
     if removed {
         println!("{} `{}` from dependencies", green("Removed"), bold(name));
         return;
     }
 
-    let removed_dev = manifest::remove_dep(&manifest_path, name, true)
-        .unwrap_or_else(|e| { eprintln!("{}: {}", red("error"), e); std::process::exit(1); });
+    let removed_dev = manifest::remove_dep(&manifest_path, name, true).unwrap_or_else(|e| {
+        eprintln!("{}: {}", red("error"), e);
+        std::process::exit(1);
+    });
 
     if removed_dev {
-        println!("{} `{}` from dev-dependencies", green("Removed"), bold(name));
+        println!(
+            "{} `{}` from dev-dependencies",
+            green("Removed"),
+            bold(name)
+        );
     } else {
-        eprintln!("{}: `{}` is not listed as a dependency", red("error"), bold(name));
+        eprintln!(
+            "{}: `{}` is not listed as a dependency",
+            red("error"),
+            bold(name)
+        );
         std::process::exit(1);
     }
 }
@@ -266,20 +355,35 @@ pub fn cmd_install() {
         return;
     }
 
-    println!("   {} dependencies for `{}` v{}",
-        dim("Resolving"), manifest.name, manifest.version);
+    println!(
+        "   {} dependencies for `{}` v{}",
+        dim("Resolving"),
+        manifest.name,
+        manifest.version
+    );
 
     for (name, ver) in &manifest.dependencies {
         println!("     {} {} {}", dim("•"), bold(name), dim(ver));
     }
     for (name, ver) in &manifest.dev_dependencies {
-        println!("     {} {} {} {}", dim("•"), bold(name), dim(ver), dim("(dev)"));
+        println!(
+            "     {} {} {} {}",
+            dim("•"),
+            bold(name),
+            dim(ver),
+            dim("(dev)")
+        );
     }
 
     println!();
-    println!("  {} the package registry is not yet operational.", cyan("note:"));
-    println!("  Local {} dependencies are resolved at import time.",
-        cyan("path = \"...\""));
+    println!(
+        "  {} the package registry is not yet operational.",
+        cyan("note:")
+    );
+    println!(
+        "  Local {} dependencies are resolved at import time.",
+        cyan("path = \"...\"")
+    );
     println!("  Registry-hosted packages will be supported in a future release.");
 }
 
@@ -287,7 +391,10 @@ pub fn cmd_install() {
 
 pub fn cmd_update() {
     require_manifest();
-    println!("  {} dependency updating requires the package registry,", cyan("note:"));
+    println!(
+        "  {} dependency updating requires the package registry,",
+        cyan("note:")
+    );
     println!("  which is planned for a future release.");
     println!("  To update a local-path dependency, edit its source directly.");
 }
@@ -297,10 +404,16 @@ pub fn cmd_update() {
 pub fn cmd_publish() {
     let manifest_path = require_manifest();
     let manifest = read_manifest(&manifest_path);
-    println!("  {} publishing `{}` v{} requires the registry at",
-        cyan("note:"), bold(&manifest.name), manifest.version);
-    println!("  {}, which is planned for a future release.",
-        cyan("packages.syma-lang.org"));
+    println!(
+        "  {} publishing `{}` v{} requires the registry at",
+        cyan("note:"),
+        bold(&manifest.name),
+        manifest.version
+    );
+    println!(
+        "  {}, which is planned for a future release.",
+        cyan("packages.syma-lang.org")
+    );
 }
 
 // ── syma search ───────────────────────────────────────────────────────────────
@@ -364,8 +477,8 @@ fn collect_syma_files(dir: &Path) -> Vec<PathBuf> {
 fn run_file_silent(path: &Path) -> Result<(), String> {
     let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let tokens = crate::lexer::tokenize(&source).map_err(|e| e.to_string())?;
-    let stmts  = crate::parser::parse_with_suppress(tokens).map_err(|e| e.to_string())?;
-    let env    = crate::env::Env::new();
+    let stmts = crate::parser::parse_with_suppress(tokens).map_err(|e| e.to_string())?;
+    let env = crate::env::Env::new();
     crate::builtins::register_builtins(&env);
     if let Some(parent) = path.parent() {
         env.add_search_path(parent.to_path_buf());
@@ -391,7 +504,7 @@ fn to_pascal_case(s: &str) -> String {
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
-                None    => String::new(),
+                None => String::new(),
                 Some(f) => f.to_uppercase().to_string() + chars.as_str(),
             }
         })

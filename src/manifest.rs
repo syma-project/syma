@@ -1,5 +1,4 @@
 /// `syma.toml` manifest — reading, locating, and dependency editing.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,14 +43,18 @@ impl Manifest {
             if let Some((k, v)) = parse_kv(line) {
                 match section.as_str() {
                     "package" => match k {
-                        "name"        => name        = v.to_string(),
-                        "version"     => version     = v.to_string(),
+                        "name" => name = v.to_string(),
+                        "version" => version = v.to_string(),
                         "description" => description = v.to_string(),
-                        "entry"       => entry       = Some(v.to_string()),
+                        "entry" => entry = Some(v.to_string()),
                         _ => {}
                     },
-                    "dependencies"     => { deps.insert(k.to_string(), v.to_string()); }
-                    "dev-dependencies" => { dev_deps.insert(k.to_string(), v.to_string()); }
+                    "dependencies" => {
+                        deps.insert(k.to_string(), v.to_string());
+                    }
+                    "dev-dependencies" => {
+                        dev_deps.insert(k.to_string(), v.to_string());
+                    }
                     _ => {}
                 }
             }
@@ -108,7 +111,11 @@ impl Manifest {
 /// If the package is already listed, its version is updated in place.
 /// If the section doesn't exist yet it is appended.
 pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Result<(), String> {
-    let header  = if dev { "[dev-dependencies]" } else { "[dependencies]" };
+    let header = if dev {
+        "[dev-dependencies]"
+    } else {
+        "[dependencies]"
+    };
     let new_line = format!("{} = \"{}\"", name, version);
 
     let content = fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
@@ -119,8 +126,13 @@ pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Re
     let mut updated_idx: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t == header       { in_section = true; continue; }
-        if t.starts_with('[') { in_section = false; }
+        if t == header {
+            in_section = true;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_section = false;
+        }
         if in_section {
             if let Some(eq) = t.find('=') {
                 if t[..eq].trim() == name {
@@ -140,7 +152,10 @@ pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Re
         let mut found_section = false;
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
-            if t == header { found_section = true; continue; }
+            if t == header {
+                found_section = true;
+                continue;
+            }
             if found_section && t.starts_with('[') {
                 section_end = Some(i);
                 break;
@@ -168,7 +183,11 @@ pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Re
 ///
 /// Returns `true` if the entry was found and removed.
 pub fn remove_dep(manifest_path: &Path, name: &str, dev: bool) -> Result<bool, String> {
-    let header = if dev { "[dev-dependencies]" } else { "[dependencies]" };
+    let header = if dev {
+        "[dev-dependencies]"
+    } else {
+        "[dependencies]"
+    };
     let content = fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
 
@@ -176,8 +195,13 @@ pub fn remove_dep(manifest_path: &Path, name: &str, dev: bool) -> Result<bool, S
     let mut remove_idx: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t == header       { in_section = true; continue; }
-        if t.starts_with('[') { in_section = false; }
+        if t == header {
+            in_section = true;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_section = false;
+        }
         if in_section {
             if let Some(eq) = t.find('=') {
                 if t[..eq].trim() == name {

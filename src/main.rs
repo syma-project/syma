@@ -1,17 +1,16 @@
 /// Syma: A Symbolic-First Language with OOP Structure
 ///
 /// Phase 1: Tree-walk interpreter with REPL.
-
 mod ast;
-mod lexer;
-mod parser;
-mod value;
-mod eval;
-mod env;
-mod pattern;
 mod builtins;
-mod manifest;
 mod cli;
+mod env;
+mod eval;
+mod lexer;
+mod manifest;
+mod parser;
+mod pattern;
+mod value;
 
 use std::fs;
 
@@ -21,7 +20,10 @@ use rustyline::error::ReadlineError;
 const VERSION: &str = "0.1.0";
 
 fn print_usage() {
-    println!("Syma v{} — Symbolic-First Language with OOP Structure", VERSION);
+    println!(
+        "Syma v{} — Symbolic-First Language with OOP Structure",
+        VERSION
+    );
     println!();
     println!("Usage:");
     println!("  syma                       Start the interactive REPL");
@@ -67,11 +69,21 @@ fn print_repl_help() {
 }
 
 // ANSI color helpers
-fn green(s: &str) -> String   { format!("\x1b[32m{}\x1b[0m", s) }
-fn red(s: &str) -> String     { format!("\x1b[31m{}\x1b[0m", s) }
-fn bold_red(s: &str) -> String { format!("\x1b[1;31m{}\x1b[0m", s) }
-fn cyan(s: &str) -> String    { format!("\x1b[36m{}\x1b[0m", s) }
-fn dim(s: &str) -> String     { format!("\x1b[2m{}\x1b[0m", s) }
+fn green(s: &str) -> String {
+    format!("\x1b[32m{}\x1b[0m", s)
+}
+fn red(s: &str) -> String {
+    format!("\x1b[31m{}\x1b[0m", s)
+}
+fn bold_red(s: &str) -> String {
+    format!("\x1b[1;31m{}\x1b[0m", s)
+}
+fn cyan(s: &str) -> String {
+    format!("\x1b[36m{}\x1b[0m", s)
+}
+fn dim(s: &str) -> String {
+    format!("\x1b[2m{}\x1b[0m", s)
+}
 
 fn print_error(label: &str, message: &str, source: &str) {
     eprintln!("{}: {}", bold_red(label), message);
@@ -103,7 +115,6 @@ fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
     }
 }
 
-
 pub(crate) fn run_file(path: &str) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -126,11 +137,17 @@ pub(crate) fn run_file(path: &str) {
 
     let tokens = match lexer::tokenize(&source) {
         Ok(t) => t,
-        Err(e) => { print_error("LexError", &e.to_string(), path); std::process::exit(1); }
+        Err(e) => {
+            print_error("LexError", &e.to_string(), path);
+            std::process::exit(1);
+        }
     };
     let stmts = match parser::parse_with_suppress(tokens) {
         Ok(s) => s,
-        Err(e) => { print_error("ParseError", &e.to_string(), path); std::process::exit(1); }
+        Err(e) => {
+            print_error("ParseError", &e.to_string(), path);
+            std::process::exit(1);
+        }
     };
 
     for (stmt, suppress) in &stmts {
@@ -146,10 +163,15 @@ pub(crate) fn run_file(path: &str) {
 const HISTORY_FILE: &str = ".syma_history";
 
 fn run_repl() {
-    println!("{} — Symbolic-First Language with OOP Structure",
-        green(&format!("Syma v{}", VERSION)));
-    println!("Type {} for commands, {} to exit.\n",
-        cyan("'help'"), cyan("'quit'"));
+    println!(
+        "{} — Symbolic-First Language with OOP Structure",
+        green(&format!("Syma v{}", VERSION))
+    );
+    println!(
+        "Type {} for commands, {} to exit.\n",
+        cyan("'help'"),
+        cyan("'quit'")
+    );
 
     let env = env::Env::new();
     builtins::register_builtins(&env);
@@ -172,10 +194,7 @@ fn run_repl() {
 
     loop {
         // \x01 / \x02 bracket non-printing chars so rustyline measures width correctly
-        let prompt = format!(
-            "\x01\x1b[32m\x02In [{}]: \x01\x1b[0m\x02",
-            counter
-        );
+        let prompt = format!("\x01\x1b[32m\x02In [{}]: \x01\x1b[0m\x02", counter);
         match rl.readline(&prompt) {
             Ok(line) => {
                 let input = line.trim();
@@ -201,7 +220,18 @@ fn run_repl() {
 
                 if let Some(value) = eval_input(input, &env) {
                     if value != value::Value::Null {
-                        println!("{} {}", red(&format!("Out[{}]:", counter)), value);
+                        // Information queries display directly without Out[n]: prefix
+                        if input.starts_with('?') {
+                            let s = value.to_string();
+                            // Strip surrounding quotes from Str values for display
+                            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                                println!("{}", &s[1..s.len() - 1]);
+                            } else {
+                                println!("{}", s);
+                            }
+                        } else {
+                            println!("{} {}", red(&format!("Out[{}]:", counter)), value);
+                        }
                     }
                 }
                 counter += 1;
@@ -246,7 +276,9 @@ fn main() {
         Some("new") => {
             // syma new [--lib] <name>
             let is_lib = args.contains(&"--lib".to_string());
-            let name = args.iter().skip(2)
+            let name = args
+                .iter()
+                .skip(2)
                 .find(|a| a.as_str() != "--lib")
                 .map(|s| s.as_str())
                 .unwrap_or_else(|| {
@@ -257,10 +289,10 @@ fn main() {
         }
 
         // ── Source execution ─────────────────────────────────────────────────
-        Some("run")   => cli::cmd_run(),
+        Some("run") => cli::cmd_run(),
         Some("build") => cli::cmd_build(),
         Some("check") => cli::cmd_check(),
-        Some("test")  => cli::cmd_test(),
+        Some("test") => cli::cmd_test(),
 
         // ── Dependency management ─────────────────────────────────────────────
         Some("add") => {
@@ -279,11 +311,11 @@ fn main() {
             cli::cmd_remove(name);
         }
         Some("install") => cli::cmd_install(),
-        Some("update")  => cli::cmd_update(),
+        Some("update") => cli::cmd_update(),
 
         // ── Registry (planned) ────────────────────────────────────────────────
         Some("publish") => cli::cmd_publish(),
-        Some("search")  => {
+        Some("search") => {
             let query = args.get(2).map(|s| s.as_str()).unwrap_or("");
             cli::cmd_search(query);
         }
@@ -328,17 +360,23 @@ mod tests {
 
     #[test]
     fn test_variables() {
-        assert_eq!(eval_str("x = 5; x"), value::Value::Integer(Integer::from(5)));
+        assert_eq!(
+            eval_str("x = 5; x"),
+            value::Value::Integer(Integer::from(5))
+        );
     }
 
     #[test]
     fn test_lists() {
         let val = eval_str("{1, 2, 3}");
-        assert_eq!(val, value::Value::List(vec![
-            value::Value::Integer(Integer::from(1)),
-            value::Value::Integer(Integer::from(2)),
-            value::Value::Integer(Integer::from(3)),
-        ]));
+        assert_eq!(
+            val,
+            value::Value::List(vec![
+                value::Value::Integer(Integer::from(1)),
+                value::Value::Integer(Integer::from(2)),
+                value::Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     #[test]
@@ -349,8 +387,14 @@ mod tests {
 
     #[test]
     fn test_if() {
-        assert_eq!(eval_str("If[True, 1, 2]"), value::Value::Integer(Integer::from(1)));
-        assert_eq!(eval_str("If[False, 1, 2]"), value::Value::Integer(Integer::from(2)));
+        assert_eq!(
+            eval_str("If[True, 1, 2]"),
+            value::Value::Integer(Integer::from(1))
+        );
+        assert_eq!(
+            eval_str("If[False, 1, 2]"),
+            value::Value::Integer(Integer::from(2))
+        );
     }
 
     #[test]

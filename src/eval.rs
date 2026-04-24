@@ -6,18 +6,17 @@
 /// - Rule application (/. and //.)
 /// - Class instantiation and method dispatch
 /// - Control flow (If, Which, Switch, match, loops)
-
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rug::{Integer, Float};
 use rug::float::Constant;
 use rug::ops::Pow;
+use rug::{Float, Integer};
 
 use crate::ast::*;
 use crate::env::Env;
+use crate::pattern::{Bindings, MatchResult, match_pattern};
 use crate::value::*;
-use crate::pattern::{match_pattern, MatchResult, Bindings};
 
 /// Evaluate a program (list of statements) in the given environment.
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
@@ -40,9 +39,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Null => Ok(Value::Null),
 
         // ── Symbol lookup ──
-        Expr::Symbol(s) => {
-            Ok(env.get(s).unwrap_or_else(|| Value::Symbol(s.clone())))
-        }
+        Expr::Symbol(s) => Ok(env.get(s).unwrap_or_else(|| Value::Symbol(s.clone()))),
 
         // ── List ──
         Expr::List(items) => {
@@ -89,9 +86,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Function application ──
-        Expr::Call { head, args } => {
-            eval_call(head, args, env)
-        }
+        Expr::Call { head, args } => eval_call(head, args, env),
 
         // ── ReplaceAll: expr /. rules ──
         Expr::ReplaceAll { expr, rules } => {
@@ -158,7 +153,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── If ──
-        Expr::If { condition, then_branch, else_branch } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             let cond = eval(condition, env)?;
             if cond.to_bool() {
                 eval(then_branch, env)
@@ -221,7 +220,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── For loop ──
-        Expr::For { init, condition, step, body } => {
+        Expr::For {
+            init,
+            condition,
+            step,
+            body,
+        } => {
             let child_env = env.child();
             eval(init, &child_env)?;
             while eval(condition, &child_env)?.to_bool() {
@@ -244,16 +248,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let child_env = env.child();
             match iterator {
                 IteratorSpec::Range { var, min, max } => {
-                    let min_val = eval(min, &child_env)?.to_integer()
-                        .ok_or_else(|| EvalError::TypeError {
+                    let min_val = eval(min, &child_env)?.to_integer().ok_or_else(|| {
+                        EvalError::TypeError {
                             expected: "Integer".to_string(),
                             got: "non-Integer".to_string(),
-                        })?;
-                    let max_val = eval(max, &child_env)?.to_integer()
-                        .ok_or_else(|| EvalError::TypeError {
+                        }
+                    })?;
+                    let max_val = eval(max, &child_env)?.to_integer().ok_or_else(|| {
+                        EvalError::TypeError {
                             expected: "Integer".to_string(),
                             got: "non-Integer".to_string(),
-                        })?;
+                        }
+                    })?;
                     for i in min_val..=max_val {
                         child_env.set(var.clone(), Value::Integer(Integer::from(i)));
                         eval(body, &child_env)?;
@@ -268,10 +274,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                                 eval(body, &child_env)?;
                             }
                         }
-                        _ => return Err(EvalError::TypeError {
-                            expected: "List".to_string(),
-                            got: list_val.type_name().to_string(),
-                        }),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "List".to_string(),
+                                got: list_val.type_name().to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -279,7 +287,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Function definition ──
-        Expr::FuncDef { name, params, body, delayed } => {
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            delayed,
+        } => {
             // Check if function already exists
             let func = if let Some(Value::Function(f)) = env.get(name) {
                 Rc::try_unwrap(f).unwrap_or_else(|rc| (*rc).clone())
@@ -321,7 +334,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     if patterns.len() != items.len() {
                         return Err(EvalError::Error(format!(
                             "Destructuring mismatch: {} patterns, {} values",
-                            patterns.len(), items.len()
+                            patterns.len(),
+                            items.len()
                         )));
                     }
                     for (pat, item) in patterns.iter().zip(items.iter()) {
@@ -336,7 +350,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                                         env.set(name, value);
                                     }
                                 } else {
-                                    return Err(EvalError::Error("Destructuring pattern mismatch".to_string()));
+                                    return Err(EvalError::Error(
+                                        "Destructuring pattern mismatch".to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -352,21 +368,28 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
         // ── Rule definition ──
         Expr::RuleDef { name, rules } => {
-            let rule_pairs: Vec<(Value, Value)> = rules.iter()
-                .map(|(lhs, rhs)| {
-                    Ok((Value::Pattern(lhs.clone()), Value::Pattern(rhs.clone())))
-                })
+            let rule_pairs: Vec<(Value, Value)> = rules
+                .iter()
+                .map(|(lhs, rhs)| Ok((Value::Pattern(lhs.clone()), Value::Pattern(rhs.clone()))))
                 .collect::<Result<Vec<_>, EvalError>>()?;
 
-            env.set(name.clone(), Value::RuleSet {
-                name: name.clone(),
-                rules: rule_pairs,
-            });
+            env.set(
+                name.clone(),
+                Value::RuleSet {
+                    name: name.clone(),
+                    rules: rule_pairs,
+                },
+            );
             Ok(Value::Null)
         }
 
         // ── Class definition ──
-        Expr::ClassDef { name, parent: _, mixins: _, members: _ } => {
+        Expr::ClassDef {
+            name,
+            parent: _,
+            mixins: _,
+            members: _,
+        } => {
             // Store class name as a marker; actual instantiation is handled
             // by the evaluator when it sees a Call with this head.
             env.set(name.clone(), Value::Symbol(name.clone()));
@@ -374,7 +397,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Module definition ──
-        Expr::ModuleDef { name, exports, body } => {
+        Expr::ModuleDef {
+            name,
+            exports,
+            body,
+        } => {
             let child_env = env.child();
             for stmt in body {
                 eval(stmt, &child_env)?;
@@ -383,10 +410,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let mut export_map = HashMap::new();
             for sym in exports {
                 match child_env.get(sym) {
-                    Some(val) => { export_map.insert(sym.clone(), val); }
-                    None => return Err(EvalError::Error(
-                        format!("Module '{}' exports '{}' but it is not defined", name, sym)
-                    )),
+                    Some(val) => {
+                        export_map.insert(sym.clone(), val);
+                    }
+                    None => {
+                        return Err(EvalError::Error(format!(
+                            "Module '{}' exports '{}' but it is not defined",
+                            name, sym
+                        )));
+                    }
                 }
             }
             let module_val = Value::Module {
@@ -401,7 +433,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Import ──
-        Expr::Import { module, selective, alias } => {
+        Expr::Import {
+            module,
+            selective,
+            alias,
+        } => {
             let module_name = module.join(".");
             // 1. Try in-memory registry (covers same-file and previously loaded modules).
             let module_val = if let Some(m) = env.get_module(&module_name) {
@@ -410,20 +446,29 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 // 2. Try file-based loading.
                 load_module_from_file(&module[0], env)?
             } else {
-                return Err(EvalError::Error(format!("Module not found: '{}'", module_name)));
+                return Err(EvalError::Error(format!(
+                    "Module not found: '{}'",
+                    module_name
+                )));
             };
 
             match &module_val {
-                Value::Module { name: mod_name, exports } => {
+                Value::Module {
+                    name: mod_name,
+                    exports,
+                } => {
                     match (selective.as_deref(), alias.as_deref()) {
                         (Some(names), _) => {
                             // import Foo.{A, B}  — bind only the listed names
                             for sym in names {
                                 match exports.get(sym) {
                                     Some(val) => env.set(sym.clone(), val.clone()),
-                                    None => return Err(EvalError::Error(
-                                        format!("Module '{}' does not export '{}'", mod_name, sym)
-                                    )),
+                                    None => {
+                                        return Err(EvalError::Error(format!(
+                                            "Module '{}' does not export '{}'",
+                                            mod_name, sym
+                                        )));
+                                    }
                                 }
                             }
                         }
@@ -439,7 +484,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         }
                     }
                 }
-                _ => return Err(EvalError::Error(format!("'{}' is not a module", module_name))),
+                _ => {
+                    return Err(EvalError::Error(format!(
+                        "'{}' is not a module",
+                        module_name
+                    )));
+                }
             }
             Ok(Value::Null)
         }
@@ -471,23 +521,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Pattern nodes (should not be evaluated directly) ──
-        Expr::Blank { .. } | Expr::NamedBlank { .. } | Expr::BlankSequence { .. }
-        | Expr::BlankNullSequence { .. } | Expr::PatternGuard { .. } => {
-            Ok(Value::Pattern(expr.clone()))
-        }
+        Expr::Blank { .. }
+        | Expr::NamedBlank { .. }
+        | Expr::BlankSequence { .. }
+        | Expr::BlankNullSequence { .. }
+        | Expr::PatternGuard { .. } => Ok(Value::Pattern(expr.clone())),
 
         // ── Slot (only meaningful inside pure functions) ──
-        Expr::Slot(_) => {
-            Err(EvalError::Error("Slot # used outside of pure function".to_string()))
-        }
+        Expr::Slot(_) => Err(EvalError::Error(
+            "Slot # used outside of pure function".to_string(),
+        )),
+
+        // ── Information (help) ──
+        Expr::Information(inner) => eval_information(inner, env),
 
         // ── Function constructor ──
-        Expr::Function { params, body } => {
-            Ok(Value::PureFunction {
-                body: body.as_ref().clone(),
-                slot_count: params.len(),
-            })
-        }
+        Expr::Function { params, body } => Ok(Value::PureFunction {
+            body: body.as_ref().clone(),
+            slot_count: params.len(),
+        }),
     }
 }
 
@@ -506,8 +558,11 @@ fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
 fn is_pattern_like(expr: &Expr) -> bool {
     match expr {
         Expr::Symbol(s) => s.ends_with('_') || s == "_",
-        Expr::Blank { .. } | Expr::NamedBlank { .. } | Expr::BlankSequence { .. }
-        | Expr::BlankNullSequence { .. } | Expr::PatternGuard { .. } => true,
+        Expr::Blank { .. }
+        | Expr::NamedBlank { .. }
+        | Expr::BlankSequence { .. }
+        | Expr::BlankNullSequence { .. }
+        | Expr::PatternGuard { .. } => true,
         _ => false,
     }
 }
@@ -520,7 +575,9 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             "Set" | "SetDelayed" => {
                 // Handle assignment specially
                 if args.len() != 2 {
-                    return Err(EvalError::Error("Set requires exactly 2 arguments".to_string()));
+                    return Err(EvalError::Error(
+                        "Set requires exactly 2 arguments".to_string(),
+                    ));
                 }
                 let val = eval(&args[1], env)?;
                 match &args[0] {
@@ -534,7 +591,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             "Hold" => {
                 // Don't evaluate arguments
                 Ok(Value::Hold(Box::new(Value::List(
-                    args.iter().map(|a| Value::Pattern(a.clone())).collect()
+                    args.iter().map(|a| Value::Pattern(a.clone())).collect(),
                 ))))
             }
             "Table" => {
@@ -548,7 +605,9 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             "Catch" => {
                 // Catch[expr] — evaluate expr, catching any Throw[val]
                 if args.len() != 1 {
-                    return Err(EvalError::Error("Catch requires exactly 1 argument".to_string()));
+                    return Err(EvalError::Error(
+                        "Catch requires exactly 1 argument".to_string(),
+                    ));
                 }
                 match eval(&args[0], env) {
                     Ok(v) => Ok(v),
@@ -630,7 +689,10 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
             })
         }
 
-        Value::PureFunction { body, slot_count: _ } => {
+        Value::PureFunction {
+            body,
+            slot_count: _,
+        } => {
             let child_env = env.child();
             // Bind slots
             for (i, arg) in args.iter().enumerate() {
@@ -655,7 +717,10 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
             }
         }
 
-        Value::Object { class_name, fields: _ } => {
+        Value::Object {
+            class_name,
+            fields: _,
+        } => {
             // Method dispatch: look for method on the object
             let method_name = format!("{}.__method__", class_name);
             if let Some(method) = env.get(&method_name) {
@@ -683,7 +748,11 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
 /// Try to match parameters against arguments, evaluating any pattern guards.
 ///
 /// Returns Ok(Some(bindings)) on success, Ok(None) if no match, Err on guard eval error.
-fn try_match_params(params: &[Expr], args: &[Value], env: &Env) -> Result<Option<Bindings>, EvalError> {
+fn try_match_params(
+    params: &[Expr],
+    args: &[Value],
+    env: &Env,
+) -> Result<Option<Bindings>, EvalError> {
     if params.len() != args.len() {
         return Ok(None);
     }
@@ -721,7 +790,9 @@ fn try_match_params(params: &[Expr], args: &[Value], env: &Env) -> Result<Option
 /// Apply rules to a value.
 fn apply_rules_value(value: &Value, rules: &Value) -> Result<Value, EvalError> {
     match rules {
-        Value::RuleSet { rules: rule_pairs, .. } => {
+        Value::RuleSet {
+            rules: rule_pairs, ..
+        } => {
             for (lhs, rhs) in rule_pairs {
                 if let Value::Pattern(lhs_expr) = lhs {
                     if let MatchResult::Match(bindings) = match_pattern(lhs_expr, value) {
@@ -777,18 +848,23 @@ fn substitute_value(expr: &Expr, bindings: &Bindings) -> Result<Value, EvalError
         Expr::Str(s) => Ok(Value::Str(s.clone())),
         Expr::Null => Ok(Value::Null),
         Expr::List(items) => {
-            let values: Result<Vec<Value>, _> = items.iter()
+            let values: Result<Vec<Value>, _> = items
+                .iter()
                 .map(|item| substitute_value(item, bindings))
                 .collect();
             Ok(Value::List(values?))
         }
         Expr::Call { head, args } => {
             let h = substitute_value(head, bindings)?;
-            let a: Result<Vec<Value>, _> = args.iter()
+            let a: Result<Vec<Value>, _> = args
+                .iter()
                 .map(|arg| substitute_value(arg, bindings))
                 .collect();
             match h {
-                Value::Symbol(name) => Ok(Value::Call { head: name, args: a? }),
+                Value::Symbol(name) => Ok(Value::Call {
+                    head: name,
+                    args: a?,
+                }),
                 _ => Ok(Value::Call {
                     head: h.to_string(),
                     args: a?,
@@ -827,7 +903,7 @@ fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, Ev
     match expr {
         Expr::Symbol(s) => match s.as_str() {
             "Pi" => Ok(Value::Real(Float::with_val(prec_bits, Constant::Pi))),
-            "E"  => {
+            "E" => {
                 let one = Float::with_val(prec_bits, 1u32);
                 Ok(Value::Real(one.exp()))
             }
@@ -837,13 +913,14 @@ fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, Ev
             }
         },
         Expr::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
-        Expr::Real(r)    => Ok(Value::Real(Float::with_val(prec_bits, r))),
+        Expr::Real(r) => Ok(Value::Real(Float::with_val(prec_bits, r))),
         // Recursively evaluate calls at the requested precision.
         // Each argument is numeric-evaluated first, then the operation is
         // performed on high-precision floats.
         Expr::Call { head, args } => {
             if let Expr::Symbol(name) = head.as_ref() {
-                let evaluated_args: Result<Vec<Value>, _> = args.iter()
+                let evaluated_args: Result<Vec<Value>, _> = args
+                    .iter()
                     .map(|a| numeric_eval_expr(a, prec_bits, env))
                     .collect();
                 let evaluated_args = evaluated_args?;
@@ -877,32 +954,44 @@ fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, Ev
                                 None => apply_function(&eval(head, env)?, &evaluated_args, env),
                             },
                             2 => match (ln(&evaluated_args[1]), ln(&evaluated_args[0])) {
-                                (Some(lx), Some(lb)) => Ok(Value::Real(Float::with_val(prec_bits, &lx) / lb)),
+                                (Some(lx), Some(lb)) => {
+                                    Ok(Value::Real(Float::with_val(prec_bits, &lx) / lb))
+                                }
                                 _ => apply_function(&eval(head, env)?, &evaluated_args, env),
                             },
                             _ => apply_function(&eval(head, env)?, &evaluated_args, env),
                         }
                     }
-                    "Sin" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
-                        Some(f) => Ok(Value::Real(f.sin())),
-                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                    },
-                    "Cos" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
-                        Some(f) => Ok(Value::Real(f.cos())),
-                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                    },
-                    "Tan" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
-                        Some(f) => Ok(Value::Real(f.tan())),
-                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                    },
-                    "Exp" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
-                        Some(f) => Ok(Value::Real(f.exp())),
-                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                    },
-                    "Sqrt" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
-                        Some(f) => Ok(Value::Real(f.sqrt())),
-                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
-                    },
+                    "Sin" if evaluated_args.len() == 1 => {
+                        match to_float(&evaluated_args[0], prec_bits) {
+                            Some(f) => Ok(Value::Real(f.sin())),
+                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Cos" if evaluated_args.len() == 1 => {
+                        match to_float(&evaluated_args[0], prec_bits) {
+                            Some(f) => Ok(Value::Real(f.cos())),
+                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Tan" if evaluated_args.len() == 1 => {
+                        match to_float(&evaluated_args[0], prec_bits) {
+                            Some(f) => Ok(Value::Real(f.tan())),
+                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Exp" if evaluated_args.len() == 1 => {
+                        match to_float(&evaluated_args[0], prec_bits) {
+                            Some(f) => Ok(Value::Real(f.exp())),
+                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Sqrt" if evaluated_args.len() == 1 => {
+                        match to_float(&evaluated_args[0], prec_bits) {
+                            Some(f) => Ok(Value::Real(f.sqrt())),
+                            None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
                     _ => apply_function(&eval(head, env)?, &evaluated_args, env),
                 }
             } else {
@@ -920,40 +1009,51 @@ fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, Ev
 fn to_float(v: &Value, prec_bits: u32) -> Option<Float> {
     match v {
         Value::Integer(n) => Some(Float::with_val(prec_bits, n)),
-        Value::Real(r)    => Some(Float::with_val(prec_bits, r)),
+        Value::Real(r) => Some(Float::with_val(prec_bits, r)),
         _ => None,
     }
 }
 
 fn numeric_fold_op<F>(args: Vec<Value>, prec_bits: u32, op: F) -> Result<Value, EvalError>
-where F: Fn(Float, Float) -> Float {
+where
+    F: Fn(Float, Float) -> Float,
+{
     let mut acc: Option<Float> = None;
     for v in &args {
         match to_float(v, prec_bits) {
-            Some(f) => acc = Some(match acc {
-                None => f,
-                Some(a) => op(a, f),
-            }),
-            None => return Ok(Value::Call {
-                head: "Unknown".to_string(), args,
-            }),
+            Some(f) => {
+                acc = Some(match acc {
+                    None => f,
+                    Some(a) => op(a, f),
+                })
+            }
+            None => {
+                return Ok(Value::Call {
+                    head: "Unknown".to_string(),
+                    args,
+                });
+            }
         }
     }
-    Ok(acc.map(Value::Real).unwrap_or(Value::Integer(Integer::from(0))))
+    Ok(acc
+        .map(Value::Real)
+        .unwrap_or(Value::Integer(Integer::from(0))))
 }
 
 fn coerce_to_float(v: Value, prec_bits: u32) -> Result<Value, EvalError> {
     match v {
         Value::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
-        Value::Real(r)    => Ok(Value::Real(Float::with_val(prec_bits, r))),
-        other             => Ok(other),
+        Value::Real(r) => Ok(Value::Real(Float::with_val(prec_bits, r))),
+        other => Ok(other),
     }
 }
 
 /// Map[f, list] — apply f to each element of list.
 fn builtin_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Map requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Map requires exactly 2 arguments".to_string(),
+        ));
     }
     let f = &args[0];
     match &args[1] {
@@ -977,27 +1077,37 @@ fn builtin_fold_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         2 => {
             // Fold[f, list] — use first element as init
             match &args[1] {
-                Value::List(list) if !list.is_empty() => {
-                    (&args[0], list[0].clone(), &list[1..])
+                Value::List(list) if !list.is_empty() => (&args[0], list[0].clone(), &list[1..]),
+                Value::List(_) => {
+                    return Err(EvalError::Error(
+                        "Fold on empty list requires initial value".to_string(),
+                    ));
                 }
-                Value::List(_) => return Err(EvalError::Error("Fold on empty list requires initial value".to_string())),
-                _ => return Err(EvalError::TypeError {
-                    expected: "List".to_string(),
-                    got: args[1].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
             }
         }
         3 => {
             // Fold[f, init, list]
             match &args[2] {
                 Value::List(list) => (&args[0], args[1].clone(), list.as_slice()),
-                _ => return Err(EvalError::TypeError {
-                    expected: "List".to_string(),
-                    got: args[2].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List".to_string(),
+                        got: args[2].type_name().to_string(),
+                    });
+                }
             }
         }
-        _ => return Err(EvalError::Error("Fold requires 2 or 3 arguments".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Fold requires 2 or 3 arguments".to_string(),
+            ));
+        }
     };
     let mut acc = init;
     for item in items {
@@ -1009,7 +1119,9 @@ fn builtin_fold_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// Select[list, test] — keep elements where test returns True.
 fn builtin_select_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Select requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Select requires exactly 2 arguments".to_string(),
+        ));
     }
     match &args[0] {
         Value::List(items) => {
@@ -1033,7 +1145,9 @@ fn builtin_select_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// Scan[f, list] — like Map but returns Null.
 fn builtin_scan_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Scan requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Scan requires exactly 2 arguments".to_string(),
+        ));
     }
     match &args[1] {
         Value::List(items) => {
@@ -1052,14 +1166,18 @@ fn builtin_scan_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// Nest[f, x, n] — apply f to x, n times.
 fn builtin_nest_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(EvalError::Error("Nest requires exactly 3 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Nest requires exactly 3 arguments".to_string(),
+        ));
     }
     let n = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[2].type_name().to_string(),
     })?;
     if n < 0 {
-        return Err(EvalError::Error("Nest count must be non-negative".to_string()));
+        return Err(EvalError::Error(
+            "Nest count must be non-negative".to_string(),
+        ));
     }
     let mut val = args[1].clone();
     for _ in 0..n {
@@ -1071,12 +1189,17 @@ fn builtin_nest_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// MatchQ[expr, pattern] — returns True/False.
 fn builtin_match_q_eval(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("MatchQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "MatchQ requires exactly 2 arguments".to_string(),
+        ));
     }
     // The pattern arg is stored as a Value::Pattern(Expr)
     let result = match &args[1] {
         Value::Pattern(pat_expr) => {
-            matches!(crate::pattern::match_pattern(pat_expr, &args[0]), crate::pattern::MatchResult::Match(_))
+            matches!(
+                crate::pattern::match_pattern(pat_expr, &args[0]),
+                crate::pattern::MatchResult::Match(_)
+            )
         }
         // If the pattern is a regular value, do structural equality
         _ => args[0].struct_eq(&args[1]),
@@ -1087,13 +1210,18 @@ fn builtin_match_q_eval(args: &[Value]) -> Result<Value, EvalError> {
 /// FreeQ[expr, pattern] — returns True if pattern does not appear anywhere in expr.
 fn builtin_free_q_eval(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("FreeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "FreeQ requires exactly 2 arguments".to_string(),
+        ));
     }
     fn contains_pattern(value: &Value, pattern: &Value) -> bool {
         // Check if value matches pattern
         let matched = match pattern {
             Value::Pattern(pat_expr) => {
-                matches!(crate::pattern::match_pattern(pat_expr, value), crate::pattern::MatchResult::Match(_))
+                matches!(
+                    crate::pattern::match_pattern(pat_expr, value),
+                    crate::pattern::MatchResult::Match(_)
+                )
             }
             _ => value.struct_eq(pattern),
         };
@@ -1114,65 +1242,100 @@ fn builtin_free_q_eval(args: &[Value]) -> Result<Value, EvalError> {
 /// Called from eval_call as a special form (iterator spec has unevaluated symbols).
 fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Table requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Table requires exactly 2 arguments".to_string(),
+        ));
     }
     let iter_items = match &args[1] {
         Expr::List(items) => items,
-        _ => return Err(EvalError::Error("Table iterator spec must be a list".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Table iterator spec must be a list".to_string(),
+            ));
+        }
     };
 
     // Parse iterator spec: {var, n} or {var, min, max} or {var, min, max, step}
-    let (var_name, min, max, step) = match iter_items.len() {
-        2 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::Error("Table iterator variable must be a symbol".to_string())),
-            };
-            let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            (var, 1i64, n, 1i64)
-        }
-        3 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::Error("Table iterator variable must be a symbol".to_string())),
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            (var, min, max, 1i64)
-        }
-        4 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::Error("Table iterator variable must be a symbol".to_string())),
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            if step == 0 {
-                return Err(EvalError::Error("Table step cannot be zero".to_string()));
+    let (var_name, min, max, step) =
+        match iter_items.len() {
+            2 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                (var, 1i64, n, 1i64)
             }
-            (var, min, max, step)
-        }
-        _ => return Err(EvalError::Error("Table iterator spec must have 2-4 elements".to_string())),
-    };
+            3 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                (var, min, max, 1i64)
+            }
+            4 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                if step == 0 {
+                    return Err(EvalError::Error("Table step cannot be zero".to_string()));
+                }
+                (var, min, max, step)
+            }
+            _ => {
+                return Err(EvalError::Error(
+                    "Table iterator spec must have 2-4 elements".to_string(),
+                ));
+            }
+        };
 
     let expr = &args[0];
     let child_env = env.child();
@@ -1201,31 +1364,50 @@ fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
 /// Called from eval_call as a special form (iterator spec has unevaluated symbols).
 fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Sum requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Sum requires exactly 2 arguments".to_string(),
+        ));
     }
     let iter_items = match &args[1] {
         Expr::List(items) => items,
-        _ => return Err(EvalError::Error("Sum iterator spec must be a list".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Sum iterator spec must be a list".to_string(),
+            ));
+        }
     };
 
-    let (var_name, min, max) = match iter_items.len() {
-        3 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::Error("Sum iterator variable must be a symbol".to_string())),
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
-            (var, min, max)
-        }
-        _ => return Err(EvalError::Error("Sum iterator spec must have 3 elements {i, min, max}".to_string())),
-    };
+    let (var_name, min, max) =
+        match iter_items.len() {
+            3 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Sum iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                (var, min, max)
+            }
+            _ => {
+                return Err(EvalError::Error(
+                    "Sum iterator spec must have 3 elements {i, min, max}".to_string(),
+                ));
+            }
+        };
 
     let expr = &args[0];
     let child_env = env.child();
@@ -1243,7 +1425,9 @@ fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
 /// FixedPoint[f, x] — apply f until result stops changing.
 fn builtin_fixed_point_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(EvalError::Error("FixedPoint requires 2 or 3 arguments".to_string()));
+        return Err(EvalError::Error(
+            "FixedPoint requires 2 or 3 arguments".to_string(),
+        ));
     }
     let max_iter = if args.len() == 3 {
         args[2].to_integer().ok_or_else(|| EvalError::TypeError {
@@ -1264,6 +1448,70 @@ fn builtin_fixed_point_eval(args: &[Value], env: &Env) -> Result<Value, EvalErro
         val = new_val;
     }
     Ok(val)
+}
+
+/// Evaluate `?expr` — display help information for a symbol.
+fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+    match expr {
+        Expr::Symbol(s) => {
+            // 1. Check if the symbol has a user-defined value
+            if let Some(val) = env.get(s) {
+                let info = match &val {
+                    Value::Function(func_def) => {
+                        // Show function definitions
+                        let mut lines = vec![format!("User-defined function `{}`:", s)];
+                        for def in &func_def.definitions {
+                            let params: Vec<String> =
+                                def.params.iter().map(|p| format!("{}", p)).collect();
+                            lines.push(format!("    {}[{}] := {}", s, params.join(", "), def.body));
+                        }
+                        lines.join("\n")
+                    }
+                    Value::Builtin(_, _) => {
+                        // Built-in with documentation
+                        let mut info = if let Some(help) = crate::builtins::get_help(s) {
+                            help.to_string()
+                        } else {
+                            format!("Builtin function `{}`.", s)
+                        };
+                        let attrs = crate::builtins::get_attributes(s);
+                        if !attrs.is_empty() {
+                            info.push_str(&format!("\n\nAttributes: {}", attrs.join(", ")));
+                        }
+                        info
+                    }
+                    _ => {
+                        // Other values — show binding
+                        format!("{} = {}", s, val)
+                    }
+                };
+                return Ok(Value::Str(info));
+            }
+
+            // 2. Symbol not in env — check built-in docs (constants, etc.)
+            if let Some(help) = crate::builtins::get_help(s) {
+                return Ok(Value::Str(help.to_string()));
+            }
+
+            // 3. Unknown symbol
+            Ok(Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Symbol("UnknownSymbol".to_string()),
+                    Value::Symbol(s.clone()),
+                ],
+            })
+        }
+        _ => {
+            // Non-symbol: evaluate and show type
+            let val = eval(expr, env)?;
+            Ok(Value::Str(format!(
+                "{} is of type {}.",
+                val,
+                val.type_name()
+            )))
+        }
+    }
 }
 
 /// Try to load a module from a `.syma` file on disk.
@@ -1293,8 +1541,10 @@ fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
     let src = source.ok_or_else(|| {
         EvalError::Error(format!(
             "Module '{}' not found.\nSearched for '{}.syma' in: {}",
-            name, name,
-            env.search_paths.borrow()
+            name,
+            name,
+            env.search_paths
+                .borrow()
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -1322,9 +1572,9 @@ fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins;
     use crate::lexer;
     use crate::parser;
-    use crate::builtins;
 
     fn eval_str(input: &str) -> Value {
         let env = Env::new();
@@ -1408,19 +1658,28 @@ mod tests {
 
     #[test]
     fn test_multiple_assignments() {
-        assert_eq!(eval_str("x = 1; y = 2; x + y"), Value::Integer(Integer::from(3)));
+        assert_eq!(
+            eval_str("x = 1; y = 2; x + y"),
+            Value::Integer(Integer::from(3))
+        );
     }
 
     // ── Functions ──
 
     #[test]
     fn test_function_def_and_call() {
-        assert_eq!(eval_str("f[x_] := x^2; f[3]"), Value::Integer(Integer::from(9)));
+        assert_eq!(
+            eval_str("f[x_] := x^2; f[3]"),
+            Value::Integer(Integer::from(9))
+        );
     }
 
     #[test]
     fn test_function_multi_arg() {
-        assert_eq!(eval_str("add[a_, b_] := a + b; add[3, 4]"), Value::Integer(Integer::from(7)));
+        assert_eq!(
+            eval_str("add[a_, b_] := a + b; add[3, 4]"),
+            Value::Integer(Integer::from(7))
+        );
     }
 
     // ── Control flow ──
@@ -1432,7 +1691,10 @@ mod tests {
 
     #[test]
     fn test_if_false() {
-        assert_eq!(eval_str("If[False, 1, 2]"), Value::Integer(Integer::from(2)));
+        assert_eq!(
+            eval_str("If[False, 1, 2]"),
+            Value::Integer(Integer::from(2))
+        );
     }
 
     #[test]
@@ -1468,11 +1730,14 @@ mod tests {
 
     #[test]
     fn test_list_literal() {
-        assert_eq!(eval_str("{1, 2, 3}"), Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(3)),
-        ]));
+        assert_eq!(
+            eval_str("{1, 2, 3}"),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     #[test]
@@ -1482,9 +1747,18 @@ mod tests {
 
     #[test]
     fn test_list_operations() {
-        assert_eq!(eval_str("Length[{1, 2, 3}]"), Value::Integer(Integer::from(3)));
-        assert_eq!(eval_str("First[{1, 2, 3}]"), Value::Integer(Integer::from(1)));
-        assert_eq!(eval_str("Last[{1, 2, 3}]"), Value::Integer(Integer::from(3)));
+        assert_eq!(
+            eval_str("Length[{1, 2, 3}]"),
+            Value::Integer(Integer::from(3))
+        );
+        assert_eq!(
+            eval_str("First[{1, 2, 3}]"),
+            Value::Integer(Integer::from(1))
+        );
+        assert_eq!(
+            eval_str("Last[{1, 2, 3}]"),
+            Value::Integer(Integer::from(3))
+        );
     }
 
     // ── Pipe ──
@@ -1492,7 +1766,10 @@ mod tests {
     #[test]
     fn test_pipe() {
         // {1, 2, 3} // Length
-        assert_eq!(eval_str("{1, 2, 3} // Length"), Value::Integer(Integer::from(3)));
+        assert_eq!(
+            eval_str("{1, 2, 3} // Length"),
+            Value::Integer(Integer::from(3))
+        );
     }
 
     // ── Prefix ──
@@ -1500,7 +1777,10 @@ mod tests {
     #[test]
     fn test_prefix() {
         // f @ x is equivalent to f[x]
-        assert_eq!(eval_str("Length @ {1, 2, 3}"), Value::Integer(Integer::from(3)));
+        assert_eq!(
+            eval_str("Length @ {1, 2, 3}"),
+            Value::Integer(Integer::from(3))
+        );
     }
 
     // ── ReplaceAll ──
@@ -1517,11 +1797,14 @@ mod tests {
     fn test_map_builtin() {
         // Sqrt /@ {1, 4, 9} maps Sqrt over a list
         let result = eval_str("Sqrt /@ {1, 4, 9}");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(3)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     // ── Constants ──
@@ -1542,7 +1825,11 @@ mod tests {
             Value::Real(r) => {
                 let e = r.to_f64();
                 // Check first 15 digits of Euler's number
-                assert!((e - 2.718281828459045).abs() < 1e-10, "Expected ~e, got {}", e);
+                assert!(
+                    (e - 2.718281828459045).abs() < 1e-10,
+                    "Expected ~e, got {}",
+                    e
+                );
             }
             _ => panic!("Expected Real, got {:?}", val),
         }
@@ -1560,7 +1847,10 @@ mod tests {
 
     #[test]
     fn test_string_length() {
-        assert_eq!(eval_str(r#"StringLength["hello"]"#), Value::Integer(Integer::from(5)));
+        assert_eq!(
+            eval_str(r#"StringLength["hello"]"#),
+            Value::Integer(Integer::from(5))
+        );
     }
 
     // ── Math functions ──
@@ -1587,21 +1877,27 @@ mod tests {
     #[test]
     fn test_map_function() {
         let result = eval_str("sq[x_] := x^2; Map[sq, {1, 2, 3}]");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(9)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(9)),
+            ])
+        );
     }
 
     #[test]
     fn test_map_with_builtin() {
         let result = eval_str("Map[Sqrt, {1, 4, 9}]");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(3)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     #[test]
@@ -1619,7 +1915,13 @@ mod tests {
     #[test]
     fn test_select() {
         let result = eval_str("gt3[x_] := x > 3; Select[{1, 2, 3, 4, 5}, gt3]");
-        assert_eq!(result, Value::List(vec![Value::Integer(Integer::from(4)), Value::Integer(Integer::from(5))]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(5))
+            ])
+        );
     }
 
     #[test]
@@ -1631,36 +1933,45 @@ mod tests {
     #[test]
     fn test_table_basic() {
         let result = eval_str("Table[i^2, {i, 1, 5}]");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(9)),
-            Value::Integer(Integer::from(16)),
-            Value::Integer(Integer::from(25)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(16)),
+                Value::Integer(Integer::from(25)),
+            ])
+        );
     }
 
     #[test]
     fn test_table_short_form() {
         let result = eval_str("Table[i, {i, 3}]");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(3)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
     }
 
     #[test]
     fn test_table_with_step() {
         let result = eval_str("Table[i, {i, 0, 10, 2}]");
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(0)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(6)),
-            Value::Integer(Integer::from(8)),
-            Value::Integer(Integer::from(10)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(0)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(6)),
+                Value::Integer(Integer::from(8)),
+                Value::Integer(Integer::from(10)),
+            ])
+        );
     }
 
     #[test]
@@ -1687,25 +1998,21 @@ mod tests {
     fn test_pattern_guard_function() {
         // f[x_ /; x > 0] := "positive"
         // f[x_ /; x < 0] := "negative"
-        let result = eval_str(
-            r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[5]"#
-        );
+        let result =
+            eval_str(r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[5]"#);
         assert_eq!(result, Value::Str("positive".to_string()));
     }
 
     #[test]
     fn test_pattern_guard_negative() {
-        let result = eval_str(
-            r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[-3]"#
-        );
+        let result =
+            eval_str(r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[-3]"#);
         assert_eq!(result, Value::Str("negative".to_string()));
     }
 
     #[test]
     fn test_pattern_guard_match_expression() {
-        let result = eval_str(
-            r#"match 7 { n_ /; n > 5 => "big"; n_ => "small" }"#
-        );
+        let result = eval_str(r#"match 7 { n_ /; n > 5 => "big"; n_ => "small" }"#);
         assert_eq!(result, Value::Str("big".to_string()));
     }
 

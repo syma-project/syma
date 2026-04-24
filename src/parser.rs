@@ -2,14 +2,13 @@
 ///
 /// Recursive descent parser with precedence climbing for operators.
 /// Implements the EBNF grammar from the language specification.
-
 use crate::ast::*;
-use crate::lexer::Token;
-use rug::Integer;
+use crate::lexer::{Span, SpannedToken, Token};
 use rug::Float;
+use rug::Integer;
 
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<SpannedToken>,
     pos: usize,
 }
 
@@ -17,25 +16,41 @@ pub struct Parser {
 pub struct ParseError {
     pub message: String,
     pub token: Option<Token>,
+    pub span: Option<Span>,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        if let Some(span) = &self.span {
+            write!(f, "{}:{}: {}", span.line, span.col, self.message)
+        } else {
+            write!(f, "{}", self.message)
+        }
     }
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+    pub fn new(tokens: Vec<SpannedToken>) -> Self {
         Parser { tokens, pos: 0 }
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+        self.tokens
+            .get(self.pos)
+            .map(|t| &t.token)
+            .unwrap_or(&Token::Eof)
+    }
+
+    fn peek_span(&self) -> Option<Span> {
+        self.tokens.get(self.pos).map(|t| t.span.clone())
     }
 
     fn advance(&mut self) -> Token {
-        let tok = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
+        let tok = self
+            .tokens
+            .get(self.pos)
+            .map(|t| t.token.clone())
+            .unwrap_or(Token::Eof);
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -43,6 +58,7 @@ impl Parser {
     }
 
     fn expect(&mut self, expected: &Token) -> Result<(), ParseError> {
+        let span = self.peek_span();
         let tok = self.advance();
         if &tok == expected {
             Ok(())
@@ -50,6 +66,7 @@ impl Parser {
             Err(ParseError {
                 message: format!("Expected '{}', found '{}'", expected, tok),
                 token: Some(tok),
+                span,
             })
         }
     }
@@ -101,9 +118,8 @@ impl Parser {
                         self.advance(); // consume :=
                         if let Expr::Call { head, args } = expr {
                             if let Expr::Symbol(name) = *head {
-                                let params: Vec<Expr> = args.into_iter()
-                                    .map(Self::convert_pattern)
-                                    .collect();
+                                let params: Vec<Expr> =
+                                    args.into_iter().map(Self::convert_pattern).collect();
                                 let body = self.parse_expression()?;
                                 Ok(Expr::FuncDef {
                                     name,
@@ -113,14 +129,20 @@ impl Parser {
                                 })
                             } else {
                                 Err(ParseError {
-                                    message: "Invalid function definition (head not a symbol)".to_string(),
+                                    message: "Invalid function definition (head not a symbol)"
+                                        .to_string(),
                                     token: Some(Token::DelayedAssign),
+                                    span: None,
                                 })
                             }
                         } else {
                             Err(ParseError {
-                                message: format!("Invalid function definition (expr is {:?})", expr),
+                                message: format!(
+                                    "Invalid function definition (expr is {:?})",
+                                    expr
+                                ),
                                 token: Some(Token::DelayedAssign),
+                                span: None,
                             })
                         }
                     }
@@ -228,6 +250,7 @@ impl Parser {
             _ => Err(ParseError {
                 message: "Expected field, method, constructor, or @transform".to_string(),
                 token: Some(self.peek().clone()),
+                span: None,
             }),
         }
     }
@@ -344,6 +367,7 @@ impl Parser {
                 return Err(ParseError {
                     message: "Expected -> or :> in transform rule".to_string(),
                     token: Some(self.peek().clone()),
+                    span: None,
                 });
             };
             rules.push((pattern, rhs));
@@ -382,7 +406,11 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
 
-        Ok(Expr::ModuleDef { name, exports, body })
+        Ok(Expr::ModuleDef {
+            name,
+            exports,
+            body,
+        })
     }
 
     fn parse_mixin_def(&mut self) -> Result<Expr, ParseError> {
@@ -423,6 +451,7 @@ impl Parser {
                 return Err(ParseError {
                     message: "Expected -> or :> in rule definition".to_string(),
                     token: Some(self.peek().clone()),
+                    span: None,
                 });
             };
             rules.push((lhs, rhs));
@@ -449,7 +478,10 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
 
-        Ok(Expr::Match { expr: Box::new(expr), branches })
+        Ok(Expr::Match {
+            expr: Box::new(expr),
+            branches,
+        })
     }
 
     fn parse_try(&mut self) -> Result<Expr, ParseError> {
@@ -720,6 +752,67 @@ impl Parser {
                     args: vec![expr],
                 })
             }
+            Token::QuestionMark => {
+                self.advance();
+                // Handle ?keyword — keywords like If, While, etc. need special
+                // treatment since they aren't parsed as standalone symbols.
+                let expr = match self.peek().clone() {
+                    Token::If => {
+                        self.advance();
+                        Expr::Symbol("If".to_string())
+                    }
+                    Token::Which => {
+                        self.advance();
+                        Expr::Symbol("Which".to_string())
+                    }
+                    Token::Switch => {
+                        self.advance();
+                        Expr::Symbol("Switch".to_string())
+                    }
+                    Token::For => {
+                        self.advance();
+                        Expr::Symbol("For".to_string())
+                    }
+                    Token::While => {
+                        self.advance();
+                        Expr::Symbol("While".to_string())
+                    }
+                    Token::Do => {
+                        self.advance();
+                        Expr::Symbol("Do".to_string())
+                    }
+                    Token::Function => {
+                        self.advance();
+                        Expr::Symbol("Function".to_string())
+                    }
+                    Token::Hold => {
+                        self.advance();
+                        Expr::Symbol("Hold".to_string())
+                    }
+                    Token::HoldComplete => {
+                        self.advance();
+                        Expr::Symbol("HoldComplete".to_string())
+                    }
+                    Token::ReleaseHold => {
+                        self.advance();
+                        Expr::Symbol("ReleaseHold".to_string())
+                    }
+                    Token::True => {
+                        self.advance();
+                        Expr::Symbol("True".to_string())
+                    }
+                    Token::False => {
+                        self.advance();
+                        Expr::Symbol("False".to_string())
+                    }
+                    Token::Null => {
+                        self.advance();
+                        Expr::Symbol("Null".to_string())
+                    }
+                    _ => self.parse_unary_expr()?,
+                };
+                Ok(Expr::Information(Box::new(expr)))
+            }
             Token::Quote => {
                 self.advance();
                 let expr = self.parse_unary_expr()?;
@@ -815,15 +908,22 @@ impl Parser {
             // Atoms
             Token::Integer(n) => {
                 self.advance();
-                let val = Integer::from_str_radix(&n, 10)
-                    .map_err(|_| ParseError { message: format!("Invalid integer: {}", n), token: None })?;
+                let val = Integer::from_str_radix(&n, 10).map_err(|_| ParseError {
+                    message: format!("Invalid integer: {}", n),
+                    token: None,
+                    span: None,
+                })?;
                 Ok(Expr::Integer(val))
             }
             Token::Real(r) => {
                 self.advance();
                 let val = Float::parse(&r)
                     .map(|v| Float::with_val(128, v))
-                    .map_err(|_| ParseError { message: format!("Invalid real: {}", r), token: None })?;
+                    .map_err(|_| ParseError {
+                        message: format!("Invalid real: {}", r),
+                        token: None,
+                        span: None,
+                    })?;
                 Ok(Expr::Real(val))
             }
             Token::Str(s) => {
@@ -891,6 +991,7 @@ impl Parser {
                             return Err(ParseError {
                                 message: "Expected string or ident as association key".to_string(),
                                 token: Some(tok),
+                                span: None,
                             });
                         }
                     };
@@ -1090,6 +1191,7 @@ impl Parser {
             tok => Err(ParseError {
                 message: format!("Unexpected token in expression: {:?}", tok),
                 token: Some(tok),
+                span: None,
             }),
         }
     }
@@ -1430,15 +1532,22 @@ impl Parser {
             // Literals
             Token::Integer(n) => {
                 self.advance();
-                let val = Integer::from_str_radix(&n, 10)
-                    .map_err(|_| ParseError { message: format!("Invalid integer: {}", n), token: None })?;
+                let val = Integer::from_str_radix(&n, 10).map_err(|_| ParseError {
+                    message: format!("Invalid integer: {}", n),
+                    token: None,
+                    span: None,
+                })?;
                 Ok(Expr::Integer(val))
             }
             Token::Real(r) => {
                 self.advance();
                 let val = Float::parse(&r)
                     .map(|v| Float::with_val(128, v))
-                    .map_err(|_| ParseError { message: format!("Invalid real: {}", r), token: None })?;
+                    .map_err(|_| ParseError {
+                        message: format!("Invalid real: {}", r),
+                        token: None,
+                        span: None,
+                    })?;
                 Ok(Expr::Real(val))
             }
             Token::Str(s) => {
@@ -1493,6 +1602,7 @@ impl Parser {
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),
                 token: Some(tok),
+                span: None,
             }),
         }
     }
@@ -1530,7 +1640,9 @@ impl Parser {
         match expr {
             Expr::Symbol(ref s) if s.contains('_') => {
                 if s == "_" {
-                    Expr::Blank { type_constraint: None }
+                    Expr::Blank {
+                        type_constraint: None,
+                    }
                 } else if let Some(pos) = s.find('_') {
                     let name = &s[..pos];
                     let rest = &s[pos + 1..];
@@ -1561,13 +1673,14 @@ impl Parser {
             tok => Err(ParseError {
                 message: format!("Expected identifier, found '{}'", tok),
                 token: Some(tok),
+                span: None,
             }),
         }
     }
 }
 
 /// Convenience function to parse tokens into an AST.
-pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expr>, ParseError> {
+pub fn parse(tokens: Vec<SpannedToken>) -> Result<Vec<Expr>, ParseError> {
     Parser::new(tokens).parse_program()
 }
 
@@ -1575,7 +1688,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expr>, ParseError> {
 ///
 /// `had_semicolon == true` means the statement was followed by `;`, which is
 /// the convention for suppressing output in the REPL and file runner.
-pub fn parse_with_suppress(tokens: Vec<Token>) -> Result<Vec<(Expr, bool)>, ParseError> {
+pub fn parse_with_suppress(tokens: Vec<SpannedToken>) -> Result<Vec<(Expr, bool)>, ParseError> {
     let mut p = Parser::new(tokens);
     let mut stmts = Vec::new();
     while p.peek() != &Token::Eof {
@@ -1614,7 +1727,9 @@ mod tests {
 
     #[test]
     fn test_real_literal() {
-        let expected = Float::parse("3.14").map(|v| Float::with_val(128, v)).unwrap();
+        let expected = Float::parse("3.14")
+            .map(|v| Float::with_val(128, v))
+            .unwrap();
         assert_eq!(parse_one("3.14"), Expr::Real(expected));
     }
 
@@ -1836,7 +1951,12 @@ mod tests {
     fn test_function_definition() {
         let expr = parse_one("f[x_] := x^2");
         match expr {
-            Expr::FuncDef { name, params, body, delayed } => {
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                delayed,
+            } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
                 assert!(delayed);
@@ -1855,7 +1975,11 @@ mod tests {
     fn test_if_expression() {
         let expr = parse_one("If[True, 1, 2]");
         match expr {
-            Expr::If { condition, then_branch, else_branch } => {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 assert_eq!(*condition, Expr::Bool(true));
                 assert_eq!(*then_branch, Expr::Integer(Integer::from(1)));
                 assert_eq!(*else_branch.unwrap(), Expr::Integer(Integer::from(2)));
@@ -1958,7 +2082,16 @@ mod tests {
 
     #[test]
     fn test_parse_error_unexpected_token() {
-        let tokens = vec![Token::RBracket, Token::Eof];
+        let tokens = vec![
+            SpannedToken {
+                token: Token::RBracket,
+                span: Span { line: 1, col: 1 },
+            },
+            SpannedToken {
+                token: Token::Eof,
+                span: Span { line: 1, col: 2 },
+            },
+        ];
         let result = parse(tokens);
         assert!(result.is_err());
     }
