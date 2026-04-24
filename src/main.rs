@@ -10,6 +10,8 @@ mod eval;
 mod env;
 mod pattern;
 mod builtins;
+mod manifest;
+mod cli;
 
 use std::fs;
 
@@ -22,10 +24,30 @@ fn print_usage() {
     println!("Syma v{} — Symbolic-First Language with OOP Structure", VERSION);
     println!();
     println!("Usage:");
-    println!("  syma             Start the interactive REPL");
-    println!("  syma <file>      Evaluate a Syma source file");
-    println!("  syma --help      Show this help message");
-    println!("  syma --version   Show version information");
+    println!("  syma                       Start the interactive REPL");
+    println!("  syma <file>                Evaluate a Syma source file");
+    println!("  syma --help                Show this help");
+    println!("  syma --version             Show version");
+    println!();
+    println!("Package commands:");
+    println!("  syma new <name>            Create a binary package");
+    println!("  syma new --lib <name>      Create a library package");
+    println!("  syma run                   Run the package entry point");
+    println!("  syma build                 Check syntax of all src/ files");
+    println!("  syma check                 Same as build (no codegen yet)");
+    println!("  syma test                  Run all files in tests/");
+    println!();
+    println!("Dependency commands:");
+    println!("  syma add <pkg>[@ver]       Add a dependency to syma.toml");
+    println!("  syma add <pkg> --dev       Add a dev-dependency");
+    println!("  syma remove <pkg>          Remove a dependency");
+    println!("  syma install               Install declared dependencies");
+    println!("  syma update                Update dependencies (planned)");
+    println!();
+    println!("Registry commands (planned):");
+    println!("  syma publish               Publish to packages.syma-lang.org");
+    println!("  syma search <query>        Search the registry");
+    println!("  syma info <pkg>            Show package metadata");
 }
 
 fn print_repl_help() {
@@ -82,7 +104,7 @@ fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
 }
 
 
-fn run_file(path: &str) {
+pub(crate) fn run_file(path: &str) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -216,9 +238,69 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
+        // ── Meta ──────────────────────────────────────────────────────────────
         Some("--help") | Some("-h") => print_usage(),
         Some("--version") | Some("-v") => println!("syma {}", VERSION),
-        Some(path) => run_file(path),
+
+        // ── Package scaffolding ───────────────────────────────────────────────
+        Some("new") => {
+            // syma new [--lib] <name>
+            let is_lib = args.contains(&"--lib".to_string());
+            let name = args.iter().skip(2)
+                .find(|a| a.as_str() != "--lib")
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| {
+                    eprintln!("Usage: syma new [--lib] <name>");
+                    std::process::exit(1);
+                });
+            cli::cmd_new(name, is_lib);
+        }
+
+        // ── Source execution ─────────────────────────────────────────────────
+        Some("run")   => cli::cmd_run(),
+        Some("build") => cli::cmd_build(),
+        Some("check") => cli::cmd_check(),
+        Some("test")  => cli::cmd_test(),
+
+        // ── Dependency management ─────────────────────────────────────────────
+        Some("add") => {
+            let spec = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                eprintln!("Usage: syma add <package>[@version] [--dev]");
+                std::process::exit(1);
+            });
+            let dev = args.contains(&"--dev".to_string());
+            cli::cmd_add(spec, dev);
+        }
+        Some("remove") | Some("rm") => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                eprintln!("Usage: syma remove <package>");
+                std::process::exit(1);
+            });
+            cli::cmd_remove(name);
+        }
+        Some("install") => cli::cmd_install(),
+        Some("update")  => cli::cmd_update(),
+
+        // ── Registry (planned) ────────────────────────────────────────────────
+        Some("publish") => cli::cmd_publish(),
+        Some("search")  => {
+            let query = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            cli::cmd_search(query);
+        }
+        Some("info") => {
+            let pkg = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                eprintln!("Usage: syma info <package>");
+                std::process::exit(1);
+            });
+            cli::cmd_info(pkg);
+        }
+
+        // ── Direct file execution and REPL ────────────────────────────────────
+        Some(path) if !path.starts_with('-') => run_file(path),
+        Some(flag) => {
+            eprintln!("Unknown option: {}. Try `syma --help`.", flag);
+            std::process::exit(1);
+        }
         None => run_repl(),
     }
 }
