@@ -36,14 +36,14 @@ The pipeline is: **Source → Lexer → Parser → AST → Evaluator → Value**
   - `arithmetic.rs` — `Plus`, `Times`, `Power`, `Divide`, `Minus`, `Abs` + helpers (`add_values`, `mul_values`)
   - `comparison.rs` — `Equal`, `Unequal`, `Less`, `Greater`, `LessEqual`, `GreaterEqual`
   - `logical.rs` — `And`, `Or`, `Not`
-  - `list.rs` — `Length`, `First`, `Last`, `Rest`, `Append`, `Join`, `Flatten`, `Sort`, `Reverse`, `Part`, `Range`, `Map`, `Fold`, `Select`, `Take`, `Drop`, `Riffle`, `Transpose`, `Total`, `MemberQ`, `Count`, `Position`, `Union`, `Intersection`, `Complement`, `Tally`, `PadLeft`, `PadRight`
+  - `list.rs` — `Length`, `First`, `Last`, `Rest`, `Append`, `Join`, `Flatten`, `Sort`, `Reverse`, `Part`, `Range`, `Table`, `Map`, `Fold`, `Select`, `Scan`, `Nest`, `Take`, `Drop`, `Riffle`, `Transpose`, `Total`, `MemberQ`, `Count`, `Position`, `Union`, `Intersection`, `Complement`, `Tally`, `PadLeft`, `PadRight`
   - `string.rs` — `StringJoin`, `StringLength`, `ToString`, `ToExpression`, `StringSplit`, `StringReplace`, `StringTake`, `StringDrop`, `StringContainsQ`, `StringReverse`, `ToUpperCase`, `ToLowerCase`, `Characters`, `StringMatchQ`, `StringPadLeft`, `StringPadRight`, `StringTrim`, `StringStartsQ`, `StringEndsQ`
   - `math.rs` — `Sin`, `Cos`, `Tan`, `Log`, `Exp`, `Sqrt`, `Floor`, `Ceiling`, `Round`, `Max`, `Min`, `ArcSin`, `ArcCos`, `ArcTan`, `Log2`, `Log10`, `Mod`, `GCD`, `LCM`, `Factorial`, `FixedPoint` stub
   - `pattern.rs` — `MatchQ`, `Head`, `TypeOf`, `FreeQ`
   - `association.rs` — `Keys`, `Values`, `Lookup`, `KeyExistsQ`
   - `symbolic.rs` — `Simplify`, `Expand`, `D` (differentiation), `Integrate`, `Factor`, `Solve`, `Series`
   - `random.rs` — `RandomInteger`, `RandomReal`, `RandomChoice`
-  - `io.rs` — `Print`, `Input`, `Write`, `WriteLine`, `PrintF`
+  - `io.rs` — `Print`, `Input`, `Write`, `WriteLine`, `PrintF`, `WriteString`, `ReadString`, `Export`, `Import`
   - `error.rs` — `Throw`, `Error`
 
 ### Key Design Decisions
@@ -57,8 +57,6 @@ The pipeline is: **Source → Lexer → Parser → AST → Evaluator → Value**
 
 - Class/module evaluation (parsed but only stores a symbol marker)
 - Import system
-- `Table`, `MatchQ`, `FreeQ`, `Fold`, `Select`, `Scan`, `Nest`, `ToExpression`
-- `Simplify`/`Expand` (stub pass-through)
 - Guard condition evaluation in pattern matching
 - Pure function (`#`/`#1`) evaluation is basic — only via `PureFunction` value type
 - Bytecode compilation and JIT (Phase 2/3)

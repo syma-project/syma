@@ -126,7 +126,7 @@ pub fn json_to_value(json: &str) -> Result<Value, EvalError> {
     json_val_to_value(&jv)
 }
 
-fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
+pub fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
     match v {
         Value::Integer(n) => Ok(serde_json::Value::Number(
             serde_json::Number::from(n.to_i64().unwrap_or(0)),

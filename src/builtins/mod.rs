@@ -187,6 +187,10 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Write", io::builtin_write);
     register_builtin(env, "WriteLine", io::builtin_write_line);
     register_builtin(env, "PrintF", io::builtin_printf);
+    register_builtin(env, "WriteString", io::builtin_write_string);
+    register_builtin(env, "ReadString", io::builtin_read_string);
+    register_builtin(env, "Export", io::builtin_export);
+    register_builtin(env, "Import", io::builtin_import);
 
     // ── Error handling ──
     register_builtin(env, "Throw", error::builtin_throw);
@@ -411,6 +415,20 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Write" => "Write[stream, expr] writes expr to an output stream.",
         "WriteLine" => "WriteLine[stream, s] writes string s followed by a newline.",
         "PrintF" => "PrintF[fmt, args...] prints formatted output.",
+        "WriteString" => "WriteString[path, data] writes the string data to the file at path, creating or overwriting it.",
+        "ReadString" => "ReadString[path] reads the entire file at path and returns it as a string.",
+        "Export" => {
+            "Export[path, data] exports data to a file.\n\
+             Format is detected by extension:\n\
+             1. `.json` — serialises the value to JSON.\n\
+             2. Everything else — writes data.to_string() as plain text."
+        }
+        "Import" => {
+            "Import[path] imports data from a file.\n\
+             Format is detected by extension:\n\
+             1. `.json` — parses JSON into a Syma value.\n\
+             2. Everything else — returns the file contents as a string."
+        }
 
         // ── Error handling ──
         "Throw" => "Throw[expr] throws expr as an exception, to be caught by Catch.",
