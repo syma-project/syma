@@ -428,9 +428,6 @@ fn exact_sec(num: i64, den: u32) -> Option<Value> {
         (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = sec(11π/6) = 2√3/3
         (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = sec(7π/4) = √2
         (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = sec(5π/3) = 2
-        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = 2√3/3
-        (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = √2
-        (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = 2
         (1, 2) | (3, 2) => None,                        // sec(±π/2) undefined
         (2, 3) | (4, 3) => Some(val_int(-2)),
         (3, 4) | (5, 4) => Some(val_neg(val_sqrt(2))),
@@ -448,10 +445,6 @@ fn exact_cot(num: i64, den: u32) -> Option<Value> {
         (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = cot(7π/6) = √3
         (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = cot(5π/4) = 1
         (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // cot(π/3) = √3/3
-        (1, 2) | (3, 2) => Some(val_int(0)),            // cot(π/2) = 0
-        (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = √3
-        (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = 1
-        (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // √3/3
         (2, 3) | (5, 3) => Some(val_neg(val_div(val_sqrt(3), val_int(3)))),
         (3, 4) | (7, 4) => Some(val_int(-1)),
         (5, 6) | (11, 6) => Some(val_neg(val_sqrt(3))),

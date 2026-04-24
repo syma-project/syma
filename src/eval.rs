@@ -15,6 +15,7 @@ use rug::{Float, Integer};
 
 use crate::ast::*;
 use crate::env::Env;
+use crate::ffi;
 use crate::pattern::{Bindings, MatchResult, match_pattern};
 use crate::value::*;
 
@@ -386,13 +387,111 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── Class definition ──
         Expr::ClassDef {
             name,
-            parent: _,
-            mixins: _,
-            members: _,
+            parent,
+            mixins,
+            members,
         } => {
-            // Store class name as a marker; actual instantiation is handled
-            // by the evaluator when it sees a Call with this head.
-            env.set(name.clone(), Value::Symbol(name.clone()));
+            let mut fields = Vec::new();
+            let mut methods = HashMap::new();
+            let mut constructor = None;
+
+            for member in members {
+                match member {
+                    crate::ast::MemberDef::Field {
+                        name: field_name,
+                        type_hint,
+                        default,
+                    } => {
+                        fields.push(crate::value::ClassField {
+                            name: field_name.clone(),
+                            type_hint: type_hint.clone(),
+                            default: default.clone(),
+                        });
+                    }
+                    crate::ast::MemberDef::Method {
+                        name: method_name,
+                        params,
+                        body,
+                        ..
+                    } => {
+                        let body_expr = match body {
+                            crate::ast::MethodBody::Expr(e) => e.clone(),
+                            crate::ast::MethodBody::Block(stmts) => {
+                                Expr::Sequence(stmts.clone())
+                            }
+                        };
+                        methods.insert(
+                            method_name.clone(),
+                            crate::value::ClassMethod {
+                                name: method_name.clone(),
+                                params: params.clone(),
+                                body: body_expr,
+                            },
+                        );
+                    }
+                    crate::ast::MemberDef::Constructor { params, body } => {
+                        let body_expr = if body.len() == 1 {
+                            body[0].clone()
+                        } else {
+                            Expr::Sequence(body.clone())
+                        };
+                        constructor = Some(crate::value::ClassConstructor {
+                            params: params.clone(),
+                            body: body_expr,
+                        });
+                    }
+                    crate::ast::MemberDef::Transform { .. } => {
+                        // Transforms are not yet supported
+                    }
+                }
+            }
+
+            // Resolve parent class and merge its fields/methods
+            let parent_name = parent.clone();
+            if let Some(ref parent_name) = parent_name {
+                if let Some(parent_val) = env.get(parent_name) {
+                    if let Value::Class(parent_class) = parent_val {
+                        // Merge parent fields (child fields override)
+                        let child_field_names: std::collections::HashSet<String> =
+                            fields.iter().map(|f| f.name.clone()).collect();
+                        for parent_field in &parent_class.fields {
+                            if !child_field_names.contains(&parent_field.name) {
+                                fields.insert(0, parent_field.clone());
+                            }
+                        }
+                        // Merge parent methods (child methods override)
+                        for (method_name, method) in &parent_class.methods {
+                            methods.entry(method_name.clone()).or_insert_with(|| method.clone());
+                        }
+                        // Use parent constructor if child doesn't have one
+                        if constructor.is_none() {
+                            constructor = parent_class.constructor.clone();
+                        }
+                    }
+                }
+            }
+
+            // Resolve mixins and merge their methods
+            for mixin_name in mixins {
+                if let Some(mixin_val) = env.get(mixin_name) {
+                    if let Value::Class(mixin_class) = mixin_val {
+                        for (method_name, method) in &mixin_class.methods {
+                            methods.entry(method_name.clone()).or_insert_with(|| method.clone());
+                        }
+                    }
+                }
+            }
+
+            let class_def = crate::value::ClassDef {
+                name: name.clone(),
+                parent: parent_name,
+                mixins: mixins.clone(),
+                fields,
+                methods,
+                constructor,
+            };
+            let class_val = Value::Class(std::sync::Arc::new(class_def));
+            env.set(name.clone(), class_val);
             Ok(Value::Null)
         }
 
@@ -585,6 +684,30 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                         env.set(name.clone(), val.clone());
                         Ok(val)
                     }
+                    // this.field = value  (desugared to Set[field[this], value])
+                    Expr::Call { head, args: call_args }
+                        if call_args.len() == 1 =>
+                    {
+                        if let Expr::Symbol(field_name) = head.as_ref() {
+                            let target = eval(&call_args[0], env)?;
+                            match target {
+                                Value::Object { class_name, mut fields } => {
+                                    fields.insert(field_name.clone(), val.clone());
+                                    let updated = Value::Object { class_name, fields };
+                                    // If target is 'this', update it in the environment
+                                    if let Expr::Symbol(s) = &call_args[0] {
+                                        if s == "this" {
+                                            env.set("this".to_string(), updated.clone());
+                                        }
+                                    }
+                                    Ok(val)
+                                }
+                                _ => Err(EvalError::Error("Invalid assignment target".to_string())),
+                            }
+                        } else {
+                            Err(EvalError::Error("Invalid assignment target".to_string()))
+                        }
+                    }
                     _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                 }
             }
@@ -666,7 +789,115 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 "FreeQ" => return builtin_free_q_eval(args),
                 "FixedPoint" => return builtin_fixed_point_eval(args, env),
                 "ParallelMap" => return builtin_parallel_map_eval(args, env),
-                _ => {}
+                // ── FFI builtins (need env access) ──
+                "LoadLibrary" => {
+                    if args.len() != 1 {
+                        return Err(EvalError::Error(
+                            "LoadLibrary requires exactly 1 argument".to_string(),
+                        ));
+                    }
+                    if let Value::Str(path) = &args[0] {
+                        return ffi::loader::load_native_library(path, env);
+                    }
+                    return Err(EvalError::TypeError {
+                        expected: "String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
+                "LoadExtension" => {
+                    if args.len() != 1 {
+                        return Err(EvalError::Error(
+                            "LoadExtension requires exactly 1 argument".to_string(),
+                        ));
+                    }
+                    if let Value::Str(path) = &args[0] {
+                        ffi::extension::load_extension(path, env)?;
+                        return Ok(Value::Null);
+                    }
+                    return Err(EvalError::TypeError {
+                        expected: "String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
+                "LibraryFunction" => {
+                    // LibraryFunction[lib, "symbol", {types} -> retType]
+                    if args.len() != 3 {
+                        return Err(EvalError::Error(
+                            "LibraryFunction requires 3 arguments: lib, symbol, signature"
+                                .to_string(),
+                        ));
+                    }
+                    let sym = match &args[1] {
+                        Value::Str(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "String".to_string(),
+                                got: args[1].type_name().to_string(),
+                            })
+                        }
+                    };
+                    let sig = ffi::loader::parse_sig(&args[2])?;
+                    return ffi::loader::library_function(&args[0], &sym, sig);
+                }
+                "LibraryFunctionLoad" => {
+                    // LibraryFunctionLoad["path", "symbol", {types} -> retType]
+                    if args.len() != 3 {
+                        return Err(EvalError::Error(
+                            "LibraryFunctionLoad requires 3 arguments: path, symbol, signature"
+                                .to_string(),
+                        ));
+                    }
+                    let path = match &args[0] {
+                        Value::Str(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "String".to_string(),
+                                got: args[0].type_name().to_string(),
+                            })
+                        }
+                    };
+                    let sym = match &args[1] {
+                        Value::Str(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "String".to_string(),
+                                got: args[1].type_name().to_string(),
+                            })
+                        }
+                    };
+                    let sig = ffi::loader::parse_sig(&args[2])?;
+                    let lib = ffi::loader::load_native_library(&path, env)?;
+                    return ffi::loader::library_function(&lib, &sym, sig);
+                }
+                "ExternalEvaluate" => {
+                    if args.len() < 2 {
+                        return Err(EvalError::Error(
+                            "ExternalEvaluate requires at least 2 arguments: system, opts"
+                                .to_string(),
+                        ));
+                    }
+                    let system = match &args[0] {
+                        Value::Str(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "String".to_string(),
+                                got: args[0].type_name().to_string(),
+                            })
+                        }
+                    };
+                    let (module, func, call_args) =
+                        ffi::python::parse_external_evaluate_args(&system, &args[1], &args[2..])?;
+                    return ffi::python::call_python(&module, &func, &call_args);
+                }
+                _ => {
+                    // Extension-registered builtin: trampoline through ext registry.
+                    if std::ptr::fn_addr_eq(
+                        *f as fn(&[Value]) -> _,
+                        ffi::extension::EXT_DISPATCH_FN as fn(&[Value]) -> _,
+                    ) {
+                        return ffi::extension::call_ext_fn(name, args);
+                    }
+                }
             }
             f(args).map_err(|e| match e {
                 EvalError::NoMatch { .. } => EvalError::NoMatch {
@@ -676,6 +907,12 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 other => other,
             })
         }
+
+        Value::NativeFunction {
+            fn_ptr,
+            signature,
+            ..
+        } => ffi::loader::call_native(*fn_ptr, signature, args),
 
         Value::Function(func_def) => {
             // Try each definition in order
@@ -713,6 +950,51 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
             // Look up the symbol and apply
             if let Some(f) = env.get(name) {
                 apply_function(&f, args, env)
+            } else if args.len() == 1 {
+                // Check if this is a field access on an object
+                if let Value::Object { fields, .. } = &args[0] {
+                    if let Some(val) = fields.get(name) {
+                        return Ok(val.clone());
+                    }
+                }
+                // Return unevaluated
+                Ok(Value::Call {
+                    head: name.clone(),
+                    args: args.to_vec(),
+                })
+            } else if !args.is_empty() {
+                // Check if first arg is an object and this is a method call
+                if let Value::Object { class_name, fields } = &args[0] {
+                    // Look up method on the class
+                    if let Some(class_val) = env.get(class_name) {
+                        if let Value::Class(class_def) = class_val {
+                            if let Some(method) = class_def.methods.get(name) {
+                                let child_env = env.child();
+                                // Bind 'this' to the object
+                                child_env.set("this".to_string(), args[0].clone());
+                                // Bind field names to their values
+                                for (field_name, field_val) in fields {
+                                    child_env.set(field_name.clone(), field_val.clone());
+                                }
+                                // Match method params to remaining args
+                                let method_args = &args[1..];
+                                if let Some(bindings) =
+                                    try_match_params(&method.params, method_args, env)?
+                                {
+                                    for (bind_name, bind_val) in &bindings {
+                                        child_env.set(bind_name.clone(), bind_val.clone());
+                                    }
+                                    return eval(&method.body, &child_env);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Return unevaluated
+                Ok(Value::Call {
+                    head: name.clone(),
+                    args: args.to_vec(),
+                })
             } else {
                 // Return unevaluated
                 Ok(Value::Call {
@@ -720,6 +1002,47 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                     args: args.to_vec(),
                 })
             }
+        }
+
+        Value::Class(class_def) => {
+            // Object instantiation: ClassName[args...]
+            let mut fields = HashMap::new();
+
+            // Initialize fields with defaults
+            for field in &class_def.fields {
+                if let Some(default_expr) = &field.default {
+                    let default_val = eval(default_expr, env)?;
+                    fields.insert(field.name.clone(), default_val);
+                } else {
+                    fields.insert(field.name.clone(), Value::Null);
+                }
+            }
+
+            let mut object = Value::Object {
+                class_name: class_def.name.clone(),
+                fields,
+            };
+
+            // Run constructor if one exists
+            if let Some(constructor) = &class_def.constructor {
+                let child_env = env.child();
+                // Bind 'this' to the object
+                child_env.set("this".to_string(), object.clone());
+                // Match constructor params to args
+                if let Some(bindings) = try_match_params(&constructor.params, args, env)? {
+                    for (name, value) in &bindings {
+                        child_env.set(name.clone(), value.clone());
+                    }
+                    // Evaluate constructor body
+                    let _ = eval(&constructor.body, &child_env)?;
+                    // Read back the 'this' value (it may have been modified)
+                    if let Some(this_val) = child_env.get("this") {
+                        object = this_val;
+                    }
+                }
+            }
+
+            Ok(object)
         }
 
         Value::Object {

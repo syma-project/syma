@@ -3,6 +3,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A native dependency entry in `syma.toml`.
+#[derive(Debug, Clone)]
+pub struct NativeDep {
+    /// Path to the compiled native library (`.so` / `.dylib` / `.dll`).
+    pub path: String,
+}
+
 /// Parsed representation of a `syma.toml` package manifest.
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -10,11 +17,14 @@ pub struct Manifest {
     pub path: PathBuf,
     pub name: String,
     pub version: String,
+    #[allow(dead_code)]
     pub description: String,
     /// Explicit entry point (`entry` key in `[package]`).
     pub entry: Option<String>,
     pub dependencies: HashMap<String, String>,
     pub dev_dependencies: HashMap<String, String>,
+    /// Native library dependencies (Tier 1/3).
+    pub native_dependencies: HashMap<String, NativeDep>,
 }
 
 impl Manifest {
@@ -30,6 +40,7 @@ impl Manifest {
         let mut entry: Option<String> = None;
         let mut deps: HashMap<String, String> = HashMap::new();
         let mut dev_deps: HashMap<String, String> = HashMap::new();
+        let mut native_deps: HashMap<String, NativeDep> = HashMap::new();
 
         for raw_line in content.lines() {
             let line = raw_line.trim();
@@ -55,6 +66,16 @@ impl Manifest {
                     "dev-dependencies" => {
                         dev_deps.insert(k.to_string(), v.to_string());
                     }
+                    "native-dependencies" => {
+                        // Value is either `"path"` or `{ path = "path" }`.
+                        let dep_path = if v.starts_with('{') {
+                            // Inline table: extract `path = "..."`.
+                            parse_inline_path(v).unwrap_or_else(|| v.to_string())
+                        } else {
+                            v.to_string()
+                        };
+                        native_deps.insert(k.to_string(), NativeDep { path: dep_path });
+                    }
                     _ => {}
                 }
             }
@@ -68,6 +89,7 @@ impl Manifest {
             entry,
             dependencies: deps,
             dev_dependencies: dev_deps,
+            native_dependencies: native_deps,
         })
     }
 
@@ -222,6 +244,21 @@ pub fn remove_dep(manifest_path: &Path, name: &str, dev: bool) -> Result<bool, S
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Extract the `path` value from a TOML inline table like `{ path = "vendor/foo.so" }`.
+fn parse_inline_path(s: &str) -> Option<String> {
+    // Find `path = "..."` inside the braces.
+    let inner = s.trim_start_matches('{').trim_end_matches('}').trim();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some((k, v)) = parse_kv(part) {
+            if k.trim() == "path" {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
 
 /// Parse a TOML `key = "value"` (or `key = { ... }`) line.
 /// Returns `(key, value)` with surrounding quotes stripped for plain strings.

@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 05: Map, Fold, Select   *)
+(* Syma Functional Programming — 01: Map, Fold, Select   *)
 (* ============================================= *)
 
 (* ── Map: apply a function to every element ── *)

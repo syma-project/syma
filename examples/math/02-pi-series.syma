@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 10: Pi Approximations   *)
+(* Syma Math Examples — 02: Pi Series Formulas   *)
 (*                                               *)
 (* Three classic series/formulas for pi:         *)
 (*   1. Leibniz formula                          *)

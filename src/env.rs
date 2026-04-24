@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::value::Value;
+use crate::value::{NativeLibHandle, Value};
 
 /// Global module registry shared across all scopes in a session.
 /// Maps module names (e.g. `"LinearAlgebra"`, `"Math.Stats"`) to their `Value::Module`.
@@ -20,6 +20,10 @@ pub struct Scope {
     parent: Option<Arc<Mutex<Scope>>>,
 }
 
+/// Shared registry of opened native libraries, keyed by path.
+/// Prevents double-dlopen when `LoadLibrary["x"]` is called twice.
+pub type NativeLibRegistry = Arc<Mutex<HashMap<String, Arc<NativeLibHandle>>>>;
+
 /// The evaluation environment, managing scopes.
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -29,6 +33,8 @@ pub struct Env {
     pub registry: ModuleRegistry,
     /// Directories searched when resolving `import Name` to a `.syma` file.
     pub search_paths: Arc<Mutex<Vec<PathBuf>>>,
+    /// Native library handles shared across all child envs in a session.
+    pub native_libs: NativeLibRegistry,
 }
 
 impl Scope {
@@ -66,6 +72,7 @@ impl Env {
             scope: Arc::new(Mutex::new(Scope::new(None))),
             registry: Arc::new(Mutex::new(HashMap::new())),
             search_paths: Arc::new(Mutex::new(vec![PathBuf::from(".")])),
+            native_libs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -75,6 +82,7 @@ impl Env {
             scope: Arc::new(Mutex::new(Scope::new(Some(self.scope.clone())))),
             registry: self.registry.clone(),
             search_paths: self.search_paths.clone(),
+            native_libs: self.native_libs.clone(),
         }
     }
 
@@ -86,6 +94,16 @@ impl Env {
     /// Look up a module by its qualified name (e.g. `"LinearAlgebra"`).
     pub fn get_module(&self, name: &str) -> Option<Value> {
         self.registry.lock().unwrap().get(name).cloned()
+    }
+
+    /// Register a loaded native library handle under its path key.
+    pub fn register_native_lib(&self, path: String, handle: Arc<NativeLibHandle>) {
+        self.native_libs.lock().unwrap().insert(path, handle);
+    }
+
+    /// Look up a previously loaded native library by path.
+    pub fn get_native_lib(&self, path: &str) -> Option<Arc<NativeLibHandle>> {
+        self.native_libs.lock().unwrap().get(path).cloned()
     }
 
     /// Prepend a directory to the module search path.
@@ -116,6 +134,7 @@ impl Env {
     }
 
     /// Return all bindings in the current scope (not parents), as a Vec of (name, value) pairs.
+    #[allow(dead_code)]
     pub fn bindings(&self) -> Vec<(String, Value)> {
         self.scope
             .lock()

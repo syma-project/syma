@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 06: Patterns & Rules    *)
+(* Syma Functional Programming — 02: Patterns & Rules    *)
 (* ============================================= *)
 
 (* ── Pattern matching basics ── *)

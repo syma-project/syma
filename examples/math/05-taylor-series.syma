@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 13: Taylor Series       *)
+(* Syma Math Examples — 05: Taylor Series           *)
 (*                                               *)
 (* Approximate transcendental functions using    *)
 (* their Taylor/Maclaurin series expansions.     *)

@@ -7,6 +7,7 @@ mod cli;
 mod debug;
 mod env;
 mod eval;
+mod ffi;
 mod lexer;
 mod manifest;
 mod parser;

@@ -230,6 +230,7 @@ pub struct Lexer {
 #[derive(Debug)]
 pub struct LexError {
     pub message: String,
+    #[allow(dead_code)]
     pub pos: usize,
     pub line: usize,
     pub col: usize,

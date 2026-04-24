@@ -11,6 +11,84 @@ use rug::Integer;
 
 use crate::ast::Expr;
 
+// ── FFI types ─────────────────────────────────────────────────────────────────
+
+/// The C type tags used in native function signatures.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeType {
+    Void,
+    I32,
+    I64,
+    U32,
+    U64,
+    F32,
+    F64,
+    /// Null-terminated UTF-8 string (`*const c_char`).
+    CString,
+    /// Marshalled as `i32` (C convention: 0 = false).
+    Bool,
+}
+
+impl NativeType {
+    /// Parse a Syma string literal (e.g. `"Integer64"`) into a `NativeType`.
+    pub fn from_syma_name(s: &str) -> Option<Self> {
+        match s {
+            "Void" => Some(NativeType::Void),
+            "Integer32" => Some(NativeType::I32),
+            "Integer64" => Some(NativeType::I64),
+            "UnsignedInteger32" => Some(NativeType::U32),
+            "UnsignedInteger64" => Some(NativeType::U64),
+            "Real32" => Some(NativeType::F32),
+            "Real64" => Some(NativeType::F64),
+            "CString" => Some(NativeType::CString),
+            "Boolean" => Some(NativeType::Bool),
+            _ => None,
+        }
+    }
+
+    /// Return the Syma display name.
+    pub fn syma_name(&self) -> &'static str {
+        match self {
+            NativeType::Void => "Void",
+            NativeType::I32 => "Integer32",
+            NativeType::I64 => "Integer64",
+            NativeType::U32 => "UnsignedInteger32",
+            NativeType::U64 => "UnsignedInteger64",
+            NativeType::F32 => "Real32",
+            NativeType::F64 => "Real64",
+            NativeType::CString => "CString",
+            NativeType::Bool => "Boolean",
+        }
+    }
+}
+
+/// Type signature of a native C function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeSig {
+    pub params: Vec<NativeType>,
+    pub ret: NativeType,
+}
+
+/// Opaque handle to an OS-level dynamic library (`dlopen` handle).
+///
+/// Stored as `usize` so that `NativeLibHandle: Send + Sync` without
+/// requiring `unsafe impl` — the OS guarantees the handle is valid
+/// across threads for the lifetime of the loaded library.
+pub struct NativeLibHandle {
+    /// Raw `dlopen` / `LoadLibrary` handle stored as `usize`.
+    pub(crate) raw: usize,
+}
+
+impl fmt::Debug for NativeLibHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NativeLibHandle(0x{:x})", self.raw)
+    }
+}
+
+// SAFETY: dlopen handles are valid from any thread once the library is loaded.
+unsafe impl Send for NativeLibHandle {}
+unsafe impl Sync for NativeLibHandle {}
+
 /// Default precision for floating-point numbers (128 bits ≈ 38 decimal digits).
 pub const DEFAULT_PRECISION: u32 = 128;
 
@@ -136,11 +214,13 @@ pub enum Value {
 
     // ── Objects ──
     /// A class instance.
-    #[allow(dead_code)]
     Object {
         class_name: String,
         fields: HashMap<String, Value>,
     },
+
+    /// A class definition (metadata for instantiation).
+    Class(Arc<ClassDef>),
 
     // ── Rules ──
     /// A named rule set.
@@ -163,6 +243,22 @@ pub enum Value {
     // ── Hold ──
     Hold(Box<Value>),
     HoldComplete(Box<Value>),
+
+    // ── FFI ──
+    /// A loaded native dynamic library.
+    NativeLib {
+        name: String,
+        handle: Arc<NativeLibHandle>,
+    },
+
+    /// A callable symbol resolved from a native library.
+    NativeFunction {
+        lib_name: String,
+        symbol_name: String,
+        /// Raw function pointer stored as `usize` for `Send + Sync`.
+        fn_ptr: usize,
+        signature: NativeSig,
+    },
 }
 
 /// A built-in function implementation.
@@ -184,6 +280,40 @@ pub struct FunctionDefinition {
     pub delayed: bool,
 }
 
+/// A class definition with fields, methods, constructor, and inheritance info.
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    pub name: String,
+    pub parent: Option<String>,
+    pub mixins: Vec<String>,
+    pub fields: Vec<ClassField>,
+    pub methods: HashMap<String, ClassMethod>,
+    pub constructor: Option<ClassConstructor>,
+}
+
+/// A class field with optional type hint and default value.
+#[derive(Debug, Clone)]
+pub struct ClassField {
+    pub name: String,
+    pub type_hint: Option<String>,
+    pub default: Option<Expr>,
+}
+
+/// A class method.
+#[derive(Debug, Clone)]
+pub struct ClassMethod {
+    pub name: String,
+    pub params: Vec<Expr>,
+    pub body: Expr,
+}
+
+/// A class constructor.
+#[derive(Debug, Clone)]
+pub struct ClassConstructor {
+    pub params: Vec<Expr>,
+    pub body: Expr,
+}
+
 /// Evaluation error.
 #[derive(Debug, Clone)]
 pub enum EvalError {
@@ -203,6 +333,8 @@ pub enum EvalError {
     Thrown(Value),
     /// General error message.
     Error(String),
+    /// FFI / foreign-function error.
+    FfiError(String),
 }
 
 impl fmt::Display for EvalError {
@@ -228,6 +360,7 @@ impl fmt::Display for EvalError {
             EvalError::UnknownSymbol(s) => write!(f, "Unknown symbol: {}", s),
             EvalError::Thrown(v) => write!(f, "Thrown: {}", v),
             EvalError::Error(s) => write!(f, "Error: {}", s),
+            EvalError::FfiError(s) => write!(f, "FFI error: {}", s),
         }
     }
 }
@@ -283,6 +416,22 @@ impl PartialEq for Value {
                     exports: e2,
                 },
             ) => n1 == n2 && e1 == e2,
+            // NativeLib and NativeFunction: compare by name/symbol (pointer identity not stable)
+            (Value::NativeLib { name: n1, .. }, Value::NativeLib { name: n2, .. }) => n1 == n2,
+            (
+                Value::NativeFunction {
+                    lib_name: l1,
+                    symbol_name: s1,
+                    signature: sig1,
+                    ..
+                },
+                Value::NativeFunction {
+                    lib_name: l2,
+                    symbol_name: s2,
+                    signature: sig2,
+                    ..
+                },
+            ) => l1 == l2 && s1 == s2 && sig1 == sig2,
             _ => false,
         }
     }
@@ -308,11 +457,14 @@ impl Value {
             Value::PureFunction { .. } => "PureFunction",
             Value::Method { .. } => "Method",
             Value::Object { class_name, .. } => class_name,
+            Value::Class(class_def) => &class_def.name,
             Value::RuleSet { .. } => "RuleSet",
             Value::Pattern(_) => "Pattern",
             Value::Module { .. } => "Module",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
+            Value::NativeLib { .. } => "NativeLib",
+            Value::NativeFunction { .. } => "NativeFunction",
         }
     }
 
@@ -697,6 +849,7 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Class(class_def) => write!(f, "Class[{}]", class_def.name),
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
             Value::Module { name, exports } => {
@@ -709,6 +862,12 @@ impl fmt::Display for Value {
             }
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),
+            Value::NativeLib { name, .. } => write!(f, "NativeLib[\"{}\"]", name),
+            Value::NativeFunction {
+                lib_name,
+                symbol_name,
+                ..
+            } => write!(f, "NativeFunction[\"{}::{}\"]", lib_name, symbol_name),
         }
     }
 }

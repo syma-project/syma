@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 09: Monte Carlo Pi      *)
+(* Syma Math Examples — 06: Monte Carlo Pi          *)
 (*                                               *)
 (* Estimate pi by throwing random darts at a     *)
 (* unit square and checking how many land inside *)

@@ -112,6 +112,11 @@ fn simplify_power(args: &[Value]) -> Value {
         _ => match &args[0] {
             Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(0)),
             Value::Integer(n) if *n == 1 => Value::Integer(Integer::from(1)),
+            // Nested Power: Power[Power[x, a], b] → Power[x, a*b]
+            Value::Call { head, args: inner } if head == "Power" && inner.len() == 2 => {
+                let new_exp = simplify_call("Times", &[inner[1].clone(), args[1].clone()]);
+                simplify_call("Power", &[inner[0].clone(), new_exp])
+            }
             _ => Value::Call {
                 head: "Power".to_string(),
                 args: args.to_vec(),
@@ -764,7 +769,208 @@ pub fn builtin_factor(args: &[Value]) -> Result<Value, EvalError> {
             "Factor requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    Ok(factor_expr(&args[0]))
+}
+
+/// Try to factor a polynomial expression.
+fn factor_expr(expr: &Value) -> Value {
+    // Find the variable (first non-constant symbol)
+    let var = match find_polynomial_var(expr) {
+        Some(v) => v,
+        None => return expr.clone(),
+    };
+    let coeffs = extract_polynomial_coeffs(expr, &var);
+    if coeffs.is_empty() {
+        return expr.clone();
+    }
+    match coeffs.len() - 1 {
+        0 => coeffs[0].clone(),
+        1 => factor_linear(&coeffs, &var),
+        2 => factor_quadratic(&coeffs, &var),
+        _ => factor_by_gcd(&coeffs, &var),
+    }
+}
+
+/// Find the polynomial variable in an expression.
+fn find_polynomial_var(expr: &Value) -> Option<String> {
+    match expr {
+        Value::Symbol(s) if !is_known_constant(s) => Some(s.clone()),
+        Value::Call { head, args } => {
+            if head == "Plus" || head == "Times" {
+                for arg in args {
+                    if let Some(v) = find_polynomial_var(arg) {
+                        return Some(v);
+                    }
+                }
+            }
+            if head == "Power" && args.len() == 2 {
+                if let Some(v) = find_polynomial_var(&args[0]) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn is_known_constant(s: &str) -> bool {
+    matches!(s, "Pi" | "E" | "I" | "True" | "False" | "Null" | "Degree")
+}
+
+fn factor_linear(coeffs: &[Value], var: &str) -> Value {
+    let a = &coeffs[0];
+    let b = &coeffs[1];
+    let x = Value::Symbol(var.to_string());
+    if let (Value::Integer(ai), Value::Integer(bi)) = (a, b) {
+        let gcd = ai.clone().gcd(bi);
+        if gcd > Integer::from(1) {
+            let new_a = Value::Call {
+                head: "Plus".to_string(),
+                args: vec![
+                    Value::Integer(ai.clone() / &gcd),
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(bi.clone() / &gcd), x],
+                    },
+                ],
+            };
+            return Value::Call {
+                head: "Times".to_string(),
+                args: vec![Value::Integer(gcd), new_a],
+            };
+        }
+    }
+    Value::Call {
+        head: "Plus".to_string(),
+        args: vec![
+            a.clone(),
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![b.clone(), x],
+            },
+        ],
+    }
+}
+
+fn factor_quadratic(coeffs: &[Value], var: &str) -> Value {
+    let c = &coeffs[0];
+    let b = &coeffs[1];
+    let a = &coeffs[2];
+    let x = Value::Symbol(var.to_string());
+
+    if let (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci)) = (a, b, c) {
+        if !ai.is_zero() {
+            // Discriminant: b^2 - 4ac
+            let b_sq: Integer = (bi * bi).into();
+            let four_ac: Integer = (Integer::from(4) * ai * ci).into();
+            let disc: Integer = (b_sq - four_ac).into();
+            if !disc.is_negative() {
+                let sqrt_disc = disc.clone().sqrt();
+                let sqrt_disc_sq: Integer = (&sqrt_disc * &sqrt_disc).into();
+                if sqrt_disc_sq == disc {
+                    let two_a: Integer = (Integer::from(2) * ai).into();
+                    let neg_bi: Integer = (-bi).into();
+                    let r1_num: Integer = (&neg_bi + &sqrt_disc).into();
+                    let r2_num: Integer = (&neg_bi - &sqrt_disc).into();
+                    if r1_num.is_divisible(&two_a) && r2_num.is_divisible(&two_a) {
+                        let r1: Integer = r1_num / &two_a;
+                        let r2: Integer = r2_num / &two_a;
+                        let factor1 = Value::Call {
+                            head: "Plus".to_string(),
+                            args: vec![x.clone(), Value::Integer(-r1)],
+                        };
+                        let factor2 = Value::Call {
+                            head: "Plus".to_string(),
+                            args: vec![x, Value::Integer(-r2)],
+                        };
+                        if *ai == Integer::from(1) {
+                            return Value::Call {
+                                head: "Times".to_string(),
+                                args: vec![factor1, factor2],
+                            };
+                        } else {
+                            return Value::Call {
+                                head: "Times".to_string(),
+                                args: vec![Value::Integer(ai.clone()), factor1, factor2],
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    expr_from_coeffs(coeffs, var)
+}
+
+fn factor_by_gcd(coeffs: &[Value], var: &str) -> Value {
+    let integers: Vec<&Integer> = coeffs
+        .iter()
+        .filter_map(|c| match c {
+            Value::Integer(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if integers.len() != coeffs.len() || integers.is_empty() {
+        return expr_from_coeffs(coeffs, var);
+    }
+    let mut gcd = integers[0].clone();
+    for n in &integers[1..] {
+        gcd = gcd.gcd(n);
+    }
+    if gcd <= Integer::from(1) {
+        return expr_from_coeffs(coeffs, var);
+    }
+    let new_coeffs: Vec<Value> = coeffs
+        .iter()
+        .map(|c| match c {
+            Value::Integer(n) => Value::Integer(n.clone() / &gcd),
+            other => other.clone(),
+        })
+        .collect();
+    let inner = expr_from_coeffs(&new_coeffs, var);
+    Value::Call {
+        head: "Times".to_string(),
+        args: vec![Value::Integer(gcd), inner],
+    }
+}
+
+fn expr_from_coeffs(coeffs: &[Value], var: &str) -> Value {
+    let x = Value::Symbol(var.to_string());
+    let mut terms = Vec::new();
+    for (i, coeff) in coeffs.iter().enumerate() {
+        if matches!(coeff, Value::Integer(n) if n.is_zero()) {
+            continue;
+        }
+        let term = match i {
+            0 => coeff.clone(),
+            1 => Value::Call {
+                head: "Times".to_string(),
+                args: vec![coeff.clone(), x.clone()],
+            },
+            _ => Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    coeff.clone(),
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![x.clone(), Value::Integer(Integer::from(i))],
+                    },
+                ],
+            },
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.into_iter().next().unwrap()
+    } else {
+        Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        }
+    }
 }
 
 // ── Solve ──
@@ -1181,5 +1387,74 @@ fn try_numerical_eval(head: &str, args: &[Value]) -> Option<Value> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Integer;
+
+    fn sym(s: &str) -> Value {
+        Value::Symbol(s.to_string())
+    }
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+
+    #[test]
+    fn test_factor_constant() {
+        assert_eq!(factor_expr(&int(5)), int(5));
+    }
+
+    #[test]
+    fn test_factor_linear_gcd() {
+        // Factor[2x + 4] = 2(x + 2)
+        let expr = simplify_call("Plus", &[
+            simplify_call("Times", &[int(2), sym("x")]),
+            int(4),
+        ]);
+        let result = factor_expr(&expr);
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], int(2));
+            }
+            _ => panic!("Expected Times call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_factor_difference_of_squares() {
+        // Factor[x^2 - 1] = (x - 1)(x + 1)
+        let expr = simplify_call("Plus", &[
+            simplify_call("Power", &[sym("x"), int(2)]),
+            int(-1),
+        ]);
+        let result = factor_expr(&expr);
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Times call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_factor_perfect_square() {
+        // Factor[x^2 + 2x + 1] = (x + 1)^2
+        let expr = simplify_call("Plus", &[
+            simplify_call("Power", &[sym("x"), int(2)]),
+            simplify_call("Times", &[int(2), sym("x")]),
+            int(1),
+        ]);
+        let result = factor_expr(&expr);
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Times call, got {:?}", result),
+        }
     }
 }

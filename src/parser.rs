@@ -15,6 +15,7 @@ pub struct Parser {
 #[derive(Debug)]
 pub struct ParseError {
     pub message: String,
+    #[allow(dead_code)]
     pub token: Option<Token>,
     pub span: Option<Span>,
 }

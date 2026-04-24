@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 12: Numerical Integration *)
+(* Syma Math Examples — 04: Numerical Integration *)
 (*                                               *)
 (* Approximate definite integrals using:         *)
 (*   1. Trapezoidal rule                         *)

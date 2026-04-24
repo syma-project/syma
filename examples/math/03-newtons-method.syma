@@ -1,5 +1,5 @@
 (* ============================================= *)
-(* Syma Language Examples — 11: Newton's Method     *)
+(* Syma Math Examples — 03: Newton's Method     *)
 (*                                               *)
 (* Use Newton-Raphson iteration to find roots.   *)
 (* ============================================= *)

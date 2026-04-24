@@ -324,6 +324,13 @@ fn format_value(val: &Value) -> String {
         Value::Hold(_) => "<hold>".to_string(),
         Value::HoldComplete(_) => "<hold>".to_string(),
         Value::Complex { re, im } => format!("{}+{}I", re, im),
+        Value::Class(class_def) => format!("<class {}>", class_def.name),
+        Value::NativeLib { name, .. } => format!("<native lib {}>", name),
+        Value::NativeFunction {
+            lib_name,
+            symbol_name,
+            ..
+        } => format!("<native {}::{}>", lib_name, symbol_name),
     }
 }
 

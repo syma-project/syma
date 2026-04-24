@@ -2,6 +2,7 @@ pub mod arithmetic;
 pub mod association;
 pub mod comparison;
 pub mod error;
+pub mod ffi;
 pub mod filesystem;
 pub mod io;
 pub mod list;
@@ -206,6 +207,15 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
     register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
     register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
+
+    // ── FFI (env-aware; stubs registered so Help/Head works) ──
+    register_builtin(env, "LoadLibrary", ffi::builtin_load_library);
+    register_builtin(env, "LoadExtension", ffi::builtin_load_extension);
+    register_builtin(env, "ExternalEvaluate", ffi::builtin_external_evaluate);
+    // LibraryFunction and LibraryFunctionLoad are handled as special cases in eval.rs.
+    // Register stubs so they appear in the environment and can be looked up.
+    register_builtin(env, "LibraryFunction", ffi::builtin_load_library);
+    register_builtin(env, "LibraryFunctionLoad", ffi::builtin_load_library);
 
     // ── File system ──
     register_builtin(env, "FileNameSplit", filesystem::builtin_file_name_split);

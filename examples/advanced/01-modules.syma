@@ -1,4 +1,4 @@
-(* 14-modules.syma — first-class module system demo *)
+(* Syma Advanced — 01: Module System *)
 
 (* ── Define a module ─────────────────────────────────────────── *)
 
