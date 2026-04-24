@@ -19,6 +19,9 @@ pub mod pattern;
 pub mod profiler;
 pub mod value;
 
+#[cfg(feature = "jit")]
+pub mod jit;
+
 use std::fs;
 
 use crate::format::{bold_red, dim};

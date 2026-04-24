@@ -135,6 +135,28 @@ pub fn register_builtins(env: &Env) {
     // ── Association ──
     register_builtin(env, "Keys", association::builtin_keys);
     register_builtin(env, "Values", association::builtin_values);
+    register_builtin(env, "Lookup", association::builtin_lookup);
+    register_builtin(env, "KeyExistsQ", association::builtin_key_member_q);
+    register_builtin(env, "AssociationQ", association::builtin_association_q);
+    register_builtin(env, "Normal", association::builtin_normal);
+    register_builtin(env, "KeySort", association::builtin_key_sort);
+    register_builtin_env(env, "KeySortBy", association::builtin_key_sort_by);
+    register_builtin(env, "KeyTake", association::builtin_key_take);
+    register_builtin(env, "KeyDrop", association::builtin_key_drop);
+    register_builtin_env(env, "KeySelect", association::builtin_key_select);
+    register_builtin_env(env, "KeyMap", association::builtin_key_map);
+    register_builtin_env(env, "KeyValueMap", association::builtin_key_value_map);
+    register_builtin(env, "KeyMemberQ", association::builtin_key_member_q);
+    register_builtin(env, "KeyFreeQ", association::builtin_key_free_q);
+    register_builtin(env, "AssociateTo", association::builtin_associate_to);
+    register_builtin(env, "KeyDropFrom", association::builtin_key_drop_from);
+    register_builtin(env, "Counts", association::builtin_counts);
+    register_builtin_env(env, "CountsBy", association::builtin_counts_by);
+    register_builtin_env(env, "GroupBy", association::builtin_group_by);
+    register_builtin_env(env, "Merge", association::builtin_merge);
+    register_builtin(env, "KeyUnion", association::builtin_key_union);
+    register_builtin(env, "KeyIntersection", association::builtin_key_intersection);
+    register_builtin(env, "KeyComplement", association::builtin_key_complement);
 
     // ── Symbolic ──
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
@@ -223,10 +245,6 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Tally", list::builtin_tally);
     register_builtin(env, "PadLeft", list::builtin_pad_left);
     register_builtin(env, "PadRight", list::builtin_pad_right);
-
-    // ── Association extended ──
-    register_builtin(env, "Lookup", association::builtin_lookup);
-    register_builtin(env, "KeyExistsQ", association::builtin_key_exists_q);
 
     // ── I/O ──
     register_builtin(env, "Input", io::builtin_input);
@@ -942,6 +960,67 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Lookup[assoc, key] gives the value associated with key, or Missing if not found."
         }
         "KeyExistsQ" => "KeyExistsQ[assoc, key] returns True if key exists in the association.",
+        "AssociationQ" => {
+            "AssociationQ[expr] returns True if expr is a valid association."
+        }
+        "Normal" => {
+            "Normal[assoc] converts an association to a list of rules."
+        }
+        "KeySort" => {
+            "KeySort[assoc] sorts the keys of an association alphabetically."
+        }
+        "KeySortBy" => {
+            "KeySortBy[assoc, f] sorts keys using the ordering function f."
+        }
+        "KeyTake" => {
+            "KeyTake[assoc, keys] returns an association with only the specified keys."
+        }
+        "KeyDrop" => {
+            "KeyDrop[assoc, keys] returns an association without the specified keys."
+        }
+        "KeySelect" => {
+            "KeySelect[assoc, pred] selects entries where pred[key] returns True."
+        }
+        "KeyMap" => {
+            "KeyMap[f, assoc] applies f to each key in the association."
+        }
+        "KeyValueMap" => {
+            "KeyValueMap[f, assoc] applies f to each {key, value} pair, returning a list."
+        }
+        "KeyMemberQ" => {
+            "KeyMemberQ[assoc, key] returns True if the key exists in the association."
+        }
+        "KeyFreeQ" => {
+            "KeyFreeQ[assoc, key] returns True if the key does NOT exist in the association."
+        }
+        "AssociateTo" => {
+            "AssociateTo[assoc, rule] returns a new association with the key->value added.\n\
+             AssociateTo[assoc, {rule1, rule2, ...}] adds multiple entries."
+        }
+        "KeyDropFrom" => {
+            "KeyDropFrom[assoc, key] returns a new association with the specified key removed."
+        }
+        "Counts" => {
+            "Counts[list] returns an association counting occurrences of each element."
+        }
+        "CountsBy" => {
+            "CountsBy[list, f] counts occurrences grouped by f[element]."
+        }
+        "GroupBy" => {
+            "GroupBy[list, f] groups elements of list by f[element]."
+        }
+        "Merge" => {
+            "Merge[{assoc1, assoc2, ...}, combiner] merges associations, using combiner for duplicate keys."
+        }
+        "KeyUnion" => {
+            "KeyUnion[{assoc1, assoc2, ...}] returns the union of keys from multiple associations."
+        }
+        "KeyIntersection" => {
+            "KeyIntersection[{assoc1, assoc2, ...}] returns the intersection of keys."
+        }
+        "KeyComplement" => {
+            "KeyComplement[assoc1, assoc2] returns keys in assoc1 that are not in assoc2."
+        }
 
         // ── Random ──
         "RandomInteger" => {

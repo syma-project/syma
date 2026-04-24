@@ -16,6 +16,9 @@ pub fn execute_bytecode(
     args: &[Value],
     env: &Env,
 ) -> Result<Value, EvalError> {
+    // Validate register bounds before execution
+    validate_bytecode_regs(bytecode)?;
+
     let nregs = bytecode.nregs.max(args.len() as u16).max(1) as usize;
     let mut regs = vec![Value::Null; nregs];
     for (i, arg) in args.iter().enumerate() {
@@ -319,9 +322,9 @@ impl VmState<'_> {
 
     fn int_binop(
         &mut self,
-        d: u8,
-        a: u8,
-        b: u8,
+        d: u16,
+        a: u16,
+        b: u16,
         int_op: fn(rug::Integer, &rug::Integer) -> Value,
         fallback: &str,
     ) -> Result<(), EvalError> {
@@ -339,9 +342,9 @@ impl VmState<'_> {
 
     fn real_binop(
         &mut self,
-        d: u8,
-        a: u8,
-        b: u8,
+        d: u16,
+        a: u16,
+        b: u16,
         real_op: fn(rug::Float, rug::Float) -> Value,
         fallback: &str,
     ) -> Result<(), EvalError> {
@@ -430,6 +433,89 @@ impl Truthy for Value {
             Value::Symbol(s) => s != "False",
             _ => true,
         }
+    }
+}
+
+/// Validate that all register references in the bytecode are within bounds.
+fn validate_bytecode_regs(bc: &CompiledBytecode) -> Result<(), EvalError> {
+    let nregs = bc.nregs.max(1) as usize;
+    for instr in &bc.instructions {
+        let max_reg = max_reg_index(instr);
+        if max_reg >= nregs {
+            return Err(EvalError::Error(format!(
+                "bytecode: register {max_reg} out of bounds (nregs={nregs})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Return the maximum register index referenced by an instruction.
+fn max_reg_index(instr: &Instruction) -> usize {
+    match instr {
+        Instruction::Halt
+        | Instruction::Jump(_) => 0,
+
+        // 1 register
+        Instruction::LoadNull(d)
+        | Instruction::LoadTrue(d)
+        | Instruction::LoadFalse(d) => *d as usize,
+
+        // 2 registers — max of both
+        Instruction::Mov(d, s)
+        | Instruction::Neg(d, s)
+        | Instruction::Not(d, s) => (*d).max(*s) as usize,
+
+        // 3 registers — max of all three
+        Instruction::Add(d, a, b)
+        | Instruction::Sub(d, a, b)
+        | Instruction::Mul(d, a, b)
+        | Instruction::Div(d, a, b)
+        | Instruction::Pow(d, a, b)
+        | Instruction::IntAdd(d, a, b)
+        | Instruction::IntSub(d, a, b)
+        | Instruction::IntMul(d, a, b)
+        | Instruction::RealAdd(d, a, b)
+        | Instruction::RealSub(d, a, b)
+        | Instruction::RealMul(d, a, b)
+        | Instruction::RealDiv(d, a, b)
+        | Instruction::Eq(d, a, b)
+        | Instruction::Neq(d, a, b)
+        | Instruction::Lt(d, a, b)
+        | Instruction::Gt(d, a, b)
+        | Instruction::Le(d, a, b)
+        | Instruction::Ge(d, a, b)
+        | Instruction::And(d, a, b)
+        | Instruction::Or(d, a, b) => (*d).max(*a).max(*b) as usize,
+
+        // reg + u8 — includes contiguous registers
+        Instruction::MakeList(d, n)
+        | Instruction::MakeAssoc(d, n)
+        | Instruction::Apply(d, n)
+        | Instruction::Call(d, n)
+        | Instruction::TailCall(d, n) => {
+            // d + (up to 2*n for MakeAssoc, n for others) contiguous regs
+            let count = match instr {
+                Instruction::MakeAssoc(_, n) => 1 + 2 * n,
+                _ => 1 + n,
+            };
+            (*d as usize).saturating_add(count as usize - 1) // -1 because d itself is 1
+        }
+
+        // reg + u32
+        Instruction::LoadConst(d, _)
+        | Instruction::LoadArg(d, _)
+        | Instruction::LoadSym(d, _) => *d as usize,
+
+        // StoreSym(idx, s) — s is source register
+        Instruction::StoreSym(_, s) => *s as usize,
+
+        // reg + i32
+        Instruction::JumpIfZero(r, _)
+        | Instruction::JumpIfNotZero(r, _) => *r as usize,
+
+        // Return
+        Instruction::Return(r) => *r as usize,
     }
 }
 

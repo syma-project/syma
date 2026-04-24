@@ -1073,6 +1073,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 
         Value::Function(func_def) => {
             // ── Hotness check: compile to bytecode if frequently called ──
+            profiler::Profiler::count_call(&func_def.name);
             if profiler::Profiler::check_hot(&func_def.name) {
                 if let Ok(bc) = bytecode::compiler::BytecodeCompiler::compile_multi(
                     &func_def.definitions,

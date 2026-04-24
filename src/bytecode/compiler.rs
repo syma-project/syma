@@ -15,14 +15,14 @@ use crate::value::{FunctionDefinition, Value};
 #[derive(Debug)]
 pub enum CompileError {
     UnsupportedFeature(String),
+    RegisterOverflow,
 }
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CompileError::UnsupportedFeature(msg) => {
-                write!(f, "unsupported feature: {msg}")
-            }
+            CompileError::UnsupportedFeature(msg) => write!(f, "{msg}"),
+            CompileError::RegisterOverflow => write!(f, "too many registers"),
         }
     }
 }
@@ -32,8 +32,8 @@ impl std::error::Error for CompileError {}
 // ── Register Allocator ─────────────────────────────────────────────────────────
 
 struct RegAlloc {
-    next: u8,
-    _freed: Vec<u8>,
+    next: u16,
+    _freed: Vec<u16>,
 }
 
 impl RegAlloc {
@@ -44,21 +44,24 @@ impl RegAlloc {
         }
     }
 
-    fn alloc(&mut self) -> u8 {
+    fn alloc(&mut self) -> Result<u16, CompileError> {
         if let Some(r) = self._freed.pop() {
-            return r;
+            return Ok(r);
+        }
+        if self.next >= u16::MAX {
+            return Err(CompileError::RegisterOverflow);
         }
         let r = self.next;
         self.next += 1;
-        r
+        Ok(r)
     }
 
-    fn _free(&mut self, reg: u8) {
+    fn _free(&mut self, reg: u16) {
         self._freed.push(reg);
     }
 
     fn used(&self) -> u16 {
-        self.next as u16 - self._freed.len() as u16
+        self.next - self._freed.len() as u16
     }
 }
 
@@ -97,7 +100,7 @@ pub struct BytecodeCompiler {
     pool: ConstPool,
     symbol_cache: HashMap<String, u32>,
     /// Maps parameter names to their register numbers.
-    param_regs: HashMap<String, u8>,
+    param_regs: HashMap<String, u16>,
 }
 
 impl Default for BytecodeCompiler {
@@ -153,7 +156,7 @@ impl BytecodeCompiler {
         let mut c = Self::new();
 
         for (i, param) in params.iter().enumerate() {
-            let reg = c.regs.alloc();
+            let reg = c.regs.alloc()?;
             c.emit(Instruction::LoadArg(reg, i as u32));
 
             match param {
@@ -184,26 +187,26 @@ impl BytecodeCompiler {
 
     // ── Expression compilation ────────────────────────────────────────────────
 
-    fn compile_expr(&mut self, expr: &Expr) -> Result<u8, CompileError> {
+    fn compile_expr(&mut self, expr: &Expr) -> Result<u16, CompileError> {
         match expr {
-            Expr::Integer(n) => Ok(self.emit_const(Value::Integer(n.clone()))),
-            Expr::Real(r) => Ok(self.emit_const(Value::Real(r.clone()))),
-            Expr::Str(s) => Ok(self.emit_const(Value::Str(s.clone()))),
-            Expr::Bool(b) => Ok(self.emit_const(Value::Bool(*b))),
+            Expr::Integer(n) => self.emit_const(Value::Integer(n.clone())),
+            Expr::Real(r) => self.emit_const(Value::Real(r.clone())),
+            Expr::Str(s) => self.emit_const(Value::Str(s.clone())),
+            Expr::Bool(b) => self.emit_const(Value::Bool(*b)),
             Expr::Null => {
-                let dst = self.regs.alloc();
+                let dst = self.regs.alloc()?;
                 self.emit(Instruction::LoadNull(dst));
                 Ok(dst)
             }
             Expr::Symbol(s) => {
                 // If this symbol is a function parameter, load from register
                 if let Some(&reg) = self.param_regs.get(s) {
-                    let dst = self.regs.alloc();
+                    let dst = self.regs.alloc()?;
                     self.emit(Instruction::Mov(dst, reg));
                     return Ok(dst);
                 }
                 // Otherwise, do an environment lookup
-                let dst = self.regs.alloc();
+                let dst = self.regs.alloc()?;
                 let idx = self.symbol_idx(s);
                 self.emit(Instruction::LoadSym(dst, idx));
                 Ok(dst)
@@ -213,26 +216,36 @@ impl BytecodeCompiler {
                 for item in items {
                     regs.push(self.compile_expr(item)?);
                 }
-                let dst = self.regs.alloc();
+                let dst = self.regs.alloc()?;
                 self.emit(Instruction::MakeList(dst, regs.len() as u8));
                 for r in regs {
                     self.regs._free(r);
                 }
                 Ok(dst)
             }
+            Expr::Assoc(entries) => self.compile_assoc(entries),
             Expr::Call { head, args } => self.compile_call(head, args),
             Expr::If { condition, then_branch, else_branch } => {
                 self.compile_if(condition, then_branch, else_branch)
             }
             Expr::While { condition, body } => self.compile_while(condition, body),
             Expr::Sequence(stmts) => self.compile_sequence(stmts),
+            Expr::Assign { lhs, rhs } => self.compile_assign(lhs, rhs),
             _ => Err(CompileError::UnsupportedFeature(format!(
                 "expression: {expr:?}"
             ))),
         }
     }
 
-    fn compile_call(&mut self, head: &Expr, args: &[Expr]) -> Result<u8, CompileError> {
+    fn compile_call(&mut self, head: &Expr, args: &[Expr]) -> Result<u16, CompileError> {
+        // Try inline arithmetic for known binary ops
+        if let Expr::Symbol(name) = head {
+            if let Some(instr) = self.try_inline_arithmetic(name, args)? {
+                return Ok(instr);
+            }
+        }
+
+        // General call: compile head and args, emit Apply
         let func_reg = self.compile_expr(head)?;
         let mut arg_regs = Vec::with_capacity(args.len());
         for arg in args {
@@ -241,12 +254,15 @@ impl BytecodeCompiler {
         // The Apply instruction expects function and args in consecutive
         // registers starting at dst: [func, arg0, arg1, ..., argN].
         // Allocate dst and emit Mov instructions to pack them.
-        let dst = self.regs.alloc();
+        let dst = self.regs.alloc()?;
         if func_reg != dst {
             self.emit(Instruction::Mov(dst, func_reg));
         }
         for (i, arg_reg) in arg_regs.iter().enumerate() {
-            self.emit(Instruction::Mov(dst + 1 + i as u8, *arg_reg));
+            let target = dst.checked_add(1 + i as u16).ok_or_else(|| {
+                CompileError::UnsupportedFeature("register overflow in call".to_string())
+            })?;
+            self.emit(Instruction::Mov(target, *arg_reg));
         }
         self.emit(Instruction::Apply(dst, args.len() as u8));
         self.regs._free(func_reg);
@@ -256,13 +272,104 @@ impl BytecodeCompiler {
         Ok(dst)
     }
 
+    /// Try to emit a direct arithmetic instruction for known binary ops.
+    /// Returns `Ok(Some(reg))` on success, `Ok(None)` to fall through to Apply.
+    fn try_inline_arithmetic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Option<u16>, CompileError> {
+        // Unary ops
+        if args.len() == 1 {
+            return match name {
+                "Not" => {
+                    let a_reg = self.compile_expr(&args[0])?;
+                    self.emit(Instruction::Not(a_reg, a_reg));
+                    Ok(Some(a_reg))
+                }
+                _ => Ok(None),
+            };
+        }
+
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let a_reg = self.compile_expr(&args[0])?;
+        let b_reg = self.compile_expr(&args[1])?;
+        let dst = self.regs.alloc()?;
+
+        // Check if both operands are statically integer or real literals
+        let a_is_int = matches!(&args[0], Expr::Integer(_));
+        let b_is_int = matches!(&args[1], Expr::Integer(_));
+        let a_is_real = matches!(&args[0], Expr::Real(_));
+        let b_is_real = matches!(&args[1], Expr::Real(_));
+
+        match name {
+            "Plus" => {
+                if a_is_int && b_is_int {
+                    self.emit(Instruction::IntAdd(dst, a_reg, b_reg));
+                } else if a_is_real && b_is_real {
+                    self.emit(Instruction::RealAdd(dst, a_reg, b_reg));
+                } else {
+                    self.emit(Instruction::Add(dst, a_reg, b_reg));
+                }
+            }
+            "Times" => {
+                // Detect unary minus: Times[-1, x] → Neg
+                if matches!(&args[0], Expr::Integer(n) if n == &(-1)) {
+                    self.regs._free(a_reg);
+                    self.regs._free(dst);
+                    self.emit(Instruction::Neg(b_reg, b_reg));
+                    return Ok(Some(b_reg));
+                }
+                if matches!(&args[1], Expr::Integer(n) if n == &(-1)) {
+                    self.regs._free(b_reg);
+                    self.regs._free(dst);
+                    self.emit(Instruction::Neg(a_reg, a_reg));
+                    return Ok(Some(a_reg));
+                }
+                if a_is_int && b_is_int {
+                    self.emit(Instruction::IntMul(dst, a_reg, b_reg));
+                } else if a_is_real && b_is_real {
+                    self.emit(Instruction::RealMul(dst, a_reg, b_reg));
+                } else {
+                    self.emit(Instruction::Mul(dst, a_reg, b_reg));
+                }
+            }
+            "Power" => {
+                self.emit(Instruction::Pow(dst, a_reg, b_reg));
+            }
+            "Subtract" => {
+                // Subtract[a, b] desugars to Plus[a, Times[-1, b]], but
+                // the parser desugars it before it reaches us. Handle it anyway.
+                if a_is_int && b_is_int {
+                    self.emit(Instruction::IntSub(dst, a_reg, b_reg));
+                } else if a_is_real && b_is_real {
+                    self.emit(Instruction::RealSub(dst, a_reg, b_reg));
+                } else {
+                    self.emit(Instruction::Sub(dst, a_reg, b_reg));
+                }
+            }
+            _ => {
+                // Not an arithmetic op — free regs and fall through
+                self.regs._free(dst);
+                self.regs._free(a_reg);
+                self.regs._free(b_reg);
+                return Ok(None);
+            }
+        }
+        self.regs._free(a_reg);
+        self.regs._free(b_reg);
+        Ok(Some(dst))
+    }
+
     fn compile_if(
         &mut self,
         condition: &Expr,
         then_branch: &Expr,
         else_branch: &Option<Box<Expr>>,
-    ) -> Result<u8, CompileError> {
-        let result_reg = self.regs.alloc();
+    ) -> Result<u16, CompileError> {
+        let result_reg = self.regs.alloc()?;
         let cond_reg = self.compile_expr(condition)?;
         let else_label = self.emit(Instruction::JumpIfZero(cond_reg, 0));
         self.regs._free(cond_reg);
@@ -288,7 +395,7 @@ impl BytecodeCompiler {
         Ok(result_reg)
     }
 
-    fn compile_while(&mut self, condition: &Expr, body: &Expr) -> Result<u8, CompileError> {
+    fn compile_while(&mut self, condition: &Expr, body: &Expr) -> Result<u16, CompileError> {
         let loop_start = self.code.len() as i32;
         let cond_reg = self.compile_expr(condition)?;
         let exit_jz = self.emit(Instruction::JumpIfZero(cond_reg, 0));
@@ -299,13 +406,13 @@ impl BytecodeCompiler {
         self.emit(Instruction::Jump(loop_start - jump_back as i32 - 1));
 
         self.patch_jump(exit_jz, self.code.len() as i32);
-        let dst = self.regs.alloc();
+        let dst = self.regs.alloc()?;
         self.emit(Instruction::LoadNull(dst));
         Ok(dst)
     }
 
-    fn compile_sequence(&mut self, stmts: &[Expr]) -> Result<u8, CompileError> {
-        let mut last_reg = self.regs.alloc();
+    fn compile_sequence(&mut self, stmts: &[Expr]) -> Result<u16, CompileError> {
+        let mut last_reg = self.regs.alloc()?;
         self.emit(Instruction::LoadNull(last_reg));
         for stmt in stmts {
             self.regs._free(last_reg);
@@ -334,11 +441,58 @@ impl BytecodeCompiler {
         }
     }
 
-    fn emit_const(&mut self, val: Value) -> u8 {
-        let dst = self.regs.alloc();
+    fn emit_const(&mut self, val: Value) -> Result<u16, CompileError> {
+        let dst = self.regs.alloc()?;
         let idx = self.pool.insert(val);
         self.emit(Instruction::LoadConst(dst, idx));
-        dst
+        Ok(dst)
+    }
+
+    /// Compile an Association literal: `<\| key1 -> val1, key2 -> val2 \|>`
+    fn compile_assoc(&mut self, entries: &[(String, Expr)]) -> Result<u16, CompileError> {
+        let n = entries.len();
+        if n > u8::MAX as usize {
+            return Err(CompileError::UnsupportedFeature(
+                "association with too many entries".to_string(),
+            ));
+        }
+        // Layout: dst = assoc result, dst+1 = key0, dst+2 = val0, dst+3 = key1, ...
+        let dst = self.regs.alloc()?;
+        let mut temp_regs = Vec::with_capacity(2 * n);
+        for (key, val_expr) in entries {
+            temp_regs.push(self.emit_const(Value::Str(key.clone()))?);
+            temp_regs.push(self.compile_expr(val_expr)?);
+        }
+        let mut offset: u16 = 1;
+        for &tr in &temp_regs {
+            let target = dst.checked_add(offset).ok_or_else(|| {
+                CompileError::UnsupportedFeature("register overflow in assoc".to_string())
+            })?;
+            self.emit(Instruction::Mov(target, tr));
+            self.regs._free(tr);
+            offset += 1;
+        }
+        self.emit(Instruction::MakeAssoc(dst, n as u8));
+        Ok(dst)
+    }
+
+    /// Compile an assignment: symbol = expr
+    fn compile_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Result<u16, CompileError> {
+        match lhs {
+            Expr::Symbol(name) => {
+                let val_reg = self.compile_expr(rhs)?;
+                let sym_idx = self.symbol_idx(name);
+                self.emit(Instruction::StoreSym(sym_idx, val_reg));
+                self.regs._free(val_reg);
+                // Assignments return Null
+                let dst = self.regs.alloc()?;
+                self.emit(Instruction::LoadNull(dst));
+                Ok(dst)
+            }
+            _ => Err(CompileError::UnsupportedFeature(format!(
+                "assignment target: {lhs:?}"
+            ))),
+        }
     }
 
     fn symbol_idx(&mut self, name: &str) -> u32 {
