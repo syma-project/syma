@@ -193,7 +193,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Match { expr, branches } => {
             let val = eval(expr, env)?;
             for branch in branches {
-                if let MatchResult::Match(bindings) = match_pattern(&branch.pattern, &val) {
+                let (inner_pat, guard) = extract_guard_expr(&branch.pattern);
+                if let MatchResult::Match(bindings) = match_pattern(inner_pat, &val) {
+                    // Evaluate guard if present
+                    if let Some(guard_expr) = guard {
+                        let guard_env = env.child();
+                        for (name, value) in &bindings {
+                            guard_env.set(name.clone(), value.clone());
+                        }
+                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                            continue;
+                        }
+                    }
                     let child_env = env.child();
                     for (name, value) in &bindings {
                         child_env.set(name.clone(), value.clone());
@@ -421,6 +432,17 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
     }
 }
 
+/// Extract a top-level guard from a pattern expression.
+///
+/// Returns (inner_pattern, Some(guard_condition)) if the expression is a
+/// PatternGuard, otherwise (expr, None).
+fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
+    match expr {
+        Expr::PatternGuard { pattern, condition } => (pattern.as_ref(), Some(condition.as_ref())),
+        _ => (expr, None),
+    }
+}
+
 /// Check if an expression looks like a pattern that should not be evaluated.
 fn is_pattern_like(expr: &Expr) -> bool {
     match expr {
@@ -464,6 +486,17 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 eval_sum(args, env)
             }
+            "Catch" => {
+                // Catch[expr] — evaluate expr, catching any Throw[val]
+                if args.len() != 1 {
+                    return Err(EvalError::Error("Catch requires exactly 1 argument".to_string()));
+                }
+                match eval(&args[0], env) {
+                    Ok(v) => Ok(v),
+                    Err(EvalError::Thrown(v)) => Ok(v),
+                    Err(e) => Err(e),
+                }
+            }
             _ => {
                 // Normal function call
                 let head_val = eval(head, env)?;
@@ -506,7 +539,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
         Value::Function(func_def) => {
             // Try each definition in order
             for def in &func_def.definitions {
-                if let Some(bindings) = try_match_params(&def.params, args) {
+                if let Some(bindings) = try_match_params(&def.params, args, env)? {
                     let child_env = env.child();
                     for (name, value) in &bindings {
                         child_env.set(name.clone(), value.clone());
@@ -570,20 +603,42 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
     }
 }
 
-/// Try to match parameters against arguments.
-fn try_match_params(params: &[Expr], args: &[Value]) -> Option<Bindings> {
+/// Try to match parameters against arguments, evaluating any pattern guards.
+///
+/// Returns Ok(Some(bindings)) on success, Ok(None) if no match, Err on guard eval error.
+fn try_match_params(params: &[Expr], args: &[Value], env: &Env) -> Result<Option<Bindings>, EvalError> {
     if params.len() != args.len() {
-        return None;
+        return Ok(None);
     }
 
     let mut bindings = HashMap::new();
+    let mut guards: Vec<&Expr> = Vec::new();
+
     for (param, arg) in params.iter().zip(args.iter()) {
-        match match_pattern(param, arg) {
-            MatchResult::Match(b) => bindings.extend(b),
-            MatchResult::NoMatch => return None,
+        let (inner_pat, guard) = extract_guard_expr(param);
+        match match_pattern(inner_pat, arg) {
+            MatchResult::Match(b) => {
+                bindings.extend(b);
+                if let Some(g) = guard {
+                    guards.push(g);
+                }
+            }
+            MatchResult::NoMatch => return Ok(None),
         }
     }
-    Some(bindings)
+
+    // Evaluate guards with the collected bindings
+    for guard in guards {
+        let guard_env = env.child();
+        for (name, val) in &bindings {
+            guard_env.set(name.clone(), val.clone());
+        }
+        if !eval(guard, &guard_env)?.to_bool() {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(bindings))
 }
 
 /// Apply rules to a value.
@@ -1364,5 +1419,48 @@ mod tests {
             Value::Integer(n) => assert_eq!(n, 0),
             _ => panic!("Expected numeric value, got {:?}", result),
         }
+    }
+
+    // ── Pattern guards ──
+
+    #[test]
+    fn test_pattern_guard_function() {
+        // f[x_ /; x > 0] := "positive"
+        // f[x_ /; x < 0] := "negative"
+        let result = eval_str(
+            r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[5]"#
+        );
+        assert_eq!(result, Value::Str("positive".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_guard_negative() {
+        let result = eval_str(
+            r#"f[x_ /; x > 0] := "positive"; f[x_ /; x < 0] := "negative"; f[-3]"#
+        );
+        assert_eq!(result, Value::Str("negative".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_guard_match_expression() {
+        let result = eval_str(
+            r#"match 7 { n_ /; n > 5 => "big"; n_ => "small" }"#
+        );
+        assert_eq!(result, Value::Str("big".to_string()));
+    }
+
+    // ── Catch/Throw ──
+
+    #[test]
+    fn test_catch_throw() {
+        // Space before ]] prevents lexer from treating it as RDoubleBracket
+        let result = eval_str("Catch[Throw[42] ]");
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_catch_no_throw() {
+        let result = eval_str("Catch[1 + 2]");
+        assert_eq!(result, Value::Integer(Integer::from(3)));
     }
 }

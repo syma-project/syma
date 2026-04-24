@@ -207,6 +207,9 @@ pub struct Lexer {
     input: Vec<char>,
     pos: usize,
     tokens: Vec<Token>,
+    /// Tracks nesting depth of [[ ... ]] Part-access brackets.
+    /// Only emit RDoubleBracket when depth > 0; otherwise ]] is two RBracket tokens.
+    double_bracket_depth: usize,
 }
 
 #[derive(Debug)]
@@ -227,6 +230,7 @@ impl Lexer {
             input: input.chars().collect(),
             pos: 0,
             tokens: Vec::new(),
+            double_bracket_depth: 0,
         }
     }
 
@@ -479,6 +483,7 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('[') {
                         self.advance();
+                        self.double_bracket_depth += 1;
                         self.tokens.push(Token::LDoubleBracket);
                     } else {
                         self.tokens.push(Token::LBracket);
@@ -486,8 +491,9 @@ impl Lexer {
                 }
                 ']' => {
                     self.advance();
-                    if self.peek() == Some(']') {
+                    if self.peek() == Some(']') && self.double_bracket_depth > 0 {
                         self.advance();
+                        self.double_bracket_depth -= 1;
                         self.tokens.push(Token::RDoubleBracket);
                     } else {
                         self.tokens.push(Token::RBracket);

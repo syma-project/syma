@@ -151,6 +151,22 @@ pub fn register_builtins(env: &Env) {
 
     // ── I/O ──
     register_builtin(env, "Input", builtin_input);
+    register_builtin(env, "Write", builtin_write);
+    register_builtin(env, "WriteLine", builtin_write_line);
+    register_builtin(env, "PrintF", builtin_printf);
+
+    // ── Error handling ──
+    register_builtin(env, "Throw", builtin_throw);
+    register_builtin(env, "Error", builtin_error);
+
+    // ── Extended string ──
+    register_builtin(env, "Characters", builtin_characters);
+    register_builtin(env, "StringMatchQ", builtin_string_match_q);
+    register_builtin(env, "StringPadLeft", builtin_string_pad_left);
+    register_builtin(env, "StringPadRight", builtin_string_pad_right);
+    register_builtin(env, "StringTrim", builtin_string_trim);
+    register_builtin(env, "StringStartsQ", builtin_string_starts_q);
+    register_builtin(env, "StringEndsQ", builtin_string_ends_q);
 
     // ── Constants ──
     env.set("Pi".to_string(), Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi)));
@@ -2390,6 +2406,190 @@ fn builtin_input(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(input.trim().to_string()))
 }
 
+/// Write[args...] — print space-separated args without a trailing newline.
+fn builtin_write(args: &[Value]) -> Result<Value, EvalError> {
+    use std::io::Write as IoWrite;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 { print!(" "); }
+        print!("{}", arg);
+    }
+    std::io::stdout().flush().ok();
+    Ok(Value::Null)
+}
+
+/// WriteLine[args...] — print space-separated args followed by a newline (same as Print).
+fn builtin_write_line(args: &[Value]) -> Result<Value, EvalError> {
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 { print!(" "); }
+        print!("{}", arg);
+    }
+    println!();
+    Ok(Value::Null)
+}
+
+/// PrintF["fmt", args...] — formatted print.
+/// Replaces `~1~`, `~2~`, ... with the corresponding arguments.
+/// Example: PrintF["Hello ~1~, you are ~2~ years old.", "Alice", 30]
+fn builtin_printf(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error("PrintF requires at least 1 argument".to_string()));
+    }
+    let template = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    };
+    let mut result = template;
+    for (i, arg) in args[1..].iter().enumerate() {
+        result = result.replace(&format!("~{}~", i + 1), &format!("{}", arg));
+    }
+    print!("{}", result);
+    Ok(Value::Null)
+}
+
+// ── Error handling ──
+
+/// Throw[val] — raise a value as a thrown exception (caught by Catch).
+fn builtin_throw(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Throw requires exactly 1 argument".to_string()));
+    }
+    Err(EvalError::Thrown(args[0].clone()))
+}
+
+/// Error["message"] — raise a general error.
+fn builtin_error(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Error requires exactly 1 argument".to_string()));
+    }
+    let msg = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => format!("{}", other),
+    };
+    Err(EvalError::Error(msg))
+}
+
+// ── Extended string (Characters, StringMatchQ, padding, trimming) ──
+
+/// Characters["string"] — split string into a list of single-character strings.
+fn builtin_characters(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Characters requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok(Value::List(
+            s.chars().map(|c| Value::Str(c.to_string())).collect()
+        )),
+        _ => Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    }
+}
+
+/// StringMatchQ["string", "pattern"] — check if string matches a regex pattern.
+fn builtin_string_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error("StringMatchQ requires exactly 2 arguments".to_string()));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s,
+        _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    };
+    let pat = match &args[1] {
+        Value::Str(p) => p,
+        _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[1].type_name().to_string() }),
+    };
+    // Use glob-style matching: * matches any substring, ? matches any single char
+    Ok(Value::Bool(glob_match(pat, s)))
+}
+
+/// Simple glob-style pattern matching (* = any substring, ? = any single char).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match_chars(&pat, &txt)
+}
+
+fn glob_match_chars(pat: &[char], txt: &[char]) -> bool {
+    match (pat.first(), txt.first()) {
+        (None, None) => true,
+        (Some('*'), _) => {
+            // * matches zero or more characters
+            glob_match_chars(&pat[1..], txt)
+                || (!txt.is_empty() && glob_match_chars(pat, &txt[1..]))
+        }
+        (Some('?'), Some(_)) => glob_match_chars(&pat[1..], &txt[1..]),
+        (Some(p), Some(t)) if p == t => glob_match_chars(&pat[1..], &txt[1..]),
+        _ => false,
+    }
+}
+
+/// StringPadLeft["str", n] or StringPadLeft["str", n, "pad"] — left-pad a string.
+fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error("StringPadLeft requires 2 or 3 arguments".to_string()));
+    }
+    let s = match &args[0] { Value::Str(s) => s.clone(), _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }) };
+    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError { expected: "Integer".to_string(), got: args[1].type_name().to_string() })?;
+    let pad = if args.len() == 3 {
+        match &args[2] { Value::Str(p) => p.clone(), _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[2].type_name().to_string() }) }
+    } else {
+        " ".to_string()
+    };
+    if n <= 0 || s.len() >= n as usize {
+        return Ok(Value::Str(s));
+    }
+    let pad_char = pad.chars().next().unwrap_or(' ');
+    let padding: String = std::iter::repeat(pad_char).take(n as usize - s.len()).collect();
+    Ok(Value::Str(format!("{}{}", padding, s)))
+}
+
+/// StringPadRight["str", n] or StringPadRight["str", n, "pad"] — right-pad a string.
+fn builtin_string_pad_right(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error("StringPadRight requires 2 or 3 arguments".to_string()));
+    }
+    let s = match &args[0] { Value::Str(s) => s.clone(), _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }) };
+    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError { expected: "Integer".to_string(), got: args[1].type_name().to_string() })?;
+    let pad = if args.len() == 3 {
+        match &args[2] { Value::Str(p) => p.clone(), _ => return Err(EvalError::TypeError { expected: "String".to_string(), got: args[2].type_name().to_string() }) }
+    } else {
+        " ".to_string()
+    };
+    if n <= 0 || s.len() >= n as usize {
+        return Ok(Value::Str(s));
+    }
+    let pad_char = pad.chars().next().unwrap_or(' ');
+    let padding: String = std::iter::repeat(pad_char).take(n as usize - s.len()).collect();
+    Ok(Value::Str(format!("{}{}", s, padding)))
+}
+
+/// StringTrim["str"] — remove leading and trailing whitespace.
+fn builtin_string_trim(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("StringTrim requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok(Value::Str(s.trim().to_string())),
+        _ => Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    }
+}
+
+/// StringStartsQ["str", "prefix"] — check if string starts with prefix.
+fn builtin_string_starts_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 { return Err(EvalError::Error("StringStartsQ requires exactly 2 arguments".to_string())); }
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.starts_with(p.as_str()))),
+        _ => Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    }
+}
+
+/// StringEndsQ["str", "suffix"] — check if string ends with suffix.
+fn builtin_string_ends_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 { return Err(EvalError::Error("StringEndsQ requires exactly 2 arguments".to_string())); }
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.ends_with(p.as_str()))),
+        _ => Err(EvalError::TypeError { expected: "String".to_string(), got: args[0].type_name().to_string() }),
+    }
+}
+
 // ── ToExpression ──
 
 fn builtin_to_expression(args: &[Value]) -> Result<Value, EvalError> {
@@ -2836,5 +3036,87 @@ mod tests {
     #[test]
     fn test_min() {
         assert_eq!(builtin_min(&[int(3), int(1), int(2)]).unwrap(), int(1));
+    }
+
+    // ── Characters ──
+
+    #[test]
+    fn test_characters() {
+        let result = builtin_characters(&[Value::Str("abc".to_string())]).unwrap();
+        assert_eq!(result, Value::List(vec![
+            Value::Str("a".to_string()),
+            Value::Str("b".to_string()),
+            Value::Str("c".to_string()),
+        ]));
+    }
+
+    #[test]
+    fn test_characters_empty() {
+        let result = builtin_characters(&[Value::Str("".to_string())]).unwrap();
+        assert_eq!(result, Value::List(vec![]));
+    }
+
+    // ── StringMatchQ ──
+
+    #[test]
+    fn test_string_match_q_exact() {
+        let result = builtin_string_match_q(&[Value::Str("hello".to_string()), Value::Str("hello".to_string())]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_string_match_q_wildcard() {
+        let result = builtin_string_match_q(&[Value::Str("hello".to_string()), Value::Str("h*".to_string())]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_string_match_q_no_match() {
+        let result = builtin_string_match_q(&[Value::Str("hello".to_string()), Value::Str("world".to_string())]).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    // ── StringPadLeft / StringPadRight ──
+
+    #[test]
+    fn test_string_pad_left() {
+        let result = builtin_string_pad_left(&[Value::Str("42".to_string()), int(5)]).unwrap();
+        assert_eq!(result, Value::Str("   42".to_string()));
+    }
+
+    #[test]
+    fn test_string_pad_right() {
+        let result = builtin_string_pad_right(&[Value::Str("hi".to_string()), int(5)]).unwrap();
+        assert_eq!(result, Value::Str("hi   ".to_string()));
+    }
+
+    // ── StringTrim ──
+
+    #[test]
+    fn test_string_trim() {
+        let result = builtin_string_trim(&[Value::Str("  hello  ".to_string())]).unwrap();
+        assert_eq!(result, Value::Str("hello".to_string()));
+    }
+
+    // ── StringStartsQ / StringEndsQ ──
+
+    #[test]
+    fn test_string_starts_q() {
+        assert_eq!(builtin_string_starts_q(&[Value::Str("hello".to_string()), Value::Str("hel".to_string())]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_string_starts_q(&[Value::Str("hello".to_string()), Value::Str("ell".to_string())]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_string_ends_q() {
+        assert_eq!(builtin_string_ends_q(&[Value::Str("hello".to_string()), Value::Str("llo".to_string())]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_string_ends_q(&[Value::Str("hello".to_string()), Value::Str("hel".to_string())]).unwrap(), Value::Bool(false));
+    }
+
+    // ── Throw ──
+
+    #[test]
+    fn test_throw() {
+        let result = builtin_throw(&[int(99)]);
+        assert!(matches!(result, Err(EvalError::Thrown(Value::Integer(_)))));
     }
 }

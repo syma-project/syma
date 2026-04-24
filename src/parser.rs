@@ -21,10 +21,7 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.token {
-            Some(tok) => write!(f, "Parse error: {} (found {})", self.message, tok),
-            None => write!(f, "Parse error: {}", self.message),
-        }
+        write!(f, "{}", self.message)
     }
 }
 
@@ -759,7 +756,7 @@ impl Parser {
                         let args = if self.at(&Token::RBracket) {
                             vec![]
                         } else {
-                            self.parse_expr_list()?
+                            self.parse_pattern_list()?
                         };
                         self.expect(&Token::RBracket)?;
                         // p.method[args] = method[p, args]
@@ -784,7 +781,7 @@ impl Parser {
                     let args = if self.at(&Token::RBracket) {
                         vec![]
                     } else {
-                        self.parse_expr_list()?
+                        self.parse_pattern_list()?
                     };
                     self.expect(&Token::RBracket)?;
                     expr = Expr::Call {
@@ -796,7 +793,7 @@ impl Parser {
                 // Part access: [[index]]
                 Token::LDoubleBracket => {
                     self.advance();
-                    let indices = self.parse_expr_list()?;
+                    let indices = self.parse_pattern_list()?;
                     self.expect(&Token::RDoubleBracket)?;
                     let mut args = vec![expr];
                     args.extend(indices);

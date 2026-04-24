@@ -44,13 +44,17 @@ fn print_repl_help() {
     println!("  (* comment *)    Comment");
 }
 
+fn print_error(label: &str, message: &str, source: &str) {
+    eprintln!("\x1b[1;31m{}\x1b[0m: {}", label, message);
+    eprintln!("  \x1b[2m{}\x1b[0m", source);
+}
+
 fn eval_input(input: &str, env: &env::Env) {
     // Tokenize
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
         Err(e) => {
-            eprintln!("  Lexer error: {}", e);
-            eprintln!("  | {}", input);
+            print_error("Lex error", &e.to_string(), input);
             return;
         }
     };
@@ -59,8 +63,7 @@ fn eval_input(input: &str, env: &env::Env) {
     let ast = match parser::parse(tokens) {
         Ok(ast) => ast,
         Err(e) => {
-            eprintln!("  Parse error: {}", e);
-            eprintln!("  | {}", input);
+            print_error("Parse error", &e.to_string(), input);
             return;
         }
     };
@@ -73,8 +76,7 @@ fn eval_input(input: &str, env: &env::Env) {
             }
         }
         Err(e) => {
-            eprintln!("  Error: {}", e);
-            eprintln!("  | {}", input);
+            print_error("Error", &e.to_string(), input);
         }
     }
 }
@@ -82,14 +84,20 @@ fn eval_input(input: &str, env: &env::Env) {
 fn eval_input_silent(input: &str, env: &env::Env) {
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
-        Err(e) => { eprintln!("  Lexer error: {}", e); return; }
+        Err(e) => {
+            print_error("Lex error", &e.to_string(), input);
+            return;
+        }
     };
     let ast = match parser::parse(tokens) {
         Ok(ast) => ast,
-        Err(e) => { eprintln!("  Parse error: {}", e); return; }
+        Err(e) => {
+            print_error("Parse error", &e.to_string(), input);
+            return;
+        }
     };
     if let Err(e) = eval::eval_program(&ast, env) {
-        eprintln!("  Error: {}", e);
+        print_error("Error", &e.to_string(), input);
     }
 }
 
