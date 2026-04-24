@@ -4,13 +4,16 @@ pub mod comparison;
 pub mod error;
 pub mod ffi;
 pub mod filesystem;
+pub mod graphics;
 pub mod io;
+pub mod linalg;
 pub mod list;
 pub mod logical;
 pub mod math;
 pub mod parallel;
 pub mod pattern;
 pub mod random;
+pub mod statistics;
 pub mod string;
 pub mod symbolic;
 
@@ -109,6 +112,12 @@ pub fn register_builtins(env: &Env) {
 
     // ── Control (evaluator-dependent) ──
     register_builtin(env, "FixedPoint", math::builtin_fixed_point_stub);
+
+    // ── Package loading (evaluator-dependent) ──
+    register_builtin(env, "Needs", builtin_needs_stub);
+
+    // ── Graphics (evaluator-dependent) ──
+    register_builtin(env, "Plot", graphics::builtin_plot_stub);
 
     // ── Attributes (evaluator-dependent) ──
     register_builtin(env, "SetAttributes", symbolic::builtin_set_attributes_stub);
@@ -260,6 +269,13 @@ fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, E
     if !attrs.is_empty() {
         env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
     }
+}
+
+/// Stub for `Needs` — the real implementation is in eval.rs (requires Env access).
+fn builtin_needs_stub(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "Needs should be handled by evaluator".to_string(),
+    ))
 }
 
 /// Re-export for use by eval.rs
@@ -418,6 +434,75 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "FixedPoint" => {
             "FixedPoint[f, expr] applies f repeatedly until the result no longer changes.\nFixedPoint[f, expr, n] performs at most n iterations."
         }
+
+        // ── Package loading ──
+        "Needs" => {
+            "Needs[\"PackageName\"] loads a standard library package and makes its symbols available.\n\
+             Built-in packages: LinearAlgebra, Statistics, Graphics.\n\
+             Returns Null if the package is already loaded."
+        }
+
+        // ── LinearAlgebra ──
+        "Dimensions" => "Dimensions[m] gives the dimensions of a matrix or vector as a list {rows, cols}.",
+        "Dot" => "Dot[a, b] or a . b computes the dot product of vectors or matrix multiplication.",
+        "MatrixMultiply" => "MatrixMultiply[a, b] is an alias for Dot[a, b].",
+        "IdentityMatrix" => "IdentityMatrix[n] gives the n×n identity matrix.",
+        "Det" => "Det[m] computes the determinant of a square matrix.",
+        "Inverse" => "Inverse[m] computes the inverse of a square matrix.",
+        "Tr" => "Tr[m] gives the trace (sum of diagonal elements) of a matrix.",
+        "Norm" => "Norm[v] gives the Euclidean norm of a vector or Frobenius norm of a matrix.",
+        "Cross" => "Cross[a, b] computes the cross product of two 3D vectors.",
+        "LinearSolve" => "LinearSolve[A, b] solves the linear system A·x = b for x.",
+        "Eigenvalues" => "Eigenvalues[m] gives the eigenvalues of matrix m. (Symbolic stub.)",
+        "MatrixPower" => "MatrixPower[m, n] gives the n-th matrix power of m.",
+        "ArrayFlatten" => "ArrayFlatten[{{m11, m12}, {m21, m22}}] flattens a matrix of matrices into a single matrix.",
+
+        // ── Statistics ──
+        "Mean" => "Mean[list] gives the arithmetic mean of the elements in list.",
+        "Median" => "Median[list] gives the median of the elements in list.",
+        "Variance" => "Variance[list] gives the sample variance (with Bessel's correction, n-1 denominator).",
+        "StandardDeviation" => "StandardDeviation[list] gives the sample standard deviation.",
+        "Quantile" => "Quantile[list, q] gives the q-th quantile of list (0 ≤ q ≤ 1).",
+        "Covariance" => "Covariance[list1, list2] gives the sample covariance of two lists.",
+        "Correlation" => "Correlation[list1, list2] gives the Pearson correlation coefficient of two lists.",
+        "RandomVariate" => "RandomVariate[dist, n] generates n random values from distribution dist.",
+        "NormalDistribution" => "NormalDistribution[μ, σ] represents a normal distribution with mean μ and standard deviation σ.",
+        "UniformDistribution" => "UniformDistribution[min, max] represents a uniform distribution on [min, max].",
+        "PoissonDistribution" => "PoissonDistribution[λ] represents a Poisson distribution with rate λ.",
+        "GeometricMean" => "GeometricMean[list] gives the geometric mean of the elements in list.",
+        "HarmonicMean" => "HarmonicMean[list] gives the harmonic mean of the elements in list.",
+        "Skewness" => "Skewness[list] gives the skewness of the elements in list.",
+        "Kurtosis" => "Kurtosis[list] gives the excess kurtosis of the elements in list.",
+        "BinCounts" => "BinCounts[list, width] counts elements in bins of the given width.",
+        "HistogramList" => "HistogramList[list, n] gives {binEdges, counts} for n equal-width bins.",
+
+        // ── Graphics ──
+        "Plot" => {
+            "Plot[f, {x, xmin, xmax}] plots f as a function of x from xmin to xmax.\n\
+             Options: ImageSize → {width, height}, Axes → True, PlotRange → {ymin, ymax}."
+        }
+        "ListPlot" => {
+            "ListPlot[data] plots a list of points.\n\
+             ListPlot[{{x1,y1}, {x2,y2}, ...}] plots (x,y) pairs.\n\
+             ListPlot[{y1, y2, ...}] plots points at x = 1, 2, ...."
+        }
+        "ListLinePlot" => {
+            "ListLinePlot[data] plots data as connected line segments.\n\
+             Accepts the same formats as ListPlot."
+        }
+        "ExportGraphics" => "ExportGraphics[path, svg] writes an SVG string to the file at path.",
+        "Graphics" => "Graphics[primitives, options] wraps graphical primitives for rendering.",
+        "Show" => "Show[graphics, options] displays graphics with updated options.",
+        "Line" => "Line[{{x1,y1}, {x2,y2}, ...}] represents a line primitive connecting the given points.",
+        "Point" => "Point[{x, y}] represents a point primitive at the given coordinates.",
+        "Circle" => "Circle[{cx, cy}, r] represents a circle primitive with center and radius.",
+        "Rectangle" => "Rectangle[{xmin, ymin}, {xmax, ymax}] represents a rectangle primitive.",
+        "RGBColor" => "RGBColor[r, g, b] specifies a color with red, green, blue components (0–1).",
+        "Hue" => "Hue[h] specifies a color with hue h (0–1), saturation and brightness default to 1.",
+        "Thickness" => "Thickness[t] specifies line thickness.",
+        "PointSize" => "PointSize[r] specifies point radius.",
+        "Opacity" => "Opacity[a] specifies opacity (0 = transparent, 1 = opaque).",
+        "Directive" => "Directive[style1, style2, ...] combines multiple graphics directives.",
 
         // ── I/O ──
         "Print" => "Print[expr] prints expr followed by a newline to standard output.",

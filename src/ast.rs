@@ -90,6 +90,17 @@ pub enum Expr {
         condition: Box<Expr>,
     },
 
+    /// _.— optional blank (defaults to Null if unmatched)
+    OptionalBlank {
+        type_constraint: Option<Symbol>,
+    },
+
+    /// x_. or x_Integer.— named optional blank
+    OptionalNamedBlank {
+        name: Symbol,
+        type_constraint: Option<Symbol>,
+    },
+
     // ── Special forms ──
     /// a /. rules — replace all
     ReplaceAll {
@@ -359,6 +370,24 @@ impl PartialEq for Expr {
                     condition: c2,
                 },
             ) => p1 == p2 && c1 == c2,
+            (
+                Expr::OptionalBlank {
+                    type_constraint: a,
+                },
+                Expr::OptionalBlank {
+                    type_constraint: b,
+                },
+            ) => a == b,
+            (
+                Expr::OptionalNamedBlank {
+                    name: n1,
+                    type_constraint: t1,
+                },
+                Expr::OptionalNamedBlank {
+                    name: n2,
+                    type_constraint: t2,
+                },
+            ) => n1 == n2 && t1 == t2,
             (
                 Expr::ReplaceAll {
                     expr: e1,
@@ -762,6 +791,17 @@ impl fmt::Display for Expr {
             Expr::PatternGuard { pattern, condition } => {
                 write!(f, "{} /; {}", pattern, condition)
             }
+            Expr::OptionalBlank { type_constraint } => match type_constraint {
+                Some(tc) => write!(f, "_{}.", tc),
+                None => write!(f, "_."),
+            },
+            Expr::OptionalNamedBlank {
+                name,
+                type_constraint,
+            } => match type_constraint {
+                Some(tc) => write!(f, "{}_{}.", name, tc),
+                None => write!(f, "{}_.", name),
+            },
             Expr::ReplaceAll { expr, rules } => write!(f, "{} /. {}", expr, rules),
             Expr::ReplaceRepeated { expr, rules } => write!(f, "{} //. {}", expr, rules),
             Expr::Map { func, list } => write!(f, "{} /@ {}", func, list),

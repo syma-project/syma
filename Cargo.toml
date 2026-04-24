@@ -11,6 +11,7 @@ path = "src/lib.rs"
 default = []
 
 [dependencies]
+fastrand = "2"
 rug = "1.29"
 rustyline = "18.0.0"
 serde = { version = "1", features = ["derive"] }

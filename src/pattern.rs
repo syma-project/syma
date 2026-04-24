@@ -65,6 +65,43 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             }
         }
 
+        // ── Optional patterns: _. and x_. ──
+        // Try normal match first; if it fails, treat the pattern as matched
+        // with Null as the default value.
+        Expr::OptionalBlank { type_constraint } => {
+            // Try normal blank match first
+            let normal_match = Expr::Blank {
+                type_constraint: type_constraint.clone(),
+            };
+            match match_pattern(&normal_match, value) {
+                MatchResult::Match(_) => MatchResult::Match(HashMap::new()),
+                MatchResult::NoMatch => {
+                    // Optional: match succeeded with no bindings
+                    MatchResult::Match(HashMap::new())
+                }
+            }
+        }
+
+        Expr::OptionalNamedBlank {
+            name,
+            type_constraint,
+        } => {
+            // Try normal named blank match first
+            let normal_match = Expr::NamedBlank {
+                name: name.clone(),
+                type_constraint: type_constraint.clone(),
+            };
+            match match_pattern(&normal_match, value) {
+                MatchResult::Match(bindings) => MatchResult::Match(bindings),
+                MatchResult::NoMatch => {
+                    // Optional: bind to Null
+                    let mut bindings = HashMap::new();
+                    bindings.insert(name.clone(), Value::Null);
+                    MatchResult::Match(bindings)
+                }
+            }
+        }
+
         // ── Literal patterns ──
         Expr::Integer(n) => {
             if let Value::Integer(v) = value {
@@ -865,5 +902,82 @@ mod tests {
             match_pattern(&pattern, &value),
             MatchResult::NoMatch
         ));
+    }
+
+    // ── Optional pattern (_. / x_.) tests ──
+
+    #[test]
+    fn test_optional_blank_matches() {
+        // _. should match any value
+        let pattern = Expr::OptionalBlank {
+            type_constraint: None,
+        };
+        let value = Value::Integer(Integer::from(42));
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_optional_named_blank_matches() {
+        // x_. should match any value
+        let pattern = Expr::OptionalNamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        };
+        let value = Value::Integer(Integer::from(42));
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_optional_named_blank_with_type() {
+        // x_Integer. should only match integers
+        let pattern = Expr::OptionalNamedBlank {
+            name: "x".to_string(),
+            type_constraint: Some("Integer".to_string()),
+        };
+        // Integer matches
+        let val_int = Value::Integer(Integer::from(42));
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_int) {
+            assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
+        } else {
+            panic!("Expected match");
+        }
+        // String does NOT match (type constraint fails), but Optional still
+        // succeeds by binding Null
+        let val_str = Value::Str("hello".to_string());
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val_str) {
+            assert_eq!(bindings.get("x"), Some(&Value::Null));
+        } else {
+            panic!("Expected optional match with Null default");
+        }
+    }
+
+    #[test]
+    fn test_optional_in_call_pattern() {
+        // f[x_.] should match f[42] (binding x to 42)
+        let pattern = Expr::Call {
+            head: Box::new(Expr::Symbol("f".to_string())),
+            args: vec![Expr::OptionalNamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
+        };
+
+        // f[42]
+        let val = Value::Call {
+            head: "f".to_string(),
+            args: vec![Value::Integer(Integer::from(42))],
+        };
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &val) {
+            assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
+        } else {
+            panic!("Expected match");
+        }
     }
 }

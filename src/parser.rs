@@ -1511,11 +1511,16 @@ impl Parser {
 
     fn parse_pattern_primary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
-            // Blank: _
+            // Blank: _ or _.
             Token::Ident(s) if s == "_" => {
                 self.advance();
                 let type_constraint = self.try_parse_type_suffix()?;
-                Ok(Expr::Blank { type_constraint })
+                if self.at(&Token::Dot) {
+                    self.advance();
+                    Ok(Expr::OptionalBlank { type_constraint })
+                } else {
+                    Ok(Expr::Blank { type_constraint })
+                }
             }
 
             // BlankSequence: __
@@ -1549,12 +1554,25 @@ impl Parser {
                     let base = &name[..name.len() - 1];
                     let type_constraint = self.try_parse_type_suffix()?;
                     if base.is_empty() {
-                        Ok(Expr::Blank { type_constraint })
+                        if self.at(&Token::Dot) {
+                            self.advance();
+                            Ok(Expr::OptionalBlank { type_constraint })
+                        } else {
+                            Ok(Expr::Blank { type_constraint })
+                        }
                     } else {
-                        Ok(Expr::NamedBlank {
-                            name: base.to_string(),
-                            type_constraint,
-                        })
+                        if self.at(&Token::Dot) {
+                            self.advance();
+                            Ok(Expr::OptionalNamedBlank {
+                                name: base.to_string(),
+                                type_constraint,
+                            })
+                        } else {
+                            Ok(Expr::NamedBlank {
+                                name: base.to_string(),
+                                type_constraint,
+                            })
+                        }
                     }
                 } else if name.ends_with("__") && name.len() > 2 {
                     let base = &name[..name.len() - 2];
