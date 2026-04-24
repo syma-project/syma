@@ -497,13 +497,13 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
             }
             Value::Call { head, args } if head == "DensityRaster" && args.len() >= 4 => {
                 // DensityRaster[vals, {xmin,xmax}, {ymin,ymax}, {nx,ny}, ...]
-                if let (Value::List(xr), Value::List(yr)) = (&args[1], &args[2]) {
-                    if xr.len() >= 2 && yr.len() >= 2 {
-                        x_min = x_min.min(to_f64(&xr[0]).unwrap_or(x_min));
-                        x_max = x_max.max(to_f64(&xr[1]).unwrap_or(x_max));
-                        y_min = y_min.min(to_f64(&yr[0]).unwrap_or(y_min));
-                        y_max = y_max.max(to_f64(&yr[1]).unwrap_or(y_max));
-                    }
+                if let (Value::List(xr), Value::List(yr)) = (&args[1], &args[2])
+                    && xr.len() >= 2 && yr.len() >= 2
+                {
+                    x_min = x_min.min(to_f64(&xr[0]).unwrap_or(x_min));
+                    x_max = x_max.max(to_f64(&xr[1]).unwrap_or(x_max));
+                    y_min = y_min.min(to_f64(&yr[0]).unwrap_or(y_min));
+                    y_max = y_max.max(to_f64(&yr[1]).unwrap_or(y_max));
                 }
             }
             Value::List(items) => {
@@ -699,7 +699,7 @@ fn axis_ticks(min: f64, max: f64, scale: ScaleType) -> Vec<f64> {
 /// Format a tick label for log-scale axes (coordinate is log10 of the actual value).
 fn format_log_tick(log_val: f64) -> String {
     let actual = 10.0_f64.powf(log_val);
-    if actual >= 0.001 && actual < 100_000.0 {
+    if (0.001..100_000.0).contains(&actual) {
         let s = format!("{:.5}", actual);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     } else {

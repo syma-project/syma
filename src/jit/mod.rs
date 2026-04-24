@@ -5,17 +5,16 @@
 ///
 /// # Architecture
 ///
-/// A compiled JIT function receives a `JitContext` pointer and returns a
-/// `Value`.  Simple integer/f64 operations are inlined as native
-/// instructions; everything else (env lookups, function calls, list ops)
-/// calls `extern "C"` runtime helpers.
+/// A compiled JIT function receives a `JitContext` pointer and returns no
+/// value — the caller reads `ctx.regs[0]` for the result.  All operations
+/// (arithmetic, env lookups, list construction) are delegated to
+/// `extern "C"` runtime helpers defined in [`runtime`].
 ///
 /// The function pointer has the ABI:
 ///
 /// ```ignore
-/// extern "C" fn(ctx: *mut JitContext) -> Value
+/// extern "C" fn(ctx: *mut JitContext)
 /// ```
-
 pub mod compiler;
 pub mod runtime;
 
@@ -23,7 +22,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::bytecode::BytecodeFunctionDef;
-use crate::bytecode::CompiledBytecode;
 use crate::value::Value;
 
 pub use runtime::JitContext;
@@ -43,5 +41,10 @@ pub struct JITFunction {
 ///
 /// Returns `None` if compilation fails (e.g. unsupported bytecode).
 pub fn compile_jit(bc_def: &BytecodeFunctionDef) -> Option<JITFunction> {
-    compiler::compile(&bc_def.bytecode, &bc_def.name).ok()
+    let fn_ptr = compiler::compile(&bc_def.bytecode, &bc_def.name).ok()?;
+    Some(JITFunction {
+        name: bc_def.name.clone(),
+        fn_ptr: fn_ptr as usize,
+        call_count: bc_def.call_count.clone(),
+    })
 }

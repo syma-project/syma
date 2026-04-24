@@ -211,6 +211,37 @@ pub(super) fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     Ok(acc)
 }
 
+/// Product[expr, {i, min, max}] — like Sum but multiplies results.
+pub(super) fn eval_product(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Product requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let iter_items = match &args[1] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "Product iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+
+    let (var_name, values) = eval_iterator_spec(iter_items, env)?;
+
+    let expr = &args[0];
+    let child_env = env.child();
+    let mut acc = Value::Integer(Integer::from(1));
+
+    for val in values {
+        child_env.set(var_name.clone(), val);
+        let val = super::eval(expr, &child_env)?;
+        acc = crate::builtins::mul_values_public(&acc, &val)?;
+    }
+
+    Ok(acc)
+}
+
 /// ParallelTable[expr, {i, ...}] — evaluate expr for each iterator value in parallel.
 pub(super) fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {

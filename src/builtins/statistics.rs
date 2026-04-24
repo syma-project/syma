@@ -14,15 +14,15 @@ use std::collections::HashMap;
 fn ln_gamma(x: f64) -> f64 {
     const G: f64 = 7.0;
     const C: [f64; 9] = [
-        0.999_999_999_999_809_93,
-        676.520_368_121_885_1,
-        -1259.139_216_722_402_8,
-        771.323_428_777_653_13,
-        -176.615_029_162_140_59,
-        12.507_343_278_686_905,
-        -0.138_571_095_265_720_12,
-        9.984_369_578_019_572e-6,
-        1.505_632_735_149_312e-7,
+        0.9999999999998099,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.3234287776531,
+        -176.6150291621406,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.984369578019572e-6,
+        1.505632735149312e-7,
     ];
     if x < 0.5 {
         std::f64::consts::PI.ln()
@@ -400,15 +400,13 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] {
-        if map.contains_key("Distribution") {
-            return match distribution_mean_f64(map) {
-                Some(v) => Ok(real(v)),
-                None => Err(EvalError::Error(
-                    "Mean: distribution mean is undefined".to_string(),
-                )),
-            };
-        }
+    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+        return match distribution_mean_f64(map) {
+            Some(v) => Ok(real(v)),
+            None => Err(EvalError::Error(
+                "Mean: distribution mean is undefined".to_string(),
+            )),
+        };
     }
     let items = as_list(&args[0])?;
     if items.is_empty() {
@@ -453,15 +451,13 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] {
-        if map.contains_key("Distribution") {
-            return match distribution_variance_f64(map) {
-                Some(v) => Ok(real(v)),
-                None => Err(EvalError::Error(
-                    "Variance: distribution variance is undefined".to_string(),
-                )),
-            };
-        }
+    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+        return match distribution_variance_f64(map) {
+            Some(v) => Ok(real(v)),
+            None => Err(EvalError::Error(
+                "Variance: distribution variance is undefined".to_string(),
+            )),
+        };
     }
     let items = as_list(&args[0])?;
     let n = items.len();
@@ -484,15 +480,13 @@ pub fn builtin_standard_deviation(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     // Distribution dispatch
-    if let Value::Assoc(map) = &args[0] {
-        if map.contains_key("Distribution") {
-            return match distribution_variance_f64(map) {
-                Some(v) => Ok(real(v.sqrt())),
-                None => Err(EvalError::Error(
-                    "StandardDeviation: distribution variance is undefined".to_string(),
-                )),
-            };
-        }
+    if let Value::Assoc(map) = &args[0] && map.contains_key("Distribution") {
+        return match distribution_variance_f64(map) {
+            Some(v) => Ok(real(v.sqrt())),
+            None => Err(EvalError::Error(
+                "StandardDeviation: distribution variance is undefined".to_string(),
+            )),
+        };
     }
     let var = builtin_variance(args)?;
     match var {
@@ -2060,7 +2054,7 @@ mod tests {
     fn test_geometric_mean() {
         let data = list(vec![int_val(1), int_val(4), int_val(4)]);
         let r = builtin_geometric_mean(&[data]).unwrap();
-        assert!(approx(&r, 2.0, 1e-10));
+        assert!(approx(&r, 2.519842099789746, 1e-10));
     }
 
     #[test]

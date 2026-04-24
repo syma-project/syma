@@ -1745,6 +1745,63 @@ impl Parser {
                 Ok(Expr::Symbol("HoldComplete".to_string()))
             }
 
+            // ── If expression ──
+            Token::If => {
+                self.advance();
+                self.expect(&Token::LBracket)?;
+                let condition = self.parse_expression()?;
+                self.expect(&Token::Comma)?;
+                let then_branch = self.parse_expression()?;
+                let else_branch = if self.at(&Token::Comma) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch,
+                })
+            }
+
+            // ── Which expression ──
+            Token::Which => {
+                self.advance();
+                self.expect(&Token::LBracket)?;
+                let mut pairs = Vec::new();
+                loop {
+                    let cond = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let val = self.parse_expression()?;
+                    pairs.push((cond, val));
+                    if !self.at(&Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::Which { pairs })
+            }
+
+            // ── Switch expression ──
+            Token::Switch => {
+                self.advance();
+                self.expect(&Token::LBracket)?;
+                let expr = self.parse_expression()?;
+                let mut cases = Vec::new();
+                while self.at(&Token::Comma) {
+                    self.advance();
+                    let pat = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let val = self.parse_expression()?;
+                    cases.push((pat, val));
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::Switch { expr: Box::new(expr), cases })
+            }
+
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),
                 token: Some(tok),

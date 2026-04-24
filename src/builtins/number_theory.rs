@@ -27,12 +27,12 @@ fn miller_rabin(n: u64, a: u64) -> bool {
     if n == a {
         return true;
     }
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         return false;
     }
     let mut d = n - 1;
     let mut r = 0u32;
-    while d % 2 == 0 {
+    while d.is_multiple_of(2) {
         d /= 2;
         r += 1;
     }
@@ -56,7 +56,7 @@ pub fn is_prime_u64(n: u64) -> bool {
     if n == 2 || n == 3 || n == 5 || n == 7 {
         return true;
     }
-    if n % 2 == 0 || n % 3 == 0 || n % 5 == 0 {
+    if n.is_multiple_of(2) || n.is_multiple_of(3) || n.is_multiple_of(5) {
         return false;
     }
     WITNESSES.iter().all(|&a| miller_rabin(n, a))
@@ -355,7 +355,7 @@ fn mod_inverse(a: &Integer, m: &Integer) -> Option<Integer> {
         s = old_s.clone() - q.clone() * s.clone();
         old_s = tmp;
     }
-    if old_r != Integer::from(1) {
+    if old_r != 1 {
         return None; // Not invertible
     }
     let result = (old_s % m.clone() + m.clone()) % m.clone();
@@ -414,7 +414,7 @@ pub fn builtin_moebius_mu(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
             // Otherwise μ(n) = (-1)^(number of distinct prime factors)
-            let sign = if factors.len() % 2 == 0 { 1 } else { -1 };
+            let sign = if factors.len().is_multiple_of(2) { 1 } else { -1 };
             Ok(Value::Integer(Integer::from(sign)))
         }
         _ => Err(EvalError::TypeError {
@@ -508,7 +508,7 @@ pub fn builtin_coprime_q(args: &[Value]) -> Result<Value, EvalError> {
             match (&args[i], &args[j]) {
                 (Value::Integer(a), Value::Integer(b)) => {
                     let g = gcd_int(a.clone().abs(), b.clone().abs());
-                    if g != Integer::from(1) {
+                    if g != 1 {
                         return Ok(Value::Symbol("False".to_string()));
                     }
                 }
@@ -536,7 +536,7 @@ fn gcd_int(mut a: Integer, mut b: Integer) -> Integer {
 // ── IntegerDigits ─────────────────────────────────────────────────────────
 
 pub fn builtin_integer_digits(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "IntegerDigits requires 1 or 2 arguments".to_string(),
         ));

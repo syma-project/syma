@@ -9,10 +9,13 @@ pub mod compiler;
 pub mod instruction;
 pub mod vm;
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicPtr, AtomicU64};
 use std::sync::Arc;
 
 use crate::value::Value;
+
+/// The type of a JIT-compiled function: `extern "C" fn(ctx: *mut JitContext)`.
+pub type JitFnPtr = AtomicPtr<()>;
 
 /// A function whose body has been compiled to Syma bytecode.
 #[derive(Debug, Clone)]
@@ -24,6 +27,8 @@ pub struct BytecodeFunctionDef {
     /// How many times this function has been called
     /// (used for Phase 3 promotion).
     pub call_count: Arc<AtomicU64>,
+    /// Pointer to JIT-compiled native code (null = not compiled yet).
+    pub jit_fn_ptr: Arc<JitFnPtr>,
 }
 
 /// Compiled bytecode for a single function body.

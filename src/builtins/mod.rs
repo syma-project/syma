@@ -20,6 +20,7 @@ pub mod pattern;
 pub mod random;
 pub mod statistics;
 pub mod string;
+pub mod discrete;
 pub mod symbolic;
 
 use crate::env::{Env, LazyProvider};
@@ -84,6 +85,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Transpose", list::builtin_transpose);
     register_builtin(env, "Total", list::builtin_total);
     register_builtin(env, "Sum", list::builtin_sum);
+    register_builtin(env, "Product", list::builtin_product);
     // Extended list operations
     register_builtin(env, "Partition", list::builtin_partition);
     register_builtin(env, "Split", list::builtin_split);
@@ -176,6 +178,15 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin(env, "Series", symbolic::builtin_series);
+
+    // ── Discrete Calculus ──
+    register_builtin(env, "DiscreteDelta", discrete::builtin_discrete_delta);
+    register_builtin(env, "DiscreteShift", discrete::builtin_discrete_shift);
+    register_builtin(env, "DiscreteRatio", discrete::builtin_discrete_ratio);
+    register_builtin(env, "FactorialPower", discrete::builtin_factorial_power);
+    register_builtin(env, "BernoulliB", discrete::builtin_bernoulli_b);
+    register_builtin(env, "LinearRecurrence", discrete::builtin_linear_recurrence);
+    register_builtin_env(env, "RSolve", discrete::builtin_rsolve);
 
     // ── Control (evaluator-dependent) ──
     register_builtin_env(env, "FixedPoint", math::builtin_fixed_point);
@@ -745,6 +756,10 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Transpose" => "Transpose[list] transposes the first two levels of list.",
         "Total" => "Total[list] gives the total of all elements in list.",
         "Sum" => "Sum[expr, {i, min, max}] evaluates the sum of expr as i goes from min to max.",
+        "Product" => {
+            "Product[expr, {i, min, max}] evaluates a product of expr as i goes from min to max.\n\
+             Product[expr, {i, max}] evaluates a product of expr for i from 1 to max."
+        }
         "Partition" => {
             "Partition[list, n] splits list into sublists of length n.\nPartition[list, n, d] uses offset d between successive sublists."
         }
@@ -914,6 +929,24 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Factor" => "Factor[expr] factors the polynomial expr. (Planned.)",
         "Solve" => "Solve[eqns, vars] solves equations for variables. (Planned.)",
         "Series" => "Series[expr, {x, x0, n}] computes a power series expansion. (Planned.)",
+
+        // ── Discrete Calculus ──
+        "DiscreteDelta" => "DiscreteDelta[n1, n2, ...] returns 1 if all arguments are zero, 0 otherwise.",
+        "DiscreteShift" => {
+            "DiscreteShift[expr, n] represents the forward shift of expr with respect to n.\n\
+             DiscreteShift[expr, n, h] shifts by step h."
+        }
+        "DiscreteRatio" => {
+            "DiscreteRatio[expr, n] represents the ratio of expr at successive points of n.\n\
+             DiscreteRatio[expr, n, h] uses step h."
+        }
+        "FactorialPower" => {
+            "FactorialPower[x, n] gives the falling factorial x^(n) = x*(x-1)*...*(x-n+1).\n\
+             FactorialPower[x, n, h] uses step h."
+        }
+        "BernoulliB" => "BernoulliB[n] gives the n-th Bernoulli number B_n.",
+        "LinearRecurrence" => "LinearRecurrence[kernel, init, n] gives the n-th term of a linear recurrence with kernel coefficients and initial values.",
+        "RSolve" => "RSolve[eqn, f[n], n] attempts to solve a recurrence equation for f[n].",
 
         // ── Control ──
         "FixedPoint" => {

@@ -286,10 +286,8 @@ pub(super) fn eval_parametric_plot(args: &[Expr], env: &Env) -> Result<Value, Ev
             .ok()
             .and_then(|v| to_f64_val(&v));
 
-        if let (Some(x), Some(y)) = (x_res, y_res) {
-            if x.is_finite() && y.is_finite() {
-                points.push(Value::List(vec![make_real(x), make_real(y)]));
-            }
+        if let (Some(x), Some(y)) = (x_res, y_res) && x.is_finite() && y.is_finite() {
+            points.push(Value::List(vec![make_real(x), make_real(y)]));
         }
     }
 

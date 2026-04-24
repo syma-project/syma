@@ -748,6 +748,13 @@ pub fn builtin_sum(_args: &[Value]) -> Result<Value, EvalError> {
     ))
 }
 
+pub fn builtin_product(_args: &[Value]) -> Result<Value, EvalError> {
+    // Product[expr, {i, min, max}] — handled by evaluator
+    Err(EvalError::Error(
+        "Product should be handled by evaluator".to_string(),
+    ))
+}
+
 // ── Extended list operations ──
 
 pub fn builtin_member_q(args: &[Value]) -> Result<Value, EvalError> {

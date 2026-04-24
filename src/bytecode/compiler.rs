@@ -691,7 +691,9 @@ impl BytecodeCompiler {
     /// Compile a Which expression: Which[cond1, val1, cond2, val2, ...]
     fn compile_which(&mut self, pairs: &[(Expr, Expr)]) -> Result<u16, CompileError> {
         let result_reg = self.regs.alloc()?;
-        let mut patch_labels = Vec::new();
+        // Track JumpIfZero instructions (next case) and Jump instructions (past LoadNull)
+        let mut next_labels = Vec::new();
+        let mut end_jumps = Vec::new();
 
         for (i, (cond, val)) in pairs.iter().enumerate() {
             let cond_reg = self.compile_expr(cond)?;
@@ -704,22 +706,30 @@ impl BytecodeCompiler {
             }
             self.regs._free(val_reg);
 
+            // Every case needs a Jump past the LoadNull so matched values
+            // don't get overwritten by the "no match" result.
+            let end_jump = self.emit(Instruction::Jump(0));
+
             if i < pairs.len() - 1 {
-                // Jump past remaining cases
-                let end_jump = self.emit(Instruction::Jump(0));
-                patch_labels.push((next_label, end_jump));
+                // Non-last case: JumpIfZero skips past the value + end_jump
+                next_labels.push(next_label);
+                end_jumps.push(end_jump);
             } else {
-                // Last case: just patch the JumpIfZero to fall through
+                // Last case: JumpIfZero goes to LoadNull (no match)
                 self.patch_jump(next_label, self.code.len() as i32);
+                end_jumps.push(end_jump);
             }
         }
 
         // No match — return Null
         self.emit(Instruction::LoadNull(result_reg));
 
-        // Patch the end-jumps from each non-last case
-        for (next_label, end_jump) in patch_labels {
+        for (&next_label, &end_jump) in next_labels.iter().zip(end_jumps.iter()) {
+            // JumpIfZero → instruction past the corresponding Jump(end)
             self.patch_jump(next_label, end_jump as i32 + 1);
+        }
+        for &end_jump in &end_jumps {
+            // Jump(end) → past LoadNull
             self.patch_jump(end_jump, self.code.len() as i32);
         }
 

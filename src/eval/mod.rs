@@ -978,6 +978,10 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 table::eval_sum(args, env)
             }
+            "Product" => {
+                // Product[expr, {i, min, max}] — iterator spec has unevaluated symbols
+                table::eval_product(args, env)
+            }
             "Plot" => {
                 // Plot[f, {x, xmin, xmax}] — needs unevaluated expr for sampling
                 plot::eval_plot(args, env)
@@ -1139,6 +1143,40 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         } => ffi::loader::call_native(*fn_ptr, signature, args),
 
         Value::BytecodeFunction(bc_def) => {
+            #[cfg(feature = "jit")]
+            {
+                use std::sync::atomic::Ordering;
+                const JIT_THRESHOLD: u64 = 1000;
+
+                let prev = bc_def.call_count.fetch_add(1, Ordering::Relaxed);
+                if prev + 1 > JIT_THRESHOLD {
+                    let jit_ptr = bc_def.jit_fn_ptr.load(Ordering::Relaxed);
+                    if !jit_ptr.is_null() {
+                        let mut regs =
+                            vec![Value::Null; bc_def.bytecode.nregs as usize];
+                        let mut jit_ctx = crate::jit::runtime::JitContext::new(
+                            &bc_def.bytecode,
+                            args,
+                            env,
+                            &mut regs,
+                        );
+                        let jit_fn: extern "C" fn(
+                            *mut crate::jit::runtime::JitContext,
+                        ) = unsafe { std::mem::transmute(jit_ptr) };
+                        jit_fn(&mut jit_ctx);
+                        return Ok(unsafe { (*jit_ctx.regs).clone() });
+                    }
+                    // First time past threshold — try to compile.
+                    if prev + 1 == JIT_THRESHOLD + 1 {
+                        if let Some(jit_fn) = crate::jit::compile_jit(&bc_def) {
+                            bc_def
+                                .jit_fn_ptr
+                                .store(jit_fn.fn_ptr as *mut (), Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+
             bytecode::vm::execute_bytecode(&bc_def.bytecode, args, env)
         }
 
@@ -1156,6 +1194,9 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                             bytecode: bc,
                             call_count: std::sync::Arc::new(
                                 std::sync::atomic::AtomicU64::new(0),
+                            ),
+                            jit_fn_ptr: std::sync::Arc::new(
+                                std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
                             ),
                         },
                     ));
