@@ -356,7 +356,7 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            let pattern = self.parse_pattern()?;
+            let pattern = self.parse_pattern_no_rule()?;
             let rhs = if self.at(&Token::Rule) {
                 self.advance();
                 self.parse_expression()?
@@ -440,7 +440,7 @@ impl Parser {
 
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            let lhs = self.parse_pattern()?;
+            let lhs = self.parse_pattern_no_rule()?;
             let rhs = if self.at(&Token::Rule) {
                 self.advance();
                 self.parse_expression()?
@@ -959,12 +959,26 @@ impl Parser {
                 Ok(Expr::Slot(Some(n)))
             }
 
-            // Parenthesized expression
+            // Parenthesized expression or compound expression (stmt; stmt; expr)
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expression()?;
-                self.expect(&Token::RParen)?;
-                Ok(expr)
+                let first = self.parse_statement()?;
+                if self.at(&Token::Semicolon) {
+                    // Compound expression: (stmt1; stmt2; ...; expr)
+                    let mut exprs = vec![first];
+                    while self.at(&Token::Semicolon) {
+                        self.advance();
+                        if self.at(&Token::RParen) {
+                            break;
+                        }
+                        exprs.push(self.parse_statement()?);
+                    }
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::Sequence(exprs))
+                } else {
+                    self.expect(&Token::RParen)?;
+                    Ok(first)
+                }
             }
 
             // List literal: {a, b, c}
@@ -1205,6 +1219,26 @@ impl Parser {
         if self.at(&Token::ColonSlashSemicolon) {
             self.advance();
             let condition = self.parse_expression()?;
+            Ok(Expr::PatternGuard {
+                pattern: Box::new(pattern),
+                condition: Box::new(condition),
+            })
+        } else {
+            Ok(pattern)
+        }
+    }
+
+    /// Parse a pattern that may have a guard (`/;`) but does NOT consume
+    /// `->` / `:>` as rule operators.  Used inside `rule` and `@transform`
+    /// bodies where `->`/`:>` separate LHS from RHS.
+    fn parse_pattern_no_rule(&mut self) -> Result<Expr, ParseError> {
+        let pattern = self.parse_pattern_or()?;
+
+        if self.at(&Token::ColonSlashSemicolon) {
+            self.advance();
+            // Parse condition without consuming -> / :> as rule operators.
+            // Stop at parse_or_expr level (just below rule precedence).
+            let condition = self.parse_or_expr()?;
             Ok(Expr::PatternGuard {
                 pattern: Box::new(pattern),
                 condition: Box::new(condition),
@@ -1585,6 +1619,16 @@ impl Parser {
                         args: patterns,
                     })
                 }
+            }
+
+            // Slot: # or #N (also valid in pattern contexts like function args)
+            Token::Slot => {
+                self.advance();
+                Ok(Expr::Slot(None))
+            }
+            Token::SlotN(n) => {
+                self.advance();
+                Ok(Expr::Slot(Some(n)))
             }
 
             // List pattern: {pat1, pat2, ...}
@@ -2053,6 +2097,20 @@ mod tests {
                 assert_eq!(*head, Expr::Symbol("Plus".to_string()));
             }
             _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_parenthesized_compound() {
+        // (x = 1; x + 2) should parse as Sequence[Assign[x, 1], Plus[x, 2]]
+        let expr = parse_one("(x = 1; x + 2)");
+        match expr {
+            Expr::Sequence(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                assert!(matches!(exprs[0], Expr::Assign { .. }));
+                assert!(matches!(exprs[1], Expr::Call { .. }));
+            }
+            _ => panic!("Expected Sequence, got {:?}", expr),
         }
     }
 

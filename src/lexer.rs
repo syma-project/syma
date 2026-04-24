@@ -512,7 +512,7 @@ impl Lexer {
                 }
 
                 // Identifiers and keywords
-                'a'..='z' | 'A'..='Z' | '$' => {
+                'a'..='z' | 'A'..='Z' | '$' | '_' => {
                     self.advance();
                     let ident = self.read_ident(ch);
                     let token = Self::keyword_or_ident(&ident);

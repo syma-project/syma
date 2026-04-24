@@ -1,0 +1,261 @@
+(* ============================================= *)
+(* Syma Language Examples — 15: OOP                *)
+(*                                               *)
+(* Classes, inheritance, mixins, and objects.    *)
+(*                                               *)
+(* STATUS: The parser fully supports this        *)
+(* syntax, but the evaluator only stores class   *)
+(* names as symbols — object construction, field *)
+(* access, method dispatch, inheritance, and     *)
+(* mixin composition are not yet implemented.    *)
+(* ============================================= *)
+
+
+(* ── 1. Basic Class Definition ───────────────────────────────── *)
+
+(* A class with fields, a constructor, and methods. *)
+class Point {
+    field x: Real
+    field y: Real
+
+    constructor[x_, y_] {
+        this.x = x
+        this.y = y
+    }
+
+    method distance[] := Sqrt[x^2 + y^2]
+
+    method translate[dx_, dy_] := Point[x + dx, y + dy]
+
+    method toString[] := "(" <> ToString[x] <> ", " <> ToString[y] <> ")"
+}
+
+(* Once implemented, usage would look like:        *)
+(*                                                 *)
+(*   p = Point[3, 4]                               *)
+(*   p.x              (* => 3 *)                   *)
+(*   p.y              (* => 4 *)                   *)
+(*   p.distance[]     (* => 5 *)                   *)
+(*   p.translate[1, 2]  (* => Point[4, 6] *)       *)
+(*   p.toString[]     (* => "(3, 4)" *)            *)
+
+
+(* ── 2. Field Defaults ────────────────────────────────────────── *)
+
+class Circle {
+    field radius: Real
+    field color: String = "black"
+
+    constructor[r_] {
+        this.radius = r
+    }
+
+    method area[] := Pi * radius^2
+
+    method circumference[] := 2 * Pi * radius
+}
+
+(*   c = Circle[5]                                 *)
+(*   c.color          (* => "black" *)             *)
+(*   c.area[]         (* => 25 Pi *)               *)
+
+
+(* ── 3. Inheritance ──────────────────────────────────────────── *)
+
+class Shape {
+    field name: String = "shape"
+
+    method area[] := 0
+
+    method describe[] := name <> " with area " <> ToString[area[]]
+}
+
+class Rectangle extends Shape {
+    field width
+    field height
+
+    constructor[w_, h_] {
+        this.width = w
+        this.height = h
+        this.name = "rectangle"
+    }
+
+    method area[] := width * height
+
+    method isSquare[] := width == height
+}
+
+class Square extends Rectangle {
+    constructor[size_] {
+        this.width = size
+        this.height = size
+        this.name = "square"
+    }
+}
+
+(*   r = Rectangle[3, 4]                           *)
+(*   r.area[]         (* => 12 *)                  *)
+(*   r.isSquare[]     (* => False *)               *)
+(*   r.describe[]     (* => "rectangle with area 12" *) *)
+(*                                                 *)
+(*   s = Square[5]                                 *)
+(*   s.area[]         (* => 25 *)                  *)
+(*   s.isSquare[]     (* => True *)                *)
+
+
+(* ── 4. Mixins ───────────────────────────────────────────────── *)
+
+(* A mixin is a class without a constructor — it only contributes methods. *)
+mixin Printable {
+    method print[] := Print[toString[]]
+    method debug[] := Print[Head[], ": ", toString[]]
+}
+
+mixin Serializable {
+    method toJSON[] := "{ \"type\": \"" <> Head[] <> "\" }"
+}
+
+(* Apply mixins with `with`: *)
+class Vector with Printable {
+    field components: List
+
+    constructor[comps_] {
+        this.components = comps
+    }
+
+    method length[] := Length[components]
+
+    method toString[] := "Vector[" <> ToString[components] <> "]"
+}
+
+(*   v = Vector[{1, 2, 3}]                        *)
+(*   v.length[]       (* => 3 *)                   *)
+(*   v.print[]        (* prints: Vector[{1, 2, 3}] *) *)
+(*                                                 *)
+(* Multiple mixins:                                *)
+(*   class Matrix with Printable, Serializable { ... } *)
+
+
+(* ── 5. Operator Overloading (Special Methods) ───────────────── *)
+
+class Vector2D {
+    field x
+    field y
+
+    constructor[x_, y_] {
+        this.x = x
+        this.y = y
+    }
+
+    (* Arithmetic operators *)
+    method __add__[other_Vector2D] := Vector2D[x + other.x, y + other.y]
+    method __mul__[scalar_] := Vector2D[x * scalar, y * scalar]
+
+    (* Comparison *)
+    method __eq__[other_Vector2D] := x == other.x && y == other.y
+
+    (* Representation *)
+    method __repr__[] := "Vector2D[" <> ToString[x] <> ", " <> ToString[y] <> "]"
+
+    (* Indexing *)
+    method __len__[] := 2
+    method __getitem__[i_] := If[i == 1, x, y]
+}
+
+(* Once implemented:                               *)
+(*   a = Vector2D[1, 2]                            *)
+(*   b = Vector2D[3, 4]                            *)
+(*   a + b             (* => Vector2D[4, 6] *)     *)
+(*   a * 3             (* => Vector2D[3, 6] *)     *)
+(*   a == b            (* => False *)              *)
+
+
+(* ── 6. Class as Pattern ─────────────────────────────────────── *)
+
+(* Class names can be used as type patterns in pattern matching: *)
+
+(* Dispatch on object type *)
+areaOfShape[c_Circle] := Pi * c.radius^2
+areaOfShape[r_Rectangle] := r.width * r.height
+areaOfShape[s_] := s.area[]
+
+(* Match expressions *)
+shapeDescribe[shape_] := match shape {
+    c_Circle    => "circle r=" <> ToString[c.radius]
+    r_Rectangle => "rectangle " <> ToString[r.width] <> "x" <> ToString[r.height]
+    _           => "unknown shape"
+}
+
+
+(* ── 7. @transform — Class-Attached Transformations ──────────── *)
+
+(* Classes can define transformation rules that auto-apply: *)
+
+class Tensor {
+    field data: List
+    field dims: List
+
+    @transform normalize {
+        Tensor[d_, dims_] /; Max[Abs[d]] > 0 :>
+            Tensor[d / Max[Abs[d]], dims]
+    }
+
+    @transform flatten {
+        Tensor[d_, _] :> Tensor[Flatten[d], {Length[Flatten[d]]}]
+    }
+}
+
+(* Once implemented:                               *)
+(*   t = Tensor[{{1, 2}, {3, 4}}, {2, 2}]         *)
+(*   t.normalize[]                                 *)
+(*   t.flatten[]                                   *)
+
+
+(* ── 8. Objects as Symbolic Expressions ──────────────────────── *)
+
+(* Internally, an object is:                       *)
+(*   Object[ClassName, {field1 -> val1, ...}]      *)
+(*                                                 *)
+(* This means objects participate in pattern       *)
+(* matching and rule application like any expr:    *)
+
+rule expandPoly = {
+    Polynomial[cs_, v_] /; Length[cs] > 2 :>
+        Polynomial[Take[cs, 2], v] + Polynomial[Drop[cs, 2], v] * v^2
+}
+
+
+(* ── 9. Full Example: Polynomial Arithmetic ──────────────────── *)
+
+class Polynomial {
+    field coeffs: List
+    field var: Symbol = 'x
+
+    constructor[coeffs_, var_] {
+        this.coeffs = coeffs
+        this.var = var
+    }
+
+    method evaluate[x_] := Sum[
+        coeffs * x^Range[0, Length[coeffs] - 1]
+    ]
+
+    method derivative[] := Polynomial[
+        Drop[coeffs * Range[0, Length[coeffs] - 1], 1],
+        var
+    ]
+
+    method degree[] := Length[coeffs] - 1
+
+    method toString[] := StringJoin[
+        Riffle[Map[ToString, coeffs], " + "]
+    ]
+}
+
+(* Once implemented:                               *)
+(*   p = Polynomial[{3, 2, 1}]                     *)
+(*   p.coeffs          (* => {3, 2, 1} *)          *)
+(*   p.var             (* => x *)                  *)
+(*   p.evaluate[2]     (* => 3 + 4 + 4 = 11 *)    *)
+(*   p.derivative[]    (* => Polynomial[{2, 2}] *) *)
+(*   p.degree[]        (* => 2 *)                  *)
