@@ -15,9 +15,6 @@ pub mod lexer;
 pub mod manifest;
 pub mod parser;
 pub mod pattern;
-#[cfg(feature = "rubi")]
-pub mod rubi;
-pub mod server;
 pub mod value;
 
 use std::fs;

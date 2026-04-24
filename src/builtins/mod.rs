@@ -103,10 +103,6 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
     register_builtin(env, "Expand", symbolic::builtin_expand);
     register_builtin(env, "D", symbolic::builtin_d);
-    // Integrate is registered as a lazy provider that loads the Rubi
-    // rule-based integration engine on first call.
-    #[cfg(feature = "rubi")]
-    crate::rubi::register(env);
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin(env, "Series", symbolic::builtin_series);
