@@ -1467,15 +1467,22 @@ fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
 /// Try to load a module from a `.syma` file on disk.
 ///
-/// Searches `env.search_paths` for `{Name}.syma` (then `{name}.syma`).
+/// Searches `env.search_paths` for `{Name}.syma` (then `{name}.syma`),
+/// then `{Name}/{Name}.syma` (then `{name}/{name}.syma`), then
+/// `{Name}/src/{Name}.syma` for the standard package layout.
 /// The file must contain a top-level `module <Name> { ... }` definition.
 fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
     use crate::{lexer, parser};
 
-    // Candidates: exact case first, then lowercase fallback.
+    // Candidates: flat file, then directory/file, then directory/src/file.
+    // Each pair: exact case, then lowercase fallback.
     let candidates = [
         format!("{}.syma", name),
         format!("{}.syma", name.to_lowercase()),
+        format!("{}/{}.syma", name, name),
+        format!("{}/{}.syma", name.to_lowercase(), name.to_lowercase()),
+        format!("{}/src/{}.syma", name, name),
+        format!("{}/src/{}.syma", name.to_lowercase(), name.to_lowercase()),
     ];
 
     let mut source: Option<String> = None;
@@ -2773,6 +2780,53 @@ mod tests {
         // !expr should desugar to Not[expr]
         assert_eq!(eval_str("!True"), Value::Bool(false));
         assert_eq!(eval_str("!False"), Value::Bool(true));
+    }
+
+    // ── JIT promotion ──
+
+    #[test]
+    fn test_jit_promotion() {
+        // Define a function and call it 101+ times to trigger JIT promotion (threshold is 100).
+        // Verify correctness after promotion to bytecode.
+        let result = eval_str(
+            "double[x_] := x * 2;
+             Do[double[i], {i, 1, 100}];
+             double[21]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_jit_promotion_with_if() {
+        // JIT promotion for a function with a simple If
+        let result = eval_str(
+            "abs[x_] := If[x < 0, -x, x];
+             Do[abs[i], {i, -50, 50}];
+             abs[-5]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_jit_promotion_inline_arithmetic() {
+        // Triggers inline arithmetic path in bytecode compiler
+        let result = eval_str(
+            "f[x_] := x + 10;
+             Do[f[i], {i, 1, 100}];
+             f[32]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_jit_promotion_multiple_calls() {
+        // 200 calls across multiple arguments
+        let result = eval_str(
+            "add[a_, b_] := a + b;
+             Do[add[i, i], {i, 1, 200}];
+             add[20, 22]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
     }
 
     #[test]

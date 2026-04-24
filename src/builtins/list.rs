@@ -1,7 +1,22 @@
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
+use rug::Float;
 use rug::Integer;
+
+// Helper: convert a Value to f64.
+fn to_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(n) => Some(n.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        _ => None,
+    }
+}
+
+// Helper: create a Real value from f64.
+fn real(v: f64) -> Value {
+    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
+}
 
 // ── Helper functions ──
 
@@ -1497,6 +1512,196 @@ pub fn builtin_nest_list(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         result.push(val.clone());
     }
     Ok(Value::List(result))
+}
+
+// ── MapApply ──────────────────────────────────────────────────────────
+
+/// MapApply[f, expr] (like f @@@ expr) replaces heads at level 1.
+///
+/// For lists: MapApply[f, {{a,b}, {c,d}}] → {f[a,b], f[c,d]}
+/// For non-list items: MapApply[f, {a, b}] → {f[a], f[b]}
+pub fn builtin_map_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MapApply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let items = get_list(&args[1])?;
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::List(sub_args) => {
+                result.push(apply_function(f, sub_args, env)?);
+            }
+            other => {
+                result.push(apply_function(f, &[other.clone()], env)?);
+            }
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── MovingAverage ─────────────────────────────────────────────────────
+
+/// MovingAverage[list, n] computes the moving average with window size n.
+pub fn builtin_moving_average(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MovingAverage requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    if n <= 0 {
+        return Err(EvalError::Error(
+            "MovingAverage window size must be positive".to_string(),
+        ));
+    }
+    let n = n as usize;
+    if items.len() < n {
+        return Ok(Value::List(vec![]));
+    }
+    let mut result = Vec::with_capacity(items.len() - n + 1);
+    for window in items.windows(n) {
+        let count = window.len() as f64;
+        let sum: f64 = window.iter().filter_map(to_f64).sum();
+        result.push(real(sum / count));
+    }
+    Ok(Value::List(result))
+}
+
+// ── BlockMap ──────────────────────────────────────────────────────────
+
+/// BlockMap[f, list, n] partitions list into non-overlapping blocks of
+/// size n, applies f to each block, and returns the list of results.
+pub fn builtin_block_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 3 || args.len() > 4 {
+        return Err(EvalError::Error(
+            "BlockMap requires 3 or 4 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let items = get_list(&args[1])?;
+    let n = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: args[2].type_name().to_string(),
+    })?;
+    if n <= 0 {
+        return Err(EvalError::Error(
+            "BlockMap block size must be positive".to_string(),
+        ));
+    }
+    let n = n as usize;
+    let mut result = Vec::new();
+    for chunk in items.chunks(n) {
+        if chunk.len() == n {
+            let block = Value::List(chunk.to_vec());
+            result.push(apply_function(f, &[block], env)?);
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── ListConvolve ──────────────────────────────────────────────────────
+
+/// ListConvolve[kernel, list] computes the convolution of kernel with list.
+///
+/// output[j] = sum_i kernel[i] * list[j + i]  for j = 0..len(list)-len(kernel)
+///
+/// Numeric elements only; non-numeric elements are treated as zero.
+pub fn builtin_list_convolve(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 5 {
+        return Err(EvalError::Error(
+            "ListConvolve requires 2 to 5 arguments".to_string(),
+        ));
+    }
+    let kernel = get_list(&args[0])?;
+    let list = get_list(&args[1])?;
+    if kernel.is_empty() || list.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let k = kernel.len();
+    let n = list.len();
+    if n < k {
+        return Ok(Value::List(vec![]));
+    }
+    let mut result = Vec::with_capacity(n - k + 1);
+    for j in 0..=(n - k) {
+        let mut sum = 0.0f64;
+        for (i, k_val) in kernel.iter().enumerate() {
+            if let (Some(kf), Some(lf)) = (to_f64(k_val), to_f64(&list[j + i])) {
+                sum += kf * lf;
+            }
+        }
+        result.push(real(sum));
+    }
+    Ok(Value::List(result))
+}
+
+// ── Nearest ───────────────────────────────────────────────────────────
+
+/// Nearest[list, x] finds the element(s) in list closest to x.
+/// Nearest[list, x, n] finds the n closest elements.
+///
+/// Uses absolute numeric distance; non-numeric elements are ignored.
+pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error(
+            "Nearest requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let target = &args[1];
+    let n = if args.len() == 3 {
+        let nn = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[2].type_name().to_string(),
+        })?;
+        if nn <= 0 {
+            return Err(EvalError::Error(
+                "Nearest n must be positive".to_string(),
+            ));
+        }
+        nn as usize
+    } else {
+        1
+    };
+
+    if items.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+
+    // Compute distances as f64
+    let target_f = to_f64(target).ok_or_else(|| EvalError::Error(
+        "Nearest target must be numeric".to_string(),
+    ))?;
+
+    let mut scored: Vec<(f64, &Value)> = items
+        .iter()
+        .filter_map(|item| {
+            to_f64(item).map(|f| {
+                let d = (f - target_f).abs();
+                (d, item)
+            })
+        })
+        .collect();
+
+    if scored.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+
+    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let result: Vec<Value> = scored.into_iter().take(n).map(|(_, v)| v.clone()).collect();
+    if n == 1 {
+        Ok(result.into_iter().next().unwrap_or(Value::Null))
+    } else {
+        Ok(Value::List(result))
+    }
 }
 
 #[cfg(test)]

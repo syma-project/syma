@@ -485,7 +485,7 @@ pub fn builtin_merge(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 if vals.len() == 1 {
                     result.insert(k, vals.into_iter().next().unwrap());
                 } else {
-                    let combined = apply_function(combiner, &vals, env)?;
+                    let combined = apply_function(combiner, &[Value::List(vals)], env)?;
                     result.insert(k, combined);
                 }
             }
@@ -527,7 +527,7 @@ pub fn builtin_key_union(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
             Ok(Value::List(
-                all_keys.into_iter().map(|k| Value::Str(k)).collect(),
+                all_keys.into_iter().map(Value::Str).collect(),
             ))
         }
         _ => Err(EvalError::TypeError {
@@ -579,7 +579,7 @@ pub fn builtin_key_intersection(args: &[Value]) -> Result<Value, EvalError> {
             }
             result.sort();
             Ok(Value::List(
-                result.into_iter().map(|k| Value::Str(k)).collect(),
+                result.into_iter().map(Value::Str).collect(),
             ))
         }
         _ => Err(EvalError::TypeError {
@@ -622,7 +622,7 @@ pub fn builtin_key_complement(args: &[Value]) -> Result<Value, EvalError> {
         .collect();
     keys.sort();
     Ok(Value::List(
-        keys.into_iter().map(|k| Value::Str(k)).collect(),
+        keys.into_iter().map(Value::Str).collect(),
     ))
 }
 
@@ -811,8 +811,13 @@ mod tests {
         let env = make_env();
         // Key length > 1: select keys longer than 1 char
         let a = assoc(vec![("x", integer(1)), ("yy", integer(2)), ("zzz", integer(3))]);
-        let f = Value::Builtin("StringLength".to_string(), crate::value::BuiltinFn::Pure(crate::builtins::string::builtin_string_length));
-        let result = builtin_key_select(&[a, f], &env).unwrap();
+        let pred = Value::Builtin("_pred".to_string(), crate::value::BuiltinFn::Pure(|args| {
+            match &args[0] {
+                Value::Str(s) => Ok(Value::Bool(s.len() > 1)),
+                _ => Ok(Value::Bool(false)),
+            }
+        }));
+        let result = builtin_key_select(&[a, pred], &env).unwrap();
         match result {
             Value::Assoc(map) => {
                 assert_eq!(map.len(), 2);

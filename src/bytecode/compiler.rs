@@ -34,6 +34,8 @@ impl std::error::Error for CompileError {}
 struct RegAlloc {
     next: u16,
     _freed: Vec<u16>,
+    /// High-water mark: the highest register index ever allocated.
+    max_reg: u16,
 }
 
 impl RegAlloc {
@@ -41,6 +43,7 @@ impl RegAlloc {
         Self {
             next: 0,
             _freed: Vec::new(),
+            max_reg: 0,
         }
     }
 
@@ -48,11 +51,14 @@ impl RegAlloc {
         if let Some(r) = self._freed.pop() {
             return Ok(r);
         }
-        if self.next >= u16::MAX {
+        if self.next == u16::MAX {
             return Err(CompileError::RegisterOverflow);
         }
         let r = self.next;
         self.next += 1;
+        if r > self.max_reg {
+            self.max_reg = r;
+        }
         Ok(r)
     }
 
@@ -60,8 +66,16 @@ impl RegAlloc {
         self._freed.push(reg);
     }
 
+    /// Ensure a specific register index is accounted for in max_reg.
+    /// Used when instructions reference registers not obtained via alloc().
+    fn note_reg(&mut self, reg: u16) {
+        if reg > self.max_reg {
+            self.max_reg = reg;
+        }
+    }
+
     fn used(&self) -> u16 {
-        self.next - self._freed.len() as u16
+        self.max_reg + 1
     }
 }
 
@@ -239,10 +253,10 @@ impl BytecodeCompiler {
 
     fn compile_call(&mut self, head: &Expr, args: &[Expr]) -> Result<u16, CompileError> {
         // Try inline arithmetic for known binary ops
-        if let Expr::Symbol(name) = head {
-            if let Some(instr) = self.try_inline_arithmetic(name, args)? {
-                return Ok(instr);
-            }
+        if let Expr::Symbol(name) = head
+            && let Some(instr) = self.try_inline_arithmetic(name, args)?
+        {
+            return Ok(instr);
         }
 
         // General call: compile head and args, emit Apply
@@ -262,6 +276,7 @@ impl BytecodeCompiler {
             let target = dst.checked_add(1 + i as u16).ok_or_else(|| {
                 CompileError::UnsupportedFeature("register overflow in call".to_string())
             })?;
+            self.regs.note_reg(target);
             self.emit(Instruction::Mov(target, *arg_reg));
         }
         self.emit(Instruction::Apply(dst, args.len() as u8));
@@ -430,13 +445,15 @@ impl BytecodeCompiler {
     }
 
     fn patch_jump(&mut self, instr_idx: usize, target: i32) {
-        // Safe: we're matching on a mutable reference to an Instruction
-        // and replacing the offset field.
+        // The Jump instruction's offset is relative to the PC after fetching
+        // (PC already incremented past the jump). Compute the relative offset
+        // from instr_idx + 1 to target.
+        let relative = target - (instr_idx as i32) - 1;
         let instr = &mut self.code[instr_idx];
         match instr {
             Instruction::Jump(o)
             | Instruction::JumpIfZero(_, o)
-            | Instruction::JumpIfNotZero(_, o) => *o = target,
+            | Instruction::JumpIfNotZero(_, o) => *o = relative,
             _ => panic!("Cannot patch non-jump at {instr_idx}"),
         }
     }
@@ -463,14 +480,13 @@ impl BytecodeCompiler {
             temp_regs.push(self.emit_const(Value::Str(key.clone()))?);
             temp_regs.push(self.compile_expr(val_expr)?);
         }
-        let mut offset: u16 = 1;
-        for &tr in &temp_regs {
+        for (offset, &tr) in (1_u16..).zip(temp_regs.iter()) {
             let target = dst.checked_add(offset).ok_or_else(|| {
                 CompileError::UnsupportedFeature("register overflow in assoc".to_string())
             })?;
+            self.regs.note_reg(target);
             self.emit(Instruction::Mov(target, tr));
             self.regs._free(tr);
-            offset += 1;
         }
         self.emit(Instruction::MakeAssoc(dst, n as u8));
         Ok(dst)
@@ -512,6 +528,10 @@ mod tests {
     use super::*;
     use crate::ast::Expr;
 
+    fn compile(params: Vec<Expr>, body: Expr) -> CompiledBytecode {
+        BytecodeCompiler::compile_function(&params, &body, "f").unwrap()
+    }
+
     #[test]
     fn test_compile_identity() {
         let params = vec![Expr::NamedBlank {
@@ -519,16 +539,15 @@ mod tests {
             type_constraint: None,
         }];
         let body = Expr::Symbol("x".to_string());
-        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        let bc = compile(params, body);
         assert_eq!(bc.nparams, 1);
         assert!(bc.nregs > 0);
     }
 
     #[test]
     fn test_compile_constant() {
-        let params = vec![];
         let body = Expr::Integer(42.into());
-        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        let bc = compile(vec![], body);
         assert_eq!(bc.nparams, 0);
         assert_eq!(bc.constants.len(), 1);
     }
@@ -552,7 +571,77 @@ mod tests {
                 Expr::Symbol("y".to_string()),
             ],
         };
-        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        let bc = compile(params, body);
         assert_eq!(bc.nparams, 2);
+        // Should use Add (not IntAdd) since params are not statically int
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Add(..))));
+    }
+
+    #[test]
+    fn test_compile_if_else() {
+        // f[x_] := If[x > 0, x, -x]
+        let body = Expr::If {
+            condition: Box::new(Expr::Call {
+                head: Box::new(Expr::Symbol("Greater".to_string())),
+                args: vec![Expr::Symbol("x".to_string()), Expr::Integer(0.into())],
+            }),
+            then_branch: Box::new(Expr::Symbol("x".to_string())),
+            else_branch: Some(Box::new(Expr::Call {
+                head: Box::new(Expr::Symbol("Times".to_string())),
+                args: vec![Expr::Integer((-1).into()), Expr::Symbol("x".to_string())],
+            })),
+        };
+        let params = vec![Expr::NamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        }];
+        let bc = compile(params, body);
+        // Should contain JumpIfZero and Jump instructions
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::JumpIfZero(..))));
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Jump(..))));
+    }
+
+    #[test]
+    fn test_compile_inline_int_add() {
+        // Plus[1, 2] → should emit IntAdd
+        let body = Expr::Call {
+            head: Box::new(Expr::Symbol("Plus".to_string())),
+            args: vec![Expr::Integer(1.into()), Expr::Integer(2.into())],
+        };
+        let bc = compile(vec![], body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::IntAdd(..))),
+            "Plus of two integers should emit IntAdd");
+    }
+
+    #[test]
+    fn test_compile_inline_neg() {
+        // Times[-1, x] → should emit Neg
+        let body = Expr::Call {
+            head: Box::new(Expr::Symbol("Times".to_string())),
+            args: vec![Expr::Integer((-1).into()), Expr::Symbol("x".to_string())],
+        };
+        let params = vec![Expr::NamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        }];
+        let bc = compile(params, body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Neg(..))),
+            "Times[-1, x] should emit Neg");
+    }
+
+    #[test]
+    fn test_compile_not() {
+        // Not[x] → should emit Not
+        let body = Expr::Call {
+            head: Box::new(Expr::Symbol("Not".to_string())),
+            args: vec![Expr::Symbol("x".to_string())],
+        };
+        let params = vec![Expr::NamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        }];
+        let bc = compile(params, body);
+        assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Not(..))),
+            "Not[x] should emit Not instruction");
     }
 }

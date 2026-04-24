@@ -595,6 +595,47 @@ mod tests {
     }
 
     #[test]
+    fn test_bounds_validation_out_of_bounds() {
+        // Register 5 is out of bounds (nregs=3)
+        let bc = CompiledBytecode {
+            instructions: vec![Instruction::LoadConst(5, 0), Instruction::Return(5)],
+            constants: vec![Value::Integer(42.into())],
+            nregs: 3,
+            nparams: 0,
+        };
+        let err = run(&bc, &[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+    }
+
+    #[test]
+    fn test_bounds_validation_make_list() {
+        // MakeList at reg 0 with n=5 touches regs 0..5, but nregs=3
+        let bc = CompiledBytecode {
+            instructions: vec![Instruction::MakeList(0, 5), Instruction::Return(0)],
+            constants: vec![],
+            nregs: 3,
+            nparams: 0,
+        };
+        let err = run(&bc, &[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+    }
+
+    #[test]
+    fn test_bounds_validation_jump_if_zero() {
+        let bc = CompiledBytecode {
+            instructions: vec![Instruction::JumpIfZero(99, 1), Instruction::Return(99)],
+            constants: vec![],
+            nregs: 3,
+            nparams: 0,
+        };
+        let err = run(&bc, &[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("out of bounds"), "expected bounds error, got: {msg}");
+    }
+
+    #[test]
     fn test_compiled_identity() {
         use crate::ast::Expr;
         let params = vec![Expr::NamedBlank {

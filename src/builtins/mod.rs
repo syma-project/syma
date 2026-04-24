@@ -109,6 +109,8 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Head", pattern::builtin_head);
     register_builtin(env, "TypeOf", pattern::builtin_type_of);
     register_builtin(env, "FreeQ", pattern::builtin_free_q);
+    register_builtin(env, "Cases", pattern::builtin_cases);
+    register_builtin(env, "DeleteCases", pattern::builtin_delete_cases);
 
     // ── String ──
     register_builtin(env, "StringJoin", string::builtin_string_join);
@@ -245,6 +247,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Tally", list::builtin_tally);
     register_builtin(env, "PadLeft", list::builtin_pad_left);
     register_builtin(env, "PadRight", list::builtin_pad_right);
+    register_builtin_env(env, "MapApply", list::builtin_map_apply);
+    register_builtin(env, "MovingAverage", list::builtin_moving_average);
+    register_builtin_env(env, "BlockMap", list::builtin_block_map);
+    register_builtin(env, "ListConvolve", list::builtin_list_convolve);
+    register_builtin(env, "Nearest", list::builtin_nearest);
 
     // ── I/O ──
     register_builtin(env, "Input", io::builtin_input);
@@ -423,6 +430,23 @@ pub fn register_builtins(env: &Env) {
         "Graphics",
         graphics::register,
     );
+
+    // ── Add SYMA_HOME/Packages to module search path ───────────────
+    // This enables `Needs["PackageName"]` to find pure-Syma packages.
+    if let Some(syma_home) = std::env::var_os("SYMA_HOME") {
+        let packages_dir = std::path::Path::new(&syma_home).join("Packages");
+        if packages_dir.is_dir() {
+            env.add_search_path(packages_dir);
+        }
+    } else {
+        // Fall back to ~/.syma/Packages
+        if let Some(home) = std::env::var_os("HOME") {
+            let packages_dir = std::path::Path::new(&home).join(".syma").join("Packages");
+            if packages_dir.is_dir() {
+                env.add_search_path(packages_dir);
+            }
+        }
+    }
 }
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
@@ -702,12 +726,38 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "GatherBy" => "GatherBy[list, f] groups elements by the values of f applied to each element.",
         "FoldList" => "FoldList[f, init, list] gives all intermediate results of folding f from the left.",
         "NestList" => "NestList[f, expr, n] gives all intermediate results of applying f to expr n times.",
+        "MapApply" => {
+            "MapApply[f, expr] (f @@@ expr) replaces heads at level 1, using elements of lists as arguments.\n\
+             MapApply[f, {{a,b}, {c,d}}] → {f[a,b], f[c,d]}."
+        }
+        "MovingAverage" => {
+            "MovingAverage[list, n] computes the moving average of list with window size n."
+        }
+        "BlockMap" => {
+            "BlockMap[f, list, n] partitions list into non-overlapping blocks of size n and applies f to each."
+        }
+        "ListConvolve" => {
+            "ListConvolve[kernel, list] computes the convolution of kernel with list.\n\
+             ListConvolve[{k1,k2}, {a,b,c}] → {a*k1+b*k2, b*k1+c*k2}."
+        }
+        "Nearest" => {
+            "Nearest[list, x] returns the element in list closest to x.\n\
+             Nearest[list, x, n] returns the n closest elements."
+        }
 
         // ── Pattern ──
         "MatchQ" => "MatchQ[expr, pattern] returns True if expr matches pattern.",
         "Head" => "Head[expr] gives the head of expr (e.g., List for {1,2,3}).",
         "TypeOf" => "TypeOf[expr] returns the type name of expr as a string.",
         "FreeQ" => "FreeQ[expr, pattern] returns True if pattern does not appear in expr.",
+        "Cases" => {
+            "Cases[{e1, e2, ...}, pattern] gives a list of elements that match pattern.\n\
+             Cases[list, pattern, levelspec] — not yet supported."
+        }
+        "DeleteCases" => {
+            "DeleteCases[{e1, e2, ...}, pattern] removes elements that match pattern.\n\
+             DeleteCases[list, pattern, levelspec] — not yet supported."
+        }
 
         // ── String ──
         "StringJoin" => "StringJoin[s1, s2, ...] or s1 <> s2 <> ... concatenates strings.",
