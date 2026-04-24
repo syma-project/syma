@@ -329,6 +329,7 @@ fn format_value(val: &Value) -> String {
             let parts: Vec<String> = items.iter().map(format_value).collect();
             format!("Sequence[{}]", parts.join(", "))
         }
+        Value::Formatted { value, .. } => format_value(value),
     }
 }
 

@@ -1,4 +1,15 @@
-use crate::ffi::marshal::{json_to_value, value_to_json};
+//! I/O builtins: Print, Input, Write, WriteLine, PrintF, WriteString, ReadString.
+//!
+//! Format-specific Import/Export lives in sibling modules:
+//! - `export.rs` — Export dispatcher and format converters
+//! - `import.rs` — Import dispatcher and format converters
+
+pub mod export;
+pub mod import;
+
+pub use export::builtin_export;
+pub use import::builtin_import;
+
 use crate::value::EvalError;
 use crate::value::Value;
 use std::io::Write as IoWrite;
@@ -44,7 +55,7 @@ pub fn builtin_write(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Null)
 }
 
-/// WriteLine[args...] — print space-separated args followed by a newline (same as Print).
+/// WriteLine[args...] — print space-separated args followed by a newline.
 pub fn builtin_write_line(args: &[Value]) -> Result<Value, EvalError> {
     for (i, arg) in args.iter().enumerate() {
         if i > 0 {
@@ -58,7 +69,6 @@ pub fn builtin_write_line(args: &[Value]) -> Result<Value, EvalError> {
 
 /// PrintF["fmt", args...] — formatted print.
 /// Replaces `~1~`, `~2~`, ... with the corresponding arguments.
-/// Example: PrintF["Hello ~1~, you are ~2~ years old.", "Alice", 30]
 pub fn builtin_printf(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(EvalError::Error(
@@ -128,132 +138,84 @@ pub fn builtin_read_string(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(contents))
 }
 
-/// Export[path, data] — export data to a file.
-/// Format is detected by extension:
-///   `.json` — serialise Value to JSON
-///   everything else — write data.to_string() as text
-pub fn builtin_export(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Export requires exactly 2 arguments".to_string(),
-        ));
-    }
-    let path = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let data = if path.ends_with(".json") {
-        let json_val = value_to_json(&args[1])
-            .map_err(|e| EvalError::Error(format!("Export JSON error: {}", e)))?;
-        serde_json::to_string_pretty(&json_val)
-            .map_err(|e| EvalError::Error(format!("Export JSON serialisation: {}", e)))?
-    } else {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            other => format!("{}", other),
-        }
-    };
-    std::fs::write(&path, &data).map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?;
-    Ok(Value::Null)
-}
-
-/// Import[path] — import data from a file.
-/// Format is detected by extension:
-///   `.json` — parse JSON into Value
-///   everything else — return as Value::Str
-pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Import requires exactly 1 argument".to_string(),
-        ));
-    }
-    let path = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| EvalError::Error(format!("Import failed: {}", e)))?;
-    if path.ends_with(".json") {
-        json_to_value(&contents).map_err(|e| EvalError::Error(format!("Import JSON parse: {}", e)))
-    } else {
-        Ok(Value::Str(contents))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    fn str_val(s: &str) -> Value {
-        Value::Str(s.to_string())
-    }
-
-    #[test]
-    fn test_write_read_string_roundtrip() {
-        let path = "/tmp/syma_test_io_roundtrip.txt";
-        let data = "hello world\nline two";
-        builtin_write_string(&[str_val(path), str_val(data)]).unwrap();
-        let result = builtin_read_string(&[str_val(path)]).unwrap();
-        assert_eq!(result, str_val(data));
-        fs::remove_file(path).ok();
-    }
+    use crate::value::Value;
 
     #[test]
     fn test_write_string_errors() {
-        assert!(builtin_write_string(&[str_val("x")]).is_err()); // too few args
-        assert!(
-            builtin_write_string(&[Value::Integer(rug::Integer::from(1)), str_val("x")]).is_err()
-        ); // wrong type
+        let result = builtin_write_string(&[]);
+        assert!(result.is_err());
+        let result = builtin_write_string(&[Value::Str("/tmp/test.txt".into())]);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_read_string_errors() {
-        assert!(builtin_read_string(&[]).is_err()); // no args
-        assert!(builtin_read_string(&[str_val("/tmp/syma_nonexistent_file_xyz")]).is_err()); // file not found
+        let result = builtin_read_string(&[]);
+        assert!(result.is_err());
+        let result = builtin_read_string(&[Value::Str("/nonexistent/file".into())]);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_export_import_json_roundtrip() {
-        let path = "/tmp/syma_test_export.json";
-        let data = Value::List(vec![
-            Value::Integer(rug::Integer::from(1)),
-            Value::Integer(rug::Integer::from(2)),
-            Value::Integer(rug::Integer::from(3)),
+    fn test_write_read_string_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_io_roundtrip.txt";
+        let data = "Hello, Syma!";
+        let wr = builtin_write_string(&[
+            Value::Str(path.to_string()),
+            Value::Str(data.to_string()),
         ]);
-        builtin_export(&[str_val(path), data.clone()]).unwrap();
-        let result = builtin_import(&[str_val(path)]).unwrap();
-        assert_eq!(result, data);
-        fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn test_export_import_text_roundtrip() {
-        let path = "/tmp/syma_test_export.txt";
-        let data = str_val("some text content");
-        builtin_export(&[str_val(path), data.clone()]).unwrap();
-        let result = builtin_import(&[str_val(path)]).unwrap();
-        assert_eq!(result, data);
+        assert!(wr.is_ok());
+        let rd = builtin_read_string(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(rd, Value::Str(data.to_string()));
         fs::remove_file(path).ok();
     }
 
     #[test]
     fn test_export_errors() {
-        assert!(builtin_export(&[str_val("x")]).is_err()); // too few args
+        let result = builtin_export(&[]);
+        assert!(result.is_err());
+        let result = builtin_export(&[Value::Str("/tmp/x.txt".into())]);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_import_errors() {
-        assert!(builtin_import(&[]).is_err()); // no args
+        let result = builtin_import(&[]);
+        assert!(result.is_err());
+        let result = builtin_import(&[Value::Str("/nonexistent/file.json".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_export_import_json_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_json_rt.json";
+        let data = Value::List(vec![
+            Value::Integer(rug::Integer::from(1)),
+            Value::Integer(rug::Integer::from(2)),
+            Value::Integer(rug::Integer::from(3)),
+        ]);
+        let export_result = builtin_export(&[Value::Str(path.to_string()), data.clone()]);
+        assert!(export_result.is_ok(), "Export failed: {:?}", export_result);
+        let import_result = builtin_import(&[Value::Str(path.to_string())]);
+        assert!(import_result.is_ok(), "Import failed: {:?}", import_result);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_export_import_text_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_text_rt.txt";
+        let data_str = "Hello world";
+        let export_result =
+            builtin_export(&[Value::Str(path.to_string()), Value::Str(data_str.to_string())]);
+        assert!(export_result.is_ok());
+        let import_result = builtin_import(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(import_result, Value::Str(data_str.to_string()));
+        fs::remove_file(path).ok();
     }
 }

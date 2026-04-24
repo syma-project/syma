@@ -1,9 +1,9 @@
 use std::process::Command;
 
-/// Run `cargo run -- -e <expr>` and return stdout on success.
+/// Run `cargo run --bin syma -- -e <expr>` and return stdout on success.
 fn syma_eval(expr: &str) -> String {
     let output = Command::new("cargo")
-        .args(["run", "--", "-e", expr])
+        .args(["run", "--bin", "syma", "--", "-e", expr])
         .output()
         .expect("failed to run syma -e");
     if !output.status.success() {
@@ -15,10 +15,10 @@ fn syma_eval(expr: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// Run `cargo run -- <args...>` and return the output.
+/// Run `cargo run --bin syma -- <args...>` and return the output.
 fn syma_run(args: &[&str]) -> std::process::Output {
     Command::new("cargo")
-        .args(["run", "--"])
+        .args(["run", "--bin", "syma", "--"])
         .args(args)
         .output()
         .expect("failed to run syma")
@@ -97,5 +97,61 @@ fn test_run_math_example() {
         output.status.success(),
         "math example failed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ── Format / display tests ──────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_format_flag_inputform() {
+    // --format inputform should show infix notation for Plus[a, b]
+    let output = syma_run(&["-e", "Plus[a, b]", "--format", "inputform"]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("a + b"),
+        "expected 'a + b' in output, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_cli_format_flag_fullform() {
+    // --format fullform should show head notation for a + b with symbolic args
+    let output = syma_run(&["-e", "Plus[a, b]", "--format", "fullform"]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Plus"),
+        "expected FullForm output containing 'Plus', got: {stdout}"
+    );
+}
+
+#[test]
+fn test_eval_syntax_q() {
+    let out = syma_eval(r#"SyntaxQ["1 + 2"]"#);
+    assert!(out.contains("True"), "got: {out}");
+}
+
+#[test]
+fn test_short_builtin_via_eval() {
+    // Short of a long list should show <<...>>
+    let out = syma_eval("Short[Range[20]]");
+    assert!(out.contains("<<"), "Short[Range[20]] should contain <<, got: {out}");
+}
+
+#[test]
+fn test_grid_builtin_via_eval() {
+    // Grid of a 2D list should produce tabular output
+    let out = syma_eval("Grid[{{1, 2, 3}, {10, 20, 30}}]");
+    assert!(out.contains("1"), "Grid output should contain values, got: {out}");
+    assert!(out.contains("10"), "Grid output should contain values, got: {out}");
+}
+
+#[test]
+fn test_base_form_via_eval() {
+    let out = syma_eval("BaseForm[255, 16]");
+    assert!(
+        out.contains("ff(base 16)") || out.contains("FF(base 16)"),
+        "BaseForm[255, 16] should show ff(base 16), got: {out}"
     );
 }

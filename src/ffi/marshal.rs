@@ -315,6 +315,7 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             let vs: Vec<JVal> = items.iter().map(value_to_json_full).collect();
             JVal::Array(vs)
         }
+        Value::Formatted { value, .. } => value_to_json_full(value),
     }
 }
 

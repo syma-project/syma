@@ -3,6 +3,7 @@ pub mod association;
 pub mod comparison;
 pub mod error;
 pub mod ffi;
+pub mod format;
 pub mod filesystem;
 pub mod graphics;
 pub mod io;
@@ -247,6 +248,19 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "FileExistsQ", filesystem::builtin_file_exists_q);
     register_builtin(env, "DirectoryQ", filesystem::builtin_directory_q);
     register_builtin(env, "FileNames", filesystem::builtin_file_names);
+
+    // ── Format/display ──
+    register_builtin(env, "InputForm", format::builtin_input_form);
+    register_builtin(env, "FullForm", format::builtin_full_form);
+    register_builtin(env, "Short", format::builtin_short);
+    register_builtin(env, "Shallow", format::builtin_shallow);
+    register_builtin(env, "NumberForm", format::builtin_number_form);
+    register_builtin(env, "ScientificForm", format::builtin_scientific_form);
+    register_builtin(env, "BaseForm", format::builtin_base_form);
+    register_builtin(env, "Grid", format::builtin_grid);
+    register_builtin(env, "Defer", format::builtin_defer);
+    register_builtin(env, "SyntaxQ", format::builtin_syntax_q);
+    register_builtin(env, "SyntaxLength", format::builtin_syntax_length);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
@@ -808,6 +822,35 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "CloseKernels" => "CloseKernels[] resets the parallel worker pool. Returns Null.",
 
+        // ── Format/display ──
+        "InputForm" => {
+            "InputForm[expr] displays expr using infix notation (e.g., `a + b` instead of `Plus[a, b]`)."
+        }
+        "FullForm" => "FullForm[expr] displays expr in head[arg, ...] notation.",
+        "Short" => {
+            "Short[expr] displays expr with top-level truncation (shows at most 5 items).\nShort[expr, n] displays at most n top-level items."
+        }
+        "Shallow" => {
+            "Shallow[expr] displays expr with limited nesting depth (default 3).\nShallow[expr, n] limits nesting to n levels."
+        }
+        "NumberForm" => {
+            "NumberForm[expr, n] displays numbers with n significant digits."
+        }
+        "ScientificForm" => {
+            "ScientificForm[expr, n] displays numbers in scientific notation with n significant digits."
+        }
+        "BaseForm" => {
+            "BaseForm[expr, base] displays a number in the given base (2–36)."
+        }
+        "Grid" => "Grid[list] displays a 2D list as an aligned table grid.",
+        "Defer" => "Defer[expr] displays expr in its original form. (Currently a display wrapper.)",
+        "SyntaxQ" => {
+            "SyntaxQ[\"expr\"] returns True if expr is valid Syma syntax, False otherwise. Performs lex + parse only (no evaluation)."
+        }
+        "SyntaxLength" => {
+            "SyntaxLength[\"expr\"] returns the position of the first syntax error, or the length of the string if valid."
+        }
+
         // ── File system ──
         "FileNameSplit" => {
             "FileNameSplit[\"path\"] splits a file name into a list of its components."
@@ -865,6 +908,7 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Not" => vec!["Listable"],
         "Hold" => vec!["HoldAll"],
         "HoldComplete" => vec!["HoldAllComplete"],
+        "Defer" => vec!["HoldAll"],
         _ => vec![],
     }
 }

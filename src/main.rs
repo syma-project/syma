@@ -8,10 +8,11 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use syma::format::{cyan, dim, green, red};
 use syma::kernel::SymaKernel;
-use syma::value::Value;
+use syma::value::{Format, Value};
 use syma::{VERSION, eval_input, run_file};
 
 const HISTORY_FILE: &str = ".syma_history";
+const MAX_OUTPUT_CHARS: usize = 2000;
 
 fn print_usage() {
     println!(
@@ -23,6 +24,7 @@ fn print_usage() {
     println!("  syma                       Start the interactive REPL");
     println!("  syma <file>                Evaluate a Syma source file");
     println!("  syma -e <expr>             Evaluate an expression and print the result");
+    println!("  syma -e <expr> --format F  Evaluate and format output (inputform|fullform, default inputform)");
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --check <file>        Parse-only check (no evaluation)");
     println!("  syma --kernel              Run in kernel mode (JSON over stdin/stdout)");
@@ -135,7 +137,16 @@ fn run_repl() {
                             println!("{}", s);
                         }
                     } else {
-                        println!("{} {}", red(&format!("Out[{}]:", counter)), value);
+                        let display_val = Value::Formatted {
+                            format: Format::InputForm,
+                            value: Box::new(value),
+                        };
+                        let output = display_val.to_string();
+                        println!(
+                            "{} {}",
+                            red(&format!("Out[{}]:", counter)),
+                            truncate_output(&output)
+                        );
                     }
                 }
                 counter += 1;
@@ -166,6 +177,23 @@ fn run_repl() {
 /// Get the home directory for history file storage.
 fn dirs_or_default() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Truncate output that exceeds MAX_OUTPUT_CHARS.
+/// Returns the original string if under the limit, or a truncated version
+/// with a message like `... (N bytes omitted)` appended.
+fn truncate_output(s: &str) -> String {
+    if s.len() <= MAX_OUTPUT_CHARS {
+        s.to_string()
+    } else {
+        let omitted = s.len() - MAX_OUTPUT_CHARS;
+        let truncated: String = s.chars().take(MAX_OUTPUT_CHARS).collect();
+        format!(
+            "{}\n{}",
+            truncated,
+            dim(&format!("... ({} bytes omitted)", omitted))
+        )
+    }
 }
 
 /// Run in kernel mode: read JSON requests from stdin, write JSON responses to stdout.
@@ -251,10 +279,27 @@ fn main() {
                 eprintln!("Usage: syma --eval <expression>");
                 process::exit(1);
             });
+            // Check for --format flag
+            let format_flag = args.iter().position(|a| a == "--format").and_then(|i| {
+                args.get(i + 1).map(|s| s.as_str())
+            });
             let env = syma::env::Env::new();
             syma::builtins::register_builtins(&env);
             match eval_input(expr, &env) {
-                Some(val) => println!("{}", val),
+                Some(val) => {
+                    let display_val = match format_flag {
+                        Some("fullform") | Some("full") => Value::Formatted {
+                            format: Format::FullForm,
+                            value: Box::new(val),
+                        },
+                        // Default to InputForm for readability
+                        _ => Value::Formatted {
+                            format: Format::InputForm,
+                            value: Box::new(val),
+                        },
+                    };
+                    println!("{}", truncate_output(&display_val.to_string()));
+                }
                 None => process::exit(1),
             }
         }

@@ -93,6 +93,34 @@ unsafe impl Sync for NativeLibHandle {}
 /// Default precision for floating-point numbers (128 bits ≈ 38 decimal digits).
 pub const DEFAULT_PRECISION: u32 = 128;
 
+/// Output format specification for `Value::Formatted`.
+///
+/// Controls how a value is displayed without affecting its semantics.
+/// Analogous to Wolfram Language's `Format` types (`InputForm`, `Short`, `NumberForm`, etc.).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Format {
+    /// Default display (FullForm-style).
+    Standard,
+    /// Explicit FullForm (head[arg, ...] notation).
+    FullForm,
+    /// InputForm (infix notation with operators, e.g. `a + b` instead of `Plus[a, b]`).
+    InputForm,
+    /// Truncated output — at most `n` top-level items. `Short[expr]` alias with default 5.
+    Short(usize),
+    /// Limit nesting depth — at most `n` levels shown. `Shallow[expr]` default depth 3.
+    Shallow(usize),
+    /// Number formatting — `NumberForm[expr, n]` shows n significant digits.
+    NumberForm { digits: usize },
+    /// Scientific notation — `ScientificForm[expr, n]` shows n significant digits in `m·10^e`.
+    ScientificForm { digits: usize },
+    /// Number display in a given base — `BaseForm[expr, base]` (2 ≤ base ≤ 36).
+    BaseForm(u32),
+    /// Table/grid layout for 2D lists — `Grid[list]`.
+    Grid,
+    /// Deferred evaluation — display placeholder (e.g. `Defer[1 + 1]` → `1 + 1`).
+    Deferred,
+}
+
 /// Convert rug's `to_string_radix` output (e.g. `"3.14159e0"`, `"-1.5e2"`)
 /// into standard decimal notation (e.g. `"3.14159"`, `"-150.0"`).
 /// Rug uses `e` as exponent marker for base 10 (MPFR convention).
@@ -179,6 +207,14 @@ pub enum Value {
     /// A sequence of values that automatically splats into lists and calls.
     /// Analogous to Wolfram Language's Sequence[...].
     Sequence(Vec<Value>),
+
+    /// A value with an explicit display format.
+    /// The format controls how the value is rendered (e.g., `InputForm`, `Short`, `NumberForm`),
+    /// without affecting its semantic meaning. Analogous to Wolfram Language's `Format[expr, form]`.
+    Formatted {
+        format: Format,
+        value: Box<Value>,
+    },
 
     /// A named function with its head.
     Call {
@@ -443,6 +479,11 @@ impl PartialEq for Value {
                     ..
                 },
             ) => l1 == l2 && s1 == s2 && sig1 == sig2,
+            // Formatted: compare inner values (format is only a display hint)
+            (Value::Formatted { value: a, .. }, Value::Formatted { value: b, .. }) => a == b,
+            (Value::Formatted { value, .. }, other) | (other, Value::Formatted { value, .. }) => {
+                value.as_ref() == other
+            }
             _ => false,
         }
     }
@@ -477,6 +518,17 @@ impl Value {
             Value::HoldComplete(_) => "HoldComplete",
             Value::NativeLib { .. } => "NativeLib",
             Value::NativeFunction { .. } => "NativeFunction",
+            Value::Formatted { format, value } => match format {
+                Format::InputForm => "InputForm",
+                Format::Short(_) => "Short",
+                Format::Shallow(_) => "Shallow",
+                Format::NumberForm { .. } => "NumberForm",
+                Format::ScientificForm { .. } => "ScientificForm",
+                Format::BaseForm(_) => "BaseForm",
+                Format::Grid => "Grid",
+                Format::Deferred => "Deferred",
+                Format::Standard | Format::FullForm => value.type_name(),
+            },
         }
     }
 
@@ -517,6 +569,7 @@ impl Value {
     /// Convert to boolean.
     pub fn to_bool(&self) -> bool {
         match self {
+            Value::Formatted { value, .. } => value.to_bool(),
             Value::Bool(b) => *b,
             Value::Integer(n) => !n.is_zero(),
             Value::Real(r) => !r.is_zero(),
@@ -529,6 +582,7 @@ impl Value {
     /// Try to convert to i64.
     pub fn to_integer(&self) -> Option<i64> {
         match self {
+            Value::Formatted { value, .. } => value.to_integer(),
             Value::Integer(n) => Some(n.to_i64().unwrap_or(0)),
             Value::Real(r) => Some(r.to_f64() as i64),
             _ => None,
@@ -538,6 +592,7 @@ impl Value {
     /// Try to convert to f64.
     pub fn to_real(&self) -> Option<f64> {
         match self {
+            Value::Formatted { value, .. } => value.to_real(),
             Value::Integer(n) => Some(n.to_f64()),
             Value::Real(r) => Some(r.to_f64()),
             Value::Complex { re, im } if *im == 0.0 => Some(*re),
@@ -553,6 +608,11 @@ impl Value {
     /// Check if two values are structurally equal.
     pub fn struct_eq(&self, other: &Value) -> bool {
         match (self, other) {
+            (Value::Formatted { value: a, .. }, Value::Formatted { value: b, .. }) => {
+                a.struct_eq(b)
+            }
+            (Value::Formatted { value, .. }, other) => value.struct_eq(other),
+            (other, Value::Formatted { value, .. }) => other.struct_eq(value),
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Real(a), Value::Real(b)) => a == b,
             (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
@@ -894,6 +954,403 @@ impl fmt::Display for Value {
                 symbol_name,
                 ..
             } => write!(f, "NativeFunction[\"{}::{}\"]", lib_name, symbol_name),
+            Value::Formatted { format, value } => match format {
+                Format::Standard | Format::FullForm => write!(f, "{}", value),
+                Format::InputForm => format_input_form(value, f),
+                Format::Short(n) => format_short(value, *n, f),
+                Format::Shallow(depth) => format_shallow(value, *depth, 0, f),
+                Format::NumberForm { digits } => format_number_form(value, *digits, f),
+                Format::ScientificForm { digits } => format_scientific_form(value, *digits, f),
+                Format::BaseForm(base) => format_base_form(value, *base, f),
+                Format::Grid => format_grid(value, f),
+                Format::Deferred => write!(f, "{}", value),
+            },
         }
     }
+}
+
+// ── Format display helpers ──────────────────────────────────────────────────────
+
+/// Format a value in InputForm (infix notation) — recursive.
+///
+/// Common operators are rendered with infix syntax:
+/// `Plus[a, b]` → `a + b`, `Times[a, b]` → `a * b`, etc.
+/// Child values are also formatted in InputForm recursively.
+fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::Call { head, args } => {
+            // Known infix operators
+            match head.as_str() {
+                "Plus" if args.len() == 1 => format_input_form(&args[0], f),
+                "Plus" => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " + ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    Ok(())
+                }
+                "Times" if args.is_empty() => write!(f, "Times[]"),
+                "Times" => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " ")?;
+                        }
+                        if matches!(
+                            arg,
+                            Value::Call { head: h, .. } if h == "Power" || h == "Plus"
+                        ) || is_negative_number(arg)
+                        {
+                            write!(f, "(")?;
+                            format_input_form(arg, f)?;
+                            write!(f, ")")?;
+                        } else {
+                            format_input_form(arg, f)?;
+                        }
+                    }
+                    Ok(())
+                }
+                "Power" if args.len() == 2 => {
+                    let base = &args[0];
+                    let exp = &args[1];
+                    if matches!(
+                        base,
+                        Value::Call { head: h, .. } if h == "Times" || h == "Plus"
+                    ) {
+                        write!(f, "(")?;
+                        format_input_form(base, f)?;
+                        write!(f, ")")?;
+                    } else {
+                        format_input_form(base, f)?;
+                    }
+                    write!(f, "^")?;
+                    format_input_form(exp, f)
+                }
+                "Divide" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, "/")?;
+                    format_input_form(&args[1], f)
+                }
+                "Minus" if args.len() == 1 => {
+                    write!(f, "-")?;
+                    format_input_form(&args[0], f)
+                }
+                "Equal" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " == ")?;
+                    format_input_form(&args[1], f)
+                }
+                "Unequal" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " != ")?;
+                    format_input_form(&args[1], f)
+                }
+                "Less" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " < ")?;
+                    format_input_form(&args[1], f)
+                }
+                "Greater" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " > ")?;
+                    format_input_form(&args[1], f)
+                }
+                "LessEqual" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " <= ")?;
+                    format_input_form(&args[1], f)
+                }
+                "GreaterEqual" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " >= ")?;
+                    format_input_form(&args[1], f)
+                }
+                "And" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " && ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    Ok(())
+                }
+                "Or" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " || ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    Ok(())
+                }
+                "Not" if args.len() == 1 => {
+                    write!(f, "!")?;
+                    format_input_form(&args[0], f)
+                }
+                "Rule" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " -> ")?;
+                    format_input_form(&args[1], f)
+                }
+                "RuleDelayed" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " :> ")?;
+                    format_input_form(&args[1], f)
+                }
+                "List" => {
+                    write!(f, "{{")?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    write!(f, "}}")
+                }
+                "Part" if args.len() >= 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, "[[")?;
+                    for (i, arg) in args[1..].iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    write!(f, "]]")
+                }
+                "Apply" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " @@ ")?;
+                    format_input_form(&args[1], f)
+                }
+                "Map" if args.len() == 2 => {
+                    format_input_form(&args[0], f)?;
+                    write!(f, " /@ ")?;
+                    format_input_form(&args[1], f)
+                }
+                "StringJoin" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " <> ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    Ok(())
+                }
+                // Default: FullForm with recursive InputForm children
+                _ => {
+                    write!(f, "{}[", head)?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        format_input_form(arg, f)?;
+                    }
+                    write!(f, "]")
+                }
+            }
+        }
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Check if a value is a negative number (for parenthesization in Times).
+fn is_negative_number(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n < &rug::Integer::from(0),
+        Value::Real(r) => r.is_sign_negative(),
+        _ => false,
+    }
+}
+
+/// Format with truncation — at most `n` top-level items.
+fn format_short(v: &Value, n: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::List(items) if items.len() > n => {
+            write!(f, "{{")?;
+            for (i, item) in items.iter().take(n).enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", item)?;
+            }
+            write!(f, ", <<{}>>", items.len() - n)?;
+            write!(f, "}}")
+        }
+        Value::Call { head, args } if args.len() > n => {
+            write!(f, "{}[", head)?;
+            for (i, arg) in args.iter().take(n).enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", arg)?;
+            }
+            write!(f, ", <<{}>>", args.len() - n)?;
+            write!(f, "]")
+        }
+        // Non-truncatable or small: fallback to standard rendering
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format with limited nesting depth.
+fn format_shallow(
+    v: &Value,
+    depth: usize,
+    current: usize,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if current >= depth {
+        return match v {
+            Value::List(_) => write!(f, "{{<<...>>}}"),
+            Value::Call { head, .. } => write!(f, "{}[<<...>>]", head),
+            Value::Assoc(_) => write!(f, "<|<<...>>|>"),
+            _ => write!(f, "{}", v),
+        };
+    }
+    match v {
+        Value::List(items) => {
+            write!(f, "{{")?;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_shallow(item, depth, current + 1, f)?;
+            }
+            write!(f, "}}")
+        }
+        Value::Call { head, args } => {
+            write!(f, "{}[", head)?;
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_shallow(arg, depth, current + 1, f)?;
+            }
+            write!(f, "]")
+        }
+        // Atoms pass through
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format a number with the given number of significant digits.
+fn format_number_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::Integer(n) => write!(f, "{}", n),
+        Value::Real(r) => {
+            let prec_bits = ((digits as f64) / std::f64::consts::LOG10_2).ceil() as u32;
+            let rounded = Float::with_val(prec_bits.max(64), r);
+            let raw = rounded.to_string_radix(10, Some(digits.max(1)));
+            let formatted = rug_radix_to_decimal(&raw);
+            write!(f, "{}", formatted)
+        }
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format a number in scientific notation with the given significant digits.
+fn format_scientific_form(
+    v: &Value,
+    digits: usize,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match v {
+        Value::Integer(n) => {
+            let s = n.to_string();
+            let exp = s.len() - 1;
+            let first = &s[..1];
+            let rest = if s.len() > 1 { &s[1..] } else { "" };
+            if rest.is_empty() {
+                write!(f, "{}·10^{}", first, exp)
+            } else {
+                write!(f, "{}.{}·10^{}", first, rest, exp)
+            }
+        }
+        Value::Real(r) => {
+            let prec_bits = ((digits as f64) / std::f64::consts::LOG10_2).ceil() as u32;
+            let rounded = Float::with_val(prec_bits.max(64), r);
+            // Use rug's to_string_radix with exponent marker '@'
+            let raw = rounded.to_string_radix(10, Some(digits.max(1)));
+            // raw is like "3.14159@0" (mantissa @ exponent)
+            if let Some(at) = raw.find('@') {
+                let mantissa = &raw[..at];
+                let exp: i64 = raw[at + 1..].parse().unwrap_or(0);
+                let adjusted_exp = exp + (mantissa.len() - 2) as i64; // account for decimal point
+                write!(f, "{}·10^{}", mantissa, adjusted_exp)
+            } else {
+                // No exponent, probably 0
+                write!(f, "{}·10^{}", raw, 0)
+            }
+        }
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format a number in a given base (2–36).
+fn format_base_form(v: &Value, base: u32, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::Integer(n) => {
+            let s = n.to_string_radix(base as i32);
+            write!(f, "{}(base {})", s, base)
+        }
+        Value::Real(r) => {
+            // Convert to a rational approximation and show integer part in base
+            let integer_part = r.clone().floor().to_integer().unwrap();
+            let int_str = integer_part.to_string_radix(base as i32);
+            write!(f, "{}(base {})", int_str, base)
+        }
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format a 2D list as a grid (aligned columns).
+fn format_grid(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let rows = match v {
+        Value::List(rows) => rows,
+        other => return write!(f, "Grid[{}]", other),
+    };
+    if rows.is_empty() {
+        return write!(f, "{{}}");
+    }
+
+    // Convert each cell to a string
+    let mut cell_strings: Vec<Vec<String>> = Vec::new();
+    let mut col_widths: Vec<usize> = Vec::new();
+    for row_val in rows {
+        let row = match row_val {
+            Value::List(cells) => cells,
+            _ => {
+                let s = format!("{}", row_val);
+                return write!(f, "{}", s);
+            }
+        };
+        let mut row_strs: Vec<String> = Vec::new();
+        for (col_idx, cell) in row.iter().enumerate() {
+            let s = format!("{}", cell);
+            if col_idx >= col_widths.len() {
+                col_widths.push(s.len());
+            } else {
+                col_widths[col_idx] = col_widths[col_idx].max(s.len());
+            }
+            row_strs.push(s);
+        }
+        cell_strings.push(row_strs);
+    }
+
+    // Render table
+    for (row_idx, row) in cell_strings.iter().enumerate() {
+        if row_idx > 0 {
+            writeln!(f)?;
+        }
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx > 0 {
+                write!(f, "  ")?;
+            }
+            let width = col_widths.get(col_idx).copied().unwrap_or(0);
+            write!(f, "{:width$}", cell, width = width)?;
+        }
+    }
+    Ok(())
 }

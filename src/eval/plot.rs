@@ -1,4 +1,4 @@
-/// Plot — sample an expression and render SVG.
+/// Plot — sample an expression and return a symbolic Graphics object.
 use rug::Float;
 use rug::Integer;
 
@@ -6,7 +6,10 @@ use crate::ast::*;
 use crate::env::Env;
 use crate::value::*;
 
-/// Plot[f, {x, xmin, xmax}] — sample f and render SVG.
+/// Plot[f, {x, xmin, xmax}] — sample f and return a Graphics object.
+///
+/// The returned value is a symbolic `Graphics[primitives, options]` expression
+/// that gets rendered to SVG only when exported via Export["file.svg", graphics].
 pub(super) fn eval_plot(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
@@ -120,7 +123,10 @@ pub(super) fn eval_plot(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     }
     let options = Value::Assoc(opt_map);
 
-    crate::builtins::graphics::render_svg(&primitives, &options).map(Value::Str)
+    Ok(Value::Call {
+        head: "Graphics".to_string(),
+        args: vec![primitives, options],
+    })
 }
 
 /// Helper: convert a Value to f64 if possible.

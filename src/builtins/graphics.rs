@@ -28,6 +28,229 @@ fn to_f64(v: &Value) -> Option<f64> {
     }
 }
 
+// ── Graphics Style State ────────────────────────────────────────────────────
+
+/// Accumulated rendering state from graphics directives.
+///
+/// Directives like `RGBColor`, `Thickness`, `PointSize` set fields on this
+/// struct as the renderer walks through the primitives list. Each subsequent
+/// primitive inherits the current style.
+#[derive(Clone, Debug)]
+pub struct GraphicsStyle {
+    /// Current stroke color (SVG format, e.g. "#1a73e8").
+    pub color: String,
+    /// Stroke width in SVG units.
+    pub stroke_width: f64,
+    /// Point radius for `Point` primitives, in SVG units.
+    pub point_size: f64,
+    /// Dash pattern (if set, e.g. Some(vec![4.0, 2.0])).
+    pub dash_array: Option<Vec<f64>>,
+    /// Opacity in [0, 1].
+    pub opacity: f64,
+}
+
+impl Default for GraphicsStyle {
+    fn default() -> Self {
+        Self {
+            color: "#1a73e8".to_string(),
+            stroke_width: 2.0,
+            point_size: 3.0,
+            dash_array: None,
+            opacity: 1.0,
+        }
+    }
+}
+
+// ── Directive helpers ───────────────────────────────────────────────────────
+
+/// Return true if `val` is a graphics directive rather than a geometry primitive.
+fn is_directive(val: &Value) -> bool {
+    match val {
+        Value::Call { head, .. } => matches!(
+            head.as_str(),
+            "RGBColor"
+                | "Hue"
+                | "Thickness"
+                | "AbsoluteThickness"
+                | "PointSize"
+                | "AbsolutePointSize"
+                | "Dashing"
+                | "AbsoluteDashing"
+                | "Opacity"
+                | "Directive"
+                | "EdgeForm"
+                | "FaceForm"
+                | "Thick"
+                | "Thin"
+        ),
+        Value::Symbol(s) => matches!(s.as_str(), "Red" | "Green" | "Blue" | "Black" | "White" | "Gray" | "Yellow" | "Cyan" | "Magenta" | "Orange" | "Purple" | "Brown" | "Pink"),
+        _ => false,
+    }
+}
+
+/// Convert an RGBColor Call value to an SVG hex color string.
+fn color_call_to_svg(val: &Value) -> Option<String> {
+    let (args, head) = match val {
+        Value::Call { head, args } => (args, head.as_str()),
+        _ => return None,
+    };
+    match head {
+        "RGBColor" if args.len() >= 3 => {
+            let r = to_f64(&args[0])?;
+            let g = to_f64(&args[1])?;
+            let b = to_f64(&args[2])?;
+            let ri = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let gi = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let bi = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some(format!("#{:02x}{:02x}{:02x}", ri, gi, bi))
+        }
+        "Hue" if !args.is_empty() => {
+            let h = to_f64(&args[0])?;
+            let s = if args.len() > 1 { to_f64(&args[1])? } else { 1.0 };
+            let v = if args.len() > 2 { to_f64(&args[2])? } else { 1.0 };
+            Some(hsv_to_svg(h, s, v))
+        }
+        _ => None,
+    }
+}
+
+/// Convert a named colour symbol to an SVG hex string.
+fn named_color_to_svg(name: &str) -> Option<&'static str> {
+    match name {
+        "Red" => Some("#dc2626"),
+        "Green" => Some("#16a34a"),
+        "Blue" => Some("#2563eb"),
+        "Black" => Some("#000000"),
+        "White" => Some("#ffffff"),
+        "Gray" | "Grey" => Some("#888888"),
+        "Yellow" => Some("#eab308"),
+        "Cyan" => Some("#06b6d4"),
+        "Magenta" => Some("#d946ef"),
+        "Orange" => Some("#ea580c"),
+        "Purple" => Some("#9333ea"),
+        "Brown" => Some("#8b5cf6"),
+        "Pink" => Some("#ec4899"),
+        _ => None,
+    }
+}
+
+/// Apply a directive to the current style.
+fn apply_directive(style: &mut GraphicsStyle, directive: &Value) {
+    match directive {
+        Value::Call { head, args } => match head.as_str() {
+            "RGBColor" | "Hue" => {
+                if let Some(c) = color_call_to_svg(directive) {
+                    style.color = c;
+                }
+            }
+            "Thickness" if !args.is_empty() => {
+                if let Some(t) = to_f64(&args[0]) {
+                    style.stroke_width = t.max(0.0) * 10.0; // WL relative thickness
+                }
+            }
+            "AbsoluteThickness" if !args.is_empty() => {
+                if let Some(t) = to_f64(&args[0]) {
+                    style.stroke_width = t.max(0.0);
+                }
+            }
+            "PointSize" if !args.is_empty() => {
+                if let Some(s) = to_f64(&args[0]) {
+                    style.point_size = s.max(0.0) * 20.0; // relative
+                }
+            }
+            "AbsolutePointSize" if !args.is_empty() => {
+                if let Some(s) = to_f64(&args[0]) {
+                    style.point_size = s.max(0.0);
+                }
+            }
+            "Dashing" if !args.is_empty() => {
+                if let Value::List(dashes) = &args[0] {
+                    let v: Vec<f64> = dashes.iter().filter_map(to_f64).collect();
+                    if !v.is_empty() {
+                        style.dash_array = Some(v);
+                    }
+                }
+            }
+            "AbsoluteDashing" if !args.is_empty() => {
+                if let Value::List(dashes) = &args[0] {
+                    let v: Vec<f64> = dashes.iter().filter_map(to_f64).collect();
+                    if !v.is_empty() {
+                        style.dash_array = Some(v);
+                    }
+                }
+            }
+            "Opacity" if !args.is_empty() => {
+                if let Some(o) = to_f64(&args[0]) {
+                    style.opacity = o.clamp(0.0, 1.0);
+                }
+            }
+            "Directive" => {
+                for arg in args {
+                    apply_directive(style, arg);
+                }
+            }
+            "Thick" => style.stroke_width = 4.0,
+            "Thin" => style.stroke_width = 0.5,
+            // EdgeForm / FaceForm — ignored for now (all primitives use the current color)
+            _ => {}
+        },
+        Value::Symbol(s) => {
+            if let Some(c) = named_color_to_svg(s) {
+                style.color = c.to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Build the SVG attribute string for stroked primitives (Line, Circle, Rectangle).
+fn svg_stroke_attrs(style: &GraphicsStyle) -> String {
+    let mut a = format!("stroke=\"{}\" stroke-width=\"{:.1}\"", style.color, style.stroke_width);
+    if let Some(ref dashes) = style.dash_array {
+        let d: Vec<String> = dashes.iter().map(|x| format!("{:.1}", x)).collect();
+        a.push_str(&format!(" stroke-dasharray=\"{}\"", d.join(",")));
+    }
+    if style.opacity < 1.0 {
+        a.push_str(&format!(" stroke-opacity=\"{:.2}\"", style.opacity));
+    }
+    a
+}
+
+/// Build the SVG attribute string for filled primitives (Point, Disk).
+fn svg_fill_attrs(style: &GraphicsStyle) -> String {
+    let mut a = format!("fill=\"{}\"", style.color);
+    if style.opacity < 1.0 {
+        a.push_str(&format!(" fill-opacity=\"{:.2}\"", style.opacity));
+    }
+    a
+}
+
+// ── HSV → SVG hex ───────────────────────────────────────────────────────────
+
+/// Simple HSV → hex conversion for the Hue directive.
+fn hsv_to_svg(h: f64, s: f64, v: f64) -> String {
+    let h = h - h.floor();
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let hi = (h * 6.0).floor() as i32 % 6;
+    let f = h * 6.0 - (h * 6.0).floor();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - f * s);
+    let t = v * (1.0 - (1.0 - f) * s);
+    let (r, g, b) = match hi {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let ri = (r * 255.0).round() as u8;
+    let gi = (g * 255.0).round() as u8;
+    let bi = (b * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", ri, gi, bi)
+}
+
 // ── SVG Renderer ────────────────────────────────────────────────────────────
 
 /// Parsed graphics options: (width, height, plot_range, show_axes).
@@ -38,20 +261,29 @@ const DEFAULT_WIDTH: f64 = 600.0;
 const DEFAULT_HEIGHT: f64 = 400.0;
 const MARGIN: f64 = 50.0;
 
-/// Render a list of graphics primitives to an SVG string.
+/// Render a list of graphics primitives and directives to an SVG string.
 ///
-/// Primitives supported:
+/// Supported geometry primitives:
 /// - `Line[{{x1,y1},{x2,y2},...}]`
 /// - `Point[{x,y}]`
 /// - `Circle[{cx,cy}, r]`
 /// - `Rectangle[{x1,y1}, {x2,y2}]`
+///
+/// Supported directives (interleaved with primitives):
+/// - `RGBColor[r,g,b]`, `Hue[h,s,v]`
+/// - `Thickness[t]`, `AbsoluteThickness[t]`
+/// - `PointSize[s]`, `AbsolutePointSize[s]`
+/// - `Dashing[{d1,d2,...}]`, `AbsoluteDashing[{d1,d2,...}]`
+/// - `Opacity[o]`
+/// - `Directive[d1, d2, ...]`
+/// - Named colours: `Red`, `Blue`, `Green`, etc.
 pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalError> {
     let prims = as_list(primitives)?;
 
     // Extract options
     let (width, height, plot_range, show_axes) = parse_options(options)?;
 
-    // Compute data bounds for auto-ranging
+    // Compute data bounds for auto-ranging (skip directives)
     let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &plot_range {
         (xr.0, xr.1, yr.0, yr.1)
     } else {
@@ -101,9 +333,14 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
         ));
     }
 
-    // Draw primitives
+    // Draw primitives with directive state
+    let mut style = GraphicsStyle::default();
     for prim in prims {
-        svg.push_str(&render_primitive(prim, &tx, &ty)?);
+        if is_directive(prim) {
+            apply_directive(&mut style, prim);
+        } else {
+            svg.push_str(&render_primitive(prim, &tx, &ty, &style)?);
+        }
     }
 
     svg.push_str("</svg>\n");
@@ -161,6 +398,9 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
     let mut y_max = f64::NEG_INFINITY;
 
     for prim in prims {
+        if is_directive(prim) {
+            continue;
+        }
         match prim {
             Value::Call { head, args } if head == "Line" => {
                 if let Some(pts) = args.first() {
@@ -388,19 +628,20 @@ fn render_primitive(
     prim: &Value,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
 ) -> Result<String, EvalError> {
     match prim {
         Value::Call { head, args } => match head.as_str() {
             "Line" => {
                 if let Some(pts_val) = args.first() {
-                    render_line(pts_val, tx, ty)
+                    render_line(pts_val, tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
             }
             "Point" => {
                 if let Some(pt) = args.first() {
-                    render_point(pt, tx, ty)
+                    render_point(pt, tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
@@ -413,14 +654,14 @@ fn render_primitive(
                     1.0
                 };
                 if let Some(c) = center {
-                    render_circle(c, r, tx, ty)
+                    render_circle(c, r, tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
             }
             "Rectangle" => {
                 if args.len() >= 2 {
-                    render_rectangle(&args[0], &args[1], tx, ty)
+                    render_rectangle(&args[0], &args[1], tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
@@ -435,7 +676,7 @@ fn render_primitive(
                 // It's a list of points
                 let mut s = String::new();
                 for pt in items {
-                    s.push_str(&render_point(pt, tx, ty)?);
+                    s.push_str(&render_point(pt, tx, ty, style)?);
                 }
                 return Ok(s);
             }
@@ -449,6 +690,7 @@ fn render_line(
     pts_val: &Value,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
 ) -> Result<String, EvalError> {
     let pts = as_list(pts_val)?;
     if pts.is_empty() {
@@ -468,8 +710,9 @@ fn render_line(
         }
     }
     Ok(format!(
-        "<polyline points=\"{}\" fill=\"none\" stroke=\"#1a73e8\" stroke-width=\"2\"/>\n",
-        points_str
+        "<polyline points=\"{}\" fill=\"none\" {}/>\n",
+        points_str,
+        svg_stroke_attrs(style),
     ))
 }
 
@@ -477,6 +720,7 @@ fn render_point(
     pt: &Value,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
 ) -> Result<String, EvalError> {
     if let Value::List(coords) = pt
         && coords.len() >= 2
@@ -484,9 +728,11 @@ fn render_point(
         let x = to_f64(&coords[0]).unwrap_or(0.0);
         let y = to_f64(&coords[1]).unwrap_or(0.0);
         return Ok(format!(
-            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"3\" fill=\"#1a73e8\"/>\n",
+            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.1}\" stroke=\"none\" {}/>\n",
             tx(x),
-            ty(y)
+            ty(y),
+            style.point_size,
+            svg_fill_attrs(style),
         ));
     }
     Ok(String::new())
@@ -497,6 +743,7 @@ fn render_circle(
     r: f64,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
 ) -> Result<String, EvalError> {
     if let Value::List(coords) = center
         && coords.len() >= 2
@@ -506,11 +753,11 @@ fn render_circle(
         // Scale radius using the x scale factor
         let scale = tx(1.0) - tx(0.0);
         return Ok(format!(
-            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" \
-                 fill=\"none\" stroke=\"#1a73e8\" stroke-width=\"2\"/>\n",
+            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"none\" {}/>\n",
             tx(cx),
             ty(cy),
-            r * scale.abs()
+            r * scale.abs(),
+            svg_stroke_attrs(style),
         ));
     }
     Ok(String::new())
@@ -521,6 +768,7 @@ fn render_rectangle(
     p2: &Value,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
 ) -> Result<String, EvalError> {
     let coords1 = as_list(p1)?;
     let coords2 = as_list(p2)?;
@@ -535,8 +783,9 @@ fn render_rectangle(
         let h = (ty(y2) - ty(y1)).abs();
         return Ok(format!(
             "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" \
-             fill=\"none\" stroke=\"#1a73e8\" stroke-width=\"2\"/>\n",
-            sx, sy, w, h
+             fill=\"none\" {}/>\n",
+            sx, sy, w, h,
+            svg_stroke_attrs(style),
         ));
     }
     Ok(String::new())
@@ -544,7 +793,7 @@ fn render_rectangle(
 
 // ── Builtins ────────────────────────────────────────────────────────────────
 
-/// ListPlot[data] — scatter plot from {x,y} pairs, returns SVG string.
+/// ListPlot[data] — scatter plot from {x,y} pairs, returns a Graphics object.
 pub fn builtin_list_plot(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
@@ -566,12 +815,15 @@ pub fn builtin_list_plot(args: &[Value]) -> Result<Value, EvalError> {
             args: vec![pt.clone()],
         })
         .collect();
+    let primitives = Value::List(points);
 
-    let svg = render_svg(&Value::List(points), &options)?;
-    Ok(Value::Str(svg))
+    Ok(Value::Call {
+        head: "Graphics".to_string(),
+        args: vec![primitives, options],
+    })
 }
 
-/// ListLinePlot[data] — line plot from {x,y} pairs, returns SVG string.
+/// ListLinePlot[data] — line plot from {x,y} pairs, returns a Graphics object.
 pub fn builtin_list_line_plot(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
@@ -590,9 +842,12 @@ pub fn builtin_list_line_plot(args: &[Value]) -> Result<Value, EvalError> {
         head: "Line".to_string(),
         args: vec![Value::List(data.clone())],
     };
+    let primitives = Value::List(vec![line]);
 
-    let svg = render_svg(&Value::List(vec![line]), &options)?;
-    Ok(Value::Str(svg))
+    Ok(Value::Call {
+        head: "Graphics".to_string(),
+        args: vec![primitives, options],
+    })
 }
 
 /// ExportGraphics[path, svg_string] — write SVG to file.
@@ -709,12 +964,11 @@ mod tests {
     fn test_list_plot() {
         let data = list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)]);
         let result = builtin_list_plot(&[data]).unwrap();
-        if let Value::Str(svg) = result {
-            assert!(svg.contains("<svg"));
-            assert!(svg.contains("<circle"));
-            assert!(svg.contains("</svg>"));
-        } else {
-            panic!("Expected String");
+        match &result {
+            Value::Call { head, args } if head == "Graphics" && args.len() >= 1 => {
+                assert!(matches!(&args[0], Value::List(prims) if prims.len() == 3));
+            }
+            _ => panic!("Expected Graphics call, got {:?}", result),
         }
     }
 
@@ -722,12 +976,11 @@ mod tests {
     fn test_list_line_plot() {
         let data = list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)]);
         let result = builtin_list_line_plot(&[data]).unwrap();
-        if let Value::Str(svg) = result {
-            assert!(svg.contains("<svg"));
-            assert!(svg.contains("<polyline"));
-            assert!(svg.contains("</svg>"));
-        } else {
-            panic!("Expected String");
+        match &result {
+            Value::Call { head, args } if head == "Graphics" && args.len() >= 1 => {
+                assert!(matches!(&args[0], Value::List(prims) if prims.len() == 1));
+            }
+            _ => panic!("Expected Graphics call, got {:?}", result),
         }
     }
 
@@ -783,5 +1036,264 @@ mod tests {
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("<svg"));
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_export_graphics_svg() {
+        // Export a symbolic Graphics object to .svg and verify it renders
+        use std::fs;
+        let path = "/tmp/test_syma_graphics_export.svg";
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0), point(2.0, 4.0)])],
+        };
+        let primitives = Value::List(vec![line]);
+        let options = Value::Assoc(std::collections::HashMap::new());
+        let graphics = Value::Call {
+            head: "Graphics".to_string(),
+            args: vec![primitives, options],
+        };
+
+        let result = crate::builtins::io::builtin_export(&[
+            Value::Str(path.to_string()),
+            graphics,
+        ]);
+        assert!(result.is_ok(), "Export failed: {:?}", result);
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("<svg"));
+        assert!(content.contains("<polyline"));
+        assert!(content.contains("</svg>"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_export_graphics_no_svg_extension() {
+        // Exporting a Graphics object to non-.svg should still fall back to text
+        use std::fs;
+        let path = "/tmp/test_syma_graphics.txt";
+        let graphics = Value::Call {
+            head: "Graphics".to_string(),
+            args: vec![
+                Value::List(vec![]),
+                Value::Assoc(std::collections::HashMap::new()),
+            ],
+        };
+
+        let result = crate::builtins::io::builtin_export(&[
+            Value::Str(path.to_string()),
+            graphics,
+        ]);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("Graphics")); // should be text representation
+        fs::remove_file(path).ok();
+    }
+
+    // ── Directive tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_directive_rgb_color() {
+        let red = Value::Call {
+            head: "RGBColor".to_string(),
+            args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![red, line]), &opts).unwrap();
+        assert!(svg.contains("stroke=\"#ff0000\""), "Expected red stroke, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_named_color() {
+        let blue = Value::Symbol("Blue".to_string());
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![blue, line]), &opts).unwrap();
+        assert!(svg.contains("stroke=\"#2563eb\""), "Expected blue stroke, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_thickness() {
+        let thick = Value::Call {
+            head: "Thickness".to_string(),
+            args: vec![real_val(0.1)],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
+        assert!(svg.contains("stroke-width=\"1.0\""), "Expected stroke-width 1.0, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_absolute_thickness() {
+        let thick = Value::Call {
+            head: "AbsoluteThickness".to_string(),
+            args: vec![real_val(5.0)],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
+        assert!(svg.contains("stroke-width=\"5.0\""), "Expected stroke-width 5.0, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_point_size() {
+        let big_pts = Value::Call {
+            head: "AbsolutePointSize".to_string(),
+            args: vec![real_val(10.0)],
+        };
+        let pt = Value::Call {
+            head: "Point".to_string(),
+            args: vec![point(5.0, 3.0)],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![big_pts, pt]), &opts).unwrap();
+        assert!(svg.contains("r=\"10.0\""), "Expected r=10.0, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_opacity() {
+        let half = Value::Call {
+            head: "Opacity".to_string(),
+            args: vec![real_val(0.5)],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![half, line]), &opts).unwrap();
+        assert!(svg.contains("opacity"), "Expected opacity attribute, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_hue() {
+        let hue = Value::Call {
+            head: "Hue".to_string(),
+            args: vec![real_val(0.0)], // red
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![hue, line]), &opts).unwrap();
+        // Hue[0] should produce red-ish
+        assert!(svg.contains("stroke=\"#"), "Expected stroke attribute, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_composite() {
+        let comp = Value::Call {
+            head: "Directive".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "RGBColor".to_string(),
+                    args: vec![real_val(0.0), real_val(1.0), real_val(0.0)],
+                },
+                Value::Call {
+                    head: "AbsoluteThickness".to_string(),
+                    args: vec![real_val(3.0)],
+                },
+            ],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![comp, line]), &opts).unwrap();
+        assert!(svg.contains("#00ff00"), "Expected green, got: {}", svg);
+        assert!(svg.contains("stroke-width=\"3.0\""), "Expected width 3.0, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_state_persists() {
+        // Directives should persist for subsequent primitives
+        let red = Value::Call {
+            head: "RGBColor".to_string(),
+            args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+        };
+        let line1 = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let line2 = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(2.0, 2.0), point(3.0, 3.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![red, line1, line2]), &opts).unwrap();
+        // Both lines should be red
+        assert_eq!(svg.matches("stroke=\"#ff0000\"").count(), 2, "Both lines should be red");
+    }
+
+    #[test]
+    fn test_directive_red_overrides_green() {
+        let green = Value::Call {
+            head: "RGBColor".to_string(),
+            args: vec![real_val(0.0), real_val(1.0), real_val(0.0)],
+        };
+        let red = Value::Call {
+            head: "RGBColor".to_string(),
+            args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+        };
+        let line1 = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let line2 = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(2.0, 2.0), point(3.0, 3.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![green, line1, red, line2]), &opts).unwrap();
+        // line1 green, line2 red
+        assert!(svg.contains("#00ff00"), "line1 should be green");
+        assert!(svg.contains("#ff0000"), "line2 should be red");
+    }
+
+    #[test]
+    fn test_directive_dashing() {
+        let dashed = Value::Call {
+            head: "Dashing".to_string(),
+            args: vec![list(vec![real_val(5.0), real_val(3.0)])],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![dashed, line]), &opts).unwrap();
+        assert!(svg.contains("stroke-dasharray"), "Expected dasharray, got: {}", svg);
+    }
+
+    #[test]
+    fn test_directive_thick_thin() {
+        let thick = Value::Call {
+            head: "Thick".to_string(),
+            args: vec![],
+        };
+        let line = Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        };
+        let opts = Value::Assoc(std::collections::HashMap::new());
+        let svg = render_svg(&Value::List(vec![thick, line]), &opts).unwrap();
+        assert!(svg.contains("stroke-width=\"4.0\""), "Thick should be 4.0, got: {}", svg);
     }
 }
