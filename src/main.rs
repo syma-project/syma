@@ -12,6 +12,7 @@ mod debug;
 mod env;
 mod eval;
 mod ffi;
+mod format;
 mod lexer;
 mod manifest;
 mod parser;
@@ -20,6 +21,7 @@ mod value;
 
 use std::fs;
 
+use crate::format::{bold_red, cyan, dim, green, red};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -34,6 +36,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  syma                       Start the interactive REPL");
     println!("  syma <file>                Evaluate a Syma source file");
+    println!("  syma -e <expr>             Evaluate an expression and print the result");
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --help                Show this help");
     println!("  syma --version             Show version");
@@ -75,23 +78,6 @@ fn print_repl_help() {
     println!("  (* comment *)    Comment");
 }
 
-// ANSI color helpers
-fn green(s: &str) -> String {
-    format!("\x1b[32m{}\x1b[0m", s)
-}
-fn red(s: &str) -> String {
-    format!("\x1b[31m{}\x1b[0m", s)
-}
-fn bold_red(s: &str) -> String {
-    format!("\x1b[1;31m{}\x1b[0m", s)
-}
-fn cyan(s: &str) -> String {
-    format!("\x1b[36m{}\x1b[0m", s)
-}
-fn dim(s: &str) -> String {
-    format!("\x1b[2m{}\x1b[0m", s)
-}
-
 fn print_error(label: &str, message: &str, source: &str) {
     eprintln!("{}: {}", bold_red(label), message);
     eprintln!("  {}", dim(source));
@@ -122,14 +108,9 @@ fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
     }
 }
 
-pub(crate) fn run_file(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading '{}': {}", path, e);
-            std::process::exit(1);
-        }
-    };
+pub(crate) fn run_file(path: &str) -> Result<(), String> {
+    let source =
+        fs::read_to_string(path).map_err(|e| format!("Error reading '{}': {}", path, e))?;
 
     let env = env::Env::new();
     builtins::register_builtins(&env);
@@ -142,20 +123,8 @@ pub(crate) fn run_file(path: &str) {
         env.add_search_path(parent.to_path_buf());
     }
 
-    let tokens = match lexer::tokenize(&source) {
-        Ok(t) => t,
-        Err(e) => {
-            print_error("LexError", &e.to_string(), path);
-            std::process::exit(1);
-        }
-    };
-    let stmts = match parser::parse_with_suppress(tokens) {
-        Ok(s) => s,
-        Err(e) => {
-            print_error("ParseError", &e.to_string(), path);
-            std::process::exit(1);
-        }
-    };
+    let tokens = lexer::tokenize(&source).map_err(|e| format!("{}", e))?;
+    let stmts = parser::parse_with_suppress(tokens).map_err(|e| format!("{}", e))?;
 
     for (stmt, suppress) in &stmts {
         match eval::eval(stmt, &env) {
@@ -165,6 +134,7 @@ pub(crate) fn run_file(path: &str) {
             Err(e) => print_error("Error", &e.to_string(), path),
         }
     }
+    Ok(())
 }
 
 const HISTORY_FILE: &str = ".syma_history";
@@ -312,6 +282,20 @@ fn main() {
         Some("--help") | Some("-h") => print_usage(),
         Some("--version") | Some("-v") => println!("syma {}", VERSION),
 
+        // ── Expression evaluation ──────────────────────────────────────────────
+        Some("--eval") | Some("-e") => {
+            let expr = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                eprintln!("Usage: syma --eval <expression>");
+                std::process::exit(1);
+            });
+            let env = env::Env::new();
+            builtins::register_builtins(&env);
+            match eval_input(expr, &env) {
+                Some(val) => println!("{}", val),
+                None => std::process::exit(1),
+            }
+        }
+
         // ── Package scaffolding ───────────────────────────────────────────────
         Some("new") => {
             // syma new [--lib] <name>
@@ -368,7 +352,12 @@ fn main() {
         }
 
         // ── Direct file execution and REPL ────────────────────────────────────
-        Some(path) if !path.starts_with('-') => run_file(path),
+        Some(path) if !path.starts_with('-') => {
+            if let Err(e) = run_file(path) {
+                eprintln!("{}: {}", red("Error"), e);
+                std::process::exit(1);
+            }
+        }
         Some(flag) => {
             eprintln!("Unknown option: {}. Try `syma --help`.", flag);
             std::process::exit(1);

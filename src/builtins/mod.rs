@@ -14,7 +14,9 @@ pub mod random;
 pub mod string;
 pub mod symbolic;
 
-use crate::env::Env;
+use std::sync::Arc;
+
+use crate::env::{Env, LazyProvider};
 use crate::value::{EvalError, Value};
 
 /// Register all built-in functions in the environment.
@@ -103,13 +105,30 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
     register_builtin(env, "Expand", symbolic::builtin_expand);
     register_builtin(env, "D", symbolic::builtin_d);
-    register_builtin(env, "Integrate", symbolic::builtin_integrate);
+    // Integrate is registered as a lazy provider to support deferred loading
+    // of large rule sets (e.g., Rubi's 7000+ integration rules).
+    env.register_lazy_provider(
+        "Integrate",
+        LazyProvider::Custom(Arc::new(|env| {
+            // Currently loads the builtin stub. In the future, this will be
+            // replaced with rule-based integration from Rubi rule files.
+            env.set(
+                "Integrate".to_string(),
+                Value::Builtin("Integrate".to_string(), symbolic::builtin_integrate),
+            );
+            Ok(env.get("Integrate").unwrap())
+        })),
+    );
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin(env, "Series", symbolic::builtin_series);
 
     // ── Control (evaluator-dependent) ──
     register_builtin(env, "FixedPoint", math::builtin_fixed_point_stub);
+
+    // ── Attributes (evaluator-dependent) ──
+    register_builtin(env, "SetAttributes", symbolic::builtin_set_attributes_stub);
+    register_builtin(env, "Attributes", symbolic::builtin_attributes_stub);
 
     // ── Extended math ──
     register_builtin(env, "ArcSin", math::builtin_arcsin);
@@ -252,6 +271,10 @@ pub fn register_builtins(env: &Env) {
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
     env.set(name.to_string(), Value::Builtin(name.to_string(), func));
+    let attrs = get_attributes(name);
+    if !attrs.is_empty() {
+        env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
+    }
 }
 
 /// Re-export for use by eval.rs
@@ -539,7 +562,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
 /// Get known attributes for a built-in function.
 pub fn get_attributes(name: &str) -> Vec<&'static str> {
     match name {
-        "Plus" | "Times" => vec![
+        "Plus" | "Times" | "Min" | "Max" => vec![
             "Flat",
             "Listable",
             "NumericFunction",
@@ -562,7 +585,6 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
         | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
         "Factorial" => vec!["Listable"],
-        "Max" | "Min" => vec!["Flat", "NumericFunction", "OneIdentity", "Orderless"],
         "And" | "Or" => vec!["Flat", "HoldAll", "Listable", "OneIdentity", "Orderless"],
         "Not" => vec!["Listable"],
         "Hold" => vec!["HoldAll"],

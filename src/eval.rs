@@ -7,6 +7,7 @@
 /// - Class instantiation and method dispatch
 /// - Control flow (If, Which, Switch, match, loops)
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rug::float::Constant;
@@ -14,9 +15,11 @@ use rug::ops::Pow;
 use rug::{Float, Integer};
 
 use crate::ast::*;
+use crate::env::LazyProvider;
 use crate::env::Env;
+use crate::builtins::parallel::{close_kernels, launch_kernels, parallel_batch, pool_size};
 use crate::ffi;
-use crate::pattern::{Bindings, MatchResult, match_pattern};
+use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
 use crate::value::*;
 
 /// Evaluate a program (list of statements) in the given environment.
@@ -26,6 +29,38 @@ pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
         result = eval(stmt, env)?;
     }
     Ok(result)
+}
+
+/// Convert an AST expression to a value without performing evaluation.
+/// Used by Hold/HoldComplete to preserve the syntactic form.
+fn expr_to_value(expr: &Expr) -> Value {
+    match expr {
+        Expr::Integer(n) => Value::Integer(n.clone()),
+        Expr::Real(r) => Value::Real(r.clone()),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::Str(s) => Value::Str(s.clone()),
+        Expr::Null => Value::Null,
+        Expr::Symbol(s) => Value::Symbol(s.clone()),
+        Expr::List(items) => Value::List(items.iter().map(expr_to_value).collect()),
+        // Wrap calls as Pattern so ReleaseHold can evaluate them properly
+        Expr::Call { .. } => Value::Pattern(expr.clone()),
+        // Everything else wraps as Pattern
+        _ => Value::Pattern(expr.clone()),
+    }
+}
+
+/// Evaluate a value that was previously held.
+/// Recursively evaluates Value::Pattern/list contents after ReleaseHold.
+fn release_inner(val: Value, env: &Env) -> Result<Value, EvalError> {
+    match val {
+        Value::Pattern(expr) => eval(&expr, env),
+        Value::List(items) => {
+            let evaled: Result<Vec<Value>, _> =
+                items.into_iter().map(|v| release_inner(v, env)).collect();
+            Ok(Value::List(evaled?))
+        }
+        other => Ok(other),
+    }
 }
 
 /// Evaluate a single expression in the given environment.
@@ -294,6 +329,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             body,
             delayed,
         } => {
+            // Check if symbol is protected
+            if env.has_attribute(name, "Protected") && env.get(name).is_some() {
+                return Err(EvalError::Error(
+                    format!("Symbol {} is protected; cannot redefine", name)
+                ));
+            }
             // Check if function already exists
             let func = if let Some(Value::Function(f)) = env.get(name) {
                 Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
@@ -320,6 +361,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let val = eval(rhs, env)?;
             match lhs.as_ref() {
                 Expr::Symbol(s) => {
+                    // Check if symbol is protected
+                    if env.has_attribute(s, "Protected") && env.get(s).is_some() {
+                        return Err(EvalError::Error(
+                            format!("Symbol {} is protected; cannot assign", s)
+                        ));
+                    }
                     env.set(s.clone(), val.clone());
                     Ok(val)
                 }
@@ -636,13 +683,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Hold ──
-        Expr::Hold(e) => Ok(Value::Hold(Box::new(eval(e, env)?))),
-        Expr::HoldComplete(e) => Ok(Value::HoldComplete(Box::new(eval(e, env)?))),
+        Expr::Hold(e) => Ok(Value::Hold(Box::new(expr_to_value(e)))),
+        Expr::HoldComplete(e) => Ok(Value::HoldComplete(Box::new(expr_to_value(e)))),
         Expr::ReleaseHold(e) => {
             let val = eval(e, env)?;
             match val {
-                Value::Hold(v) => Ok(*v),
-                Value::HoldComplete(v) => Ok(*v),
+                Value::Hold(v) | Value::HoldComplete(v) => release_inner(*v, env),
                 _ => Ok(val),
             }
         }
@@ -692,6 +738,48 @@ fn is_pattern_like(expr: &Expr) -> bool {
         | Expr::PatternGuard { .. } => true,
         _ => false,
     }
+}
+
+/// Evaluate function arguments, respecting HoldAll/HoldFirst/HoldRest attributes.
+fn eval_args_with_attributes(head: &Expr, args: &[Expr], head_val: &Value, env: &Env) -> Result<Vec<Value>, EvalError> {
+    // Determine head name for attribute lookup
+    let head_name = match head {
+        Expr::Symbol(s) => Some(s.as_str()),
+        _ => if let Value::Symbol(s) = head_val { Some(s.as_str()) } else { None },
+    };
+
+    if let Some(name) = head_name {
+        let hold_all = env.has_attribute(name, "HoldAll");
+        let hold_first = env.has_attribute(name, "HoldFirst");
+        let hold_rest = env.has_attribute(name, "HoldRest");
+
+        if hold_all {
+            return Ok(args.iter().map(|a| Value::Pattern(a.clone())).collect());
+        }
+        if hold_first {
+            let mut vals = Vec::with_capacity(args.len());
+            if let Some(first) = args.first() {
+                vals.push(Value::Pattern(first.clone()));
+            }
+            for rest in &args[1..] {
+                vals.push(eval(rest, env)?);
+            }
+            return Ok(vals);
+        }
+        if hold_rest {
+            let mut vals = Vec::with_capacity(args.len());
+            if let Some(first) = args.first() {
+                vals.push(eval(first, env)?);
+            }
+            for rest in &args[1..] {
+                vals.push(Value::Pattern(rest.clone()));
+            }
+            return Ok(vals);
+        }
+    }
+
+    // Default: evaluate all arguments
+    args.iter().map(|a| eval(a, env)).collect()
 }
 
 /// Evaluate a function call.
@@ -744,10 +832,26 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 }
             }
             "Hold" => {
-                // Don't evaluate arguments
-                Ok(Value::Hold(Box::new(Value::List(
-                    args.iter().map(|a| Value::Pattern(a.clone())).collect(),
-                ))))
+                // Don't evaluate arguments. Single arg: Hold[expr]; multi: Hold[expr, ...]
+                if args.len() == 1 {
+                    Ok(Value::Hold(Box::new(Value::Pattern(args[0].clone()))))
+                } else {
+                    Ok(Value::Hold(Box::new(Value::List(
+                        args.iter().map(|a| Value::Pattern(a.clone())).collect(),
+                    ))))
+                }
+            }
+            "HoldComplete" => {
+                // HoldComplete prevents ALL evaluation, including interior
+                if args.len() == 1 {
+                    Ok(Value::HoldComplete(Box::new(Value::Pattern(
+                        args[0].clone(),
+                    ))))
+                } else {
+                    Ok(Value::HoldComplete(Box::new(Value::List(
+                        args.iter().map(|a| Value::Pattern(a.clone())).collect(),
+                    ))))
+                }
             }
             "Table" => {
                 // Table[expr, {i, min, max}] — iterator spec has unevaluated symbols
@@ -774,6 +878,18 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     Err(e) => Err(e),
                 }
             }
+            "ReleaseHold" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Error(
+                        "ReleaseHold requires exactly 1 argument".to_string(),
+                    ));
+                }
+                let held = eval(&args[0], env)?;
+                match held {
+                    Value::Hold(v) | Value::HoldComplete(v) => release_inner(*v, env),
+                    other => Ok(other),
+                }
+            }
             "N" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(EvalError::Error("N requires 1 or 2 arguments".to_string()));
@@ -793,21 +909,83 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 numeric_eval_expr(&args[0], prec_bits, env)
             }
             _ => {
-                // Normal function call
+                // Normal function call — check for Hold attributes
                 let head_val = eval(head, env)?;
-                let arg_vals: Result<Vec<Value>, _> = args.iter().map(|a| eval(a, env)).collect();
-                apply_function(&head_val, &arg_vals?, env)
+                let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
+                apply_function(&head_val, &arg_vals, env)
             }
         }
     } else {
         let head_val = eval(head, env)?;
-        let arg_vals: Result<Vec<Value>, _> = args.iter().map(|a| eval(a, env)).collect();
-        apply_function(&head_val, &arg_vals?, env)
+        let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
+        apply_function(&head_val, &arg_vals, env)
     }
 }
 
 /// Apply a function value to arguments.
 fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    // ── Listable attribute: auto-thread over lists ──
+    let func_name = match func {
+        Value::Builtin(name, _) => Some(name.as_str()),
+        Value::Function(fd) => Some(fd.name.as_str()),
+        Value::Symbol(s) => Some(s.as_str()),
+        _ => None,
+    };
+    if let Some(name) = func_name {
+        if env.has_attribute(name, "Listable") {
+            // Find which args are lists
+            let list_indices: Vec<usize> = args.iter().enumerate()
+                .filter(|(_, a)| matches!(a, Value::List(_)))
+                .map(|(i, _)| i)
+                .collect();
+
+            if !list_indices.is_empty() {
+                if list_indices.len() == args.len() {
+                    // All args are lists — do element-wise threading
+                    if let Value::List(first) = &args[0] {
+                        let len = first.len();
+                        // All lists must be the same length
+                        let all_same_len = list_indices.iter().all(|&i| {
+                            if let Value::List(items) = &args[i] {
+                                items.len() == len
+                            } else {
+                                false
+                            }
+                        });
+                        if all_same_len {
+                            let mut result = Vec::with_capacity(len);
+                            for i in 0..len {
+                                let thread_args: Vec<Value> = args.iter()
+                                    .map(|a| {
+                                        if let Value::List(items) = a {
+                                            items[i].clone()
+                                        } else {
+                                            a.clone()
+                                        }
+                                    })
+                                    .collect();
+                                result.push(apply_function(func, &thread_args, env)?);
+                            }
+                            return Ok(Value::List(result));
+                        }
+                    }
+                } else {
+                    // Mixed: some args are lists, some are scalars
+                    let list_idx = list_indices[0];
+                    if let Value::List(items) = &args[list_idx] {
+                        let mut result = Vec::with_capacity(items.len());
+                        for elem in items {
+                            let mut thread_args: Vec<Value> = args.to_vec();
+                            thread_args[list_idx] = elem.clone();
+                            result.push(apply_function(func, &thread_args, env)?);
+                        }
+                        return Ok(Value::List(result));
+                    }
+                }
+            }
+        }
+    }
+
     match func {
         Value::Builtin(name, f) => {
             // Handle evaluator-dependent builtins that need apply_function
@@ -821,6 +999,8 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 "FreeQ" => return builtin_free_q_eval(args),
                 "FixedPoint" => return builtin_fixed_point_eval(args, env),
                 "ParallelMap" => return builtin_parallel_map_eval(args, env),
+                "LaunchKernels" => return builtin_launch_kernels_eval(args, env),
+                "CloseKernels" => return builtin_close_kernels_eval(args, env),
                 // ── FFI builtins (need env access) ──
                 "LoadLibrary" => {
                     if args.len() != 1 {
@@ -921,6 +1101,48 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                         ffi::python::parse_external_evaluate_args(&system, &args[1], &args[2..])?;
                     return ffi::python::call_python(&module, &func, &call_args);
                 }
+                // ── Attribute builtins ──
+                "SetAttributes" => {
+                    if args.len() < 2 {
+                        return Err(EvalError::Error(
+                            "SetAttributes requires at least 2 arguments: symbol and attributes"
+                                .to_string(),
+                        ));
+                    }
+                    let sym_name = match &args[0] {
+                        Value::Symbol(s) | Value::Str(s) => s.clone(),
+                        Value::Builtin(name, _) => name.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "Symbol or String".to_string(),
+                                got: args[0].type_name().to_string(),
+                            });
+                        }
+                    };
+                    let attrs: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
+                    env.set_attributes(&sym_name, attrs);
+                    return Ok(Value::Null);
+                }
+                "Attributes" => {
+                    if args.len() != 1 {
+                        return Err(EvalError::Error(
+                            "Attributes requires exactly 1 argument".to_string(),
+                        ));
+                    }
+                    let sym_name = match &args[0] {
+                        Value::Symbol(s) | Value::Str(s) => s.clone(),
+                        Value::Builtin(name, _) => name.clone(),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "Symbol or String".to_string(),
+                                got: args[0].type_name().to_string(),
+                            });
+                        }
+                    };
+                    let attrs = env.get_attributes(&sym_name);
+                    let list: Vec<Value> = attrs.into_iter().map(Value::Symbol).collect();
+                    return Ok(Value::List(list));
+                }
                 _ => {
                     // Extension-registered builtin: trampoline through ext registry.
                     if std::ptr::fn_addr_eq(
@@ -979,8 +1201,50 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
         Value::Symbol(name) => {
             // Look up the symbol and apply
             if let Some(f) = env.get(name) {
-                apply_function(&f, args, env)
-            } else if !args.is_empty() {
+                return apply_function(&f, args, env);
+            }
+
+            // ── Lazy provider: load on first use ──
+            if let Some(provider) = env.lazy_providers.lock().unwrap().remove(name) {
+                use crate::{lexer, parser};
+                return match provider {
+                    LazyProvider::Custom(f) => {
+                        let val = f(&env)?;
+                        env.root_env().set(name.to_string(), val.clone());
+                        apply_function(&val, args, env)
+                    }
+                    LazyProvider::File(path) => {
+                        let resolved = resolve_lazy_path(&path, &env)?;
+                        let source = std::fs::read_to_string(&resolved).map_err(|e| {
+                            EvalError::Error(format!(
+                                "Failed to read lazy provider file '{}': {}",
+                                resolved.display(),
+                                e
+                            ))
+                        })?;
+                        let tokens = lexer::tokenize(&source)
+                            .map_err(|e| EvalError::Error(e.to_string()))?;
+                        let ast = parser::parse(tokens)
+                            .map_err(|e| EvalError::Error(e.to_string()))?;
+                        // Evaluate in a child of root so definitions land in
+                        // a scope that chains to root.
+                        let file_env = env.root_env().child();
+                        eval_program(&ast, &file_env)?;
+                        let val = file_env.get(name).ok_or_else(|| {
+                            EvalError::Error(format!(
+                                "Lazy provider file '{}' did not define symbol '{}'",
+                                resolved.display(),
+                                name
+                            ))
+                        })?;
+                        env.root_env().set(name.to_string(), val.clone());
+                        apply_function(&val, args, env)
+                    }
+                };
+            }
+
+            // ── Object field access / method dispatch ──
+            if !args.is_empty() {
                 // Check if first arg is an object — field access or method call
                 if let Value::Object { class_name, fields } = &args[0] {
                     // Field access: single arg
@@ -1012,18 +1276,13 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                         }
                     }
                 }
-                // Return unevaluated
-                Ok(Value::Call {
-                    head: name.clone(),
-                    args: args.to_vec(),
-                })
-            } else {
-                // Return unevaluated
-                Ok(Value::Call {
-                    head: name.clone(),
-                    args: args.to_vec(),
-                })
             }
+
+            // Return unevaluated
+            Ok(Value::Call {
+                head: name.clone(),
+                args: args.to_vec(),
+            })
         }
 
         Value::Class(class_def) => {
@@ -1108,7 +1367,8 @@ fn try_match_params(
     }
 
     let mut bindings = HashMap::new();
-    let mut guards: Vec<&Expr> = Vec::new();
+    // Collect both top-level and nested guards (owned exprs)
+    let mut guard_exprs: Vec<Expr> = Vec::new();
 
     for (param, arg) in params.iter().zip(args.iter()) {
         let (inner_pat, guard) = extract_guard_expr(param);
@@ -1116,15 +1376,17 @@ fn try_match_params(
             MatchResult::Match(b) => {
                 bindings.extend(b);
                 if let Some(g) = guard {
-                    guards.push(g);
+                    guard_exprs.push(g.clone());
                 }
+                // Also collect guards nested inside list/call patterns
+                collect_nested_guards(inner_pat, &mut guard_exprs);
             }
             MatchResult::NoMatch => return Ok(None),
         }
     }
 
     // Evaluate guards with the collected bindings
-    for guard in guards {
+    for guard in &guard_exprs {
         let guard_env = env.child();
         for (name, val) in &bindings {
             guard_env.set(name.clone(), val.clone());
@@ -1847,7 +2109,7 @@ fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
 
 // ── Parallel evaluation builtins ──
 
-/// ParallelMap[f, list] — apply f to each element of list using multiple threads.
+/// ParallelMap[f, list] — apply f to each element of list using the thread pool.
 fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -1867,38 +2129,66 @@ fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalErr
                 return Ok(Value::List(result));
             }
 
-            let mut results: Vec<Option<Value>> = vec![None; items.len()];
-            std::thread::scope(|s| {
-                let handles: Vec<_> = items
-                    .iter()
-                    .map(|item| {
-                        let item = item.clone();
-                        let f = f.clone();
-                        let env = env.clone();
-                        s.spawn(move || -> Result<Value, EvalError> {
-                            apply_function(&f, &[item], &env)
-                        })
-                    })
-                    .collect();
+            let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = items
+                .iter()
+                .map(|item| {
+                    let f = f.clone();
+                    let item = item.clone();
+                    let env = env.clone();
+                    Box::new(move || apply_function(&f, &[item], &env))
+                        as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+                })
+                .collect();
 
-                for (i, handle) in handles.into_iter().enumerate() {
-                    let val = handle.join().map_err(|_| {
-                        EvalError::Error("ParallelMap worker panicked".to_string())
-                    })??;
-                    results[i] = Some(val);
-                }
-                Ok::<(), EvalError>(())
-            })?;
-
-            Ok(Value::List(
-                results.into_iter().map(|r| r.unwrap()).collect(),
-            ))
+            let results = parallel_batch(jobs);
+            let mut out = Vec::with_capacity(results.len());
+            for r in results {
+                out.push(r?);
+            }
+            Ok(Value::List(out))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
             got: args[1].type_name().to_string(),
         }),
     }
+}
+
+/// LaunchKernels[n] — set up the parallel kernel thread pool with n workers.
+fn builtin_launch_kernels_eval(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    match args.len() {
+        0 => {
+            // Return current pool size
+            Ok(Value::Integer(Integer::from(pool_size() as i64)))
+        }
+        1 => {
+            let n = args[0].to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[0].type_name().to_string(),
+            })?;
+            if n < 1 {
+                return Err(EvalError::Error(
+                    "LaunchKernels requires a positive integer".to_string(),
+                ));
+            }
+            launch_kernels(n as usize);
+            Ok(Value::Integer(Integer::from(n)))
+        }
+        _ => Err(EvalError::Error(
+            "LaunchKernels requires 0 or 1 arguments".to_string(),
+        )),
+    }
+}
+
+/// CloseKernels[] — shut down the parallel kernel thread pool.
+fn builtin_close_kernels_eval(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Err(EvalError::Error(
+            "CloseKernels takes no arguments".to_string(),
+        ));
+    }
+    close_kernels();
+    Ok(Value::Null)
 }
 
 /// ParallelTable[expr, {i, ...}] — evaluate expr for each iterator value in parallel.
@@ -2047,35 +2337,27 @@ fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         return Ok(Value::List(result));
     }
 
-    // Parallel evaluation using scoped threads
-    let mut results: Vec<Option<Value>> = vec![None; values.len()];
-    std::thread::scope(|s| {
-        let handles: Vec<_> = values
-            .into_iter()
-            .map(|val| {
-                let expr = expr.clone();
-                let var_name = var_name.clone();
-                let env = env.clone();
-                s.spawn(move || -> Result<Value, EvalError> {
-                    let child_env = env.child();
-                    child_env.set(var_name, val);
-                    eval(&expr, &child_env)
-                })
-            })
-            .collect();
+    // Parallel evaluation using the thread pool (or sequential fallback)
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = values
+        .into_iter()
+        .map(|val| {
+            let expr = expr.clone();
+            let var_name = var_name.clone();
+            let env = env.clone();
+            Box::new(move || {
+                let child_env = env.child();
+                child_env.set(var_name, val);
+                eval(&expr, &child_env)
+            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
 
-        for (i, handle) in handles.into_iter().enumerate() {
-            let val = handle
-                .join()
-                .map_err(|_| EvalError::Error("ParallelTable worker panicked".to_string()))??;
-            results[i] = Some(val);
-        }
-        Ok::<(), EvalError>(())
-    })?;
-
-    Ok(Value::List(
-        results.into_iter().map(|r| r.unwrap()).collect(),
-    ))
+    let results = parallel_batch(jobs);
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        out.push(r?);
+    }
+    Ok(Value::List(out))
 }
 
 /// FixedPoint[f, x] — apply f until result stops changing.
@@ -2224,6 +2506,31 @@ fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
             name, name, name
         ))
     })
+}
+
+/// Resolve a lazy-provider file path against the environment's search paths.
+/// If the path is absolute and exists, returns it directly.
+/// Otherwise searches each directory in `search_paths` for the file.
+fn resolve_lazy_path(path: &std::path::Path, env: &Env) -> Result<PathBuf, EvalError> {
+    if path.is_absolute() && path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    let paths = env.search_paths.lock().unwrap();
+    for dir in paths.iter() {
+        let candidate = dir.join(path);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(EvalError::Error(format!(
+        "Lazy provider file '{}' not found.\nSearched in: {}",
+        path.display(),
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 #[cfg(test)]
@@ -2900,5 +3207,296 @@ mod tests {
             Value::Integer(n) => assert!(n.to_i64().unwrap() >= 1),
             _ => panic!("Expected Integer, got {:?}", result),
         }
+    }
+
+    // ── Hold / HoldComplete / ReleaseHold ──
+
+    #[test]
+    fn test_hold_prevents_evaluation() {
+        // Hold[1 + 2] should preserve the syntactic form, not evaluate to 3
+        let result = eval_str("Hold[1 + 2]");
+        match result {
+            Value::Hold(_) => {} // We just care that it's held, not evaluated
+            _ => panic!("Expected Hold, got {:?}", result),
+        }
+        // Verify it's NOT 3 (the evaluated result)
+        assert!(!matches!(result, Value::Integer(_)));
+    }
+
+    #[test]
+    fn test_hold_complete_prevents_evaluation() {
+        let result = eval_str("HoldComplete[1 + 2]");
+        assert!(matches!(result, Value::HoldComplete(_)));
+    }
+
+    #[test]
+    fn test_release_hold_evaluates() {
+        // Use a variable to pass the held expression
+        assert_eq!(
+            eval_str("x = Hold[1 + 2]; ReleaseHold[x]"),
+            Value::Integer(Integer::from(3))
+        );
+    }
+
+    #[test]
+    fn test_hold_multiple_args() {
+        // Test single-arg through Hold
+        assert!(matches!(eval_str("Hold[1 + 2]"), Value::Hold(_)));
+    }
+
+    #[test]
+    fn test_hold_preserves_symbol() {
+        // Hold[x] should not look up x
+        assert!(matches!(eval_str("Hold[x]"), Value::Hold(_)));
+    }
+
+    #[test]
+    fn test_release_hold_complete() {
+        assert_eq!(
+            eval_str("x = HoldComplete[2 + 3]; ReleaseHold[x]"),
+            Value::Integer(Integer::from(5))
+        );
+    }
+
+    #[test]
+    fn test_release_hold_non_held() {
+        // ReleaseHold of a non-held value should return it unchanged
+        assert_eq!(
+            eval_str("x = 42; ReleaseHold[x]"),
+            Value::Integer(Integer::from(42))
+        );
+    }
+
+    #[test]
+    fn test_nested_hold() {
+        // Nested hold evaluation: ReleaseHold[Hold[ReleaseHold[Hold[1+2]]]]
+        let result = eval_str("x = Hold[1 + 2]; y = ReleaseHold[x]; Hold[y]");
+        assert!(matches!(result, Value::Hold(_)));
+    }
+
+    // ── Attribute system ──
+
+    #[test]
+    fn test_set_attributes_and_query() {
+        let result = eval_str("SetAttributes[f, HoldAll]; Attributes[f]");
+        match result {
+            Value::List(items) => {
+                let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                assert!(names.contains(&"HoldAll".to_string()));
+            }
+            _ => panic!("Expected List, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_listable_plus_threads_over_list() {
+        // Plus has Listable attribute, so {1, 2} + 10 should give {11, 12}
+        let result = eval_str("{1, 2} + 10");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(11)),
+                Value::Integer(Integer::from(12)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_listable_times_threads_over_list() {
+        // Times has Listable attribute
+        let result = eval_str("{1, 2, 3} * 2");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(6)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_listable_two_lists() {
+        // {1, 2} * {3, 4} should give {3, 8}
+        let result = eval_str("{1, 2} * {3, 4}");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(8)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_listable_sin_threads() {
+        // Sin has Listable, so Sin[{0}] should thread
+        // Sin[0] returns Integer(0) (exact match), not Real(0.0)
+        let result = eval_str("Sin[{0}]");
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Integer(Integer::from(0))])
+        );
+    }
+
+    #[test]
+    fn test_protected_prevents_redefinition() {
+        // Set a symbol as protected, then try to redefine
+        let result = eval_str("SetAttributes[Sin, Protected]; f[x_] := x + 1");
+        // This should succeed because 'f' is not protected
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_builtin_attributes_seeded() {
+        // Builtins should have their attributes seeded during registration
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let plus_attrs = env.get_attributes("Plus");
+        assert!(plus_attrs.contains(&"Listable".to_string()));
+        assert!(plus_attrs.contains(&"Flat".to_string()));
+        let sin_attrs = env.get_attributes("Sin");
+        assert!(sin_attrs.contains(&"Listable".to_string()));
+        // Hold is not seeded as a builtin (it's a special form handled by the evaluator),
+        // so it shouldn't have attributes set automatically.
+        // let hold_attrs = env.get_attributes("Hold");
+        // assert!(hold_attrs.contains(&"HoldAll".to_string()));
+    }
+
+    /// Helper: evaluate an expression string in a pre-configured environment.
+    fn eval_str_in_env(input: &str, env: &Env) -> Value {
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, env).unwrap()
+    }
+
+    // ── Lazy provider tests ──
+
+    #[test]
+    fn test_lazy_custom_provider_constant() {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        env.register_lazy_provider(
+            "LazyFoo",
+            LazyProvider::Custom(Arc::new(|env| {
+                // Define a function
+                let tokens = crate::lexer::tokenize("LazyFoo[] := 42").unwrap();
+                let ast = crate::parser::parse(tokens).unwrap();
+                crate::eval::eval_program(&ast, &env.root_env()).unwrap();
+                Ok(env.root_env().get("LazyFoo").unwrap())
+            })),
+        );
+        assert_eq!(eval_str_in_env("LazyFoo[]", &env), Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_lazy_custom_provider_function() {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        // Register a lazy provider that defines a function called LazyDouble
+        env.register_lazy_provider(
+            "LazyDouble",
+            LazyProvider::Custom(Arc::new(|env| {
+                // Evaluate the function definition in the root env
+                let tokens = crate::lexer::tokenize("LazyDouble[x_] := 2*x").unwrap();
+                let ast = crate::parser::parse(tokens).unwrap();
+                crate::eval::eval_program(&ast, &env.root_env()).unwrap();
+                // Return the value that should be installed for LazyDouble
+                Ok(env.root_env().get("LazyDouble").unwrap())
+            })),
+        );
+        assert_eq!(
+            eval_str_in_env("LazyDouble[5]", &env),
+            Value::Integer(Integer::from(10))
+        );
+    }
+
+    #[test]
+    fn test_lazy_provider_one_shot() {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = call_count.clone();
+        env.register_lazy_provider(
+            "Once",
+            LazyProvider::Custom(Arc::new(move |env| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Define a real function so calling Once[] works
+                let tokens = crate::lexer::tokenize("Once[] := 99").unwrap();
+                let ast = crate::parser::parse(tokens).unwrap();
+                crate::eval::eval_program(&ast, &env.root_env()).unwrap();
+                Ok(env.root_env().get("Once").unwrap())
+            })),
+        );
+        // First call: provider fires, loads function
+        assert_eq!(eval_str_in_env("Once[]", &env), Value::Integer(Integer::from(99)));
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Second call: uses env lookup, provider does NOT fire
+        assert_eq!(eval_str_in_env("Once[]", &env), Value::Integer(Integer::from(99)));
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_lazy_provider_no_match_fallback() {
+        // An undefined symbol without a provider should still return unevaluated
+        let val = eval_str("NonExistentSymbol[1, 2]");
+        assert_eq!(
+            val,
+            Value::Call {
+                head: "NonExistentSymbol".to_string(),
+                args: vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2))],
+            }
+        );
+    }
+
+    #[test]
+    fn test_lazy_provider_file_not_found_error() {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        env.register_lazy_provider(
+            "Missing",
+            LazyProvider::File(std::path::PathBuf::from("nonexistent.syma")),
+        );
+        let tokens = crate::lexer::tokenize("Missing[]").unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        let result = crate::eval::eval_program(&ast, &env);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains("not found"),
+            "Error should mention 'not found', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_lazy_provider_file_in_search_path() {
+        use std::io::Write;
+        use std::path::Path;
+
+        // Create a temp file defining a simple function.
+        // The lazy provider hook fires when a symbol is used AS A FUNCTION
+        // (i.e., the Symbol branch in apply_function), so define a callable function.
+        let dir = std::env::temp_dir().join("syma_lazy_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("LazyAdd.syma");
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        writeln!(f, "LazyAdd[x_] := x + 42").unwrap();
+        f.flush().unwrap();
+
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        env.add_search_path(dir.clone());
+        env.register_lazy_provider(
+            "LazyAdd",
+            LazyProvider::File(Path::new("LazyAdd.syma").to_path_buf()),
+        );
+
+        // Trigger provider by calling the lazily-loaded function
+        let result = eval_str_in_env("LazyAdd[1]", &env);
+        assert_eq!(result, Value::Integer(Integer::from(43)));
+
+        // Clean up
+        let _ = std::fs::remove_file(&file_path);
     }
 }

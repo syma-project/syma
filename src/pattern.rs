@@ -250,70 +250,209 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
     }
 }
 
-/// Match a list pattern against a list value.
-fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
-    let mut bindings = HashMap::new();
-    let mut pat_idx = 0;
-    let mut val_idx = 0;
-
-    // First pass: handle non-sequence patterns
-    while pat_idx < patterns.len() && val_idx < items.len() {
-        match &patterns[pat_idx] {
-            // Sequence blank: matches 1+ remaining elements
-            Expr::BlankSequence {
-                name,
-                type_constraint: _,
-            } => {
-                let remaining = items.len() - val_idx;
-                if remaining == 0 {
-                    return MatchResult::NoMatch; // __ needs at least 1
-                }
-                // For simplicity, match all remaining elements
-                // TODO: backtrack for trailing patterns
-                let seq = Value::List(items[val_idx..].to_vec());
-                if let Some(n) = name {
-                    bindings.insert(n.clone(), seq);
-                }
-                val_idx = items.len();
-                pat_idx += 1;
+/// Recursively collect guard expressions from a pattern tree.
+/// Guards nested inside lists, calls, and alternatives are collected
+/// so that the evaluator can evaluate them after pattern matching.
+pub fn collect_nested_guards(expr: &Expr, guards: &mut Vec<Expr>) {
+    match expr {
+        Expr::PatternGuard { pattern, condition } => {
+            guards.push(condition.as_ref().clone());
+            collect_nested_guards(pattern, guards);
+        }
+        Expr::List(items) => {
+            for item in items {
+                collect_nested_guards(item, guards);
             }
-
-            // Optional sequence blank: matches 0+ remaining elements
-            Expr::BlankNullSequence {
-                name,
-                type_constraint: _,
-            } => {
-                let seq = Value::List(items[val_idx..].to_vec());
-                if let Some(n) = name {
-                    bindings.insert(n.clone(), seq);
-                }
-                val_idx = items.len();
-                pat_idx += 1;
+        }
+        Expr::Call { head, args } => {
+            collect_nested_guards(head, guards);
+            for arg in args {
+                collect_nested_guards(arg, guards);
             }
+        }
+        Expr::BlankSequence {
+            type_constraint, ..
+        }
+        | Expr::BlankNullSequence {
+            type_constraint, ..
+        } => {
+            // type_constraint is a string (type name), not an expression — no guards to collect.
+            let _ = type_constraint;
+        }
+        _ => {}
+    }
+}
 
-            // Regular pattern: match one element
-            _ => {
-                if val_idx >= items.len() {
-                    return MatchResult::NoMatch;
+/// Recursive backtracking pattern matcher for lists with sequence patterns.
+/// Tries different partition points for BlankSequence (__) and BlankNullSequence (___).
+fn match_sequence_pattern(
+    patterns: &[Expr],
+    items: &[Value],
+    pat_idx: usize,
+    val_idx: usize,
+    bindings: &mut Bindings,
+) -> MatchResult {
+    // Base: all patterns consumed → check all values consumed too
+    if pat_idx == patterns.len() {
+        return if val_idx == items.len() {
+            MatchResult::Match(bindings.clone())
+        } else {
+            MatchResult::NoMatch
+        };
+    }
+
+    // Base: all values consumed → check if remaining patterns are optional
+    if val_idx == items.len() {
+        let all_optional = patterns[pat_idx..]
+            .iter()
+            .all(|p| matches!(p, Expr::BlankNullSequence { .. }));
+        return if all_optional {
+            let mut b = bindings.clone();
+            for p in &patterns[pat_idx..] {
+                if let Expr::BlankNullSequence { name: Some(n), .. } = p {
+                    b.insert(n.clone(), Value::List(vec![]));
                 }
-                match match_pattern(&patterns[pat_idx], &items[val_idx]) {
-                    MatchResult::Match(b) => {
-                        bindings.extend(b);
-                        pat_idx += 1;
-                        val_idx += 1;
+            }
+            MatchResult::Match(b)
+        } else {
+            MatchResult::NoMatch
+        };
+    }
+
+    match &patterns[pat_idx] {
+        Expr::BlankSequence {
+            name,
+            type_constraint,
+        } => {
+            // __ matches 1+ elements. Try from most-greedy to least (backtracking).
+            let remaining = items.len() - val_idx;
+            let trailing_count = patterns.len() - pat_idx - 1;
+            // Leave at least 1 element for each trailing non-optional pattern
+            let max_for_seq = remaining.saturating_sub(trailing_count);
+            if max_for_seq < 1 {
+                return MatchResult::NoMatch;
+            }
+            for take in (1..=max_for_seq).rev() {
+                let seq_items = &items[val_idx..val_idx + take];
+                // Type constraint check
+                if let Some(tc) = type_constraint
+                    && !seq_items.iter().all(|v| v.matches_type(tc))
+                {
+                    continue;
+                }
+                let mut new_bindings = bindings.clone();
+                let seq_val = Value::List(seq_items.to_vec());
+                if let Some(n) = name {
+                    new_bindings.insert(n.clone(), seq_val);
+                }
+                if let MatchResult::Match(b) = match_sequence_pattern(
+                    patterns,
+                    items,
+                    pat_idx + 1,
+                    val_idx + take,
+                    &mut new_bindings,
+                ) {
+                    return MatchResult::Match(b);
+                }
+            }
+            MatchResult::NoMatch
+        }
+
+        Expr::BlankNullSequence {
+            name,
+            type_constraint,
+        } => {
+            // ___ matches 0+ elements.
+            let remaining = items.len() - val_idx;
+            let trailing_count = patterns.len() - pat_idx - 1;
+            // Leave at least one element per trailing non-___ pattern
+            let max_for_seq = remaining.saturating_sub(trailing_count);
+            for take in (0..=max_for_seq.min(remaining)).rev() {
+                if take == 0 {
+                    // Match zero elements
+                    let mut new_bindings = bindings.clone();
+                    if let Some(n) = name {
+                        new_bindings.insert(n.clone(), Value::List(vec![]));
                     }
-                    MatchResult::NoMatch => return MatchResult::NoMatch,
+                    if let MatchResult::Match(b) = match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx,
+                        &mut new_bindings,
+                    ) {
+                        return MatchResult::Match(b);
+                    }
+                } else {
+                    let seq_items = &items[val_idx..val_idx + take];
+                    if let Some(tc) = type_constraint
+                        && !seq_items.iter().all(|v| v.matches_type(tc))
+                    {
+                        continue;
+                    }
+                    let mut new_bindings = bindings.clone();
+                    let seq_val = Value::List(seq_items.to_vec());
+                    if let Some(n) = name {
+                        new_bindings.insert(n.clone(), seq_val);
+                    }
+                    if let MatchResult::Match(b) = match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx + take,
+                        &mut new_bindings,
+                    ) {
+                        return MatchResult::Match(b);
+                    }
                 }
+            }
+            MatchResult::NoMatch
+        }
+
+        // Regular pattern: match one element
+        _ => {
+            if val_idx >= items.len() {
+                return MatchResult::NoMatch;
+            }
+            match match_pattern(&patterns[pat_idx], &items[val_idx]) {
+                MatchResult::Match(b) => {
+                    bindings.extend(b);
+                    match_sequence_pattern(patterns, items, pat_idx + 1, val_idx + 1, bindings)
+                }
+                MatchResult::NoMatch => MatchResult::NoMatch,
             }
         }
     }
+}
 
-    // Check if all patterns and values were consumed
-    if pat_idx == patterns.len() && val_idx == items.len() {
-        MatchResult::Match(bindings)
-    } else {
-        MatchResult::NoMatch
+/// Match a list pattern against a list value.
+fn match_list_pattern(patterns: &[Expr], items: &[Value]) -> MatchResult {
+    // Check if any sequence patterns exist
+    let has_sequences = patterns.iter().any(|p| {
+        matches!(
+            p,
+            Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
+        )
+    });
+
+    if !has_sequences {
+        // Fast path: no sequences, direct matching
+        if patterns.len() != items.len() {
+            return MatchResult::NoMatch;
+        }
+        let mut bindings = HashMap::new();
+        for (pat, val) in patterns.iter().zip(items.iter()) {
+            match match_pattern(pat, val) {
+                MatchResult::Match(b) => bindings.extend(b),
+                MatchResult::NoMatch => return MatchResult::NoMatch,
+            }
+        }
+        return MatchResult::Match(bindings);
     }
+
+    // Slow path: sequences with backtracking
+    let mut bindings = Bindings::new();
+    match_sequence_pattern(patterns, items, 0, 0, &mut bindings)
 }
 
 /// Match a call pattern (e.g., f[x_, y_]) against a value.
@@ -530,5 +669,201 @@ mod tests {
         } else {
             panic!("Expected match");
         }
+    }
+
+    // ── Sequence pattern backtracking ──
+
+    #[test]
+    fn test_blank_sequence_simple() {
+        // {a__} should match all remaining elements
+        let pattern = Expr::List(vec![Expr::BlankSequence {
+            name: Some("a".to_string()),
+            type_constraint: None,
+        }]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(
+                bindings.get("a"),
+                Some(&Value::List(vec![
+                    Value::Integer(Integer::from(1)),
+                    Value::Integer(Integer::from(2)),
+                    Value::Integer(Integer::from(3)),
+                ]))
+            );
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_blank_sequence_with_trailing() {
+        // {a__, b_} should backtrack: a__ takes 2, b_ takes 1
+        let pattern = Expr::List(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(
+                bindings.get("a"),
+                Some(&Value::List(vec![
+                    Value::Integer(Integer::from(1)),
+                    Value::Integer(Integer::from(2)),
+                ]))
+            );
+            assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(3))));
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_blank_sequence_multiple_trailing() {
+        // {a__, b_, c_} — a__ takes 1, leaving one each for b_, c_
+        let pattern = Expr::List(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "c".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_blank_null_sequence_with_trailing() {
+        // {a___, b_} — a___ takes 0 elements (empty list), b_ takes first
+        let pattern = Expr::List(vec![
+            Expr::BlankNullSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![Value::Integer(Integer::from(1))]);
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(bindings.get("a"), Some(&Value::List(vec![])));
+            assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_blank_null_sequence_more() {
+        // {a___, b_, c_} — a___ takes 0, b_ takes first, c_ takes second
+        let pattern = Expr::List(vec![
+            Expr::BlankNullSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "c".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+        ]);
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(bindings.get("a"), Some(&Value::List(vec![])));
+            assert_eq!(bindings.get("b"), Some(&Value::Integer(Integer::from(1))));
+            assert_eq!(bindings.get("c"), Some(&Value::Integer(Integer::from(2))));
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_multiple_sequences() {
+        // {a__, b__} — a__ takes 0+? actually __ needs at least 1
+        // a__ takes 2, b__ takes 1 (remaining)
+        let pattern = Expr::List(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::BlankSequence {
+                name: Some("b".to_string()),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value) {
+            assert_eq!(
+                bindings.get("a"),
+                Some(&Value::List(vec![
+                    Value::Integer(Integer::from(1)),
+                    Value::Integer(Integer::from(2)),
+                ]))
+            );
+            assert_eq!(
+                bindings.get("b"),
+                Some(&Value::List(vec![Value::Integer(Integer::from(3))]))
+            );
+        } else {
+            panic!("Expected match");
+        }
+    }
+
+    #[test]
+    fn test_blank_sequence_no_match() {
+        // {a__, b_} on list with 1 element — a__ needs at least 1, leaving 0 for b_
+        let pattern = Expr::List(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "b".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let value = Value::List(vec![Value::Integer(Integer::from(1))]);
+        assert!(matches!(
+            match_pattern(&pattern, &value),
+            MatchResult::NoMatch
+        ));
     }
 }

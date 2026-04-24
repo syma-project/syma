@@ -1,5 +1,20 @@
 use std::process::Command;
 
+/// Run `cargo run -- -e <expr>` and return stdout on success.
+fn syma_eval(expr: &str) -> String {
+    let output = Command::new("cargo")
+        .args(["run", "--", "-e", expr])
+        .output()
+        .expect("failed to run syma -e");
+    if !output.status.success() {
+        panic!(
+            "syma -e {expr:?} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// Run `cargo run -- <args...>` and return the output.
 fn syma_run(args: &[&str]) -> std::process::Output {
     Command::new("cargo")
@@ -49,6 +64,30 @@ fn test_run_lists_example() {
         stdout.contains("1, 2, 3") || stdout.contains("{1, 2, 3}"),
         "stdout: {stdout}"
     );
+}
+
+#[test]
+fn test_eval_simple() {
+    let out = syma_eval("1 + 2");
+    assert!(out.contains("3"), "got: {out}");
+}
+
+#[test]
+fn test_eval_assignment() {
+    let out = syma_eval("x = 10; x + 20");
+    assert!(out.contains("30"), "got: {out}");
+}
+
+#[test]
+fn test_eval_string() {
+    let out = syma_eval(r#"StringJoin["a", "b"]"#);
+    assert!(out.contains("ab"), "got: {out}");
+}
+
+#[test]
+fn test_eval_list() {
+    let out = syma_eval("{1, 2, 3}");
+    assert!(out.contains("1,") || out.contains("1}"), "got: {out}");
 }
 
 #[test]

@@ -1388,6 +1388,20 @@ fn try_numerical_eval(head: &str, args: &[Value]) -> Option<Value> {
     }
 }
 
+/// Stub for SetAttributes (evaluator-dependent, handled in eval.rs).
+pub fn builtin_set_attributes_stub(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "SetAttributes should be handled by evaluator".to_string(),
+    ))
+}
+
+/// Stub for Attributes (evaluator-dependent, handled in eval.rs).
+pub fn builtin_attributes_stub(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "Attributes should be handled by evaluator".to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

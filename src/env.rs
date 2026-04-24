@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::value::{NativeLibHandle, Value};
+use crate::value::{EvalError, NativeLibHandle, Value};
 
 /// Global module registry shared across all scopes in a session.
 /// Maps module names (e.g. `"LinearAlgebra"`, `"Math.Stats"`) to their `Value::Module`.
@@ -24,17 +24,55 @@ pub struct Scope {
 /// Prevents double-dlopen when `LoadLibrary["x"]` is called twice.
 pub type NativeLibRegistry = Arc<Mutex<HashMap<String, Arc<NativeLibHandle>>>>;
 
+/// A lazy-loading provider: when an undefined symbol is first used in a call,
+/// the provider is fired once, then removed from the registry.
+#[allow(dead_code)]
+pub enum LazyProvider {
+    /// Load a `.syma` file and evaluate it to define the symbol.
+    /// The path is resolved against the environment's `search_paths`.
+    File(PathBuf),
+    /// Execute an arbitrary Rust closure. Must return the value to install
+    /// for the registered symbol on success.
+    Custom(Arc<dyn Fn(&Env) -> Result<Value, EvalError> + Send + Sync>),
+}
+
+impl std::fmt::Debug for LazyProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LazyProvider::File(p) => f.debug_tuple("File").field(p).finish(),
+            LazyProvider::Custom(_) => f.debug_tuple("Custom").field(&"...").finish(),
+        }
+    }
+}
+
+impl Clone for LazyProvider {
+    fn clone(&self) -> Self {
+        match self {
+            LazyProvider::File(p) => LazyProvider::File(p.clone()),
+            LazyProvider::Custom(f) => LazyProvider::Custom(f.clone()),
+        }
+    }
+}
+
 /// The evaluation environment, managing scopes.
 #[derive(Debug, Clone)]
 pub struct Env {
     /// Current scope chain.
     scope: Arc<Mutex<Scope>>,
+    /// Always points to the outermost (root) scope.
+    root_scope: Arc<Mutex<Scope>>,
     /// Module registry — shared (by `Arc` clone) across all child envs in a session.
     pub registry: ModuleRegistry,
     /// Directories searched when resolving `import Name` to a `.syma` file.
     pub search_paths: Arc<Mutex<Vec<PathBuf>>>,
     /// Native library handles shared across all child envs in a session.
     pub native_libs: NativeLibRegistry,
+    /// Per-symbol attributes (e.g., Listable, Flat, Orderless, HoldAll, Protected).
+    /// Shared across all child envs in a session.
+    pub attributes: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Lazy-loading providers — registered per symbol, fired once on first use.
+    /// Shared across all child envs in a session.
+    pub lazy_providers: Arc<Mutex<HashMap<String, LazyProvider>>>,
 }
 
 impl Scope {
@@ -68,21 +106,28 @@ impl Scope {
 impl Env {
     /// Create a new environment with a global scope.
     pub fn new() -> Self {
+        let scope = Arc::new(Mutex::new(Scope::new(None)));
         Env {
-            scope: Arc::new(Mutex::new(Scope::new(None))),
+            scope: scope.clone(),
+            root_scope: scope,
             registry: Arc::new(Mutex::new(HashMap::new())),
             search_paths: Arc::new(Mutex::new(vec![PathBuf::from(".")])),
             native_libs: Arc::new(Mutex::new(HashMap::new())),
+            attributes: Arc::new(Mutex::new(HashMap::new())),
+            lazy_providers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Create a child environment (new scope, shared registry and search paths).
+    /// Create a child environment (new scope, shared registry, search paths, and attributes).
     pub fn child(&self) -> Self {
         Env {
             scope: Arc::new(Mutex::new(Scope::new(Some(self.scope.clone())))),
+            root_scope: self.root_scope.clone(),
             registry: self.registry.clone(),
             search_paths: self.search_paths.clone(),
             native_libs: self.native_libs.clone(),
+            attributes: self.attributes.clone(),
+            lazy_providers: self.lazy_providers.clone(),
         }
     }
 
@@ -109,6 +154,32 @@ impl Env {
     /// Prepend a directory to the module search path.
     pub fn add_search_path(&self, path: PathBuf) {
         self.search_paths.lock().unwrap().insert(0, path);
+    }
+
+    /// Register a lazy provider for a symbol.
+    ///
+    /// When the symbol is first encountered as an undefined symbol in a call,
+    /// the provider fires. After loading, the provider is removed (one-shot)
+    /// and the loaded value is installed in the root scope.
+    pub fn register_lazy_provider(&self, name: &str, provider: LazyProvider) {
+        self.lazy_providers
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), provider);
+    }
+
+    /// Return an `Env` whose scope is the root (outermost) scope.
+    /// Useful for lazy providers that need to load definitions into root scope.
+    pub fn root_env(&self) -> Self {
+        Env {
+            scope: self.root_scope.clone(),
+            root_scope: self.root_scope.clone(),
+            registry: self.registry.clone(),
+            search_paths: self.search_paths.clone(),
+            native_libs: self.native_libs.clone(),
+            attributes: self.attributes.clone(),
+            lazy_providers: self.lazy_providers.clone(),
+        }
     }
 
     /// Look up a variable by name.
@@ -161,6 +232,32 @@ impl Env {
             scope_opt = s.parent.clone();
         }
         result
+    }
+
+    // ── Attribute system ──
+
+    /// Set attributes for a symbol.
+    pub fn set_attributes(&self, name: &str, attrs: Vec<String>) {
+        self.attributes
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), attrs);
+    }
+
+    /// Get attributes for a symbol. Returns an empty vec if none set.
+    pub fn get_attributes(&self, name: &str) -> Vec<String> {
+        self.attributes
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Check if a symbol has a specific attribute.
+    #[allow(dead_code)]
+    pub fn has_attribute(&self, name: &str, attr: &str) -> bool {
+        self.get_attributes(name).iter().any(|a| a == attr)
     }
 }
 
@@ -272,5 +369,53 @@ mod tests {
     fn test_default_trait() {
         let env = Env::default();
         assert!(env.get("x").is_none());
+    }
+
+    // ── Lazy provider tests ──
+
+    #[test]
+    fn test_register_lazy_provider() {
+        let env = Env::new();
+        env.register_lazy_provider("Foo", LazyProvider::File(PathBuf::from("test.syma")));
+        let providers = env.lazy_providers.lock().unwrap();
+        assert!(providers.contains_key("Foo"));
+    }
+
+    #[test]
+    fn test_lazy_provider_one_shot() {
+        let env = Env::new();
+        env.register_lazy_provider("Bar", LazyProvider::File(PathBuf::from("test.syma")));
+        // Remove it (simulates firing)
+        let removed = env.lazy_providers.lock().unwrap().remove("Bar");
+        assert!(removed.is_some());
+        // After removal, it should be gone
+        let removed2 = env.lazy_providers.lock().unwrap().remove("Bar");
+        assert!(removed2.is_none());
+    }
+
+    #[test]
+    fn test_root_env() {
+        let env = Env::new();
+        env.set("x".to_string(), Value::Integer(Integer::from(42)));
+
+        let child = env.child();
+        child.set("y".to_string(), Value::Str("child".to_string()));
+
+        // root_env still sees the root scope
+        let root = child.root_env();
+        assert_eq!(root.get("x"), Some(Value::Integer(Integer::from(42))));
+        // y was set in child scope, not root scope
+        assert_eq!(root.get("y"), None);
+    }
+
+    #[test]
+    fn test_root_env_set_visible_through_child() {
+        let env = Env::new();
+        let root = env.root_env();
+        root.set("z".to_string(), Value::Integer(Integer::from(99)));
+
+        // Child envs see the root-set value
+        let child = env.child();
+        assert_eq!(child.get("z"), Some(Value::Integer(Integer::from(99))));
     }
 }

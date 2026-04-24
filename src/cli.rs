@@ -2,24 +2,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::format::{bold, cyan, dim, green, red};
 use crate::manifest::{self, Manifest};
-
-// ── ANSI helpers (local copies — keeps cli.rs self-contained) ─────────────────
-fn green(s: &str) -> String {
-    format!("\x1b[32m{}\x1b[0m", s)
-}
-fn red(s: &str) -> String {
-    format!("\x1b[31m{}\x1b[0m", s)
-}
-fn cyan(s: &str) -> String {
-    format!("\x1b[36m{}\x1b[0m", s)
-}
-fn bold(s: &str) -> String {
-    format!("\x1b[1m{}\x1b[0m", s)
-}
-fn dim(s: &str) -> String {
-    format!("\x1b[2m{}\x1b[0m", s)
-}
 
 // ── syma new ──────────────────────────────────────────────────────────────────
 
@@ -122,7 +106,10 @@ pub fn cmd_run() {
         );
         std::process::exit(1);
     }
-    crate::run_file(entry.to_str().unwrap());
+    if let Err(e) = crate::run_file(entry.to_str().unwrap()) {
+        eprintln!("{}: {}", red("error"), e);
+        std::process::exit(1);
+    }
 }
 
 // ── syma test ─────────────────────────────────────────────────────────────────

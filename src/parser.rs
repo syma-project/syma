@@ -1200,6 +1200,12 @@ impl Parser {
                 Ok(Expr::HoldComplete(Box::new(expr)))
             }
 
+            // ReleaseHold[expr]
+            Token::ReleaseHold => {
+                self.advance();
+                Ok(Expr::Symbol("ReleaseHold".to_string()))
+            }
+
             // Try expression
             Token::Try => self.parse_try(),
 
