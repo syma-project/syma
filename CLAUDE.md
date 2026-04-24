@@ -31,7 +31,20 @@ The pipeline is: **Source → Lexer → Parser → AST → Evaluator → Value**
 - **`eval.rs`** — Tree-walk evaluator. `eval()` dispatches on `Expr` variants. `apply_function()` dispatches on `Value` types (builtin, user function, pure function, symbol lookup). Function definitions accumulate — multiple `f[x_] := ...` defs coexist and are tried in order.
 - **`env.rs`** — Lexical scoping via `Rc<RefCell<Scope>>` chains. `child()` creates a new scope inheriting the parent.
 - **`pattern.rs`** — Pattern matching engine. Supports blanks (`_`, `x_`, `_Integer`), sequences (`__`, `___`), list destructuring, call patterns, alternatives (`|`), and guards (`/;`). Guards are partially implemented — inner pattern matches but guard condition isn't evaluated yet.
-- **`builtins.rs`** — Core library: arithmetic, comparison, logical, list operations, string ops, math functions, constants (`Pi`, `E`, `I`). Some builtins are stubs (`Simplify`, `Expand`, `Table`, `ToExpression`).
+- **`builtins/`** — Core library split into sub-modules by domain:
+  - `mod.rs` — Orchestrator: `register_builtins`, `get_help`, `get_attributes`, `add_values_public` re-export
+  - `arithmetic.rs` — `Plus`, `Times`, `Power`, `Divide`, `Minus`, `Abs` + helpers (`add_values`, `mul_values`)
+  - `comparison.rs` — `Equal`, `Unequal`, `Less`, `Greater`, `LessEqual`, `GreaterEqual`
+  - `logical.rs` — `And`, `Or`, `Not`
+  - `list.rs` — `Length`, `First`, `Last`, `Rest`, `Append`, `Join`, `Flatten`, `Sort`, `Reverse`, `Part`, `Range`, `Map`, `Fold`, `Select`, `Take`, `Drop`, `Riffle`, `Transpose`, `Total`, `MemberQ`, `Count`, `Position`, `Union`, `Intersection`, `Complement`, `Tally`, `PadLeft`, `PadRight`
+  - `string.rs` — `StringJoin`, `StringLength`, `ToString`, `ToExpression`, `StringSplit`, `StringReplace`, `StringTake`, `StringDrop`, `StringContainsQ`, `StringReverse`, `ToUpperCase`, `ToLowerCase`, `Characters`, `StringMatchQ`, `StringPadLeft`, `StringPadRight`, `StringTrim`, `StringStartsQ`, `StringEndsQ`
+  - `math.rs` — `Sin`, `Cos`, `Tan`, `Log`, `Exp`, `Sqrt`, `Floor`, `Ceiling`, `Round`, `Max`, `Min`, `ArcSin`, `ArcCos`, `ArcTan`, `Log2`, `Log10`, `Mod`, `GCD`, `LCM`, `Factorial`, `FixedPoint` stub
+  - `pattern.rs` — `MatchQ`, `Head`, `TypeOf`, `FreeQ`
+  - `association.rs` — `Keys`, `Values`, `Lookup`, `KeyExistsQ`
+  - `symbolic.rs` — `Simplify`, `Expand`, `D` (differentiation), `Integrate`, `Factor`, `Solve`, `Series`
+  - `random.rs` — `RandomInteger`, `RandomReal`, `RandomChoice`
+  - `io.rs` — `Print`, `Input`, `Write`, `WriteLine`, `PrintF`
+  - `error.rs` — `Throw`, `Error`
 
 ### Key Design Decisions
 
