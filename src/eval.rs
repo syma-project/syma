@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rug::Integer;
+use rug::{Integer, Float};
+use rug::float::Constant;
+use rug::ops::Pow;
 
 use crate::ast::*;
 use crate::env::Env;
@@ -497,6 +499,24 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     Err(e) => Err(e),
                 }
             }
+            "N" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(EvalError::Error("N requires 1 or 2 arguments".to_string()));
+                }
+                let prec_bits: u32 = if args.len() == 2 {
+                    match eval(&args[1], env)? {
+                        Value::Integer(n) => {
+                            let d = u32::try_from(&n).unwrap_or(DEFAULT_PRECISION);
+                            // decimal digits → bits: d * log2(10) ≈ d * 3.322
+                            ((d as f64) * std::f64::consts::LOG2_10).ceil() as u32
+                        }
+                        _ => DEFAULT_PRECISION,
+                    }
+                } else {
+                    DEFAULT_PRECISION
+                };
+                numeric_eval_expr(&args[0], prec_bits, env)
+            }
             _ => {
                 // Normal function call
                 let head_val = eval(head, env)?;
@@ -742,6 +762,136 @@ fn pat_to_expr(val: &Value) -> Expr {
 }
 
 // ── Evaluator-dependent builtins ──
+
+/// Evaluate an expression numerically at the given bit precision.
+/// Keeps symbolic constants (Pi, E) alive so they can be computed at
+/// arbitrary precision instead of using the pre-stored DEFAULT_PRECISION value.
+fn numeric_eval_expr(expr: &Expr, prec_bits: u32, env: &Env) -> Result<Value, EvalError> {
+    match expr {
+        Expr::Symbol(s) => match s.as_str() {
+            "Pi" => Ok(Value::Real(Float::with_val(prec_bits, Constant::Pi))),
+            "E"  => {
+                let one = Float::with_val(prec_bits, 1u32);
+                Ok(Value::Real(one.exp()))
+            }
+            _ => {
+                let v = eval(expr, env)?;
+                coerce_to_float(v, prec_bits)
+            }
+        },
+        Expr::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
+        Expr::Real(r)    => Ok(Value::Real(Float::with_val(prec_bits, r))),
+        // Recursively evaluate calls at the requested precision.
+        // Each argument is numeric-evaluated first, then the operation is
+        // performed on high-precision floats.
+        Expr::Call { head, args } => {
+            if let Expr::Symbol(name) = head.as_ref() {
+                let evaluated_args: Result<Vec<Value>, _> = args.iter()
+                    .map(|a| numeric_eval_expr(a, prec_bits, env))
+                    .collect();
+                let evaluated_args = evaluated_args?;
+                match name.as_str() {
+                    "Plus" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a + b),
+                    "Times" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a * b),
+                    "Power" if evaluated_args.len() == 2 => {
+                        let (b, e) = (&evaluated_args[0], &evaluated_args[1]);
+                        let bf = to_float(b, prec_bits);
+                        let ef = to_float(e, prec_bits);
+                        match (bf, ef) {
+                            (Some(b), Some(e)) => Ok(Value::Real(b.pow(e))),
+                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Divide" if evaluated_args.len() == 2 => {
+                        let bf = to_float(&evaluated_args[0], prec_bits);
+                        let ef = to_float(&evaluated_args[1], prec_bits);
+                        match (bf, ef) {
+                            (Some(a), Some(b)) => Ok(Value::Real(a / b)),
+                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Log" => {
+                        let ln = |v: &Value| -> Option<Float> {
+                            to_float(v, prec_bits).map(|f| Float::with_val(prec_bits, f.ln()))
+                        };
+                        match evaluated_args.len() {
+                            1 => match ln(&evaluated_args[0]) {
+                                Some(r) => Ok(Value::Real(r)),
+                                None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                            },
+                            2 => match (ln(&evaluated_args[1]), ln(&evaluated_args[0])) {
+                                (Some(lx), Some(lb)) => Ok(Value::Real(Float::with_val(prec_bits, &lx) / lb)),
+                                _ => apply_function(&eval(head, env)?, &evaluated_args, env),
+                            },
+                            _ => apply_function(&eval(head, env)?, &evaluated_args, env),
+                        }
+                    }
+                    "Sin" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
+                        Some(f) => Ok(Value::Real(f.sin())),
+                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                    },
+                    "Cos" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
+                        Some(f) => Ok(Value::Real(f.cos())),
+                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                    },
+                    "Tan" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
+                        Some(f) => Ok(Value::Real(f.tan())),
+                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                    },
+                    "Exp" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
+                        Some(f) => Ok(Value::Real(f.exp())),
+                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                    },
+                    "Sqrt" if evaluated_args.len() == 1 => match to_float(&evaluated_args[0], prec_bits) {
+                        Some(f) => Ok(Value::Real(f.sqrt())),
+                        None => apply_function(&eval(head, env)?, &evaluated_args, env),
+                    },
+                    _ => apply_function(&eval(head, env)?, &evaluated_args, env),
+                }
+            } else {
+                let v = eval(expr, env)?;
+                coerce_to_float(v, prec_bits)
+            }
+        }
+        _ => {
+            let v = eval(expr, env)?;
+            coerce_to_float(v, prec_bits)
+        }
+    }
+}
+
+fn to_float(v: &Value, prec_bits: u32) -> Option<Float> {
+    match v {
+        Value::Integer(n) => Some(Float::with_val(prec_bits, n)),
+        Value::Real(r)    => Some(Float::with_val(prec_bits, r)),
+        _ => None,
+    }
+}
+
+fn numeric_fold_op<F>(args: Vec<Value>, prec_bits: u32, op: F) -> Result<Value, EvalError>
+where F: Fn(Float, Float) -> Float {
+    let mut acc: Option<Float> = None;
+    for v in &args {
+        match to_float(v, prec_bits) {
+            Some(f) => acc = Some(match acc {
+                None => f,
+                Some(a) => op(a, f),
+            }),
+            None => return Ok(Value::Call {
+                head: "Unknown".to_string(), args,
+            }),
+        }
+    }
+    Ok(acc.map(Value::Real).unwrap_or(Value::Integer(Integer::from(0))))
+}
+
+fn coerce_to_float(v: Value, prec_bits: u32) -> Result<Value, EvalError> {
+    match v {
+        Value::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
+        Value::Real(r)    => Ok(Value::Real(Float::with_val(prec_bits, r))),
+        other             => Ok(other),
+    }
+}
 
 /// Map[f, list] — apply f to each element of list.
 fn builtin_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {

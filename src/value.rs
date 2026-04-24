@@ -15,6 +15,64 @@ use crate::ast::Expr;
 /// Default precision for floating-point numbers (128 bits ≈ 38 decimal digits).
 pub const DEFAULT_PRECISION: u32 = 128;
 
+/// Convert rug's `to_string_radix` output (e.g. `"3.14159e0"`, `"-1.5e2"`)
+/// into standard decimal notation (e.g. `"3.14159"`, `"-150.0"`).
+/// Rug uses `e` as exponent marker for base 10 (MPFR convention).
+pub fn rug_radix_to_decimal(s: &str) -> String {
+    // Split on 'e' or '@' to get mantissa and base-10 exponent.
+    let sep_pos = s[1..].find(|c| c == 'e' || c == '@').map(|i| i + 1);
+    let (mantissa, exp_str) = if let Some(at) = sep_pos {
+        (&s[..at], &s[at + 1..])
+    } else {
+        // No exponent — already standard decimal.
+        return trim_float_zeros(s);
+    };
+
+    let exp: i64 = exp_str.parse().unwrap_or(0);
+    let negative = mantissa.starts_with('-');
+    let digits_part = if negative { &mantissa[1..] } else { mantissa };
+
+    // digits_part is like "3.14159265..." — collect all digit characters.
+    let mut digits: Vec<char> = digits_part.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() { digits.push('0'); }
+
+    // The mantissa has 1 digit before the decimal, so the actual integer part
+    // ends at index `1 + exp` in the digit sequence.
+    let dot_pos = 1i64 + exp; // position from the left where '.' goes
+
+    let result = if dot_pos <= 0 {
+        // All digits are after the decimal point; need leading "0.000..." prefix.
+        let leading_zeros = (-dot_pos) as usize;
+        let frac: String = digits.iter().collect();
+        format!("0.{}{}", "0".repeat(leading_zeros), frac)
+    } else if dot_pos as usize >= digits.len() {
+        // Dot is at or beyond the last digit — integer, possibly with trailing zeros.
+        let extra = dot_pos as usize - digits.len();
+        let int_part: String = digits.iter().collect();
+        format!("{}{}.0", int_part, "0".repeat(extra))
+    } else {
+        let int_part: String = digits[..dot_pos as usize].iter().collect();
+        let frac_part: String = digits[dot_pos as usize..].iter().collect();
+        format!("{}.{}", int_part, frac_part)
+    };
+
+    let result = trim_float_zeros(&result);
+    if negative { format!("-{}", result) } else { result }
+}
+
+fn trim_float_zeros(s: &str) -> String {
+    if s.contains('.') {
+        let t = s.trim_end_matches('0');
+        if t.ends_with('.') {
+            format!("{}0", t)
+        } else {
+            t.to_string()
+        }
+    } else {
+        s.to_string()
+    }
+}
+
 /// A runtime value.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -479,18 +537,13 @@ impl fmt::Display for Value {
         match self {
             Value::Integer(n) => write!(f, "{}", n),
             Value::Real(r) => {
-                let s = format!("{}", r);
-                // Strip trailing zeros after decimal point
-                if s.contains('.') {
-                    let trimmed = s.trim_end_matches('0');
-                    if trimmed.ends_with('.') {
-                        write!(f, "{}0", trimmed)
-                    } else {
-                        write!(f, "{}", trimmed)
-                    }
-                } else {
-                    write!(f, "{}", s)
-                }
+                // Use to_string_radix for precise control: gives "d.ddd@exp" format.
+                // We convert that to standard decimal notation.
+                let prec_digits = ((r.prec() as f64) * std::f64::consts::LOG10_2).ceil() as usize;
+                let raw = r.to_string_radix(10, Some(prec_digits.max(1)));
+                // raw is like "3.14159...@0" or "3.14159...@-5" etc.
+                let formatted = rug_radix_to_decimal(&raw);
+                write!(f, "{}", formatted)
             }
             Value::Complex { re, im } => {
                 if *re == 0.0 {

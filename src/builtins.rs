@@ -1038,17 +1038,10 @@ fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error("Sin requires exactly 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Integer(n) => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.sin()))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(_) => Ok(Value::Call { head: "Sin".to_string(), args: args.to_vec() }),
         Value::Real(r) => Ok(Value::Real(r.clone().sin())),
-        _ => {
-            Ok(Value::Call {
-                head: "Sin".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call { head: "Sin".to_string(), args: args.to_vec() }),
     }
 }
 
@@ -1057,17 +1050,10 @@ fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error("Cos requires exactly 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Integer(n) => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.cos()))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Integer(_) => Ok(Value::Call { head: "Cos".to_string(), args: args.to_vec() }),
         Value::Real(r) => Ok(Value::Real(r.clone().cos())),
-        _ => {
-            Ok(Value::Call {
-                head: "Cos".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call { head: "Cos".to_string(), args: args.to_vec() }),
     }
 }
 
@@ -1076,46 +1062,99 @@ fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error("Tan requires exactly 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Integer(n) => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.tan()))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(_) => Ok(Value::Call { head: "Tan".to_string(), args: args.to_vec() }),
         Value::Real(r) => Ok(Value::Real(r.clone().tan())),
-        _ => {
-            Ok(Value::Call {
-                head: "Tan".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call { head: "Tan".to_string(), args: args.to_vec() }),
     }
 }
 
 fn builtin_log(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error("Log requires exactly 1 argument".to_string()));
-    }
-    match &args[0] {
-        Value::Integer(n) => {
-            if n.is_zero() || n.is_negative() {
-                Err(EvalError::Error("Log of non-positive number".to_string()))
-            } else {
-                let f = Float::with_val(DEFAULT_PRECISION, n);
-                Ok(Value::Real(f.ln()))
+    match args.len() {
+        // Log[x] — natural logarithm
+        1 => log_natural(&args[0]),
+        // Log[b, x] — base-b logarithm = Ln[x] / Ln[b]
+        2 => {
+            let b = &args[0];
+            let x = &args[1];
+            // Log[b, 1] = 0
+            if let Value::Integer(n) = x { if *n == 1 { return Ok(Value::Integer(Integer::from(0))); } }
+            // Log[b, b] = 1
+            if b == x { return Ok(Value::Integer(Integer::from(1))); }
+            // Log[b, b^n] = n  (symbolic: x is Power[b, exp])
+            if let Value::Call { head, args: pargs } = x {
+                if head == "Power" && pargs.len() == 2 && &pargs[0] == b {
+                    return Ok(pargs[1].clone());
+                }
+            }
+            // Log[b, x] where b and x are positive integers: try exact integer result
+            if let (Value::Integer(bi), Value::Integer(xi)) = (b, x) {
+                if !bi.is_negative() && !bi.is_zero() && !xi.is_negative() && !xi.is_zero() {
+                    if let Some(n) = exact_integer_log(xi, bi) {
+                        return Ok(Value::Integer(Integer::from(n)));
+                    }
+                }
+            }
+            // Numerical evaluation when at least one arg is a float
+            match (b, x) {
+                (Value::Real(_) | Value::Integer(_), Value::Real(_))
+                | (Value::Real(_), Value::Integer(_)) => {
+                    let ln_x = log_natural(x)?;
+                    let ln_b = log_natural(b)?;
+                    match (ln_x, ln_b) {
+                        (Value::Real(lx), Value::Real(lb)) => {
+                            if lb.is_zero() {
+                                return Err(EvalError::Error("Log base cannot be 1 or 0".to_string()));
+                            }
+                            let prec = lx.prec().max(lb.prec());
+                            Ok(Value::Real(Float::with_val(prec, &lx) / Float::with_val(prec, &lb)))
+                        }
+                        _ => Ok(Value::Call { head: "Log".to_string(), args: args.to_vec() }),
+                    }
+                }
+                _ => Ok(Value::Call { head: "Log".to_string(), args: args.to_vec() }),
             }
         }
+        _ => Err(EvalError::Error("Log requires 1 or 2 arguments".to_string())),
+    }
+}
+
+/// If x == b^n for a positive integer n, return Some(n). Otherwise None.
+fn exact_integer_log(x: &Integer, b: &Integer) -> Option<u32> {
+    if *b <= 1 { return None; }
+    let mut remaining = x.clone();
+    let mut n: u32 = 0;
+    loop {
+        if remaining == 1 { return Some(n); }
+        let (q, r) = remaining.clone().div_rem(b.clone());
+        if r != 0 { return None; }
+        remaining = q;
+        n += 1;
+    }
+}
+
+fn log_natural(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        // Exact special values
+        Value::Integer(n) if *n == 1 => Ok(Value::Integer(Integer::from(0))),
+        // Integer arguments stay symbolic (like Mathematica)
+        Value::Integer(n) => {
+            if n.is_negative() {
+                Err(EvalError::Error("Log of non-positive number".to_string()))
+            } else {
+                Ok(Value::Call { head: "Log".to_string(), args: vec![v.clone()] })
+            }
+        }
+        // Float arguments evaluate numerically
         Value::Real(r) => {
             if r.is_zero() || r.is_sign_negative() {
                 Err(EvalError::Error("Log of non-positive number".to_string()))
             } else {
-                Ok(Value::Real(r.clone().ln()))
+                let prec = r.prec();
+                Ok(Value::Real(Float::with_val(prec, r).ln()))
             }
         }
-        _ => {
-            Ok(Value::Call {
-                head: "Log".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call { head: "Log".to_string(), args: vec![v.clone()] }),
     }
 }
 
@@ -1124,17 +1163,10 @@ fn builtin_exp(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error("Exp requires exactly 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Integer(n) => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.exp()))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Integer(_) => Ok(Value::Call { head: "Exp".to_string(), args: args.to_vec() }),
         Value::Real(r) => Ok(Value::Real(r.clone().exp())),
-        _ => {
-            Ok(Value::Call {
-                head: "Exp".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call { head: "Exp".to_string(), args: args.to_vec() }),
     }
 }
 
