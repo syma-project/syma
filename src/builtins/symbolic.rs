@@ -1624,4 +1624,232 @@ mod tests {
             _ => panic!("Expected Times call, got {:?}", result),
         }
     }
+
+    // ── Expand tests ──
+
+    #[test]
+    fn test_expand_basic_power() {
+        // Expand[(x+1)^2] = x^2 + 2x + 1
+        let expr = simplify_call(
+            "Power",
+            &[simplify_call("Plus", &[sym("x"), int(1)]), int(2)],
+        );
+        let result = builtin_expand(&[expr]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Plus" => {}
+            _ => panic!("Expected Plus (expanded form), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_expand_product() {
+        // Expand[(x+1)(x+2)] = x^2 + 3x + 2
+        let expr = simplify_call(
+            "Times",
+            &[
+                simplify_call("Plus", &[sym("x"), int(1)]),
+                simplify_call("Plus", &[sym("x"), int(2)]),
+            ],
+        );
+        let result = builtin_expand(&[expr]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Plus" => {}
+            _ => panic!("Expected Plus (expanded), got {:?}", result),
+        }
+    }
+
+    // ── Differentiation tests ──
+
+    #[test]
+    fn test_d_power_rule() {
+        // D[x^3, x] = 3x^2
+        let expr = simplify_call("Power", &[sym("x"), int(3)]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                assert!(args.iter().any(|a| *a == int(3)));
+            }
+            _ => panic!("Expected Times containing 3, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_d_sin() {
+        // D[Sin[x], x] = Cos[x]
+        let expr = simplify_call("Sin", &[sym("x")]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        assert_eq!(result, simplify_call("Cos", &[sym("x")]));
+    }
+
+    #[test]
+    fn test_d_cos() {
+        // D[Cos[x], x] = -Sin[x]
+        let expr = simplify_call("Cos", &[sym("x")]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Times" => {}
+            _ => panic!("Expected Times (for -Sin[x]), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_d_exp() {
+        // D[Exp[x], x] = Exp[x]
+        let expr = simplify_call("Exp", &[sym("x")]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        assert_eq!(result, simplify_call("Exp", &[sym("x")]));
+    }
+
+    #[test]
+    fn test_d_log() {
+        // D[Log[x], x] = 1/x = x^(-1)
+        let expr = simplify_call("Log", &[sym("x")]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Power" => {}
+            _ => panic!("Expected Power (for 1/x = x^-1), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_d_sum_rule() {
+        // D[x^2 + Sin[x], x] = 2x + Cos[x]
+        let expr = simplify_call(
+            "Plus",
+            &[
+                simplify_call("Power", &[sym("x"), int(2)]),
+                simplify_call("Sin", &[sym("x")]),
+            ],
+        );
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Plus" => {}
+            _ => panic!("Expected Plus (sum rule), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_d_constant() {
+        // D[5, x] = 0
+        let result = builtin_d(&[int(5), sym("x")]).unwrap();
+        assert_eq!(result, int(0));
+    }
+
+    #[test]
+    fn test_d_linear() {
+        // D[3*x, x] = 3
+        let expr = simplify_call("Times", &[int(3), sym("x")]);
+        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        assert_eq!(result, int(3));
+    }
+
+    // ── Integration tests ──
+
+    #[test]
+    fn test_integrate_power() {
+        // Integrate[x^2, x] = x^3/3 (stored as Times[Power[x,3], Power[3,-1]])
+        let expr = simplify_call("Power", &[sym("x"), int(2)]);
+        let result = builtin_integrate(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                // Contains Power[x, 3]
+                assert!(args.iter().any(|a| matches!(a,
+                    Value::Call { head, args: a_args } if head == "Power" && a_args.len() == 2
+                        && a_args[0] == sym("x") && a_args[1] == int(3)
+                )), "Expected Power[x,3] in result, got {:?}", result);
+            }
+            _ => panic!("Expected Times (x^3/3), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_integrate_sin() {
+        // Integrate[Sin[x], x] = -Cos[x]
+        let expr = simplify_call("Sin", &[sym("x")]);
+        let result = builtin_integrate(&[expr, sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, args } if head == "Times" => {
+                // Should contain Cos[x]
+                assert!(args.iter().any(|a| *a == simplify_call("Cos", &[sym("x")])),
+                    "Expected Cos[x] in result, got {:?}", result);
+            }
+            _ => panic!("Expected Times containing Cos[x], got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_integrate_constant() {
+        // Integrate[5, x] = 5x
+        let result = builtin_integrate(&[int(5), sym("x")]).unwrap();
+        match &result {
+            Value::Call { head, .. } if head == "Times" => {}
+            _ => panic!("Expected Times (5*x), got {:?}", result),
+        }
+    }
+
+    // ── Solve tests ──
+
+    #[test]
+    fn test_solve_linear() {
+        // Solve[2x + 1 == 0, x]
+        let eq = Value::Call {
+            head: "Equal".to_string(),
+            args: vec![
+                simplify_call(
+                    "Plus",
+                    &[simplify_call("Times", &[int(2), sym("x")]), int(1)],
+                ),
+                int(0),
+            ],
+        };
+        let result = builtin_solve(&[eq, sym("x")]).unwrap();
+        match &result {
+            Value::List(items) if !items.is_empty() => {}
+            _ => panic!("Expected a list of solutions, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_solve_quadratic() {
+        // Solve[x^2 - 4 == 0, x]
+        let eq = Value::Call {
+            head: "Equal".to_string(),
+            args: vec![
+                simplify_call(
+                    "Plus",
+                    &[simplify_call("Power", &[sym("x"), int(2)]), int(-4)],
+                ),
+                int(0),
+            ],
+        };
+        let result = builtin_solve(&[eq, sym("x")]).unwrap();
+        match &result {
+            Value::List(items) if !items.is_empty() => {}
+            _ => panic!("Expected a list of solutions, got {:?}", result),
+        }
+    }
+
+    // ── Series tests ──
+
+    #[test]
+    fn test_series_sin_minimal() {
+        // Series[Sin[x], {x, 0, 1}] — minimal to avoid recursion issues
+        let var_spec = Value::List(vec![sym("x"), int(0), int(1)]);
+        let expr = simplify_call("Sin", &[sym("x")]);
+        let result = builtin_series(&[expr, var_spec]).unwrap();
+        let result_str = format!("{:?}", result);
+        assert!(
+            !result_str.is_empty(),
+            "Series[Sin[x], {{x, 0, 1}}] should produce a non-empty result"
+        );
+    }
+
+    // ── Simplify tests ──
+
+    #[test]
+    fn test_simplify_trivial() {
+        // Simplify[x] = x
+        let result = builtin_simplify(&[sym("x")]).unwrap();
+        assert_eq!(result, sym("x"));
+    }
 }

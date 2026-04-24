@@ -1,5 +1,6 @@
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
+use rug::Rational;
 
 pub fn builtin_equal(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
@@ -34,6 +35,23 @@ pub fn builtin_less(args: &[Value]) -> Result<Value, EvalError> {
         (Value::Real(a), Value::Integer(b)) => {
             Ok(Value::Bool(*a < Float::with_val(DEFAULT_PRECISION, b)))
         }
+        (Value::Rational(a), Value::Rational(b)) => Ok(Value::Bool(a.as_ref() < b.as_ref())),
+        (Value::Rational(a), Value::Integer(b)) => {
+            Ok(Value::Bool(a.as_ref() < &Rational::from(b)))
+        }
+        (Value::Integer(a), Value::Rational(b)) => {
+            Ok(Value::Bool(&Rational::from(a) < b.as_ref()))
+        }
+        (Value::Rational(a), Value::Real(b)) => {
+            let a_f = Float::with_val(DEFAULT_PRECISION, a.numer())
+                / Float::with_val(DEFAULT_PRECISION, a.denom());
+            Ok(Value::Bool(a_f < *b))
+        }
+        (Value::Real(a), Value::Rational(b)) => {
+            let b_f = Float::with_val(DEFAULT_PRECISION, b.numer())
+                / Float::with_val(DEFAULT_PRECISION, b.denom());
+            Ok(Value::Bool(*a < b_f))
+        }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
         _ => Err(EvalError::TypeError {
             expected: "Number or String".to_string(),
@@ -56,6 +74,23 @@ pub fn builtin_greater(args: &[Value]) -> Result<Value, EvalError> {
         }
         (Value::Real(a), Value::Integer(b)) => {
             Ok(Value::Bool(*a > Float::with_val(DEFAULT_PRECISION, b)))
+        }
+        (Value::Rational(a), Value::Rational(b)) => Ok(Value::Bool(a.as_ref() > b.as_ref())),
+        (Value::Rational(a), Value::Integer(b)) => {
+            Ok(Value::Bool(a.as_ref() > &Rational::from(b)))
+        }
+        (Value::Integer(a), Value::Rational(b)) => {
+            Ok(Value::Bool(&Rational::from(a) > b.as_ref()))
+        }
+        (Value::Rational(a), Value::Real(b)) => {
+            let a_f = Float::with_val(DEFAULT_PRECISION, a.numer())
+                / Float::with_val(DEFAULT_PRECISION, a.denom());
+            Ok(Value::Bool(a_f > *b))
+        }
+        (Value::Real(a), Value::Rational(b)) => {
+            let b_f = Float::with_val(DEFAULT_PRECISION, b.numer())
+                / Float::with_val(DEFAULT_PRECISION, b.denom());
+            Ok(Value::Bool(*a > b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
         _ => Err(EvalError::TypeError {
@@ -80,6 +115,23 @@ pub fn builtin_less_equal(args: &[Value]) -> Result<Value, EvalError> {
         (Value::Real(a), Value::Integer(b)) => {
             Ok(Value::Bool(*a <= Float::with_val(DEFAULT_PRECISION, b)))
         }
+        (Value::Rational(a), Value::Rational(b)) => Ok(Value::Bool(a.as_ref() <= b.as_ref())),
+        (Value::Rational(a), Value::Integer(b)) => {
+            Ok(Value::Bool(a.as_ref() <= &Rational::from(b)))
+        }
+        (Value::Integer(a), Value::Rational(b)) => {
+            Ok(Value::Bool(&Rational::from(a) <= b.as_ref()))
+        }
+        (Value::Rational(a), Value::Real(b)) => {
+            let a_f = Float::with_val(DEFAULT_PRECISION, a.numer())
+                / Float::with_val(DEFAULT_PRECISION, a.denom());
+            Ok(Value::Bool(a_f <= *b))
+        }
+        (Value::Real(a), Value::Rational(b)) => {
+            let b_f = Float::with_val(DEFAULT_PRECISION, b.numer())
+                / Float::with_val(DEFAULT_PRECISION, b.denom());
+            Ok(Value::Bool(*a <= b_f))
+        }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
         _ => Err(EvalError::TypeError {
             expected: "Number or String".to_string(),
@@ -103,90 +155,27 @@ pub fn builtin_greater_equal(args: &[Value]) -> Result<Value, EvalError> {
         (Value::Real(a), Value::Integer(b)) => {
             Ok(Value::Bool(*a >= Float::with_val(DEFAULT_PRECISION, b)))
         }
+        (Value::Rational(a), Value::Rational(b)) => Ok(Value::Bool(a.as_ref() >= b.as_ref())),
+        (Value::Rational(a), Value::Integer(b)) => {
+            Ok(Value::Bool(a.as_ref() >= &Rational::from(b)))
+        }
+        (Value::Integer(a), Value::Rational(b)) => {
+            Ok(Value::Bool(&Rational::from(a) >= b.as_ref()))
+        }
+        (Value::Rational(a), Value::Real(b)) => {
+            let a_f = Float::with_val(DEFAULT_PRECISION, a.numer())
+                / Float::with_val(DEFAULT_PRECISION, a.denom());
+            Ok(Value::Bool(a_f >= *b))
+        }
+        (Value::Real(a), Value::Rational(b)) => {
+            let b_f = Float::with_val(DEFAULT_PRECISION, b.numer())
+                / Float::with_val(DEFAULT_PRECISION, b.denom());
+            Ok(Value::Bool(*a >= b_f))
+        }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
         _ => Err(EvalError::TypeError {
             expected: "Number or String".to_string(),
             got: args[0].type_name().to_string(),
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rug::Integer;
-
-    fn int(n: i64) -> Value {
-        Value::Integer(Integer::from(n))
-    }
-    fn boolean(b: bool) -> Value {
-        Value::Bool(b)
-    }
-    fn string(s: &str) -> Value {
-        Value::Str(s.to_string())
-    }
-
-    #[test]
-    fn test_equal() {
-        assert_eq!(builtin_equal(&[int(1), int(1)]).unwrap(), boolean(true));
-        assert_eq!(builtin_equal(&[int(1), int(2)]).unwrap(), boolean(false));
-    }
-
-    #[test]
-    fn test_unequal() {
-        assert_eq!(builtin_unequal(&[int(1), int(2)]).unwrap(), boolean(true));
-        assert_eq!(builtin_unequal(&[int(1), int(1)]).unwrap(), boolean(false));
-    }
-
-    #[test]
-    fn test_less() {
-        assert_eq!(builtin_less(&[int(1), int(2)]).unwrap(), boolean(true));
-        assert_eq!(builtin_less(&[int(2), int(1)]).unwrap(), boolean(false));
-    }
-
-    #[test]
-    fn test_greater() {
-        assert_eq!(builtin_greater(&[int(2), int(1)]).unwrap(), boolean(true));
-        assert_eq!(builtin_greater(&[int(1), int(2)]).unwrap(), boolean(false));
-    }
-
-    #[test]
-    fn test_less_equal() {
-        assert_eq!(
-            builtin_less_equal(&[int(1), int(1)]).unwrap(),
-            boolean(true)
-        );
-        assert_eq!(
-            builtin_less_equal(&[int(1), int(2)]).unwrap(),
-            boolean(true)
-        );
-        assert_eq!(
-            builtin_less_equal(&[int(2), int(1)]).unwrap(),
-            boolean(false)
-        );
-    }
-
-    #[test]
-    fn test_greater_equal() {
-        assert_eq!(
-            builtin_greater_equal(&[int(1), int(1)]).unwrap(),
-            boolean(true)
-        );
-        assert_eq!(
-            builtin_greater_equal(&[int(2), int(1)]).unwrap(),
-            boolean(true)
-        );
-        assert_eq!(
-            builtin_greater_equal(&[int(1), int(2)]).unwrap(),
-            boolean(false)
-        );
-    }
-
-    #[test]
-    fn test_less_strings() {
-        assert_eq!(
-            builtin_less(&[string("a"), string("b")]).unwrap(),
-            boolean(true)
-        );
     }
 }

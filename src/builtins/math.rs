@@ -1883,6 +1883,16 @@ pub fn builtin_fixed_point(args: &[Value], env: &Env) -> Result<Value, EvalError
     Ok(val)
 }
 
+/// IntegerQ[x] — return True if x is an integer.
+pub fn builtin_integer_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "IntegerQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Bool(matches!(&args[0], Value::Integer(_))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

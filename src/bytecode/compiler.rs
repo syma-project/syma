@@ -327,9 +327,9 @@ impl BytecodeCompiler {
             Expr::Hold(inner) => {
                 self.emit_const(Value::Hold(Box::new(Value::Pattern(*inner.clone()))))
             }
-            Expr::HoldComplete(inner) => {
-                self.emit_const(Value::HoldComplete(Box::new(Value::Pattern(*inner.clone()))))
-            }
+            Expr::HoldComplete(inner) => self.emit_const(Value::HoldComplete(Box::new(
+                Value::Pattern(*inner.clone()),
+            ))),
             // ── Slot ──
             Expr::Slot(None) => {
                 let dst = self.regs.alloc()?;
@@ -363,17 +363,16 @@ impl BytecodeCompiler {
                 params: params.clone(),
             }),
             // ── Pattern literals ──
-            Expr::Blank { type_constraint } => {
-                self.emit_const(Value::Pattern(Expr::Blank {
-                    type_constraint: type_constraint.clone(),
-                }))
-            }
-            Expr::NamedBlank { name, type_constraint } => {
-                self.emit_const(Value::Pattern(Expr::NamedBlank {
-                    name: name.clone(),
-                    type_constraint: type_constraint.clone(),
-                }))
-            }
+            Expr::Blank { type_constraint } => self.emit_const(Value::Pattern(Expr::Blank {
+                type_constraint: type_constraint.clone(),
+            })),
+            Expr::NamedBlank {
+                name,
+                type_constraint,
+            } => self.emit_const(Value::Pattern(Expr::NamedBlank {
+                name: name.clone(),
+                type_constraint: type_constraint.clone(),
+            })),
             Expr::BlankSequence {
                 name,
                 type_constraint,
@@ -388,13 +387,12 @@ impl BytecodeCompiler {
                 name: name.clone(),
                 type_constraint: type_constraint.clone(),
             })),
-            Expr::PatternGuard {
-                pattern,
-                condition,
-            } => self.emit_const(Value::Pattern(Expr::PatternGuard {
-                pattern: pattern.clone(),
-                condition: condition.clone(),
-            })),
+            Expr::PatternGuard { pattern, condition } => {
+                self.emit_const(Value::Pattern(Expr::PatternGuard {
+                    pattern: pattern.clone(),
+                    condition: condition.clone(),
+                }))
+            }
             Expr::OptionalBlank {
                 type_constraint,
                 default_value,
@@ -443,15 +441,11 @@ impl BytecodeCompiler {
             Expr::ModuleDef { .. } => Err(CompileError::UnsupportedFeature(
                 "module definition".to_string(),
             )),
-            Expr::Import { .. } => {
-                Err(CompileError::UnsupportedFeature("import".to_string()))
+            Expr::Import { .. } => Err(CompileError::UnsupportedFeature("import".to_string())),
+            Expr::Export(..) => Err(CompileError::UnsupportedFeature("export".to_string())),
+            Expr::Information(..) => {
+                Err(CompileError::UnsupportedFeature("information".to_string()))
             }
-            Expr::Export(..) => {
-                Err(CompileError::UnsupportedFeature("export".to_string()))
-            }
-            Expr::Information(..) => Err(CompileError::UnsupportedFeature(
-                "information".to_string(),
-            )),
         }
     }
 
@@ -959,11 +953,26 @@ fn count_slots(expr: &Expr) -> usize {
         | Expr::Pure { body: e } => count_slots(e),
         Expr::Rule { lhs, rhs }
         | Expr::RuleDelayed { lhs, rhs }
-        | Expr::ReplaceAll { expr: lhs, rules: rhs }
-        | Expr::ReplaceRepeated { expr: lhs, rules: rhs }
-        | Expr::Map { func: lhs, list: rhs }
-        | Expr::Apply { func: lhs, expr: rhs }
-        | Expr::Prefix { func: lhs, arg: rhs } => count_slots(lhs).max(count_slots(rhs)),
+        | Expr::ReplaceAll {
+            expr: lhs,
+            rules: rhs,
+        }
+        | Expr::ReplaceRepeated {
+            expr: lhs,
+            rules: rhs,
+        }
+        | Expr::Map {
+            func: lhs,
+            list: rhs,
+        }
+        | Expr::Apply {
+            func: lhs,
+            expr: rhs,
+        }
+        | Expr::Prefix {
+            func: lhs,
+            arg: rhs,
+        } => count_slots(lhs).max(count_slots(rhs)),
         Expr::Sequence(stmts) => stmts.iter().map(count_slots).max().unwrap_or(0),
         Expr::If {
             condition,
@@ -997,17 +1006,15 @@ fn count_slots(expr: &Expr) -> usize {
             condition,
             step,
             body,
-        } => {
-            count_slots(init)
-                .max(count_slots(condition))
-                .max(count_slots(step))
-                .max(count_slots(body))
-        }
+        } => count_slots(init)
+            .max(count_slots(condition))
+            .max(count_slots(step))
+            .max(count_slots(body)),
         Expr::While { condition, body } => count_slots(condition).max(count_slots(body)),
         Expr::Do { body, iterator } => match iterator {
-            crate::ast::IteratorSpec::Range { min, max, .. } => {
-                count_slots(body).max(count_slots(min)).max(count_slots(max))
-            }
+            crate::ast::IteratorSpec::Range { min, max, .. } => count_slots(body)
+                .max(count_slots(min))
+                .max(count_slots(max)),
             crate::ast::IteratorSpec::List { .. } => count_slots(body),
         },
         Expr::Function { params: _, body } => count_slots(body),

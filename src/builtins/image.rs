@@ -33,6 +33,7 @@ fn value_to_f64(v: &Value) -> Result<f64, EvalError> {
     match v {
         Value::Integer(n) => Ok(n.to_f64()),
         Value::Real(r) => Ok(r.to_f64()),
+        Value::Rational(r) => Ok(r.to_f64()),
         _ => Err(EvalError::Error(format!(
             "Expected a numeric value, got {}",
             v.type_name()

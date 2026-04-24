@@ -289,14 +289,20 @@ fn test_local_symbol_persists_across_calls() {
 fn test_pattern_test_integer_q() {
     // _?IntegerQ matches only integers
     let out = syma_eval("MatchQ[5, _?IntegerQ]");
-    assert!(out.contains("True"), "5 should match _?IntegerQ, got: {out}");
+    assert!(
+        out.contains("True"),
+        "5 should match _?IntegerQ, got: {out}"
+    );
 }
 
 #[test]
 fn test_pattern_test_not_integer_q() {
     // _?IntegerQ should not match a real
     let out = syma_eval("MatchQ[3.14, _?IntegerQ]");
-    assert!(out.contains("False"), "3.14 should not match _?IntegerQ, got: {out}");
+    assert!(
+        out.contains("False"),
+        "3.14 should not match _?IntegerQ, got: {out}"
+    );
 }
 
 #[test]
@@ -347,4 +353,180 @@ fn test_integrate_basic() {
         out.contains("x^3"),
         "Integrate[x^2 + Sin[x], x] should contain x^3, got: {out}"
     );
+}
+
+// ── Integration tests for untested example files ──────────────────────
+
+#[test]
+fn test_run_control_flow_example() {
+    let output = syma_run(&["examples/basics/04-control-flow.syma"]);
+    assert!(
+        output.status.success(),
+        "control-flow example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("yes"), "stdout: {stdout}");
+    assert!(stdout.contains("math works"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("7"),
+        "abs[-7] should yield 7, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_map_fold_select_example() {
+    let output = syma_run(&["examples/functional/01-map-fold-select.syma"]);
+    assert!(
+        output.status.success(),
+        "map-fold-select example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("15"),
+        "Sum 1..5 should be 15, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("120"),
+        "Product 1..5 should be 120, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_patterns_and_rules_example() {
+    let output = syma_run(&["examples/functional/02-patterns-and-rules.syma"]);
+    assert!(
+        output.status.success(),
+        "patterns-and-rules example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("55"),
+        "fib[10] should be 55, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("120"),
+        "fact[5] should be 120, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_applied_example() {
+    let output = syma_run(&["examples/applied/01-real-world.syma"]);
+    assert!(
+        output.status.success(),
+        "applied example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("32"),
+        "celsiusToF[0] should be 32, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("5"),
+        "dist[0,0,3,4] should be 5, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("3628800"),
+        "fact[10] should be 3628800, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_pi_series_example() {
+    let output = syma_run(&["examples/math/02-pi-series.syma"]);
+    assert!(
+        output.status.success(),
+        "pi-series example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("3.1"),
+        "pi series should approximate 3.1, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_newtons_method_example() {
+    let output = syma_run(&["examples/math/03-newtons-method.syma"]);
+    assert!(
+        output.status.success(),
+        "newtons-method example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("1.414"),
+        "sqrt(2) approx should be 1.414, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_numerical_integration_example() {
+    let output = syma_run(&["examples/math/04-numerical-integration.syma"]);
+    assert!(
+        output.status.success(),
+        "numerical-integration example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("3.14"),
+        "numerical integration of pi should be ~3.14, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_taylor_series_example() {
+    let output = syma_run(&["examples/math/05-taylor-series.syma"]);
+    assert!(
+        output.status.success(),
+        "taylor-series example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("2.718"),
+        "e^1 Taylor approx should be 2.718, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_monte_carlo_pi_example() {
+    let output = syma_run(&["examples/math/06-monte-carlo-pi.syma"]);
+    assert!(
+        output.status.success(),
+        "monte-carlo-pi example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Estimate"),
+        "monte carlo should produce an estimate, stdout: {stdout}"
+    );
+    // The estimate should be a number (non-deterministic, just check it ran)
+    assert!(
+        stdout.contains("3."),
+        "monte carlo pi estimate should be ~3.x, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_module_example() {
+    // Module/import are partially implemented (stored as symbol markers)
+    let output = syma_run(&["examples/advanced/01-modules.syma"]);
+    // The module syntax should parse without crash
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // Modules may not be fully evaluated, but should not crash
+        assert!(
+            stdout.contains("square") || stderr.contains("not implemented"),
+            "Module example should either run or give a graceful message, stdout: {stdout}, stderr: {stderr}"
+        );
+    }
 }

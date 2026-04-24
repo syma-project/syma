@@ -594,6 +594,7 @@ fn to_f64_val(v: &Value) -> Option<f64> {
     match v {
         Value::Integer(n) => Some(n.to_f64()),
         Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => Some(r.to_f64()),
         Value::Complex { re, im: 0.0 } => Some(*re),
         _ => None,
     }

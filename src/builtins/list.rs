@@ -9,6 +9,7 @@ fn to_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Integer(n) => Some(n.to_f64()),
         Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => Some(r.to_f64()),
         _ => None,
     }
 }
@@ -264,7 +265,16 @@ pub fn builtin_flatten(args: &[Value]) -> Result<Value, EvalError> {
             Value::List(items) if depth > 0 => {
                 let mut result = Vec::new();
                 for item in items {
-                    result.extend(flatten_depth(item, depth - 1));
+                    match item {
+                        Value::List(sub_items) => {
+                            if depth > 1 {
+                                result.extend(flatten_depth(item, depth - 1));
+                            } else {
+                                result.extend(sub_items.iter().cloned());
+                            }
+                        }
+                        _ => result.push(item.clone()),
+                    }
                 }
                 result
             }

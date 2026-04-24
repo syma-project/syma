@@ -17,7 +17,9 @@ use crate::bytecode;
 use crate::env::Env;
 use crate::env::LazyProvider;
 use crate::ffi;
-use crate::pattern::{AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern};
+use crate::pattern::{
+    AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern,
+};
 use crate::profiler;
 use crate::value::*;
 
@@ -232,9 +234,26 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Switch { expr, cases } => {
             let val = eval(expr, env)?;
             for (pattern, result) in cases {
-                let pat_val = eval(pattern, env)?;
-                if let MatchResult::Match(_) = match_pattern(&rules::pat_to_expr(&pat_val), &val, Some(&_attr_checker)) {
-                    return eval(result, env);
+                let (inner_pat, guard) = extract_guard_expr(pattern);
+                if let MatchResult::Match(bindings) =
+                    match_pattern(inner_pat, &val, Some(&_attr_checker))
+                {
+                    // Evaluate guard if present
+                    if let Some(guard_expr) = guard {
+                        let guard_env = env.child();
+                        for (name, value) in &bindings {
+                            guard_env.set(name.clone(), value.clone());
+                        }
+                        guard_env.set("#".to_string(), val.clone());
+                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                            continue;
+                        }
+                    }
+                    let child_env = env.child();
+                    for (name, value) in &bindings {
+                        child_env.set(name.clone(), value.clone());
+                    }
+                    return eval(result, &child_env);
                 }
             }
             Ok(Value::Null)
@@ -245,7 +264,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let val = eval(expr, env)?;
             for branch in branches {
                 let (inner_pat, guard) = extract_guard_expr(&branch.pattern);
-                if let MatchResult::Match(bindings) = match_pattern(inner_pat, &val, Some(&_attr_checker)) {
+                if let MatchResult::Match(bindings) =
+                    match_pattern(inner_pat, &val, Some(&_attr_checker))
+                {
                     // Evaluate guard if present
                     if let Some(guard_expr) = guard {
                         let guard_env = env.child();
@@ -452,7 +473,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             }
                             _ => {
                                 // Pattern destructuring
-                                if let MatchResult::Match(bindings) = match_pattern(pat, item, Some(&_attr_checker)) {
+                                if let MatchResult::Match(bindings) =
+                                    match_pattern(pat, item, Some(&_attr_checker))
+                                {
                                     for (name, value) in bindings {
                                         env.set(name, value);
                                     }
@@ -1290,11 +1313,12 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             {
                 use std::sync::atomic::Ordering;
                 const JIT_THRESHOLD: u64 = 1000;
+                const JIT_FAILED: usize = 1;
 
                 let prev = bc_def.call_count.fetch_add(1, Ordering::Relaxed);
                 if prev + 1 > JIT_THRESHOLD {
                     let jit_ptr = bc_def.jit_fn_ptr.load(Ordering::Relaxed);
-                    if !jit_ptr.is_null() {
+                    if !jit_ptr.is_null() && jit_ptr as usize != JIT_FAILED {
                         let mut regs = vec![Value::Null; bc_def.bytecode.nregs as usize];
                         let mut jit_ctx = crate::jit::runtime::JitContext::new(
                             &bc_def.bytecode,
@@ -1313,6 +1337,11 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                             bc_def
                                 .jit_fn_ptr
                                 .store(jit_fn.fn_ptr as *mut (), Ordering::Relaxed);
+                        } else {
+                            // Compilation failed — set sentinel so we never retry.
+                            bc_def
+                                .jit_fn_ptr
+                                .store(JIT_FAILED as *mut (), Ordering::Relaxed);
                         }
                     }
                 }
@@ -2488,6 +2517,41 @@ mod tests {
     fn test_pattern_guard_match_expression() {
         let result = eval_str(r#"match 7 { n_ /; n > 5 => "big"; n_ => "small" }"#);
         assert_eq!(result, Value::Str("big".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_guard_match_no_match() {
+        // Guard fails so second branch matches
+        let result = eval_str(r#"match 3 { n_ /; n > 5 => "big"; n_ => "small" }"#);
+        assert_eq!(result, Value::Str("small".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_guard_match_fallback() {
+        // Guard fails, fallback branch with no guard matches
+        let result = eval_str(r#"match 3 { n_ /; n > 5 => "big"; n_ => "small" }"#);
+        assert_eq!(result, Value::Str("small".to_string()));
+    }
+
+    #[test]
+    fn test_switch_literal() {
+        // Switch with literal integer patterns
+        let result = eval_str(r#"Switch[2, 1, "one", 2, "two", 3, "three"]"#);
+        assert_eq!(result, Value::Str("two".to_string()));
+    }
+
+    #[test]
+    fn test_switch_fallback() {
+        // Switch with no matching case returns Null
+        let result = eval_str(r#"Switch[99, 1, "one", 2, "two"]"#);
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_switch_named_blank() {
+        // Switch with named blank pattern (y_ parsed as Symbol but matched as NamedBlank)
+        let result = eval_str(r#"Switch[x, y_, y]"#);
+        assert_eq!(result, Value::Symbol("x".to_string()));
     }
 
     // ── Catch/Throw ──

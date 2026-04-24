@@ -6,11 +6,15 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::value::{EvalError, Value};
+use crate::value::{rational_value, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+use rug::Rational;
 
-use super::arithmetic::{builtin_divide, builtin_plus, builtin_times};
+use super::arithmetic::{
+    add_values_public, builtin_divide, builtin_plus, builtin_times, mul_values_public,
+    sub_values_public,
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 use crate::ast::Expr;
 use crate::env::Env;
+use crate::eval::eval;
 use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::EvalError;
 use crate::value::Value;
@@ -34,19 +35,34 @@ fn contains_pattern_value(val: &Value) -> bool {
     }
 }
 
-pub fn builtin_match_q(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+pub fn builtin_match_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "MatchQ requires exactly 2 arguments".to_string(),
         ));
     }
-    let attr_checker = AttributeChecker::new(_env.attributes.clone());
+    let attr_checker = AttributeChecker::new(env.attributes.clone());
     let result = match &args[1] {
         Value::Pattern(pat_expr) => {
-            matches!(
-                match_pattern(pat_expr, &args[0], Some(&attr_checker)),
-                MatchResult::Match(_)
-            )
+            // Handle PatternGuard — need to evaluate the guard condition
+            if let Expr::PatternGuard { pattern, condition } = pat_expr {
+                if matches!(
+                    match_pattern(pattern, &args[0], Some(&attr_checker)),
+                    MatchResult::Match(_)
+                ) {
+                    // Evaluate guard condition with # bound to the value
+                    let guard_env = env.child();
+                    guard_env.set("#".to_string(), args[0].clone());
+                    eval(condition, &guard_env)?.to_bool()
+                } else {
+                    false
+                }
+            } else {
+                matches!(
+                    match_pattern(pat_expr, &args[0], Some(&attr_checker)),
+                    MatchResult::Match(_)
+                )
+            }
         }
         // Compound values containing Pattern elements → convert to pattern expr
         _ if contains_pattern_value(&args[1]) => {
@@ -79,20 +95,45 @@ pub fn builtin_type_of(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Symbol(args[0].type_name().to_string()))
 }
 
-pub fn builtin_free_q(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "FreeQ requires exactly 2 arguments".to_string(),
         ));
     }
-    let attr_checker = AttributeChecker::new(_env.attributes.clone());
-    fn contains_pattern(value: &Value, pattern: &Value, attr_checker: &AttributeChecker) -> bool {
-        let matched = match pattern {
+    let attr_checker = AttributeChecker::new(env.attributes.clone());
+    #[inline]
+    fn check_match(
+        value: &Value,
+        pattern: &Value,
+        attr_checker: &AttributeChecker,
+        env: Option<&Env>,
+    ) -> bool {
+        match pattern {
             Value::Pattern(pat_expr) => {
-                matches!(
-                    match_pattern(pat_expr, value, Some(attr_checker)),
-                    MatchResult::Match(_)
-                )
+                if let Expr::PatternGuard { pattern, condition } = pat_expr {
+                    if matches!(
+                        match_pattern(pattern, value, Some(attr_checker)),
+                        MatchResult::Match(_)
+                    ) {
+                        if let Some(env) = env {
+                            let guard_env = env.child();
+                            guard_env.set("#".to_string(), value.clone());
+                            eval(condition, &guard_env)
+                                .map(|v| v.to_bool())
+                                .unwrap_or(false)
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    matches!(
+                        match_pattern(pat_expr, value, Some(attr_checker)),
+                        MatchResult::Match(_)
+                    )
+                }
             }
             _ if contains_pattern_value(pattern) => {
                 let pat_expr = value_to_pattern_expr(pattern);
@@ -102,28 +143,70 @@ pub fn builtin_free_q(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
                 )
             }
             _ => value.struct_eq(pattern),
-        };
-        if matched {
+        }
+    }
+    fn contains_pattern(
+        value: &Value,
+        pattern: &Value,
+        attr_checker: &AttributeChecker,
+        env: Option<&Env>,
+    ) -> bool {
+        if check_match(value, pattern, attr_checker, env) {
             return true;
         }
         match value {
-            Value::List(items) => items.iter().any(|item| contains_pattern(item, pattern, attr_checker)),
-            Value::Call { args, .. } => args.iter().any(|arg| contains_pattern(arg, pattern, attr_checker)),
+            Value::List(items) => items
+                .iter()
+                .any(|item| contains_pattern(item, pattern, attr_checker, env)),
+            Value::Call { args, .. } => args
+                .iter()
+                .any(|arg| contains_pattern(arg, pattern, attr_checker, env)),
             _ => false,
         }
     }
-    Ok(Value::Bool(!contains_pattern(&args[0], &args[1], &attr_checker)))
+    Ok(Value::Bool(!contains_pattern(
+        &args[0],
+        &args[1],
+        &attr_checker,
+        Some(env),
+    )))
 }
 
 /// Check if a value matches a pattern.
 /// If pattern is a Value::Pattern, use the pattern engine; otherwise use structural equality.
-fn matches_value(value: &Value, pattern: &Value, attr_checker: Option<&AttributeChecker>) -> bool {
+/// If env is provided, PatternGuard conditions are evaluated.
+fn matches_value(
+    value: &Value,
+    pattern: &Value,
+    attr_checker: Option<&AttributeChecker>,
+    env: Option<&Env>,
+) -> bool {
     match pattern {
         Value::Pattern(pat_expr) => {
-            matches!(
-                match_pattern(pat_expr, value, attr_checker),
-                MatchResult::Match(_)
-            )
+            // Handle PatternGuard with guard evaluation
+            if let Expr::PatternGuard { pattern, condition } = pat_expr {
+                if matches!(
+                    match_pattern(pattern, value, attr_checker),
+                    MatchResult::Match(_)
+                ) {
+                    if let Some(env) = env {
+                        let guard_env = env.child();
+                        guard_env.set("#".to_string(), value.clone());
+                        eval(condition, &guard_env)
+                            .map(|v| v.to_bool())
+                            .unwrap_or(false)
+                    } else {
+                        true // no env means we can't evaluate the guard
+                    }
+                } else {
+                    false
+                }
+            } else {
+                matches!(
+                    match_pattern(pat_expr, value, attr_checker),
+                    MatchResult::Match(_)
+                )
+            }
         }
         _ if contains_pattern_value(pattern) => {
             let pat_expr = value_to_pattern_expr(pattern);
@@ -137,7 +220,7 @@ fn matches_value(value: &Value, pattern: &Value, attr_checker: Option<&Attribute
 }
 
 /// Cases[list, pattern] — select elements matching a pattern.
-pub fn builtin_cases(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+pub fn builtin_cases(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
             "Cases requires 2 or 3 arguments".to_string(),
@@ -152,18 +235,18 @@ pub fn builtin_cases(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
             });
         }
     };
-    let attr_checker = AttributeChecker::new(_env.attributes.clone());
+    let attr_checker = AttributeChecker::new(env.attributes.clone());
     let pattern = &args[1];
     let result: Vec<Value> = items
         .iter()
-        .filter(|item| matches_value(item, pattern, Some(&attr_checker)))
+        .filter(|item| matches_value(item, pattern, Some(&attr_checker), Some(env)))
         .cloned()
         .collect();
     Ok(Value::List(result))
 }
 
 /// DeleteCases[list, pattern] — remove elements matching a pattern.
-pub fn builtin_delete_cases(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+pub fn builtin_delete_cases(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
             "DeleteCases requires 2 or 3 arguments".to_string(),
@@ -178,11 +261,11 @@ pub fn builtin_delete_cases(args: &[Value], _env: &Env) -> Result<Value, EvalErr
             });
         }
     };
-    let attr_checker = AttributeChecker::new(_env.attributes.clone());
+    let attr_checker = AttributeChecker::new(env.attributes.clone());
     let pattern = &args[1];
     let result: Vec<Value> = items
         .iter()
-        .filter(|item| !matches_value(item, pattern, Some(&attr_checker)))
+        .filter(|item| !matches_value(item, pattern, Some(&attr_checker), Some(env)))
         .cloned()
         .collect();
     Ok(Value::List(result))

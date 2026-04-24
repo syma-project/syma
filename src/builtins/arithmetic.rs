@@ -1,4 +1,4 @@
-use crate::value::{rational_value, DEFAULT_PRECISION, EvalError, Value};
+use crate::value::{DEFAULT_PRECISION, EvalError, Value, rational_value};
 use rug::Float;
 use rug::Integer;
 use rug::Rational;
@@ -73,18 +73,16 @@ fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 ))
             }
         }
-        _ => {
-            Ok(Value::Call {
-                head: "Plus".to_string(),
-                args: vec![
-                    a.clone(),
-                    Value::Call {
-                        head: "Times".to_string(),
-                        args: vec![Value::Integer(Integer::from(-1)), b.clone()],
-                    },
-                ],
-            })
-        }
+        _ => Ok(Value::Call {
+            head: "Plus".to_string(),
+            args: vec![
+                a.clone(),
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![Value::Integer(Integer::from(-1)), b.clone()],
+                },
+            ],
+        }),
     }
 }
 
@@ -142,12 +140,10 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 ))
             }
         }
-        _ => {
-            Ok(Value::Call {
-                head: "Plus".to_string(),
-                args: vec![a.clone(), b.clone()],
-            })
-        }
+        _ => Ok(Value::Call {
+            head: "Plus".to_string(),
+            args: vec![a.clone(), b.clone()],
+        }),
     }
 }
 
@@ -229,7 +225,9 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
 
 pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Power requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Power requires exactly 2 arguments".to_string(),
+        ));
     }
     if matches!(&args[1], Value::Integer(n) if n.is_zero())
         || matches!(&args[1], Value::Rational(n) if n.is_zero())
@@ -251,9 +249,10 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
             if let Some(e) = exp.to_u32() {
                 Ok(Value::Integer(base.clone().pow(e)))
             } else {
-                let e = exp.clone().abs().to_u32().ok_or_else(|| {
-                    EvalError::Error("Power: exponent out of range".to_string())
-                })?;
+                let e =
+                    exp.clone().abs().to_u32().ok_or_else(|| {
+                        EvalError::Error("Power: exponent out of range".to_string())
+                    })?;
                 let abs_pow = base.clone().pow(e);
                 Ok(rational_value(Integer::from(1), abs_pow))
             }
@@ -264,9 +263,10 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
                 let (num, den) = result.into_numer_denom();
                 Ok(rational_value(num, den))
             } else {
-                let e = exp.clone().abs().to_u32().ok_or_else(|| {
-                    EvalError::Error("Power: exponent out of range".to_string())
-                })?;
+                let e =
+                    exp.clone().abs().to_u32().ok_or_else(|| {
+                        EvalError::Error("Power: exponent out of range".to_string())
+                    })?;
                 let pow_result: Rational = rug::ops::Pow::pow(base.as_ref(), e).into();
                 let (num, den) = pow_result.into_numer_denom();
                 Ok(rational_value(den, num))
@@ -290,7 +290,9 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Divide requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Divide requires exactly 2 arguments".to_string(),
+        ));
     }
     if matches!(&args[1], Value::Integer(n) if *n == 1)
         || matches!(&args[1], Value::Rational(n) if *n.numer() == 1 && *n.denom() == 1)
@@ -375,13 +377,17 @@ pub fn builtin_minus(args: &[Value]) -> Result<Value, EvalError> {
         let neg = builtin_minus(&[args[1].clone()])?;
         add_values(&args[0], &neg)
     } else {
-        Err(EvalError::Error("Minus requires 1 or 2 arguments".to_string()))
+        Err(EvalError::Error(
+            "Minus requires 1 or 2 arguments".to_string(),
+        ))
     }
 }
 
 pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Abs requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Abs requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone().abs())),

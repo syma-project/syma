@@ -3,7 +3,9 @@
 /// Handles ReplaceAll (/. / //.) and similar rule-based substitution.
 use crate::ast::*;
 use crate::env::Env;
-use crate::pattern::{AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern};
+use crate::pattern::{
+    AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern,
+};
 use crate::value::*;
 
 /// Apply rules to a value, optionally evaluating pattern guards.
@@ -15,7 +17,8 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
         } => {
             'next_rule: for (lhs, rhs) in rule_pairs {
                 if let Value::Pattern(lhs_expr) = lhs
-                    && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value, Some(&_attr_checker))
+                    && let MatchResult::Match(bindings) =
+                        match_pattern(lhs_expr, value, Some(&_attr_checker))
                     && let Value::Pattern(rhs_expr) = rhs
                 {
                     // Evaluate guards if present
@@ -59,7 +62,8 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
         }
         Value::Rule { lhs, rhs, delayed } => {
             if let Value::Pattern(lhs_expr) = lhs.as_ref()
-                && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value, Some(&_attr_checker))
+                && let MatchResult::Match(bindings) =
+                    match_pattern(lhs_expr, value, Some(&_attr_checker))
             {
                 // Evaluate guards if present
                 let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
@@ -141,25 +145,6 @@ fn substitute_value(expr: &Expr, bindings: &Bindings) -> Result<Value, EvalError
             }
         }
         _ => Ok(Value::Pattern(expr.clone())),
-    }
-}
-
-/// Convert a Value back to an Expr for pattern matching.
-pub(super) fn pat_to_expr(val: &Value) -> Expr {
-    match val {
-        Value::Integer(n) => Expr::Integer(n.clone()),
-        Value::Real(r) => Expr::Real(r.clone()),
-        Value::Bool(b) => Expr::Bool(*b),
-        Value::Str(s) => Expr::Str(s.clone()),
-        Value::Null => Expr::Null,
-        Value::Symbol(s) => Expr::Symbol(s.clone()),
-        Value::List(items) => Expr::List(items.iter().map(pat_to_expr).collect()),
-        Value::Call { head, args } => Expr::Call {
-            head: Box::new(Expr::Symbol(head.clone())),
-            args: args.iter().map(pat_to_expr).collect(),
-        },
-        Value::Pattern(expr) => expr.clone(),
-        _ => Expr::Symbol(val.to_string()),
     }
 }
 

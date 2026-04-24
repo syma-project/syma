@@ -15,7 +15,8 @@ pub fn builtin_discrete_delta(args: &[Value]) -> Result<Value, EvalError> {
         match arg {
             Value::Integer(n) if !n.is_zero() => return Ok(Value::Integer(Integer::from(0))),
             Value::Real(r) if r.to_f64() != 0.0 => return Ok(Value::Integer(Integer::from(0))),
-            Value::Integer(_) | Value::Real(_) => continue,
+            Value::Rational(r) if r.to_f64() != 0.0 => return Ok(Value::Integer(Integer::from(0))),
+            Value::Integer(_) | Value::Real(_) | Value::Rational(_) => continue,
             _ => {
                 // Non-numeric argument — return symbolic
                 return Ok(Value::Call {

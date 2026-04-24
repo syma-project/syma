@@ -68,9 +68,7 @@ fn try_unwrap_one_identity<'a>(
     attr_checker: Option<&AttributeChecker>,
 ) -> Option<&'a Value> {
     if let Value::Call { head, args } = value {
-        if args.len() == 1
-            && attr_checker.map_or(false, |c| c.has_attr(head, "OneIdentity"))
-        {
+        if args.len() == 1 && attr_checker.map_or(false, |c| c.has_attr(head, "OneIdentity")) {
             return Some(&args[0]);
         }
     }
@@ -785,8 +783,7 @@ fn match_call_pattern(
 
             // Determine attributes
             let is_flat = attr_checker.map_or(false, |c| c.has_attr(&head_name, "Flat"));
-            let is_orderless =
-                attr_checker.map_or(false, |c| c.has_attr(&head_name, "Orderless"));
+            let is_orderless = attr_checker.map_or(false, |c| c.has_attr(&head_name, "Orderless"));
             let is_one_identity =
                 attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"));
 
@@ -803,9 +800,7 @@ fn match_call_pattern(
             };
 
             // 1. Try direct ordered match
-            if let MatchResult::Match(b) =
-                try_ordered_match(&pat_args, &val_args, attr_checker)
-            {
+            if let MatchResult::Match(b) = try_ordered_match(&pat_args, &val_args, attr_checker) {
                 return MatchResult::Match(b);
             }
 
@@ -1365,7 +1360,10 @@ mod tests {
             Value::Integer(Integer::from(0)),
             Value::Integer(Integer::from(0)),
         ]);
-        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::Match(_)));
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::Match(_)
+        ));
     }
 
     #[test]
@@ -1383,7 +1381,10 @@ mod tests {
             Value::Integer(Integer::from(0)),
             Value::Integer(Integer::from(0)),
         ]);
-        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::Match(_)));
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::Match(_)
+        ));
     }
 
     #[test]
@@ -1397,7 +1398,10 @@ mod tests {
             Value::Integer(Integer::from(1)),
             Value::Integer(Integer::from(2)),
         ]);
-        assert!(matches!(match_pattern(&pat, &val, None), MatchResult::NoMatch));
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::NoMatch
+        ));
     }
 
     #[test]

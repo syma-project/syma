@@ -251,6 +251,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Quotient", math::builtin_quotient);
     register_builtin(env, "QuotientRemainder", math::builtin_quotient_remainder);
     register_builtin(env, "KroneckerDelta", math::builtin_kronecker_delta);
+    register_builtin(env, "IntegerQ", math::builtin_integer_q);
 
     // ── Number theory ──
     register_builtin(env, "PrimeQ", number_theory::builtin_prime_q);
