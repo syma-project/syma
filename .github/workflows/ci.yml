@@ -14,7 +14,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev clang
       - name: Cache Cargo registry + build artifacts
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev clang
       - name: Cache Cargo registry + build artifacts
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev clang
       - name: Cache Cargo registry + build artifacts
