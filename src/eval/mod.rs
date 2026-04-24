@@ -26,6 +26,8 @@ pub(crate) mod numeric;
 pub(crate) mod table;
 pub(crate) mod plot;
 
+use crate::builtins::dataset;
+
 /// Evaluate a program (list of statements) in the given environment.
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
     let mut result = Value::Null;
@@ -1286,6 +1288,11 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     args: args.to_vec(),
                 })
             }
+        }
+
+        Value::Dataset(data) => {
+            // ds[args...] -> query dispatch
+            dataset::dataset_query(data, args, env)
         }
 
         _ => {

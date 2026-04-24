@@ -1,6 +1,7 @@
 pub mod arithmetic;
 pub mod association;
 pub mod comparison;
+pub mod dataset;
 pub mod error;
 pub mod ffi;
 pub mod format;
@@ -159,6 +160,12 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "KeyUnion", association::builtin_key_union);
     register_builtin(env, "KeyIntersection", association::builtin_key_intersection);
     register_builtin(env, "KeyComplement", association::builtin_key_complement);
+
+    // ── Dataset ──
+    register_builtin(env, "Dataset", dataset::builtin_dataset);
+    register_builtin(env, "DatasetQ", dataset::builtin_dataset_q);
+    register_builtin_env(env, "SortBy", dataset::builtin_sort_by);
+    register_builtin(env, "JoinAcross", dataset::builtin_join_across);
 
     // ── Symbolic ──
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
@@ -1061,6 +1068,14 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "KeyComplement" => {
             "KeyComplement[assoc1, assoc2] returns keys in assoc1 that are not in assoc2."
         }
+
+        // ── Dataset ──
+        "Dataset" => {
+            "Dataset[data] creates a Dataset wrapper around structured data for pretty display and query operations.\nUse call syntax: ds[All, \"col\"], ds[i], ds[i, \"col\"]."
+        }
+        "DatasetQ" => "DatasetQ[x] returns True if x is a Dataset, False otherwise.",
+        "SortBy" => "SortBy[list, f] sorts list elements by the key produced by applying f to each element.",
+        "JoinAcross" => "JoinAcross[list1, list2, key] performs an inner join of two lists of associations on the specified key.",
 
         // ── Random ──
         "RandomInteger" => {

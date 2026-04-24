@@ -21,7 +21,7 @@ fn real(v: f64) -> Value {
 // ── Helper functions ──
 
 /// Compare two values for ordering (used by Sort, Ordering).
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Real(x), Value::Real(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),

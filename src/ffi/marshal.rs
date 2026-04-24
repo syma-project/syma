@@ -124,6 +124,13 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             );
             JVal::Object(m)
         }
+        Value::Dataset(inner) => {
+            // Serialize Dataset by its inner data
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("dataset".into()));
+            m.insert("v".into(), value_to_json_full(inner));
+            JVal::Object(m)
+        }
         Value::Integer(n) => {
             // Serialise as a string to avoid i64 precision loss for huge integers.
             // The frontend can parse small values as numbers when needed.
@@ -327,12 +334,6 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             JVal::Array(vs)
         }
         Value::Formatted { value, .. } => value_to_json_full(value),
-        Value::Dataset(inner) => {
-            let mut m = Map::new();
-            m.insert("t".into(), JVal::String("dataset".into()));
-            m.insert("v".into(), value_to_json_full(inner));
-            JVal::Object(m)
-        }
         Value::BytecodeFunction(bc) => {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("bytecode".into()));
@@ -551,6 +552,10 @@ pub fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
                 .map(|(k, v)| value_to_json(v).map(|jv| (k.clone(), jv)))
                 .collect();
             Ok(serde_json::Value::Object(obj?))
+        }
+        Value::Dataset(inner) => {
+            // Unwrap Dataset and serialize inner data
+            value_to_json(inner)
         }
         other => Err(EvalError::FfiError(format!(
             "cannot marshal {} across FFI boundary",

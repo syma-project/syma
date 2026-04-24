@@ -73,6 +73,10 @@ pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::List(rules))
         }
+        Value::Dataset(inner) => {
+            // Unwrap Dataset to inner data
+            Ok(inner.as_ref().clone())
+        }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
             got: args[0].type_name().to_string(),
