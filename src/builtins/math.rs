@@ -414,6 +414,7 @@ fn exact_csc(num: i64, den: u32) -> Option<Value> {
         (1, 6) | (5, 6) => Some(val_int(2)),            // csc(π/6) = csc(5π/6) = 2
         (1, 4) | (3, 4) => Some(val_sqrt(2)),           // csc(π/4) = csc(3π/4) = √2
         (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3 = 2/√3
+        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3
         (7, 6) | (11, 6) => Some(val_int(-2)),
         (5, 4) | (7, 4) => Some(val_neg(val_sqrt(2))),
         (4, 3) | (5, 3) => Some(neg_sqrt_over(2, 3)),
@@ -428,6 +429,9 @@ fn exact_sec(num: i64, den: u32) -> Option<Value> {
         (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = sec(11π/6) = 2√3/3
         (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = sec(7π/4) = √2
         (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = sec(5π/3) = 2
+        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = 2√3/3
+        (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = √2
+        (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = 2
         (1, 2) | (3, 2) => None,                        // sec(±π/2) undefined
         (2, 3) | (4, 3) => Some(val_int(-2)),
         (3, 4) | (5, 4) => Some(val_neg(val_sqrt(2))),
@@ -445,6 +449,10 @@ fn exact_cot(num: i64, den: u32) -> Option<Value> {
         (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = cot(7π/6) = √3
         (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = cot(5π/4) = 1
         (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // cot(π/3) = √3/3
+        (1, 2) | (3, 2) => Some(val_int(0)),            // cot(π/2) = 0
+        (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = √3
+        (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = 1
+        (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // √3/3
         (2, 3) | (5, 3) => Some(val_neg(val_div(val_sqrt(3), val_int(3)))),
         (3, 4) | (7, 4) => Some(val_int(-1)),
         (5, 6) | (11, 6) => Some(val_neg(val_sqrt(3))),
@@ -1680,17 +1688,27 @@ mod tests {
 
     #[test]
     fn test_haversine_pi() {
-        // Haversine[π] = (1 - Cos[π]) / 2 = (1 - (-1)) / 2 = 1
-        assert_eq!(builtin_haversine(&[pi()]).unwrap(), int(1));
+        // Haversine[pi] = (1 - Cos[pi])/2 = (1-(-1))/2 = 1.0 (Real)
+        let result = builtin_haversine(&[pi()]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 1.0).abs() < 1e-15);
+        } else {
+            panic!("Expected Real, got {:?}", result);
+        }
     }
 
     #[test]
     fn test_haversine_pi_over_2() {
-        // Haversine[π/2] = (1 - Cos[π/2]) / 2 = (1 - 0) / 2 = 1/2
         let half_pi = Value::Real(
             Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
         );
-        assert_eq!(builtin_haversine(&[half_pi]).unwrap(), one_over(2));
+        // Haversine[pi/2] = (1 - Cos[pi/2])/2 = 0.5 (Real)
+        let result = builtin_haversine(&[half_pi]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 0.5).abs() < 1e-15);
+        } else {
+            panic!("Expected Real, got {:?}", result);
+        }
     }
 
     #[test]
@@ -1771,12 +1789,9 @@ mod tests {
 
     #[test]
     fn test_sin_degrees_real() {
+        // SinDegrees[30.0] → Sin[pi/6] → exact Divide[1, 2] (via pi-multiple detection)
         let result = builtin_sin_degrees(&[real(30.0)]).unwrap();
-        if let Value::Real(r) = result {
-            assert!((r.to_f64() - 0.5).abs() < 1e-10);
-        } else {
-            panic!("Expected Real");
-        }
+        assert_eq!(result, one_over(2));
     }
 
     // ── Inverse trig (degrees) ──
