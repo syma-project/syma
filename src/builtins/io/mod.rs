@@ -6,6 +6,7 @@
 
 pub mod export;
 pub mod import;
+pub mod nb;
 
 pub use export::builtin_export;
 pub use import::builtin_import;

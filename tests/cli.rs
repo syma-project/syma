@@ -24,6 +24,26 @@ fn syma_run(args: &[&str]) -> std::process::Output {
         .expect("failed to run syma")
 }
 
+/// Run `syma -e <expr>` with SYMA_HOME set to a temp directory.
+/// Returns (stdout, temp_dir_path).
+fn syma_eval_with_temp_home(expr: &str) -> (String, String) {
+    let tmp = std::env::temp_dir().join(format!("syma_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let output = Command::new("cargo")
+        .args(["run", "--bin", "syma", "--", "-e", expr])
+        .env("SYMA_HOME", &tmp)
+        .output()
+        .expect("failed to run syma -e");
+    if !output.status.success() {
+        panic!(
+            "syma -e {expr:?} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (stdout, tmp.to_string_lossy().to_string())
+}
+
 #[test]
 fn test_run_basics_example() {
     let output = syma_run(&["examples/basics/01-basics.syma"]);
@@ -154,4 +174,84 @@ fn test_base_form_via_eval() {
         out.contains("ff(base 16)") || out.contains("FF(base 16)"),
         "BaseForm[255, 16] should show ff(base 16), got: {out}"
     );
+}
+
+// ── LocalSymbol tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_local_symbol_write_then_read() {
+    let (out, _) = syma_eval_with_temp_home(
+        r#"LocalSymbol["test_int"] = 42; LocalSymbol["test_int"]"#,
+    );
+    assert!(out.contains("42"), "Should read back 42, got: {out}");
+}
+
+#[test]
+fn test_local_symbol_read_missing_null() {
+    let (out, _) =
+        syma_eval_with_temp_home(r#"LocalSymbol["nonexistent"]"#);
+    assert!(
+        out.contains("Null") || out.is_empty(),
+        "Missing key should yield Null, got: {out}"
+    );
+}
+
+#[test]
+fn test_local_symbol_read_missing_default() {
+    let (out, _) = syma_eval_with_temp_home(
+        r#"LocalSymbol["nope", "fallback"]"#,
+    );
+    assert!(
+        out.contains("fallback"),
+        "Default value should be returned, got: {out}"
+    );
+}
+
+#[test]
+fn test_local_symbol_write_string() {
+    let (out, _) = syma_eval_with_temp_home(
+        r#"LocalSymbol["greeting"] = "hello world"; LocalSymbol["greeting"]"#,
+    );
+    assert!(
+        out.contains("hello world"),
+        "Should read back the string, got: {out}"
+    );
+}
+
+#[test]
+fn test_local_symbol_persists_across_calls() {
+    let tmp = std::env::temp_dir().join(format!("syma_test_persist_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+
+    // First call: write
+    let output1 = Command::new("cargo")
+        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"] = 99"#])
+        .env("SYMA_HOME", &tmp)
+        .output()
+        .expect("failed first call");
+    assert!(
+        output1.status.success(),
+        "first call failed: {}",
+        String::from_utf8_lossy(&output1.stderr)
+    );
+
+    // Second call: read (separate process, should read from disk)
+    let output2 = Command::new("cargo")
+        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"]"#])
+        .env("SYMA_HOME", &tmp)
+        .output()
+        .expect("failed second call");
+    assert!(
+        output2.status.success(),
+        "second call failed: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        stdout.contains("99"),
+        "Should persist 99 across processes, got: {stdout}"
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp);
 }

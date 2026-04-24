@@ -373,6 +373,23 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     env.set(s.clone(), val.clone());
                     Ok(val)
                 }
+                // LocalSymbol["name"] = value
+                Expr::Call {
+                    head,
+                    args: call_args,
+                } if call_args.len() == 1
+                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "LocalSymbol") =>
+                {
+                    let name = eval(&call_args[0], env)?;
+                    match name {
+                        Value::Str(s) => {
+                            crate::builtins::localsymbol::write_local_symbol(&s, &val)
+                        }
+                        _ => Err(EvalError::Error(
+                            "LocalSymbol requires a string name".to_string(),
+                        )),
+                    }
+                }
                 // this.field = value  (desugared to Assign(field[this], value))
                 Expr::Call {
                     head,

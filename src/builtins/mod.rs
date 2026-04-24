@@ -8,6 +8,7 @@ pub mod filesystem;
 pub mod graphics;
 pub mod io;
 pub mod linalg;
+pub mod localsymbol;
 pub mod list;
 pub mod logical;
 pub mod math;
@@ -261,6 +262,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Defer", format::builtin_defer);
     register_builtin(env, "SyntaxQ", format::builtin_syntax_q);
     register_builtin(env, "SyntaxLength", format::builtin_syntax_length);
+
+    // ── Persistent storage ──
+    register_builtin(env, "LocalSymbol", localsymbol::builtin_local_symbol);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
@@ -849,6 +853,14 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "SyntaxLength" => {
             "SyntaxLength[\"expr\"] returns the position of the first syntax error, or the length of the string if valid."
+        }
+
+        // ── Persistent storage ──
+        "LocalSymbol" => {
+            "LocalSymbol[\"name\"] reads a persisted value from ~/.syma/LocalSymbols/.\n\
+             LocalSymbol[\"name\", default] returns default if the key does not exist.\n\
+             LocalSymbol[\"name\"] = value assigns a value to a persistent key.\n\
+             Supported value types: Integer, Real, String, Bool, Null, List, Assoc."
         }
 
         // ── File system ──
