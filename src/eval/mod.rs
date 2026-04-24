@@ -910,6 +910,14 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // ParallelTry[list] or ParallelTry[f, list] — return first result
                 table::eval_parallel_try(args, env)
             }
+            "ParallelProduct" => {
+                // ParallelProduct[expr, {i, min, max}] — parallel version of Product
+                table::eval_parallel_product(args, env)
+            }
+            "ParallelDo" => {
+                // ParallelDo[expr, {i, ...}] — parallel side-effect evaluation, returns Null
+                table::eval_parallel_do(args, env)
+            }
             "Sum" => {
                 // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 table::eval_sum(args, env)
@@ -1471,7 +1479,7 @@ fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 /// then `{Name}/{Name}.syma` (then `{name}/{name}.syma`), then
 /// `{Name}/src/{Name}.syma` for the standard package layout.
 /// The file must contain a top-level `module <Name> { ... }` definition.
-fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
+pub(crate) fn load_module_from_file(name: &str, env: &Env) -> Result<Value, EvalError> {
     use crate::{lexer, parser};
 
     // Candidates: flat file, then directory/file, then directory/src/file.
@@ -2357,6 +2365,90 @@ mod tests {
     #[should_panic(expected = "ParallelSum requires exactly 2 arguments")]
     fn test_parallel_sum_error_no_iter() {
         eval_str("ParallelSum[42]");
+    }
+
+    // ── ParallelProduct ──
+
+    #[test]
+    fn test_parallel_product_basic() {
+        let result = eval_str("ParallelProduct[i, {i, 1, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(120)));
+    }
+
+    #[test]
+    fn test_parallel_product_squares() {
+        let result = eval_str("ParallelProduct[i^2, {i, 1, 4}]");
+        assert_eq!(result, Value::Integer(Integer::from(576)));
+    }
+
+    #[test]
+    fn test_parallel_product_small() {
+        let result = eval_str("ParallelProduct[i, {i, 1, 3}]");
+        assert_eq!(result, Value::Integer(Integer::from(6)));
+    }
+
+    #[test]
+    fn test_parallel_product_empty() {
+        let result = eval_str("ParallelProduct[i, {i, 1, 0}]");
+        assert_eq!(result, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "ParallelProduct requires exactly 2 arguments")]
+    fn test_parallel_product_error_no_iter() {
+        eval_str("ParallelProduct[42]");
+    }
+
+    // ── ParallelDo ──
+
+    #[test]
+    fn test_parallel_do_returns_null() {
+        let result = eval_str("ParallelDo[i^2, {i, 1, 5}]");
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_parallel_do_empty_range() {
+        let result = eval_str("ParallelDo[i, {i, 1, 0}]");
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_parallel_do_small() {
+        let result = eval_str("ParallelDo[i, {i, 1, 3}]");
+        assert_eq!(result, Value::Null);
+    }
+
+    // ── ParallelCombine ──
+
+    #[test]
+    fn test_parallel_combine_plus() {
+        let result = eval_str("ParallelCombine[Plus, {1, 2, 3, 4, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(15)));
+    }
+
+    #[test]
+    fn test_parallel_combine_times() {
+        let result = eval_str("ParallelCombine[Times, {1, 2, 3, 4, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(120)));
+    }
+
+    #[test]
+    fn test_parallel_combine_single() {
+        let result = eval_str("ParallelCombine[Plus, {42}]");
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_parallel_combine_small() {
+        let result = eval_str("ParallelCombine[Plus, {10, 20, 30}]");
+        assert_eq!(result, Value::Integer(Integer::from(60)));
+    }
+
+    #[test]
+    #[should_panic(expected = "ParallelCombine requires a non-empty list")]
+    fn test_parallel_combine_empty() {
+        eval_str("ParallelCombine[Plus, {}]");
     }
 
     // ── Hold / HoldComplete / ReleaseHold ──

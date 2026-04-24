@@ -438,3 +438,125 @@ pub(super) fn eval_parallel_try(args: &[Expr], env: &Env) -> Result<Value, EvalE
         Err(EvalError::Error("ParallelTry: no results available".to_string()))
     })
 }
+
+/// ParallelProduct[expr, {i, min, max}] — parallel version of product.
+pub(super) fn eval_parallel_product(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelProduct requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let iter_items = match &args[1] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelProduct iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+
+    let (var_name, values) = eval_iterator_spec(iter_items, env)?;
+
+    if values.is_empty() {
+        return Ok(Value::Integer(Integer::from(1)));
+    }
+
+    if values.len() < 8 {
+        // Sequential for small iteration counts
+        let child_env = env.child();
+        let mut acc = Value::Integer(Integer::from(1));
+        for val in values {
+            child_env.set(var_name.clone(), val);
+            let v = super::eval(&args[0], &child_env)?;
+            acc = crate::builtins::mul_values_public(&acc, &v)?;
+        }
+        return Ok(acc);
+    }
+
+    // Parallel: chunk values by number of workers
+    let n_workers = crate::builtins::parallel::pool_size();
+    let chunk_size = values.len().div_ceil(n_workers);
+
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = values
+        .chunks(chunk_size)
+        .map(|chunk| {
+            let expr = args[0].clone();
+            let var_name = var_name.clone();
+            let chunk_vec = chunk.to_vec();
+            let env = env.clone();
+            Box::new(move || {
+                let child_env = env.child();
+                let mut acc = Value::Integer(Integer::from(1));
+                for val in chunk_vec {
+                    child_env.set(var_name.clone(), val);
+                    let v = super::eval(&expr, &child_env)?;
+                    acc = crate::builtins::mul_values_public(&acc, &v)?;
+                }
+                Ok(acc)
+            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
+
+    let results = crate::builtins::parallel::parallel_batch(jobs);
+    let mut total = Value::Integer(Integer::from(1));
+    for r in results {
+        let v = r?;
+        total = crate::builtins::mul_values_public(&total, &v)?;
+    }
+    Ok(total)
+}
+
+/// ParallelDo[expr, {i, ...}] — evaluate expr for each iterator value in parallel,
+/// discarding results and returning Null.
+pub(super) fn eval_parallel_do(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelDo requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let expr = &args[0];
+
+    let iter_items = match &args[1] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "ParallelDo iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+
+    let (var_name, values) = eval_iterator_spec(iter_items, env)?;
+
+    // For small iteration counts, sequential is faster
+    if values.len() < 4 {
+        let child_env = env.child();
+        for val in values {
+            child_env.set(var_name.clone(), val);
+            super::eval(expr, &child_env)?;
+        }
+        return Ok(Value::Null);
+    }
+
+    // Parallel evaluation — discard results, check errors
+    let jobs: Vec<Box<dyn FnOnce() -> Result<Value, EvalError> + Send>> = values
+        .into_iter()
+        .map(|val| {
+            let expr = expr.clone();
+            let var_name = var_name.clone();
+            let env = env.clone();
+            Box::new(move || {
+                let child_env = env.child();
+                child_env.set(var_name, val);
+                super::eval(&expr, &child_env)
+            }) as Box<dyn FnOnce() -> Result<Value, EvalError> + Send>
+        })
+        .collect();
+
+    let results = crate::builtins::parallel::parallel_batch(jobs);
+    for r in results {
+        r?; // propagate any error
+    }
+    Ok(Value::Null)
+}

@@ -206,7 +206,16 @@ impl BytecodeCompiler {
             Expr::Integer(n) => self.emit_const(Value::Integer(n.clone())),
             Expr::Real(r) => self.emit_const(Value::Real(r.clone())),
             Expr::Str(s) => self.emit_const(Value::Str(s.clone())),
-            Expr::Bool(b) => self.emit_const(Value::Bool(*b)),
+            Expr::Bool(true) => {
+                let dst = self.regs.alloc()?;
+                self.emit(Instruction::LoadTrue(dst));
+                Ok(dst)
+            }
+            Expr::Bool(false) => {
+                let dst = self.regs.alloc()?;
+                self.emit(Instruction::LoadFalse(dst));
+                Ok(dst)
+            }
             Expr::Null => {
                 let dst = self.regs.alloc()?;
                 self.emit(Instruction::LoadNull(dst));
@@ -365,6 +374,40 @@ impl BytecodeCompiler {
                     self.emit(Instruction::Sub(dst, a_reg, b_reg));
                 }
             }
+            // ── Comparisons ──
+            "Equal" => {
+                self.emit(Instruction::Eq(dst, a_reg, b_reg));
+            }
+            "Unequal" => {
+                self.emit(Instruction::Neq(dst, a_reg, b_reg));
+            }
+            "Less" => {
+                self.emit(Instruction::Lt(dst, a_reg, b_reg));
+            }
+            "Greater" => {
+                self.emit(Instruction::Gt(dst, a_reg, b_reg));
+            }
+            "LessEqual" => {
+                self.emit(Instruction::Le(dst, a_reg, b_reg));
+            }
+            "GreaterEqual" => {
+                self.emit(Instruction::Ge(dst, a_reg, b_reg));
+            }
+            // ── Logical ──
+            "And" => {
+                self.emit(Instruction::And(dst, a_reg, b_reg));
+            }
+            "Or" => {
+                self.emit(Instruction::Or(dst, a_reg, b_reg));
+            }
+            // ── Division ──
+            "Divide" => {
+                if a_is_real && b_is_real {
+                    self.emit(Instruction::RealDiv(dst, a_reg, b_reg));
+                } else {
+                    self.emit(Instruction::Div(dst, a_reg, b_reg));
+                }
+            }
             _ => {
                 // Not an arithmetic op — free regs and fall through
                 self.regs._free(dst);
@@ -385,8 +428,21 @@ impl BytecodeCompiler {
         else_branch: &Option<Box<Expr>>,
     ) -> Result<u16, CompileError> {
         let result_reg = self.regs.alloc()?;
-        let cond_reg = self.compile_expr(condition)?;
-        let else_label = self.emit(Instruction::JumpIfZero(cond_reg, 0));
+
+        // Optimize: If[Not[x], ...] uses JumpIfNotZero instead of JumpIfZero
+        let (cond_reg, else_label) = if let Expr::Call { head, args } = condition
+            && let Expr::Symbol(name) = head.as_ref()
+            && name == "Not"
+            && args.len() == 1
+        {
+            let inner_reg = self.compile_expr(&args[0])?;
+            let lbl = self.emit(Instruction::JumpIfNotZero(inner_reg, 0));
+            (inner_reg, lbl)
+        } else {
+            let cr = self.compile_expr(condition)?;
+            let lbl = self.emit(Instruction::JumpIfZero(cr, 0));
+            (cr, lbl)
+        };
         self.regs._free(cond_reg);
 
         let then_reg = self.compile_expr(then_branch)?;
@@ -416,7 +472,8 @@ impl BytecodeCompiler {
         let exit_jz = self.emit(Instruction::JumpIfZero(cond_reg, 0));
         self.regs._free(cond_reg);
 
-        self.compile_expr(body)?;
+        let body_reg = self.compile_expr(body)?;
+        self.regs._free(body_reg);
         let jump_back = self.code.len();
         self.emit(Instruction::Jump(loop_start - jump_back as i32 - 1));
 

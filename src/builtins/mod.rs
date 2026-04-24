@@ -302,6 +302,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "ParallelSum", parallel::builtin_parallel_sum);
     register_builtin(env, "ParallelEvaluate", parallel::builtin_parallel_evaluate);
     register_builtin(env, "ParallelTry", parallel::builtin_parallel_try);
+    register_builtin(env, "ParallelProduct", parallel::builtin_parallel_product);
+    register_builtin(env, "ParallelDo", parallel::builtin_parallel_do);
+    register_builtin_env(env, "ParallelCombine", parallel::builtin_parallel_combine);
     register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
     register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
     register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
@@ -382,19 +385,7 @@ pub fn register_builtins(env: &Env) {
     // LinearAlgebra — symbols backed by Rust builtins in linalg.rs
     register_lazy_package(
         env,
-        &[
-            "Dimensions",
-            "Dot",
-            "MatrixMultiply",
-            "IdentityMatrix",
-            "Det",
-            "Inverse",
-            "Transpose",
-            "Tr",
-            "Norm",
-            "Cross",
-            "LinearSolve",
-        ],
+        linalg::SYMBOLS,
         linalg::SYMBOLS,
         "LinearAlgebra",
         linalg::register,
@@ -582,10 +573,8 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             env.register_module("Graphics".to_string(), module);
         }
         _ => {
-            return Err(EvalError::Error(format!(
-                "Package '{}' not found. Built-in packages: LinearAlgebra, Statistics, Graphics.",
-                pkg_name
-            )));
+            // Fall back to file-based module loading
+            return crate::eval::load_module_from_file(&pkg_name, env);
         }
     }
     Ok(Value::Null)
@@ -594,6 +583,7 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// Re-export for use by eval.rs
 pub use arithmetic::add_values_public;
 pub use arithmetic::sub_values_public;
+pub use arithmetic::mul_values_public;
 
 // ── Help documentation ──
 
@@ -1142,6 +1132,17 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ParallelTry" => {
             "ParallelTry[list] evaluates each element of list in parallel, returning the first result obtained.\n\
              ParallelTry[f, list] applies f to each element of list in parallel, returning the first result."
+        }
+        "ParallelProduct" => {
+            "ParallelProduct[expr, {i, min, max}] evaluates a parallel product of expr as i goes from min to max.\n\
+             ParallelProduct[expr, {i, max}] evaluates a parallel product of expr for i from 1 to max."
+        }
+        "ParallelDo" => {
+            "ParallelDo[expr, {i, min, max}] evaluates expr for i from min to max in parallel, returning Null.\n\
+             ParallelDo[expr, {i, max}] evaluates expr for i from 1 to max in parallel, returning Null."
+        }
+        "ParallelCombine" => {
+            "ParallelCombine[f, list] applies binary function f to combine elements of list in parallel, returning a single result."
         }
         "ProcessorCount" => "ProcessorCount returns the number of processor cores on the current computer.",
         "AbortKernels" => "AbortKernels[] aborts all running kernel evaluations. (Currently a no-op.)",

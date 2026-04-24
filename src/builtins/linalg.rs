@@ -646,6 +646,404 @@ pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(result))
 }
 
+// ── f64 matrix helpers (used by eigenvalue / QR routines) ───────────────────
+
+/// Multiply two n×n f64 matrices.
+fn mat_mul_f64(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = a.len();
+    let mut c = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        for k in 0..n {
+            if a[i][k] == 0.0 {
+                continue;
+            }
+            for j in 0..n {
+                c[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    c
+}
+
+/// Extract an n×n matrix as `Vec<Vec<f64>>`, returning an error on type mismatch.
+fn matrix_to_f64(m: &[Value]) -> Result<Vec<Vec<f64>>, EvalError> {
+    let n = m.len();
+    let mut out = Vec::with_capacity(n);
+    for row_val in m {
+        let row = as_list(row_val)?;
+        let mut frow = Vec::with_capacity(row.len());
+        for v in row {
+            frow.push(to_f64(v).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".into(),
+                got: v.type_name().into(),
+            })?);
+        }
+        out.push(frow);
+    }
+    Ok(out)
+}
+
+/// QR decomposition via classical Gram-Schmidt.
+/// Returns (Q, R) where A = Q·R, Q orthogonal, R upper-triangular.
+fn qr_decompose(a: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let n = a.len();
+    // Extract columns of A
+    let cols: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|i| a[i][j]).collect()).collect();
+
+    let mut orth: Vec<Vec<f64>> = Vec::with_capacity(n); // orthonormal columns of Q
+    let mut r = vec![vec![0.0f64; n]; n];
+
+    for j in 0..n {
+        let mut v = cols[j].clone();
+        // Subtract projections onto previous orthonormal columns
+        for i in 0..j {
+            let dot_val: f64 = cols[j].iter().zip(orth[i].iter()).map(|(a, b)| a * b).sum();
+            r[i][j] = dot_val;
+            for k in 0..n {
+                v[k] -= dot_val * orth[i][k];
+            }
+        }
+        let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        r[j][j] = norm;
+        if norm > 1e-14 {
+            orth.push(v.iter().map(|x| x / norm).collect());
+        } else {
+            // Linearly dependent — fall back to a standard basis vector orthogonalized
+            let mut u = vec![0.0f64; n];
+            u[j] = 1.0;
+            for i in 0..j {
+                let d: f64 = u.iter().zip(orth[i].iter()).map(|(a, b)| a * b).sum();
+                for k in 0..n {
+                    u[k] -= d * orth[i][k];
+                }
+            }
+            let un: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if un > 1e-14 {
+                orth.push(u.iter().map(|x| x / un).collect());
+            } else {
+                orth.push(vec![0.0; n]);
+            }
+        }
+    }
+
+    // Build Q: Q[i][j] = orth[j][i]
+    let mut q = vec![vec![0.0f64; n]; n];
+    for j in 0..n {
+        for i in 0..n {
+            q[i][j] = orth[j][i];
+        }
+    }
+    (q, r)
+}
+
+/// QR iteration to compute eigenvalues and the accumulated eigenvector matrix.
+/// Returns (eigenvalues, eigenvector_matrix) where columns of eigenvector_matrix
+/// approximate the eigenvectors.
+fn qr_iteration(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let n = a.len();
+    let mut ak: Vec<Vec<f64>> = a.to_vec();
+    // Accumulate Q: starts as identity
+    let mut q_acc: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            let mut row = vec![0.0f64; n];
+            row[i] = 1.0;
+            row
+        })
+        .collect();
+
+    for _ in 0..1000 {
+        let (q, r) = qr_decompose(&ak);
+        ak = mat_mul_f64(&r, &q);
+        q_acc = mat_mul_f64(&q_acc, &q);
+
+        // Check convergence: max absolute off-diagonal element
+        let max_off = (0..n)
+            .flat_map(|i| (0..n).filter(move |&j| i != j).map(move |j| (i, j)))
+            .map(|(i, j)| ak[i][j].abs())
+            .fold(0.0f64, f64::max);
+        if max_off < 1e-10 {
+            break;
+        }
+    }
+
+    let eigenvalues: Vec<f64> = (0..n).map(|i| ak[i][i]).collect();
+    (eigenvalues, q_acc)
+}
+
+// ── New builtins ─────────────────────────────────────────────────────────────
+
+/// MatrixPower[m, n] — raise a square matrix to an integer power via binary exponentiation.
+/// n=0 returns IdentityMatrix, n<0 inverts after computing the positive power.
+pub fn builtin_matrix_power(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MatrixPower requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
+        EvalError::Error("MatrixPower: first argument must be a square matrix".to_string())
+    })?;
+    if rows != cols {
+        return Err(EvalError::Error(format!(
+            "MatrixPower: matrix must be square (got {}×{})",
+            rows, cols
+        )));
+    }
+    let exp = match &args[1] {
+        Value::Integer(i) => i.to_i64().ok_or_else(|| {
+            EvalError::Error("MatrixPower: exponent out of range".to_string())
+        })?,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+
+    if exp == 0 {
+        return builtin_identity_matrix(&[int(rows as i64)]);
+    }
+
+    let (mut e, invert) = if exp < 0 {
+        ((-exp) as u64, true)
+    } else {
+        (exp as u64, false)
+    };
+
+    // Binary exponentiation: result = I, accumulate powers of base
+    let mut result = builtin_identity_matrix(&[int(rows as i64)])?;
+    let mut base = Value::List(m.to_vec());
+    while e > 0 {
+        if e & 1 == 1 {
+            result = builtin_dot(&[result, base.clone()])?;
+        }
+        base = builtin_dot(&[base.clone(), base.clone()])?;
+        e >>= 1;
+    }
+
+    if invert {
+        builtin_inverse(&[result])
+    } else {
+        Ok(result)
+    }
+}
+
+/// Eigenvalues[m] — numerical eigenvalues via QR iteration.
+/// Returns a list of real eigenvalues ordered by descending absolute value.
+pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Eigenvalues requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
+        EvalError::Error("Eigenvalues: argument must be a square matrix".to_string())
+    })?;
+    if rows != cols {
+        return Err(EvalError::Error(format!(
+            "Eigenvalues: matrix must be square (got {}×{})",
+            rows, cols
+        )));
+    }
+    let a = matrix_to_f64(m)?;
+    let (mut eigenvalues, _) = qr_iteration(&a);
+    // Sort by descending absolute value (Wolfram convention)
+    eigenvalues.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(Value::List(eigenvalues.into_iter().map(real).collect()))
+}
+
+/// Eigenvectors[m] — numerical eigenvectors via QR iteration.
+/// Returns a matrix whose rows are the eigenvectors (same ordering as Eigenvalues).
+pub fn builtin_eigenvectors(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Eigenvectors requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    let (rows, cols) = matrix_dims(m).ok_or_else(|| {
+        EvalError::Error("Eigenvectors: argument must be a square matrix".to_string())
+    })?;
+    if rows != cols {
+        return Err(EvalError::Error(format!(
+            "Eigenvectors: matrix must be square (got {}×{})",
+            rows, cols
+        )));
+    }
+    let a = matrix_to_f64(m)?;
+    let n = rows;
+    let (eigenvalues, q_acc) = qr_iteration(&a);
+
+    // Sort indices by descending |eigenvalue|
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by(|&i, &j| {
+        eigenvalues[j]
+            .abs()
+            .partial_cmp(&eigenvalues[i].abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Columns of q_acc are eigenvectors; return as rows in sorted order
+    let result = indices
+        .into_iter()
+        .map(|col_idx| {
+            Value::List(
+                (0..n)
+                    .map(|row_idx| real(q_acc[row_idx][col_idx]))
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(Value::List(result))
+}
+
+/// ArrayFlatten[blocks] — assemble a block matrix from a matrix-of-matrices.
+/// E.g. ArrayFlatten[{{A, B}, {C, D}}] → single flat matrix.
+pub fn builtin_array_flatten(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ArrayFlatten requires exactly 1 argument".to_string(),
+        ));
+    }
+    let block_rows = as_list(&args[0])?;
+    if block_rows.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+
+    let mut result_rows: Vec<Value> = Vec::new();
+
+    for block_row_val in block_rows {
+        let block_row = as_list(block_row_val)?;
+        if block_row.is_empty() {
+            continue;
+        }
+        // Each element of block_row must be a matrix; collect their rows
+        // All matrices in a block-row must have the same number of rows
+        let first_block = as_list(&block_row[0])?;
+        let num_rows = first_block.len();
+
+        for row_idx in 0..num_rows {
+            let mut combined_row: Vec<Value> = Vec::new();
+            for block_val in block_row {
+                let block = as_list(block_val)?;
+                if block.len() != num_rows {
+                    return Err(EvalError::Error(format!(
+                        "ArrayFlatten: inconsistent block row heights ({} vs {})",
+                        block.len(),
+                        num_rows
+                    )));
+                }
+                let block_matrix_row = as_list(&block[row_idx])?;
+                combined_row.extend_from_slice(block_matrix_row);
+            }
+            result_rows.push(Value::List(combined_row));
+        }
+    }
+
+    Ok(Value::List(result_rows))
+}
+
+/// ZeroMatrix[n] or ZeroMatrix[{m, n}] — matrix of zeros.
+pub fn builtin_zero_matrix(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ZeroMatrix requires exactly 1 argument".to_string(),
+        ));
+    }
+    let (nrows, ncols) = match &args[0] {
+        Value::Integer(i) => {
+            let n = i.to_usize().ok_or_else(|| {
+                EvalError::Error(
+                    "ZeroMatrix: argument must be a non-negative integer".to_string(),
+                )
+            })?;
+            (n, n)
+        }
+        Value::List(dims) if dims.len() == 2 => {
+            let r = match &dims[0] {
+                Value::Integer(i) => i.to_usize().ok_or_else(|| {
+                    EvalError::Error("ZeroMatrix: dimensions must be non-negative integers".to_string())
+                })?,
+                _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: dims[0].type_name().into() }),
+            };
+            let c = match &dims[1] {
+                Value::Integer(i) => i.to_usize().ok_or_else(|| {
+                    EvalError::Error("ZeroMatrix: dimensions must be non-negative integers".to_string())
+                })?,
+                _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: dims[1].type_name().into() }),
+            };
+            (r, c)
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "ZeroMatrix: argument must be an integer or {m, n} list".to_string(),
+            ));
+        }
+    };
+    let zero = int(0);
+    let matrix = (0..nrows)
+        .map(|_| Value::List(vec![zero.clone(); ncols]))
+        .collect();
+    Ok(Value::List(matrix))
+}
+
+/// DiagonalMatrix[v] — n×n matrix with vector v on the diagonal.
+pub fn builtin_diagonal_matrix(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "DiagonalMatrix requires exactly 1 argument".to_string(),
+        ));
+    }
+    let v = as_list(&args[0])?;
+    let n = v.len();
+    let zero = int(0);
+    let matrix = (0..n)
+        .map(|i| {
+            let row = (0..n)
+                .map(|j| if i == j { v[i].clone() } else { zero.clone() })
+                .collect();
+            Value::List(row)
+        })
+        .collect();
+    Ok(Value::List(matrix))
+}
+
+/// UnitVector[n, k] — length-n vector with 1 at position k (1-indexed).
+pub fn builtin_unit_vector(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "UnitVector requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let n = match &args[0] {
+        Value::Integer(i) => i.to_usize().ok_or_else(|| {
+            EvalError::Error("UnitVector: first argument must be a positive integer".to_string())
+        })?,
+        _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: args[0].type_name().into() }),
+    };
+    let k = match &args[1] {
+        Value::Integer(i) => i.to_usize().ok_or_else(|| {
+            EvalError::Error("UnitVector: second argument must be a positive integer".to_string())
+        })?,
+        _ => return Err(EvalError::TypeError { expected: "Integer".into(), got: args[1].type_name().into() }),
+    };
+    if k == 0 || k > n {
+        return Err(EvalError::Error(format!(
+            "UnitVector: index {} out of range for length-{} vector (1-indexed)",
+            k, n
+        )));
+    }
+    let zero = int(0);
+    let one = int(1);
+    let v = (1..=n)
+        .map(|i| if i == k { one.clone() } else { zero.clone() })
+        .collect();
+    Ok(Value::List(v))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register all LinearAlgebra builtins in the environment.
@@ -662,6 +1060,13 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Norm", builtin_norm);
     register_builtin(env, "Cross", builtin_cross);
     register_builtin(env, "LinearSolve", builtin_linear_solve);
+    register_builtin(env, "MatrixPower", builtin_matrix_power);
+    register_builtin(env, "Eigenvalues", builtin_eigenvalues);
+    register_builtin(env, "Eigenvectors", builtin_eigenvectors);
+    register_builtin(env, "ArrayFlatten", builtin_array_flatten);
+    register_builtin(env, "ZeroMatrix", builtin_zero_matrix);
+    register_builtin(env, "DiagonalMatrix", builtin_diagonal_matrix);
+    register_builtin(env, "UnitVector", builtin_unit_vector);
 }
 
 /// Symbol names exported by the LinearAlgebra package.
@@ -677,10 +1082,13 @@ pub const SYMBOLS: &[&str] = &[
     "Norm",
     "Cross",
     "LinearSolve",
-    // Syma-side stubs (loaded from .syma file):
-    "Eigenvalues",
     "MatrixPower",
+    "Eigenvalues",
+    "Eigenvectors",
     "ArrayFlatten",
+    "ZeroMatrix",
+    "DiagonalMatrix",
+    "UnitVector",
 ];
 
 #[cfg(test)]
@@ -860,5 +1268,129 @@ mod tests {
         } else {
             panic!("Expected Real values");
         }
+    }
+
+    #[test]
+    fn test_matrix_power_zero() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let result = builtin_matrix_power(&[m, int_val(0)]).unwrap();
+        assert_eq!(result, matrix(vec![vec![1, 0], vec![0, 1]]));
+    }
+
+    #[test]
+    fn test_matrix_power_one() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let result = builtin_matrix_power(&[m.clone(), int_val(1)]).unwrap();
+        assert_eq!(result, m);
+    }
+
+    #[test]
+    fn test_matrix_power_two() {
+        let m = matrix(vec![vec![1, 1], vec![0, 1]]);
+        let result = builtin_matrix_power(&[m, int_val(2)]).unwrap();
+        // [[1,1],[0,1]]^2 = [[1,2],[0,1]]
+        assert_eq!(result, matrix(vec![vec![1, 2], vec![0, 1]]));
+    }
+
+    #[test]
+    fn test_matrix_power_negative() {
+        let m = matrix(vec![vec![2, 0], vec![0, 4]]);
+        let result = builtin_matrix_power(&[m, int_val(-1)]).unwrap();
+        // Inverse of diagonal [[2,0],[0,4]] = [[0.5,0],[0,0.25]]
+        let rows = as_list(&result).unwrap();
+        let r0 = as_list(&rows[0]).unwrap();
+        let r1 = as_list(&rows[1]).unwrap();
+        assert!((to_f64(&r0[0]).unwrap() - 0.5).abs() < 1e-10);
+        assert!((to_f64(&r0[1]).unwrap()).abs() < 1e-10);
+        assert!((to_f64(&r1[0]).unwrap()).abs() < 1e-10);
+        assert!((to_f64(&r1[1]).unwrap() - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_eigenvalues_diagonal() {
+        // Diagonal matrix: eigenvalues are the diagonal entries
+        let m = list(vec![
+            list(vec![real(3.0), real(0.0)]),
+            list(vec![real(0.0), real(1.0)]),
+        ]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        let evals = as_list(&result).unwrap();
+        assert_eq!(evals.len(), 2);
+        let v0 = to_f64(&evals[0]).unwrap();
+        let v1 = to_f64(&evals[1]).unwrap();
+        // Sorted by descending abs value: 3.0, 1.0
+        assert!((v0 - 3.0).abs() < 1e-6);
+        assert!((v1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_eigenvalues_symmetric() {
+        // [[2,1],[1,2]] has eigenvalues 3 and 1
+        let m = list(vec![
+            list(vec![real(2.0), real(1.0)]),
+            list(vec![real(1.0), real(2.0)]),
+        ]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        let evals = as_list(&result).unwrap();
+        assert_eq!(evals.len(), 2);
+        let v0 = to_f64(&evals[0]).unwrap();
+        let v1 = to_f64(&evals[1]).unwrap();
+        assert!((v0 - 3.0).abs() < 1e-6);
+        assert!((v1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_array_flatten() {
+        // Block matrix {{I2, 2*I2}, {3*I2, 4*I2}} → 4×4
+        let i2 = matrix(vec![vec![1, 0], vec![0, 1]]);
+        let a = matrix(vec![vec![2, 0], vec![0, 2]]);
+        let b = matrix(vec![vec![3, 0], vec![0, 3]]);
+        let c = matrix(vec![vec![4, 0], vec![0, 4]]);
+        let blocks = list(vec![
+            list(vec![i2.clone(), a]),
+            list(vec![b, c]),
+        ]);
+        let result = builtin_array_flatten(&[blocks]).unwrap();
+        let rows = as_list(&result).unwrap();
+        assert_eq!(rows.len(), 4);
+        // First row: [1, 0, 2, 0]
+        let r0 = as_list(&rows[0]).unwrap();
+        assert_eq!(r0.len(), 4);
+        assert_eq!(r0[0], int_val(1));
+        assert_eq!(r0[2], int_val(2));
+    }
+
+    #[test]
+    fn test_zero_matrix_square() {
+        let result = builtin_zero_matrix(&[int_val(2)]).unwrap();
+        assert_eq!(result, matrix(vec![vec![0, 0], vec![0, 0]]));
+    }
+
+    #[test]
+    fn test_zero_matrix_rect() {
+        let result = builtin_zero_matrix(&[list(vec![int_val(2), int_val(3)])]).unwrap();
+        let rows = as_list(&result).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(as_list(&rows[0]).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_diagonal_matrix() {
+        let v = list(vec![int_val(1), int_val(2), int_val(3)]);
+        let result = builtin_diagonal_matrix(&[v]).unwrap();
+        let expected = matrix(vec![vec![1, 0, 0], vec![0, 2, 0], vec![0, 0, 3]]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_unit_vector() {
+        let result = builtin_unit_vector(&[int_val(3), int_val(2)]).unwrap();
+        assert_eq!(result, list(vec![int_val(0), int_val(1), int_val(0)]));
+    }
+
+    #[test]
+    fn test_unit_vector_out_of_range() {
+        assert!(builtin_unit_vector(&[int_val(3), int_val(0)]).is_err());
+        assert!(builtin_unit_vector(&[int_val(3), int_val(4)]).is_err());
     }
 }

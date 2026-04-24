@@ -12,7 +12,7 @@
 /// - `KERNEL_POOL` — global pool instance (Arc-based for safe shared access)
 /// - `parallel_batch()` — submit batch jobs to the pool (or sequential fallback)
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -156,24 +156,50 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
         #[allow(clippy::type_complexity)]
         let results: Arc<Mutex<Vec<Option<Result<Value, EvalError>>>>> =
             Arc::new(Mutex::new(vec![None; n]));
-        let completed = Arc::new(AtomicUsize::new(0));
+        let completion: Arc<(Mutex<usize>, Condvar)> =
+            Arc::new((Mutex::new(0), Condvar::new()));
 
         for (i, job) in jobs.into_iter().enumerate() {
             let results = Arc::clone(&results);
-            let completed = Arc::clone(&completed);
+            let completion = Arc::clone(&completion);
             pool.execute(Box::new(move || {
-                let res = job();
-                let mut guard = results.lock().unwrap();
-                guard[i] = Some(res);
-                completed.fetch_add(1, Ordering::Release);
-                Ok(Value::Null) // placeholder, actual results are in `results`
+                let res = catch_unwind(AssertUnwindSafe(job));
+                let res = match res {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => Err(e),
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        Err(EvalError::Error(format!(
+                            "Parallel job panicked: {}",
+                            msg
+                        )))
+                    }
+                };
+                {
+                    let mut guard = results.lock().unwrap();
+                    guard[i] = Some(res);
+                }
+                let (lock, cvar) = &*completion;
+                let mut count = lock.lock().unwrap();
+                *count += 1;
+                cvar.notify_one();
+                Ok(Value::Null) // placeholder
             }));
         }
 
-        // Wait for all jobs to complete
-        while completed.load(Ordering::Acquire) < n {
-            std::thread::yield_now();
+        // Wait for all jobs via Condvar — no busy-wait
+        let (lock, cvar) = &*completion;
+        let mut count = lock.lock().unwrap();
+        while *count < n {
+            count = cvar.wait(count).unwrap();
         }
+        drop(count);
 
         let guard = results.lock().unwrap();
         guard.iter().map(|r| r.clone().unwrap()).collect()
@@ -287,6 +313,20 @@ pub fn builtin_parallel_try(_args: &[Value]) -> Result<Value, EvalError> {
     ))
 }
 
+/// Stub for ParallelProduct — actual implementation is in the evaluator special form.
+pub fn builtin_parallel_product(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "ParallelProduct should be handled by evaluator".to_string(),
+    ))
+}
+
+/// Stub for ParallelDo — actual implementation is in the evaluator special form.
+pub fn builtin_parallel_do(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "ParallelDo should be handled by evaluator".to_string(),
+    ))
+}
+
 /// `ProcessorCount[]` — returns the number of processor cores on the current computer.
 pub fn builtin_processor_count(args: &[Value]) -> Result<Value, EvalError> {
     if !args.is_empty() {
@@ -325,6 +365,65 @@ pub fn builtin_kernel_count(args: &[Value]) -> Result<Value, EvalError> {
         .map(|p| p.get() as i64)
         .unwrap_or(1);
     Ok(Value::Integer(rug::Integer::from(n)))
+}
+
+/// `ParallelCombine[f, list]` — apply binary function f to combine list elements in parallel.
+///
+/// Partitions the list by kernel count, reduces each chunk sequentially with f,
+/// then combines the partial results sequentially.
+pub fn builtin_parallel_combine(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelCombine requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    match &args[1] {
+        Value::List(items) if items.is_empty() => Err(EvalError::Error(
+            "ParallelCombine requires a non-empty list".to_string(),
+        )),
+        Value::List(items) if items.len() == 1 => Ok(items[0].clone()),
+        Value::List(items) => {
+            if items.len() < 8 {
+                let mut acc = items[0].clone();
+                for item in &items[1..] {
+                    acc = apply_function(f, &[acc, item.clone()], env)?;
+                }
+                return Ok(acc);
+            }
+            let n_workers = pool_size();
+            let chunk_size = items.len().div_ceil(n_workers);
+            let jobs: Vec<Job> = items
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let f = f.clone();
+                    let chunk_vec = chunk.to_vec();
+                    let env = env.clone();
+                    Box::new(move || {
+                        let mut acc = chunk_vec[0].clone();
+                        for item in &chunk_vec[1..] {
+                            acc = apply_function(&f, &[acc, item.clone()], &env)?;
+                        }
+                        Ok(acc)
+                    }) as Job
+                })
+                .collect();
+            let results = parallel_batch(jobs);
+            let mut partials: Vec<Value> = Vec::with_capacity(results.len());
+            for r in results {
+                partials.push(r?);
+            }
+            let mut acc = partials.remove(0);
+            for val in partials {
+                acc = apply_function(f, &[acc, val], env)?;
+            }
+            Ok(acc)
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +511,37 @@ mod tests {
         assert_eq!(pool_size(), 8);
         cleanup_pool();
         assert_eq!(pool_size(), 1);
+    }
+
+    #[test]
+    fn test_parallel_batch_panic_recovery() {
+        cleanup_pool();
+        launch_kernels(2);
+
+        let jobs: Vec<Job> = vec![
+            Box::new(|| Ok(Value::Integer(rug::Integer::from(1)))),
+            Box::new(|| panic!("deliberate panic")),
+            Box::new(|| Ok(Value::Integer(rug::Integer::from(3)))),
+            Box::new(|| Ok(Value::Integer(rug::Integer::from(4)))),
+        ];
+
+        let results = parallel_batch(jobs);
+        assert_eq!(results.len(), 4);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
+        assert!(results[3].is_ok());
+
+        if let Err(EvalError::Error(msg)) = &results[1] {
+            assert!(
+                msg.contains("panicked"),
+                "Error should mention panic: {}",
+                msg
+            );
+        } else {
+            panic!("Expected EvalError::Error for panicked job");
+        }
+
+        cleanup_pool();
     }
 }

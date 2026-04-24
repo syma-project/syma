@@ -19,6 +19,10 @@ pub fn sub_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
     sub_values(a, b)
 }
 
+pub fn mul_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    mul_values(a, b)
+}
+
 fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() - y)),
