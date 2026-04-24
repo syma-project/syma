@@ -2,6 +2,7 @@ pub mod arithmetic;
 pub mod association;
 pub mod comparison;
 pub mod error;
+pub mod filesystem;
 pub mod io;
 pub mod list;
 pub mod logical;
@@ -205,6 +206,21 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "LaunchKernels", parallel::builtin_launch_kernels);
     register_builtin(env, "CloseKernels", parallel::builtin_close_kernels);
     register_builtin(env, "KernelCount", parallel::builtin_kernel_count);
+
+    // ── File system ──
+    register_builtin(env, "FileNameSplit", filesystem::builtin_file_name_split);
+    register_builtin(env, "FileNameJoin", filesystem::builtin_file_name_join);
+    register_builtin(env, "FileNameTake", filesystem::builtin_file_name_take);
+    register_builtin(env, "FileNameDrop", filesystem::builtin_file_name_drop);
+    register_builtin(env, "FileBaseName", filesystem::builtin_file_base_name);
+    register_builtin(env, "FileExtension", filesystem::builtin_file_extension);
+    register_builtin(env, "FileNameDepth", filesystem::builtin_file_name_depth);
+    register_builtin(env, "DirectoryName", filesystem::builtin_directory_name);
+    register_builtin(env, "ParentDirectory", filesystem::builtin_parent_directory);
+    register_builtin(env, "ExpandFileName", filesystem::builtin_expand_file_name);
+    register_builtin(env, "FileExistsQ", filesystem::builtin_file_exists_q);
+    register_builtin(env, "DirectoryQ", filesystem::builtin_directory_q);
+    register_builtin(env, "FileNames", filesystem::builtin_file_names);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
@@ -454,6 +470,23 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "LaunchKernels[] returns the current kernel count.\nLaunchKernels[n] sets the number of parallel workers to n."
         }
         "CloseKernels" => "CloseKernels[] resets the parallel worker pool. Returns Null.",
+
+        // ── File system ──
+        "FileNameSplit" => "FileNameSplit[\"path\"] splits a file name into a list of its components.",
+        "FileNameJoin" => "FileNameJoin[{\"comp1\", \"comp2\", ...}] joins path components into a file name.",
+        "FileNameTake" => "FileNameTake[\"path\", n] gives the last n components of the path.",
+        "FileNameDrop" => "FileNameDrop[\"path\", n] gives the path with the last n components removed.",
+        "FileBaseName" => "FileBaseName[\"path\"] gives the file name without its extension.",
+        "FileExtension" => "FileExtension[\"path\"] gives the file extension (e.g., \"txt\").",
+        "FileNameDepth" => "FileNameDepth[\"path\"] gives the number of path components.",
+        "DirectoryName" => "DirectoryName[\"path\"] gives the directory portion of the path.",
+        "ParentDirectory" => "ParentDirectory[\"path\"] gives the parent directory of the path.",
+        "ExpandFileName" => "ExpandFileName[\"path\"] resolves the path to an absolute file name.",
+        "FileExistsQ" => "FileExistsQ[\"path\"] returns True if the file exists.",
+        "DirectoryQ" => "DirectoryQ[\"path\"] returns True if the path is an existing directory.",
+        "FileNames" => {
+            "FileNames[] lists files in the current directory.\nFileNames[\"pattern\"] lists files matching the glob pattern.\nFileNames[\"pattern\", {\"dir1\", \"dir2\"}] searches in the given directories."
+        }
 
         _ => return None,
     })
