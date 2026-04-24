@@ -59,6 +59,11 @@ pub enum Expr {
         body: Box<Expr>,
     },
 
+    /// expr & — pure function sugar (lowest-precedence postfix)
+    Pure {
+        body: Box<Expr>,
+    },
+
     // ── Pattern nodes (appear in function definitions and rules) ──
     /// _ — anonymous blank
     Blank {
@@ -316,6 +321,7 @@ impl PartialEq for Expr {
                 l1 == l2 && r1 == r2
             }
             (Expr::Slot(a), Expr::Slot(b)) => a == b,
+            (Expr::Pure { body: a }, Expr::Pure { body: b }) => a == b,
             (
                 Expr::Function {
                     params: p1,
@@ -742,6 +748,7 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ", {}]", body)
             }
+            Expr::Pure { body } => write!(f, "{} &", body),
             Expr::Blank { type_constraint } => match type_constraint {
                 Some(tc) => write!(f, "_{}", tc),
                 None => write!(f, "_"),

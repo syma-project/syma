@@ -726,10 +726,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         | Expr::OptionalNamedBlank { .. }
         | Expr::PatternGuard { .. } => Ok(Value::Pattern(expr.clone())),
 
-        // ── Slot (only meaningful inside pure functions) ──
-        Expr::Slot(_) => Err(EvalError::Error(
-            "Slot # used outside of pure function".to_string(),
-        )),
+        // ── Slot (look up from env; PureFunction application binds #, #1, ...) ──
+        Expr::Slot(None) => env.get("#").ok_or_else(|| {
+            EvalError::Error("Slot # used outside of pure function".to_string())
+        }),
+        Expr::Slot(Some(n)) => {
+            let key = format!("#{}", n);
+            env.get(&key).ok_or_else(|| {
+                EvalError::Error(format!("Slot #{} used outside of pure function", n))
+            })
+        }
+
+        // ── Pure function sugar: expr & ──
+        Expr::Pure { body } => {
+            let slot_count = count_slots(body);
+            Ok(Value::PureFunction {
+                body: body.as_ref().clone(),
+                slot_count,
+            })
+        }
 
         // ── Information (help) ──
         Expr::Information(inner) => eval_information(inner, env),
@@ -739,6 +754,45 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             body: body.as_ref().clone(),
             slot_count: params.len(),
         }),
+    }
+}
+
+/// Count the maximum slot index (#, #1, #2, ...) in an expression body.
+fn count_slots(expr: &Expr) -> usize {
+    match expr {
+        Expr::Slot(None) => 1,
+        Expr::Slot(Some(idx)) => *idx,
+        Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
+        Expr::Assoc(items) => items
+            .iter()
+            .map(|(_, v)| count_slots(v))
+            .max()
+            .unwrap_or(0),
+        Expr::Call { head, args } => args
+            .iter()
+            .chain(std::iter::once(head.as_ref()))
+            .map(count_slots)
+            .max()
+            .unwrap_or(0),
+        // Unary containers
+        Expr::Pipe { expr: e, .. }
+        | Expr::Hold(e)
+        | Expr::HoldComplete(e)
+        | Expr::ReleaseHold(e)
+        | Expr::Information(e)
+        | Expr::Pure { body: e } => count_slots(e),
+        // Binary containers
+        Expr::Rule { lhs, rhs }
+        | Expr::RuleDelayed { lhs, rhs }
+        | Expr::ReplaceAll { expr: lhs, rules: rhs }
+        | Expr::ReplaceRepeated { expr: lhs, rules: rhs }
+        | Expr::Map { func: lhs, list: rhs }
+        | Expr::Apply { func: lhs, expr: rhs }
+        | Expr::Prefix { func: lhs, arg: rhs }
+        | Expr::Assign { lhs, rhs } => count_slots(lhs).max(count_slots(rhs)),
+        Expr::Function { body, .. } => count_slots(body),
+        // Other expression types don't contain slots
+        _ => 0,
     }
 }
 
@@ -3017,11 +3071,12 @@ mod tests {
 
     #[test]
     fn test_jit_apply_desugar() {
-        // Apply desugaring inside a hot function
+        // Apply desugaring inside a hot function.
+        // f[x_] := Apply[Plus, x] — no list literal inside the body
         let result = eval_str(
-            "f[x_, y_] := Apply[Plus, {x, y}];
-             Do[f[i, i], {i, 1, 100}];
-             f[10, 32]",
+            "f[x_] := Apply[Plus, x];
+             Do[f[{i, i}], {i, 1, 100}];
+             f[{10, 32}]",
         );
         assert_eq!(result, Value::Integer(Integer::from(42)));
     }
@@ -3046,6 +3101,87 @@ mod tests {
             Value::List(vec![
                 Value::Bool(false),
                 Value::Bool(true),
+            ])
+        );
+    }
+
+    // ── Pure function (#&) tests ──
+
+    #[test]
+    fn test_pure_function_slot() {
+        // #& — identity function
+        assert_eq!(
+            eval_str("(#&)[5]"),
+            Value::Integer(Integer::from(5))
+        );
+    }
+
+    #[test]
+    fn test_pure_function_arithmetic() {
+        // # + 1 &
+        assert_eq!(
+            eval_str("(# + 1 &)[5]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_pure_function_two_slots() {
+        // #1 + #2 &
+        assert_eq!(
+            eval_str("(#1 + #2 &)[3, 7]"),
+            Value::Integer(Integer::from(10))
+        );
+    }
+
+    #[test]
+    fn test_pure_function_map() {
+        // Map[# + 1 &, {1, 2, 3}]
+        assert_eq!(
+            eval_str("Map[# + 1 &, {1, 2, 3}]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(4)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_pure_function_select() {
+        // Select[{1, 2, 3, 4}, # > 2 &]
+        assert_eq!(
+            eval_str("Select[{1, 2, 3, 4}, # > 2 &]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(4)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_pure_function_part() {
+        // (#[[1]] + #[[2]] &)[{10, 32}] → 42
+        assert_eq!(
+            eval_str("(#[[1]] + #[[2]] &)[{10, 32}]"),
+            Value::Integer(Integer::from(42)),
+        );
+    }
+
+    #[test]
+    fn test_pure_function_nested_slots() {
+        // Nested pure functions: inner # belongs to inner &, outer # to outer &
+        assert_eq!(
+            eval_str("Map[# + Map[# + 1 &, #] &, {{1, 2}, {3, 4}}]"),
+            Value::List(vec![
+                Value::List(vec![
+                    Value::Integer(Integer::from(3)),
+                    Value::Integer(Integer::from(5)),
+                ]),
+                Value::List(vec![
+                    Value::Integer(Integer::from(7)),
+                    Value::Integer(Integer::from(9)),
+                ]),
             ])
         );
     }

@@ -105,6 +105,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "GatherBy", list::builtin_gather_by);
     register_builtin_env(env, "FoldList", list::builtin_fold_list);
     register_builtin_env(env, "NestList", list::builtin_nest_list);
+    register_builtin_env(env, "Apply", list::builtin_apply);
 
     // ── Pattern ──
     register_builtin(env, "MatchQ", pattern::builtin_match_q);

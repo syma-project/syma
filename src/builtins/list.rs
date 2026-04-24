@@ -1704,6 +1704,23 @@ pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// Apply[func, expr] — calls func with the elements of expr as arguments.
+/// If expr is a List, the list elements become the arguments.
+/// Otherwise, func is called with expr as a single argument.
+pub fn builtin_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Apply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let func = &args[0];
+    let expr = &args[1];
+    match expr {
+        Value::List(items) => apply_function(func, items, env),
+        _ => apply_function(func, &[expr.clone()], env),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

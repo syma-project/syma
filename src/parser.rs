@@ -534,7 +534,15 @@ impl Parser {
     // ── Expressions (precedence climbing) ──
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_pipe_expr()
+        let lhs = self.parse_pipe_expr()?;
+        if self.at(&Token::FuncRef) {
+            self.advance();
+            Ok(Expr::Pure {
+                body: Box::new(lhs),
+            })
+        } else {
+            Ok(lhs)
+        }
     }
 
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1227,15 +1235,26 @@ impl Parser {
         let pattern = self.parse_pattern_pipe()?;
 
         // Check for guard: pattern /; condition
-        if self.at(&Token::ColonSlashSemicolon) {
+        let result = if self.at(&Token::ColonSlashSemicolon) {
             self.advance();
             let condition = self.parse_expression()?;
-            Ok(Expr::PatternGuard {
+            Expr::PatternGuard {
                 pattern: Box::new(pattern),
                 condition: Box::new(condition),
+            }
+        } else {
+            pattern
+        };
+
+        // Check for pure function: pattern &
+        // & has the lowest precedence (below /; and //)
+        if self.at(&Token::FuncRef) {
+            self.advance();
+            Ok(Expr::Pure {
+                body: Box::new(result),
             })
         } else {
-            Ok(pattern)
+            Ok(result)
         }
     }
 
@@ -1245,17 +1264,27 @@ impl Parser {
     fn parse_pattern_no_rule(&mut self) -> Result<Expr, ParseError> {
         let pattern = self.parse_pattern_or()?;
 
-        if self.at(&Token::ColonSlashSemicolon) {
+        let result = if self.at(&Token::ColonSlashSemicolon) {
             self.advance();
             // Parse condition without consuming -> / :> as rule operators.
             // Stop at parse_or_expr level (just below rule precedence).
             let condition = self.parse_or_expr()?;
-            Ok(Expr::PatternGuard {
+            Expr::PatternGuard {
                 pattern: Box::new(pattern),
                 condition: Box::new(condition),
+            }
+        } else {
+            pattern
+        };
+
+        // Check for pure function: pattern &
+        if self.at(&Token::FuncRef) {
+            self.advance();
+            Ok(Expr::Pure {
+                body: Box::new(result),
             })
         } else {
-            Ok(pattern)
+            Ok(result)
         }
     }
 

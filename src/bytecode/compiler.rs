@@ -785,7 +785,6 @@ impl BytecodeCompiler {
 mod tests {
     use super::*;
     use crate::ast::{Expr, IteratorSpec};
-    use rug::Integer;
 
     fn compile(params: Vec<Expr>, body: Expr) -> CompiledBytecode {
         BytecodeCompiler::compile_function(&params, &body, "f").unwrap()
