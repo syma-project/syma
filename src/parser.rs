@@ -1259,6 +1259,14 @@ impl Parser {
                         args: vec![left, right],
                     };
                 }
+                Token::MapOp => {
+                    self.advance();
+                    let right = self.parse_pattern_pow()?;
+                    left = Expr::Map {
+                        func: Box::new(left),
+                        list: Box::new(right),
+                    };
+                }
                 _ => break,
             }
         }

@@ -44,39 +44,39 @@ fn print_repl_help() {
     println!("  (* comment *)    Comment");
 }
 
+// ANSI color helpers
+fn green(s: &str) -> String   { format!("\x1b[32m{}\x1b[0m", s) }
+fn red(s: &str) -> String     { format!("\x1b[31m{}\x1b[0m", s) }
+fn bold_red(s: &str) -> String { format!("\x1b[1;31m{}\x1b[0m", s) }
+fn cyan(s: &str) -> String    { format!("\x1b[36m{}\x1b[0m", s) }
+fn dim(s: &str) -> String     { format!("\x1b[2m{}\x1b[0m", s) }
+
 fn print_error(label: &str, message: &str, source: &str) {
-    eprintln!("\x1b[1;31m{}\x1b[0m: {}", label, message);
-    eprintln!("  \x1b[2m{}\x1b[0m", source);
+    eprintln!("{}: {}", bold_red(label), message);
+    eprintln!("  {}", dim(source));
 }
 
-fn eval_input(input: &str, env: &env::Env) {
-    // Tokenize
+/// Returns the value if successful, None on error.
+fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
         Err(e) => {
-            print_error("Lex error", &e.to_string(), input);
-            return;
+            print_error("LexError", &e.to_string(), input);
+            return None;
         }
     };
-
-    // Parse
     let ast = match parser::parse(tokens) {
         Ok(ast) => ast,
         Err(e) => {
-            print_error("Parse error", &e.to_string(), input);
-            return;
+            print_error("ParseError", &e.to_string(), input);
+            return None;
         }
     };
-
-    // Evaluate
     match eval::eval_program(&ast, env) {
-        Ok(value) => {
-            if value != value::Value::Null {
-                println!("{}", value);
-            }
-        }
+        Ok(value) => Some(value),
         Err(e) => {
             print_error("Error", &e.to_string(), input);
+            None
         }
     }
 }
@@ -85,14 +85,14 @@ fn eval_input_silent(input: &str, env: &env::Env) {
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
         Err(e) => {
-            print_error("Lex error", &e.to_string(), input);
+            print_error("LexError", &e.to_string(), input);
             return;
         }
     };
     let ast = match parser::parse(tokens) {
         Ok(ast) => ast,
         Err(e) => {
-            print_error("Parse error", &e.to_string(), input);
+            print_error("ParseError", &e.to_string(), input);
             return;
         }
     };
@@ -121,8 +121,10 @@ fn run_file(path: &str) {
         // Suppress output for lines ending with ';'
         if line.ends_with(';') {
             eval_input_silent(line, &env);
-        } else {
-            eval_input(line, &env);
+        } else if let Some(value) = eval_input(line, &env) {
+            if value != value::Value::Null {
+                println!("{}", value);
+            }
         }
     }
 }
@@ -130,8 +132,10 @@ fn run_file(path: &str) {
 const HISTORY_FILE: &str = ".syma_history";
 
 fn run_repl() {
-    println!("Syma v{} — Symbolic-First Language with OOP Structure", VERSION);
-    println!("Type 'help' for commands, 'quit' to exit.\n");
+    println!("{} — Symbolic-First Language with OOP Structure",
+        green(&format!("Syma v{}", VERSION)));
+    println!("Type {} for commands, {} to exit.\n",
+        cyan("'help'"), cyan("'quit'"));
 
     let env = env::Env::new();
     builtins::register_builtins(&env);
@@ -150,8 +154,15 @@ fn run_repl() {
         let _ = rl.load_history(path);
     }
 
+    let mut counter: usize = 1;
+
     loop {
-        match rl.readline("syma> ") {
+        // \x01 / \x02 bracket non-printing chars so rustyline measures width correctly
+        let prompt = format!(
+            "\x01\x1b[32m\x02In [{}]: \x01\x1b[0m\x02",
+            counter
+        );
+        match rl.readline(&prompt) {
             Ok(line) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -174,10 +185,16 @@ fn run_repl() {
                     _ => {}
                 }
 
-                eval_input(input, &env);
+                if let Some(value) = eval_input(input, &env) {
+                    if value != value::Value::Null {
+                        println!("{} {}", red(&format!("Out[{}]:", counter)), value);
+                    }
+                }
+                counter += 1;
             }
             Err(ReadlineError::Interrupted) => {
                 // Ctrl+C: cancel current input
+                println!("{}", dim("KeyboardInterrupt"));
                 continue;
             }
             Err(ReadlineError::Eof) => {
