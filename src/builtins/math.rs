@@ -21,10 +21,12 @@ fn extract_pi_multiple(val: &Value) -> Option<(i64, u32)> {
         Value::Symbol(s) if s == "Pi" => Some((1, 1)),
         // Divide[Pi, n] or Times[Pi, Power[n, -1]]
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            if let (Value::Symbol(s), Value::Integer(d)) = (&args[0], &args[1]) {
-                if s == "Pi" && !d.is_zero() && !d.is_negative() {
-                    return d.to_u32().map(|den| (1, den));
-                }
+            if let (Value::Symbol(s), Value::Integer(d)) = (&args[0], &args[1])
+                && s == "Pi"
+                && !d.is_zero()
+                && !d.is_negative()
+            {
+                return d.to_u32().map(|den| (1, den));
             }
             None
         }
@@ -242,10 +244,10 @@ pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_sin(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_sin(num, den)
+            {
+                return Ok(result);
             }
             if is_pi_multiple(r) {
                 return Ok(Value::Call {
@@ -284,10 +286,10 @@ pub fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_cos(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_cos(num, den)
+            {
+                return Ok(result);
             }
             if is_pi_multiple(r) {
                 return Ok(Value::Call {
@@ -326,10 +328,10 @@ pub fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_tan(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_tan(num, den)
+            {
+                return Ok(result);
             }
             if is_pi_multiple(r) {
                 return Ok(Value::Call {
@@ -476,10 +478,10 @@ pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_csc(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_csc(num, den)
+            {
+                return Ok(result);
             }
             let sin_val = r.clone().sin();
             if sin_val.is_zero() {
@@ -520,10 +522,10 @@ pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_sec(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_sec(num, den)
+            {
+                return Ok(result);
             }
             let cos_val = r.clone().cos();
             if cos_val.is_zero() {
@@ -567,10 +569,10 @@ pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => {
-            if let Some((num, den)) = pi_multiple(r) {
-                if let Some(result) = exact_cot(num, den) {
-                    return Ok(result);
-                }
+            if let Some((num, den)) = pi_multiple(r)
+                && let Some(result) = exact_cot(num, den)
+            {
+                return Ok(result);
             }
             let sin_val = r.clone().sin();
             if sin_val.is_zero() {
@@ -938,28 +940,32 @@ pub fn builtin_log(args: &[Value]) -> Result<Value, EvalError> {
             let b = &args[0];
             let x = &args[1];
             // Log[b, 1] = 0
-            if let Value::Integer(n) = x {
-                if *n == 1 {
-                    return Ok(Value::Integer(Integer::from(0)));
-                }
+            if let Value::Integer(n) = x
+                && *n == 1
+            {
+                return Ok(Value::Integer(Integer::from(0)));
             }
             // Log[b, b] = 1
             if b == x {
                 return Ok(Value::Integer(Integer::from(1)));
             }
             // Log[b, b^n] = n  (symbolic: x is Power[b, exp])
-            if let Value::Call { head, args: pargs } = x {
-                if head == "Power" && pargs.len() == 2 && &pargs[0] == b {
-                    return Ok(pargs[1].clone());
-                }
+            if let Value::Call { head, args: pargs } = x
+                && head == "Power"
+                && pargs.len() == 2
+                && &pargs[0] == b
+            {
+                return Ok(pargs[1].clone());
             }
             // Log[b, x] where b and x are positive integers: try exact integer result
-            if let (Value::Integer(bi), Value::Integer(xi)) = (b, x) {
-                if !bi.is_negative() && !bi.is_zero() && !xi.is_negative() && !xi.is_zero() {
-                    if let Some(n) = exact_integer_log(xi, bi) {
-                        return Ok(Value::Integer(Integer::from(n)));
-                    }
-                }
+            if let (Value::Integer(bi), Value::Integer(xi)) = (b, x)
+                && !bi.is_negative()
+                && !bi.is_zero()
+                && !xi.is_negative()
+                && !xi.is_zero()
+                && let Some(n) = exact_integer_log(xi, bi)
+            {
+                return Ok(Value::Integer(Integer::from(n)));
             }
             // Numerical evaluation when at least one arg is a float
             match (b, x) {
@@ -1216,15 +1222,11 @@ pub fn builtin_max(args: &[Value]) -> Result<Value, EvalError> {
     let mut max = &args[0];
     for arg in &args[1..] {
         match (max, arg) {
-            (Value::Integer(a), Value::Integer(b)) => {
-                if b > a {
-                    max = arg;
-                }
+            (Value::Integer(a), Value::Integer(b)) if b > a => {
+                max = arg;
             }
-            (Value::Real(a), Value::Real(b)) => {
-                if b > a {
-                    max = arg;
-                }
+            (Value::Real(a), Value::Real(b)) if b > a => {
+                max = arg;
             }
             _ => {}
         }
@@ -1241,15 +1243,11 @@ pub fn builtin_min(args: &[Value]) -> Result<Value, EvalError> {
     let mut min = &args[0];
     for arg in &args[1..] {
         match (min, arg) {
-            (Value::Integer(a), Value::Integer(b)) => {
-                if b < a {
-                    min = arg;
-                }
+            (Value::Integer(a), Value::Integer(b)) if b < a => {
+                min = arg;
             }
-            (Value::Real(a), Value::Real(b)) => {
-                if b < a {
-                    min = arg;
-                }
+            (Value::Real(a), Value::Real(b)) if b < a => {
+                min = arg;
             }
             _ => {}
         }

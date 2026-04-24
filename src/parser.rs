@@ -300,6 +300,7 @@ impl Parser {
             None
         };
 
+        #[allow(clippy::if_same_then_else)]
         let body = if self.at(&Token::DelayedAssign) {
             self.advance();
             MethodBody::Expr(self.parse_expression()?)
@@ -358,6 +359,7 @@ impl Parser {
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             let pattern = self.parse_pattern_no_rule()?;
+            #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
                 self.advance();
                 self.parse_expression()?
@@ -442,6 +444,7 @@ impl Parser {
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             let lhs = self.parse_pattern_no_rule()?;
+            #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
                 self.advance();
                 self.parse_expression()?

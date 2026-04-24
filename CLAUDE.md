@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Syma** — a symbolic-first programming language inspired by Wolfram Language, with OOP structure. Written in Rust (edition 2024), zero external dependencies. Currently in Phase 1: tree-walk interpreter with REPL.
+**Syma** — a symbolic-first programming language inspired by Wolfram Language, with OOP structure. Written in Rust (edition 2024). Currently in Phase 1: tree-walk interpreter with REPL.
 
 The full language specification is in `syma-lang.md` (1200+ lines, includes EBNF grammar). That file is the source of truth for syntax and semantics.
 
@@ -12,10 +12,13 @@ The full language specification is in `syma-lang.md` (1200+ lines, includes EBNF
 
 ```bash
 cargo build              # Build the project
-cargo test               # Run all tests
+cargo test               # Run all tests (unit + integration)
 cargo test lexer         # Run tests for a specific module (lexer, parser, eval, etc.)
+cargo test --test cli    # Run only integration tests
 cargo run                # Launch the REPL
 cargo check              # Fast type-check without compiling
+cargo fmt                # Format all code
+cargo clippy -- -D warnings  # Lint (zero warnings required)
 ```
 
 ## Architecture
@@ -60,6 +63,16 @@ The pipeline is: **Source → Lexer → Parser → AST → Evaluator → Value**
 - Guard condition evaluation in pattern matching
 - Pure function (`#`/`#1`) evaluation is basic — only via `PureFunction` value type
 - Bytecode compilation and JIT (Phase 2/3)
+
+## CI
+
+The project uses GitHub Actions (`.github/workflows/ci.yml`) with three jobs:
+
+1. **check** — `cargo check --locked` (fast type-check, runs first)
+2. **test** — `cargo test --locked` (all unit + integration tests, depends on check)
+3. **lint** — `cargo fmt --check` + `cargo clippy --locked -- -D warnings` (depends on check)
+
+The `rug` crate requires `libgmp-dev` and `clang` on Ubuntu runners. `Cargo.lock` is checked in; all jobs use `--locked` for reproducible builds. Build artifacts are cached via `actions/cache@v4`.
 
 ## Syntax Notes for Writing Tests
 

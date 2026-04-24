@@ -47,6 +47,7 @@ impl NativeType {
     }
 
     /// Return the Syma display name.
+    #[allow(dead_code)]
     pub fn syma_name(&self) -> &'static str {
         match self {
             NativeType::Void => "Void",
@@ -97,7 +98,7 @@ pub const DEFAULT_PRECISION: u32 = 128;
 /// Rug uses `e` as exponent marker for base 10 (MPFR convention).
 pub fn rug_radix_to_decimal(s: &str) -> String {
     // Split on 'e' or '@' to get mantissa and base-10 exponent.
-    let sep_pos = s[1..].find(|c| c == 'e' || c == '@').map(|i| i + 1);
+    let sep_pos = s[1..].find(['e', '@']).map(|i| i + 1);
     let (mantissa, exp_str) = if let Some(at) = sep_pos {
         (&s[..at], &s[at + 1..])
     } else {
@@ -282,6 +283,7 @@ pub struct FunctionDefinition {
 
 /// A class definition with fields, methods, constructor, and inheritance info.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClassDef {
     pub name: String,
     pub parent: Option<String>,
@@ -293,6 +295,7 @@ pub struct ClassDef {
 
 /// A class field with optional type hint and default value.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClassField {
     pub name: String,
     pub type_hint: Option<String>,
@@ -301,6 +304,7 @@ pub struct ClassField {
 
 /// A class method.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClassMethod {
     pub name: String,
     pub params: Vec<Expr>,

@@ -465,7 +465,7 @@ fn collect_syma_files(dir: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(collect_syma_files(&path));
-            } else if path.extension().map_or(false, |e| e == "syma") {
+            } else if path.extension().is_some_and(|e| e == "syma") {
                 files.push(path);
             }
         }

@@ -365,7 +365,7 @@ impl Lexer {
         }
 
         // Check for real (decimal point)
-        if self.peek() == Some('.') && self.peek_ahead(1).map_or(false, |c| c.is_ascii_digit()) {
+        if self.peek() == Some('.') && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) {
             num_str.push('.');
             self.advance(); // consume '.'
             while let Some(ch) = self.peek() {

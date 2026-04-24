@@ -242,27 +242,25 @@ fn expand_times(args: &[Value]) -> Value {
         head,
         args: plus_args,
     } = right
+        && head == "Plus"
     {
-        if head == "Plus" {
-            let terms: Vec<Value> = plus_args
-                .iter()
-                .map(|term| simplify_call("Times", &[left.clone(), term.clone()]))
-                .collect();
-            return simplify_call("Plus", &terms);
-        }
+        let terms: Vec<Value> = plus_args
+            .iter()
+            .map(|term| simplify_call("Times", &[left.clone(), term.clone()]))
+            .collect();
+        return simplify_call("Plus", &terms);
     }
     if let Value::Call {
         head,
         args: plus_args,
     } = left
+        && head == "Plus"
     {
-        if head == "Plus" {
-            let terms: Vec<Value> = plus_args
-                .iter()
-                .map(|term| simplify_call("Times", &[term.clone(), right.clone()]))
-                .collect();
-            return simplify_call("Plus", &terms);
-        }
+        let terms: Vec<Value> = plus_args
+            .iter()
+            .map(|term| simplify_call("Times", &[term.clone(), right.clone()]))
+            .collect();
+        return simplify_call("Plus", &terms);
     }
     Value::Call {
         head: "Times".to_string(),
@@ -278,45 +276,44 @@ fn expand_power(args: &[Value]) -> Value {
         };
     }
     let (base, exp) = (&args[0], &args[1]);
-    if let Value::Integer(n) = exp {
-        if let Some(n_i64) = n.to_i64() {
-            if let Value::Call {
-                head,
-                args: plus_args,
-            } = base
-            {
-                if head == "Plus" && plus_args.len() == 2 && n_i64 >= 0 && n_i64 <= 10 {
-                    let (a, b) = (&plus_args[0], &plus_args[1]);
-                    let mut terms = Vec::new();
-                    for k in 0..=n_i64 {
-                        let coeff = binomial(n_i64, k);
-                        let a_pow = if n_i64 - k == 0 {
-                            Value::Integer(Integer::from(1))
-                        } else if n_i64 - k == 1 {
-                            a.clone()
-                        } else {
-                            simplify_call(
-                                "Power",
-                                &[a.clone(), Value::Integer(Integer::from(n_i64 - k))],
-                            )
-                        };
-                        let b_pow = if k == 0 {
-                            Value::Integer(Integer::from(1))
-                        } else if k == 1 {
-                            b.clone()
-                        } else {
-                            simplify_call("Power", &[b.clone(), Value::Integer(Integer::from(k))])
-                        };
-                        let term = simplify_call(
-                            "Times",
-                            &[Value::Integer(Integer::from(coeff)), a_pow, b_pow],
-                        );
-                        terms.push(term);
-                    }
-                    return simplify_call("Plus", &terms);
-                }
-            }
+    if let Value::Integer(n) = exp
+        && let Some(n_i64) = n.to_i64()
+        && let Value::Call {
+            head,
+            args: plus_args,
+        } = base
+        && head == "Plus"
+        && plus_args.len() == 2
+        && (0..=10).contains(&n_i64)
+    {
+        let (a, b) = (&plus_args[0], &plus_args[1]);
+        let mut terms = Vec::new();
+        for k in 0..=n_i64 {
+            let coeff = binomial(n_i64, k);
+            let a_pow = if n_i64 - k == 0 {
+                Value::Integer(Integer::from(1))
+            } else if n_i64 - k == 1 {
+                a.clone()
+            } else {
+                simplify_call(
+                    "Power",
+                    &[a.clone(), Value::Integer(Integer::from(n_i64 - k))],
+                )
+            };
+            let b_pow = if k == 0 {
+                Value::Integer(Integer::from(1))
+            } else if k == 1 {
+                b.clone()
+            } else {
+                simplify_call("Power", &[b.clone(), Value::Integer(Integer::from(k))])
+            };
+            let term = simplify_call(
+                "Times",
+                &[Value::Integer(Integer::from(coeff)), a_pow, b_pow],
+            );
+            terms.push(term);
         }
+        return simplify_call("Plus", &terms);
     }
     Value::Call {
         head: "Power".to_string(),
@@ -393,8 +390,8 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                     differentiate(&args[0], var)
                 } else {
                     let mut result = args[0].clone();
-                    for i in 1..args.len() {
-                        result = simplify_call("Times", &[result, args[i].clone()]);
+                    for item in args.iter().skip(1) {
+                        result = simplify_call("Times", &[result, item.clone()]);
                     }
                     differentiate(&result, var)
                 }
@@ -675,7 +672,7 @@ fn integrate(expr: &Value, var: &str) -> Value {
                 if vars.is_empty() {
                     simplify_call("Times", &[simplify_call("Times", args), x])
                 } else if vars.len() == 1 {
-                    let var_part = integrate(&vars[0], var);
+                    let var_part = integrate(vars[0], var);
                     let const_vals: Vec<Value> = constants.iter().map(|c| (*c).clone()).collect();
                     let const_product = if constants.is_empty() {
                         Value::Integer(Integer::from(1))
@@ -803,10 +800,11 @@ fn find_polynomial_var(expr: &Value) -> Option<String> {
                     }
                 }
             }
-            if head == "Power" && args.len() == 2 {
-                if let Some(v) = find_polynomial_var(&args[0]) {
-                    return Some(v);
-                }
+            if head == "Power"
+                && args.len() == 2
+                && let Some(v) = find_polynomial_var(&args[0])
+            {
+                return Some(v);
             }
             None
         }
@@ -824,7 +822,7 @@ fn factor_linear(coeffs: &[Value], var: &str) -> Value {
     let x = Value::Symbol(var.to_string());
     if let (Value::Integer(ai), Value::Integer(bi)) = (a, b) {
         let gcd = ai.clone().gcd(bi);
-        if gcd > Integer::from(1) {
+        if gcd > 1 {
             let new_a = Value::Call {
                 head: "Plus".to_string(),
                 args: vec![
@@ -859,42 +857,42 @@ fn factor_quadratic(coeffs: &[Value], var: &str) -> Value {
     let a = &coeffs[2];
     let x = Value::Symbol(var.to_string());
 
-    if let (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci)) = (a, b, c) {
-        if !ai.is_zero() {
-            // Discriminant: b^2 - 4ac
-            let b_sq: Integer = (bi * bi).into();
-            let four_ac: Integer = (Integer::from(4) * ai * ci).into();
-            let disc: Integer = (b_sq - four_ac).into();
-            if !disc.is_negative() {
-                let sqrt_disc = disc.clone().sqrt();
-                let sqrt_disc_sq: Integer = (&sqrt_disc * &sqrt_disc).into();
-                if sqrt_disc_sq == disc {
-                    let two_a: Integer = (Integer::from(2) * ai).into();
-                    let neg_bi: Integer = (-bi).into();
-                    let r1_num: Integer = (&neg_bi + &sqrt_disc).into();
-                    let r2_num: Integer = (&neg_bi - &sqrt_disc).into();
-                    if r1_num.is_divisible(&two_a) && r2_num.is_divisible(&two_a) {
-                        let r1: Integer = r1_num / &two_a;
-                        let r2: Integer = r2_num / &two_a;
-                        let factor1 = Value::Call {
-                            head: "Plus".to_string(),
-                            args: vec![x.clone(), Value::Integer(-r1)],
+    if let (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci)) = (a, b, c)
+        && !ai.is_zero()
+    {
+        // Discriminant: b^2 - 4ac
+        let b_sq: Integer = (bi * bi).into();
+        let four_ac: Integer = Integer::from(4) * ai * ci;
+        let disc: Integer = b_sq - four_ac;
+        if !disc.is_negative() {
+            let sqrt_disc = disc.clone().sqrt();
+            let sqrt_disc_sq: Integer = (&sqrt_disc * &sqrt_disc).into();
+            if sqrt_disc_sq == disc {
+                let two_a: Integer = Integer::from(2) * ai;
+                let neg_bi: Integer = (-bi).into();
+                let r1_num: Integer = (&neg_bi + &sqrt_disc).into();
+                let r2_num: Integer = (&neg_bi - &sqrt_disc).into();
+                if r1_num.is_divisible(&two_a) && r2_num.is_divisible(&two_a) {
+                    let r1: Integer = r1_num / &two_a;
+                    let r2: Integer = r2_num / &two_a;
+                    let factor1 = Value::Call {
+                        head: "Plus".to_string(),
+                        args: vec![x.clone(), Value::Integer(-r1)],
+                    };
+                    let factor2 = Value::Call {
+                        head: "Plus".to_string(),
+                        args: vec![x, Value::Integer(-r2)],
+                    };
+                    if *ai == 1 {
+                        return Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![factor1, factor2],
                         };
-                        let factor2 = Value::Call {
-                            head: "Plus".to_string(),
-                            args: vec![x, Value::Integer(-r2)],
+                    } else {
+                        return Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![Value::Integer(ai.clone()), factor1, factor2],
                         };
-                        if *ai == Integer::from(1) {
-                            return Value::Call {
-                                head: "Times".to_string(),
-                                args: vec![factor1, factor2],
-                            };
-                        } else {
-                            return Value::Call {
-                                head: "Times".to_string(),
-                                args: vec![Value::Integer(ai.clone()), factor1, factor2],
-                            };
-                        }
                     }
                 }
             }
@@ -918,7 +916,7 @@ fn factor_by_gcd(coeffs: &[Value], var: &str) -> Value {
     for n in &integers[1..] {
         gcd = gcd.gcd(n);
     }
-    if gcd <= Integer::from(1) {
+    if gcd <= 1 {
         return expr_from_coeffs(coeffs, var);
     }
     let new_coeffs: Vec<Value> = coeffs

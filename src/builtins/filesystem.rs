@@ -378,7 +378,7 @@ pub fn builtin_file_names(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     }
-    results.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    results.sort_by_key(|a| a.to_string());
     Ok(Value::List(results))
 }
 

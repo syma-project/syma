@@ -20,10 +20,10 @@ pub fn builtin_input(args: &[Value]) -> Result<Value, EvalError> {
             "Input requires 0 or 1 arguments".to_string(),
         ));
     }
-    if args.len() == 1 {
-        if let Value::Str(prompt) = &args[0] {
-            eprint!("{}", prompt);
-        }
+    if args.len() == 1
+        && let Value::Str(prompt) = &args[0]
+    {
+        eprint!("{}", prompt);
     }
     let mut input = String::new();
     std::io::stdin()

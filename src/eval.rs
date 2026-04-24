@@ -337,10 +337,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             } => {
                                 fields.insert(field_name.clone(), val.clone());
                                 let updated = Value::Object { class_name, fields };
-                                if let Expr::Symbol(s) = &call_args[0] {
-                                    if s == "this" {
-                                        env.set("this".to_string(), updated.clone());
-                                    }
+                                if let Expr::Symbol(s) = &call_args[0]
+                                    && s == "this"
+                                {
+                                    env.set("this".to_string(), updated.clone());
                                 }
                                 Ok(val)
                             }
@@ -473,40 +473,39 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
             // Resolve parent class and merge its fields/methods
             let parent_name = parent.clone();
-            if let Some(ref parent_name) = parent_name {
-                if let Some(parent_val) = env.get(parent_name) {
-                    if let Value::Class(parent_class) = parent_val {
-                        // Merge parent fields (child fields override)
-                        let child_field_names: std::collections::HashSet<String> =
-                            fields.iter().map(|f| f.name.clone()).collect();
-                        for parent_field in &parent_class.fields {
-                            if !child_field_names.contains(&parent_field.name) {
-                                fields.insert(0, parent_field.clone());
-                            }
-                        }
-                        // Merge parent methods (child methods override)
-                        for (method_name, method) in &parent_class.methods {
-                            methods
-                                .entry(method_name.clone())
-                                .or_insert_with(|| method.clone());
-                        }
-                        // Use parent constructor if child doesn't have one
-                        if constructor.is_none() {
-                            constructor = parent_class.constructor.clone();
-                        }
+            if let Some(ref parent_name) = parent_name
+                && let Some(parent_val) = env.get(parent_name)
+                && let Value::Class(parent_class) = parent_val
+            {
+                // Merge parent fields (child fields override)
+                let child_field_names: std::collections::HashSet<String> =
+                    fields.iter().map(|f| f.name.clone()).collect();
+                for parent_field in &parent_class.fields {
+                    if !child_field_names.contains(&parent_field.name) {
+                        fields.insert(0, parent_field.clone());
                     }
+                }
+                // Merge parent methods (child methods override)
+                for (method_name, method) in &parent_class.methods {
+                    methods
+                        .entry(method_name.clone())
+                        .or_insert_with(|| method.clone());
+                }
+                // Use parent constructor if child doesn't have one
+                if constructor.is_none() {
+                    constructor = parent_class.constructor.clone();
                 }
             }
 
             // Resolve mixins and merge their methods
             for mixin_name in mixins {
-                if let Some(mixin_val) = env.get(mixin_name) {
-                    if let Value::Class(mixin_class) = mixin_val {
-                        for (method_name, method) in &mixin_class.methods {
-                            methods
-                                .entry(method_name.clone())
-                                .or_insert_with(|| method.clone());
-                        }
+                if let Some(mixin_val) = env.get(mixin_name)
+                    && let Value::Class(mixin_class) = mixin_val
+                {
+                    for (method_name, method) in &mixin_class.methods {
+                        methods
+                            .entry(method_name.clone())
+                            .or_insert_with(|| method.clone());
                     }
                 }
             }
@@ -728,10 +727,10 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                                     fields.insert(field_name.clone(), val.clone());
                                     let updated = Value::Object { class_name, fields };
                                     // If target is 'this', update it in the environment
-                                    if let Expr::Symbol(s) = &call_args[0] {
-                                        if s == "this" {
-                                            env.set("this".to_string(), updated.clone());
-                                        }
+                                    if let Expr::Symbol(s) = &call_args[0]
+                                        && s == "this"
+                                    {
+                                        env.set("this".to_string(), updated.clone());
                                     }
                                     Ok(val)
                                 }
@@ -985,33 +984,31 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 // Check if first arg is an object — field access or method call
                 if let Value::Object { class_name, fields } = &args[0] {
                     // Field access: single arg
-                    if args.len() == 1 {
-                        if let Some(val) = fields.get(name) {
-                            return Ok(val.clone());
-                        }
+                    if args.len() == 1
+                        && let Some(val) = fields.get(name)
+                    {
+                        return Ok(val.clone());
                     }
                     // Method dispatch: look up method on the class
-                    if let Some(class_val) = env.get(class_name) {
-                        if let Value::Class(class_def) = class_val {
-                            if let Some(method) = class_def.methods.get(name) {
-                                let child_env = env.child();
-                                // Bind 'this' to the object
-                                child_env.set("this".to_string(), args[0].clone());
-                                // Bind field names to their values
-                                for (field_name, field_val) in fields {
-                                    child_env.set(field_name.clone(), field_val.clone());
-                                }
-                                // Match method params to remaining args
-                                let method_args = &args[1..];
-                                if let Some(bindings) =
-                                    try_match_params(&method.params, method_args, env)?
-                                {
-                                    for (bind_name, bind_val) in &bindings {
-                                        child_env.set(bind_name.clone(), bind_val.clone());
-                                    }
-                                    return eval(&method.body, &child_env);
-                                }
+                    if let Some(class_val) = env.get(class_name)
+                        && let Value::Class(class_def) = class_val
+                        && let Some(method) = class_def.methods.get(name)
+                    {
+                        let child_env = env.child();
+                        // Bind 'this' to the object
+                        child_env.set("this".to_string(), args[0].clone());
+                        // Bind field names to their values
+                        for (field_name, field_val) in fields {
+                            child_env.set(field_name.clone(), field_val.clone());
+                        }
+                        // Match method params to remaining args
+                        let method_args = &args[1..];
+                        if let Some(bindings) = try_match_params(&method.params, method_args, env)?
+                        {
+                            for (bind_name, bind_val) in &bindings {
+                                child_env.set(bind_name.clone(), bind_val.clone());
                             }
+                            return eval(&method.body, &child_env);
                         }
                     }
                 }
@@ -1147,12 +1144,11 @@ fn apply_rules_value(value: &Value, rules: &Value) -> Result<Value, EvalError> {
             rules: rule_pairs, ..
         } => {
             for (lhs, rhs) in rule_pairs {
-                if let Value::Pattern(lhs_expr) = lhs {
-                    if let MatchResult::Match(bindings) = match_pattern(lhs_expr, value) {
-                        if let Value::Pattern(rhs_expr) = rhs {
-                            return substitute_value(rhs_expr, &bindings);
-                        }
-                    }
+                if let Value::Pattern(lhs_expr) = lhs
+                    && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
+                    && let Value::Pattern(rhs_expr) = rhs
+                {
+                    return substitute_value(rhs_expr, &bindings);
                 }
             }
             Ok(value.clone())
@@ -1167,15 +1163,15 @@ fn apply_rules_value(value: &Value, rules: &Value) -> Result<Value, EvalError> {
             Ok(value.clone())
         }
         Value::Rule { lhs, rhs, delayed } => {
-            if let Value::Pattern(lhs_expr) = lhs.as_ref() {
-                if let MatchResult::Match(bindings) = match_pattern(lhs_expr, value) {
-                    if *delayed {
-                        if let Value::Pattern(rhs_expr) = rhs.as_ref() {
-                            return substitute_value(rhs_expr, &bindings);
-                        }
-                    } else {
-                        return Ok(rhs.as_ref().clone());
+            if let Value::Pattern(lhs_expr) = lhs.as_ref()
+                && let MatchResult::Match(bindings) = match_pattern(lhs_expr, value)
+            {
+                if *delayed {
+                    if let Value::Pattern(rhs_expr) = rhs.as_ref() {
+                        return substitute_value(rhs_expr, &bindings);
                     }
+                } else {
+                    return Ok(rhs.as_ref().clone());
                 }
             }
             Ok(value.clone())
@@ -1875,8 +1871,7 @@ fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalErr
             std::thread::scope(|s| {
                 let handles: Vec<_> = items
                     .iter()
-                    .enumerate()
-                    .map(|(_i, item)| {
+                    .map(|item| {
                         let item = item.clone();
                         let f = f.clone();
                         let env = env.clone();

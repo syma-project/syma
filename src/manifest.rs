@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// A native dependency entry in `syma.toml`.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct NativeDep {
     /// Path to the compiled native library (`.so` / `.dylib` / `.dll`).
     pub path: String,
@@ -12,6 +13,7 @@ pub struct NativeDep {
 
 /// Parsed representation of a `syma.toml` package manifest.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Manifest {
     /// Absolute path to the `syma.toml` file.
     pub path: PathBuf,
@@ -155,13 +157,12 @@ pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Re
         if t.starts_with('[') {
             in_section = false;
         }
-        if in_section {
-            if let Some(eq) = t.find('=') {
-                if t[..eq].trim() == name {
-                    updated_idx = Some(i);
-                    break;
-                }
-            }
+        if in_section
+            && let Some(eq) = t.find('=')
+            && t[..eq].trim() == name
+        {
+            updated_idx = Some(i);
+            break;
         }
     }
 
@@ -190,7 +191,7 @@ pub fn add_dep(manifest_path: &Path, name: &str, version: &str, dev: bool) -> Re
             lines.insert(insert_at, new_line);
         } else {
             // Section absent — append it.
-            if lines.last().map_or(false, |l| !l.is_empty()) {
+            if lines.last().is_some_and(|l| !l.is_empty()) {
                 lines.push(String::new());
             }
             lines.push(header.to_string());
@@ -224,13 +225,12 @@ pub fn remove_dep(manifest_path: &Path, name: &str, dev: bool) -> Result<bool, S
         if t.starts_with('[') {
             in_section = false;
         }
-        if in_section {
-            if let Some(eq) = t.find('=') {
-                if t[..eq].trim() == name {
-                    remove_idx = Some(i);
-                    break;
-                }
-            }
+        if in_section
+            && let Some(eq) = t.find('=')
+            && t[..eq].trim() == name
+        {
+            remove_idx = Some(i);
+            break;
         }
     }
 
@@ -251,10 +251,10 @@ fn parse_inline_path(s: &str) -> Option<String> {
     let inner = s.trim_start_matches('{').trim_end_matches('}').trim();
     for part in inner.split(',') {
         let part = part.trim();
-        if let Some((k, v)) = parse_kv(part) {
-            if k.trim() == "path" {
-                return Some(v.to_string());
-            }
+        if let Some((k, v)) = parse_kv(part)
+            && k.trim() == "path"
+        {
+            return Some(v.to_string());
         }
     }
     None

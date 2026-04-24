@@ -1,3 +1,7 @@
+// `cloned_ref_to_slice_refs` — suggestion `std::slice::from_ref` gives `&[&T]` but
+// apply_function/simplify_call take `&[T]`, so the fix doesn't apply in this codebase.
+#![allow(clippy::cloned_ref_to_slice_refs)]
+
 /// Syma: A Symbolic-First Language with OOP Structure
 ///
 /// Phase 1: Tree-walk interpreter with REPL.
@@ -132,10 +136,10 @@ pub(crate) fn run_file(path: &str) {
 
     // Add the file's directory to the module search path so that
     // `import Foo` can find sibling files (e.g. `Foo.syma`).
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if parent != std::path::Path::new("") {
-            env.add_search_path(parent.to_path_buf());
-        }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && parent != std::path::Path::new("")
+    {
+        env.add_search_path(parent.to_path_buf());
     }
 
     let tokens = match lexer::tokenize(&source) {
@@ -221,20 +225,20 @@ fn run_repl() {
                     _ => {}
                 }
 
-                if let Some(value) = eval_input(input, &env) {
-                    if value != value::Value::Null {
-                        // Information queries display directly without Out[n]: prefix
-                        if input.starts_with('?') {
-                            let s = value.to_string();
-                            // Strip surrounding quotes from Str values for display
-                            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                                println!("{}", &s[1..s.len() - 1]);
-                            } else {
-                                println!("{}", s);
-                            }
+                if let Some(value) = eval_input(input, &env)
+                    && value != value::Value::Null
+                {
+                    // Information queries display directly without Out[n]: prefix
+                    if input.starts_with('?') {
+                        let s = value.to_string();
+                        // Strip surrounding quotes from Str values for display
+                        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                            println!("{}", &s[1..s.len() - 1]);
                         } else {
-                            println!("{} {}", red(&format!("Out[{}]:", counter)), value);
+                            println!("{}", s);
                         }
+                    } else {
+                        println!("{} {}", red(&format!("Out[{}]:", counter)), value);
                     }
                 }
                 counter += 1;

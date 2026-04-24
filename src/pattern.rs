@@ -175,14 +175,13 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
                 && args.len() == 2
                 && matches!(&args[0], Expr::Integer(n) if *n == -1)
             {
-                if let Value::Call { head: h, args: a } = value {
-                    if h == "Times" && a.len() == 2 {
-                        if let Value::Integer(n) = &a[0] {
-                            if *n == -1 {
-                                return match_pattern(&args[1], &a[1]);
-                            }
-                        }
-                    }
+                if let Value::Call { head: h, args: a } = value
+                    && h == "Times"
+                    && a.len() == 2
+                    && let Value::Integer(n) = &a[0]
+                    && *n == -1
+                {
+                    return match_pattern(&args[1], &a[1]);
                 }
                 return MatchResult::NoMatch;
             }
@@ -211,11 +210,11 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             {
                 if !delayed {
                     let left_match = match_pattern(lhs, vl);
-                    if let MatchResult::Match(mut bindings) = left_match {
-                        if let MatchResult::Match(right_bindings) = match_pattern(rhs, vr) {
-                            bindings.extend(right_bindings);
-                            return MatchResult::Match(bindings);
-                        }
+                    if let MatchResult::Match(mut bindings) = left_match
+                        && let MatchResult::Match(right_bindings) = match_pattern(rhs, vr)
+                    {
+                        bindings.extend(right_bindings);
+                        return MatchResult::Match(bindings);
                     }
                 }
                 MatchResult::NoMatch
@@ -233,11 +232,11 @@ pub fn match_pattern(pattern: &Expr, value: &Value) -> MatchResult {
             {
                 if *delayed {
                     let left_match = match_pattern(lhs, vl);
-                    if let MatchResult::Match(mut bindings) = left_match {
-                        if let MatchResult::Match(right_bindings) = match_pattern(rhs, vr) {
-                            bindings.extend(right_bindings);
-                            return MatchResult::Match(bindings);
-                        }
+                    if let MatchResult::Match(mut bindings) = left_match
+                        && let MatchResult::Match(right_bindings) = match_pattern(rhs, vr)
+                    {
+                        bindings.extend(right_bindings);
+                        return MatchResult::Match(bindings);
                     }
                 }
                 MatchResult::NoMatch

@@ -140,10 +140,10 @@ pub fn run_debug(path: &str) {
     let env = Env::new();
     builtins::register_builtins(&env);
 
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if parent != std::path::Path::new("") {
-            env.add_search_path(parent.to_path_buf());
-        }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && parent != std::path::Path::new("")
+    {
+        env.add_search_path(parent.to_path_buf());
     }
 
     let mut dbg = Debugger::new();

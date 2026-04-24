@@ -61,7 +61,7 @@ pub fn builtin_to_expression(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_string_split(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "StringSplit requires 1 or 2 arguments".to_string(),
         ));
@@ -144,10 +144,9 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
                     rhs,
                     delayed: false,
                 } = rule
+                    && let (Value::Str(old), Value::Str(new)) = (lhs.as_ref(), rhs.as_ref())
                 {
-                    if let (Value::Str(old), Value::Str(new)) = (lhs.as_ref(), rhs.as_ref()) {
-                        result = result.replace(old, new);
-                    }
+                    result = result.replace(old, new);
                 }
             }
             Ok(Value::Str(result))
@@ -391,9 +390,7 @@ pub fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
         return Ok(Value::Str(s));
     }
     let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat(pad_char)
-        .take(n as usize - s.len())
-        .collect();
+    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
     Ok(Value::Str(format!("{}{}", padding, s)))
 }
 
@@ -434,9 +431,7 @@ pub fn builtin_string_pad_right(args: &[Value]) -> Result<Value, EvalError> {
         return Ok(Value::Str(s));
     }
     let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat(pad_char)
-        .take(n as usize - s.len())
-        .collect();
+    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
     Ok(Value::Str(format!("{}{}", s, padding)))
 }
 

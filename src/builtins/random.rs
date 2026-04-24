@@ -4,7 +4,7 @@ use rug::Integer;
 use std::cell::RefCell;
 
 thread_local! {
-    static RNG_STATE: RefCell<u64> = RefCell::new(1);
+    static RNG_STATE: RefCell<u64> = const { RefCell::new(1) };
 }
 
 fn next_random() -> u64 {

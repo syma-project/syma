@@ -368,7 +368,7 @@ unsafe fn call5(
     })
 }
 
-#[allow(unsafe_op_in_unsafe_fn)]
+#[allow(unsafe_op_in_unsafe_fn, clippy::too_many_arguments)]
 unsafe fn call6(
     fn_ptr: usize,
     ret: &NativeType,
