@@ -35,7 +35,7 @@ pub struct FunctionProfiler {
 #[derive(Debug)]
 pub struct Profiler {
     pub config: TieringConfig,
-    functions: Mutex<HashMap<String, Box<FunctionProfiler>>>,
+    functions: Mutex<HashMap<String, &'static FunctionProfiler>>,
 }
 
 impl Profiler {
@@ -53,12 +53,13 @@ impl Profiler {
 
     fn get_or_create_inner(&self, name: &str) -> &FunctionProfiler {
         let mut map = self.functions.lock().unwrap();
-        map.entry(name.to_string())
-            .or_insert_with(|| Box::new(FunctionProfiler {
+        if !map.contains_key(name) {
+            let leaked: &'static FunctionProfiler = Box::leak(Box::new(FunctionProfiler {
                 call_count: AtomicU64::new(0),
             }));
-        // Safety: we never remove entries, so the Box pointer is stable.
-        unsafe { &mut *(&mut *map.get_mut(name).unwrap() as *mut Box<FunctionProfiler> as *mut FunctionProfiler) }
+            map.insert(name.to_string(), leaked);
+        }
+        map[name]
     }
 
     /// Increment the call counter for a function and return the new count.

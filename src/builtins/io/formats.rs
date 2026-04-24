@@ -155,41 +155,6 @@ fn parse_delimited_line(line: &str, delimiter: u8) -> Vec<String> {
     fields
 }
 
-/// Join lines that belong to the same CSV record when a quoted field spans
-/// multiple lines (the quote was not closed at end-of-line).
-fn join_continuation_lines(text: &str) -> String {
-    let mut out = String::new();
-    let mut carry = String::new();
-
-    for line in text.lines() {
-        if carry.is_empty() {
-            carry = line.to_string();
-        } else {
-            carry.push('\n');
-            carry.push_str(line);
-        }
-
-        // Re-check quote balance on the accumulated text
-        let in_quotes = has_unclosed_quote(&carry);
-
-        if !in_quotes {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&carry);
-            carry.clear();
-        }
-    }
-    // Trailing unclosed quote — include remaining carry
-    if !carry.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&carry);
-    }
-    out
-}
-
 /// Check if a string has an unclosed double-quote (odd number of `"` chars).
 fn has_unclosed_quote(s: &str) -> bool {
     let mut count = 0u32;
@@ -204,16 +169,35 @@ fn has_unclosed_quote(s: &str) -> bool {
 // ── CSV ──────────────────────────────────────────────────────────────────────
 
 fn import_csv(text: &str) -> Result<Value, EvalError> {
-    let joined = join_continuation_lines(text);
     let mut rows = Vec::new();
-    for line in joined.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut carry = String::new();
+
+    for raw_line in text.split('\n') {
+        if carry.is_empty() {
+            carry = raw_line.to_string();
+        } else {
+            carry.push('\n');
+            carry.push_str(raw_line);
         }
-        let fields = parse_delimited_line(trimmed, b',');
-        let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
-        rows.push(Value::List(row));
+
+        if !has_unclosed_quote(&carry) {
+            let trimmed = carry.trim();
+            if !trimmed.is_empty() {
+                let fields = parse_delimited_line(trimmed, b',');
+                let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
+                rows.push(Value::List(row));
+            }
+            carry.clear();
+        }
+    }
+    // Trailing unclosed quote — include remaining carry as a row
+    if !carry.is_empty() {
+        let trimmed = carry.trim();
+        if !trimmed.is_empty() {
+            let fields = parse_delimited_line(trimmed, b',');
+            let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
+            rows.push(Value::List(row));
+        }
     }
     Ok(Value::List(rows))
 }
@@ -449,7 +433,13 @@ pub fn format_export(format: &Format, value: &Value) -> Result<ExportOutput, Eva
         Format::Table => export_table(value).map(ExportOutput::Text),
         Format::SVG => export_svg(value).map(ExportOutput::Text),
         Format::PNG => export_png(value).map(ExportOutput::Binary),
-        Format::Text | Format::WL => Ok(ExportOutput::Text(value.to_string())),
+        Format::Text | Format::WL => {
+            let s = match value {
+                Value::Str(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Ok(ExportOutput::Text(s))
+        }
         Format::NB => Err(EvalError::Error(
             "Export to Notebook format is not supported".to_string(),
         )),

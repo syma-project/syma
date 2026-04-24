@@ -96,6 +96,8 @@ pub struct BytecodeCompiler {
     regs: RegAlloc,
     pool: ConstPool,
     symbol_cache: HashMap<String, u32>,
+    /// Maps parameter names to their register numbers.
+    param_regs: HashMap<String, u8>,
 }
 
 impl Default for BytecodeCompiler {
@@ -111,6 +113,7 @@ impl BytecodeCompiler {
             regs: RegAlloc::new(),
             pool: ConstPool::new(),
             symbol_cache: HashMap::new(),
+            param_regs: HashMap::new(),
         }
     }
 
@@ -155,7 +158,10 @@ impl BytecodeCompiler {
 
             match param {
                 // Simple blanks always match
-                Expr::NamedBlank { .. } | Expr::Blank { .. } => {}
+                Expr::NamedBlank { name, .. } => {
+                    c.param_regs.insert(name.clone(), reg);
+                }
+                Expr::Blank { .. } => {}
                 // Complex patterns — fall back to tree-walk
                 _ => {
                     return Err(CompileError::UnsupportedFeature(format!(
@@ -190,6 +196,13 @@ impl BytecodeCompiler {
                 Ok(dst)
             }
             Expr::Symbol(s) => {
+                // If this symbol is a function parameter, load from register
+                if let Some(&reg) = self.param_regs.get(s) {
+                    let dst = self.regs.alloc();
+                    self.emit(Instruction::Mov(dst, reg));
+                    return Ok(dst);
+                }
+                // Otherwise, do an environment lookup
                 let dst = self.regs.alloc();
                 let idx = self.symbol_idx(s);
                 self.emit(Instruction::LoadSym(dst, idx));
@@ -225,7 +238,16 @@ impl BytecodeCompiler {
         for arg in args {
             arg_regs.push(self.compile_expr(arg)?);
         }
+        // The Apply instruction expects function and args in consecutive
+        // registers starting at dst: [func, arg0, arg1, ..., argN].
+        // Allocate dst and emit Mov instructions to pack them.
         let dst = self.regs.alloc();
+        if func_reg != dst {
+            self.emit(Instruction::Mov(dst, func_reg));
+        }
+        for (i, arg_reg) in arg_regs.iter().enumerate() {
+            self.emit(Instruction::Mov(dst + 1 + i as u8, *arg_reg));
+        }
         self.emit(Instruction::Apply(dst, args.len() as u8));
         self.regs._free(func_reg);
         for r in arg_regs {

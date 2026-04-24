@@ -356,4 +356,262 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         assert_eq!(val, Value::Str(m_content.to_string()));
         fs::remove_file(path).ok();
     }
+
+    // ── New Format Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_import_csv_basic() {
+        let csv = "a,b,c\n1,2,3\nx,y,z";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::CSV, csv,
+        ).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+                Value::List(vec![Value::Str("x".into()), Value::Str("y".into()), Value::Str("z".into())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_import_csv_quoted() {
+        let csv = r#""hello, world",foo,"a""b""#;
+        let result = super::formats::format_import_text(
+            &super::formats::Format::CSV, csv,
+        ).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![
+                    Value::Str("hello, world".into()),
+                    Value::Str("foo".into()),
+                    Value::Str("a\"b".into()),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_export_csv_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_csv_rt.csv";
+        let data = Value::List(vec![
+            Value::List(vec![Value::Str("x".into()), Value::Str("y".into())]),
+            Value::List(vec![Value::Str("1".into()), Value::Str("2".into())]),
+        ]);
+        builtin_export(&[Value::Str(path.to_string()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(imported, data);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_tsv() {
+        let tsv = "a\tb\tc\n1\t2\t3";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::TSV, tsv,
+        ).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_export_tsv_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_tsv_rt.tsv";
+        let data = Value::List(vec![
+            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]),
+        ]);
+        builtin_export(&[Value::Str(path.to_string()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(imported, data);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_table() {
+        let table = "1 2 3\n4 5 6\n\n7 8 9";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::Table, table,
+        ).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+                Value::List(vec![Value::Str("4".into()), Value::Str("5".into()), Value::Str("6".into())]),
+                Value::List(vec![Value::Str("7".into()), Value::Str("8".into()), Value::Str("9".into())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_import_html_strips_tags() {
+        // No space between block elements — simple tag stripper removes tags only
+        let html = "<p>Hello</p><div>World</div>";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::HTML, html,
+        ).unwrap();
+        assert_eq!(result, Value::Str("HelloWorld".into()));
+    }
+
+    #[test]
+    fn test_import_html_entities() {
+        let html = "a &amp; b &lt; c &gt; d &quot; e";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::HTML, html,
+        ).unwrap();
+        assert_eq!(result, Value::Str("a & b < c > d \" e".into()));
+    }
+
+    #[test]
+    fn test_import_string_csv() {
+        let result = builtin_import_string(&[
+            Value::Str("a,b,c\n1,2,3".into()),
+            Value::Str("CSV".into()),
+        ]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_export_string_json() {
+        let data = Value::List(vec![Value::Integer(rug::Integer::from(1)), Value::Integer(rug::Integer::from(2))]);
+        let result = builtin_export_string(&[data, Value::Str("JSON".into())]).unwrap();
+        match result {
+            Value::Str(s) => assert!(s.contains("1") && s.contains("2"), "JSON string: {}", s),
+            _ => panic!("Expected Str, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_read_list() {
+        use std::fs;
+        let path = "/tmp/test_syma_readlist.txt";
+        fs::write(path, "line1\nline2\nline3").ok();
+        let result = builtin_read_list(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Str("line1".into()),
+                Value::Str("line2".into()),
+                Value::Str("line3".into()),
+            ])
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_explicit_format() {
+        use std::fs;
+        let path = "/tmp/test_syma_explicit.xyz";
+        fs::write(path, "a,b,c\n1,2,3").ok();
+        let result = builtin_import(&[Value::Str(path.to_string()), Value::Str("CSV".into())]);
+        assert!(result.is_ok(), "Explicit format import failed: {:?}", result);
+        let val = result.unwrap();
+        assert_eq!(
+            val,
+            Value::List(vec![
+                Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]),
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into()), Value::Str("3".into())]),
+            ])
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_import_unknown_format() {
+        let result = builtin_import(&[Value::Str("/tmp/test.unknown".into())]);
+        assert!(result.is_err(), "Should fail for unknown extension");
+    }
+
+    #[test]
+    fn test_import_string_binary_rejected() {
+        let result = builtin_import_string(&[
+            Value::Str("fake".into()),
+            Value::Str("PNG".into()),
+        ]);
+        assert!(result.is_err(), "ImportString should reject PNG");
+    }
+
+    #[test]
+    fn test_export_string_binary_rejected() {
+        let result = builtin_export_string(&[
+            Value::Integer(rug::Integer::from(1)),
+            Value::Str("PNG".into()),
+        ]);
+        assert!(result.is_err(), "ExportString should reject PNG");
+    }
+
+    #[test]
+    fn test_import_csv_multiline_field() {
+        let csv = "a,\"b\nc\",d\ne,f,g";
+        let result = super::formats::format_import_text(
+            &super::formats::Format::CSV, csv,
+        ).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![
+                    Value::Str("a".into()),
+                    Value::Str("b\nc".into()),
+                    Value::Str("d".into()),
+                ]),
+                Value::List(vec![
+                    Value::Str("e".into()),
+                    Value::Str("f".into()),
+                    Value::Str("g".into()),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_import_png_image() {
+        use std::fs;
+        let path = "/tmp/test_syma_png_import.png";
+        let img = image::DynamicImage::new_rgba8(2, 2);
+        img.save(path).ok();
+        let result = builtin_import(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok(), "PNG import failed: {:?}", result);
+        match result.unwrap() {
+            Value::Image(_) => {}
+            other => panic!("Expected Image, got {:?}", other),
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_export_png_image() {
+        use std::fs;
+        let path = "/tmp/test_syma_png_export.png";
+        let img = image::DynamicImage::new_rgba8(4, 4);
+        let data = Value::Image(std::sync::Arc::new(img));
+        let result = builtin_export(&[Value::Str(path.to_string()), data]);
+        assert!(result.is_ok(), "PNG export failed: {:?}", result);
+        assert!(std::path::Path::new(path).exists(), "PNG file should exist");
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_export_text_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_export_text.txt";
+        let data = Value::Str("Hello world".into());
+        builtin_export(&[Value::Str(path.to_string()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(imported, data);
+        fs::remove_file(path).ok();
+    }
 }

@@ -496,7 +496,7 @@ mod tests {
         let bc = CompiledBytecode {
             instructions: vec![
                 Instruction::LoadConst(0, 0), // reg0 = 0
-                Instruction::Jump(2),         // skip Return(0)
+                Instruction::Jump(1),         // skip Return(0), land on LoadConst
                 Instruction::Return(0),       // skipped
                 Instruction::LoadConst(0, 1), // reg0 = 42
                 Instruction::Return(0),
