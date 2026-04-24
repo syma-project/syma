@@ -259,6 +259,7 @@ pub fn register_builtins(env: &Env) {
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
     env.set("E".to_string(), Value::Symbol("E".to_string()));
     env.set("I".to_string(), Value::Complex { re: 0.0, im: 1.0 });
+    env.set("Alice".to_string(), Value::Symbol("Alice".to_string()));
     // Degree = Pi / 180  (radians per degree)
     env.set(
         "Degree".to_string(),

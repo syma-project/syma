@@ -33,6 +33,7 @@ pub enum LazyProvider {
     File(PathBuf),
     /// Execute an arbitrary Rust closure. Must return the value to install
     /// for the registered symbol on success.
+    #[allow(clippy::type_complexity)]
     Custom(Arc<dyn Fn(&Env) -> Result<Value, EvalError> + Send + Sync>),
 }
 

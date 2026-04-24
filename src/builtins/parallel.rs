@@ -145,11 +145,12 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
     // Clone the Arc (if any) so the pool stays alive for the full batch.
     let pool_opt = {
         let guard = get_pool().lock().unwrap();
-        guard.as_ref().map(|p| Arc::clone(p))
+        guard.as_ref().map(Arc::clone)
     };
 
     if let Some(pool) = pool_opt {
         let n = jobs.len();
+        #[allow(clippy::type_complexity)]
         let results: Arc<Mutex<Vec<Option<Result<Value, EvalError>>>>> =
             Arc::new(Mutex::new(vec![None; n]));
         let completed = Arc::new(AtomicUsize::new(0));
@@ -172,10 +173,7 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
         }
 
         let guard = results.lock().unwrap();
-        guard
-            .iter()
-            .map(|r| r.clone().unwrap())
-            .collect()
+        guard.iter().map(|r| r.clone().unwrap()).collect()
     } else {
         // Sequential fallback: no pool active
         jobs.into_iter().map(|job| job()).collect()
@@ -260,9 +258,7 @@ mod tests {
     fn test_parallel_batch_sequential_fallback() {
         cleanup_pool();
         let jobs: Vec<Job> = (0..5)
-            .map(|i| {
-                Box::new(move || Ok(Value::Integer(rug::Integer::from(i * 2)))) as Job
-            })
+            .map(|i| Box::new(move || Ok(Value::Integer(rug::Integer::from(i * 2)))) as Job)
             .collect();
 
         let results = parallel_batch(jobs);
@@ -282,9 +278,7 @@ mod tests {
         launch_kernels(4);
 
         let jobs: Vec<Job> = (0..10)
-            .map(|i| {
-                Box::new(move || Ok(Value::Integer(rug::Integer::from(i)))) as Job
-            })
+            .map(|i| Box::new(move || Ok(Value::Integer(rug::Integer::from(i)))) as Job)
             .collect();
 
         let results = parallel_batch(jobs);

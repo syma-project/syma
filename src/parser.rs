@@ -133,7 +133,7 @@ impl Parser {
                                     message: "Invalid function definition (head not a symbol)"
                                         .to_string(),
                                     token: Some(Token::DelayedAssign),
-                                    span: None,
+                                    span: self.peek_span(),
                                 })
                             }
                         } else {
@@ -143,7 +143,7 @@ impl Parser {
                                     expr
                                 ),
                                 token: Some(Token::DelayedAssign),
-                                span: None,
+                                span: self.peek_span(),
                             })
                         }
                     }
@@ -370,7 +370,7 @@ impl Parser {
                 return Err(ParseError {
                     message: "Expected -> or :> in transform rule".to_string(),
                     token: Some(self.peek().clone()),
-                    span: None,
+                    span: self.peek_span(),
                 });
             };
             rules.push((pattern, rhs));
@@ -455,7 +455,7 @@ impl Parser {
                 return Err(ParseError {
                     message: "Expected -> or :> in rule definition".to_string(),
                     token: Some(self.peek().clone()),
-                    span: None,
+                    span: self.peek_span(),
                 });
             };
             rules.push((lhs, rhs));
@@ -911,22 +911,24 @@ impl Parser {
         match self.peek().clone() {
             // Atoms
             Token::Integer(n) => {
+                let span = self.peek_span();
                 self.advance();
                 let val = Integer::from_str_radix(&n, 10).map_err(|_| ParseError {
                     message: format!("Invalid integer: {}", n),
                     token: None,
-                    span: None,
+                    span,
                 })?;
                 Ok(Expr::Integer(val))
             }
             Token::Real(r) => {
+                let span = self.peek_span();
                 self.advance();
                 let val = Float::parse(&r)
                     .map(|v| Float::with_val(128, v))
                     .map_err(|_| ParseError {
                         message: format!("Invalid real: {}", r),
                         token: None,
-                        span: None,
+                        span,
                     })?;
                 Ok(Expr::Real(val))
             }
@@ -1009,7 +1011,7 @@ impl Parser {
                             return Err(ParseError {
                                 message: "Expected string or ident as association key".to_string(),
                                 token: Some(tok),
-                                span: None,
+                                span: self.peek_span(),
                             });
                         }
                     };
@@ -1575,22 +1577,24 @@ impl Parser {
 
             // Literals
             Token::Integer(n) => {
+                let span = self.peek_span();
                 self.advance();
                 let val = Integer::from_str_radix(&n, 10).map_err(|_| ParseError {
                     message: format!("Invalid integer: {}", n),
                     token: None,
-                    span: None,
+                    span,
                 })?;
                 Ok(Expr::Integer(val))
             }
             Token::Real(r) => {
+                let span = self.peek_span();
                 self.advance();
                 let val = Float::parse(&r)
                     .map(|v| Float::with_val(128, v))
                     .map_err(|_| ParseError {
                         message: format!("Invalid real: {}", r),
                         token: None,
-                        span: None,
+                        span,
                     })?;
                 Ok(Expr::Real(val))
             }

@@ -38,6 +38,7 @@ fn print_usage() {
     println!("  syma <file>                Evaluate a Syma source file");
     println!("  syma -e <expr>             Evaluate an expression and print the result");
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
+    println!("  syma --check <file>        Parse-only check (no evaluation)");
     println!("  syma --help                Show this help");
     println!("  syma --version             Show version");
     println!();
@@ -244,7 +245,8 @@ fn dirs_or_default() -> Option<std::path::PathBuf> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for --dap flag (can be first or second arg)
+    // Check for --check flag (single file parse-only syntax check)
+    let has_check = args.iter().any(|a| a == "--check");
     let has_dap = args.iter().any(|a| a == "--dap");
     let file_arg = args
         .iter()
@@ -272,6 +274,16 @@ fn main() {
             debug::run_debug(path);
         } else {
             eprintln!("Usage: syma --dap <file>");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if has_check {
+        if let Some(path) = file_arg {
+            cli::check_single_file(path);
+        } else {
+            eprintln!("Usage: syma --check <file>");
             std::process::exit(1);
         }
         return;

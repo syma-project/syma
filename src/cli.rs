@@ -168,6 +168,35 @@ pub fn cmd_test() {
 
 // ── syma check / syma build ───────────────────────────────────────────────────
 
+/// Parse-only check of a single file. Used by `syma --check <file>` for editor
+/// integration (fast, no evaluation).
+pub fn check_single_file(path: &str) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match crate::lexer::tokenize(&source) {
+        Err(e) => {
+            eprintln!("LexError: {}:{}: {}", e.line, e.col, e.message);
+            std::process::exit(1);
+        }
+        Ok(tokens) => {
+            if let Err(e) = crate::parser::parse(tokens) {
+                if let Some(span) = &e.span {
+                    eprintln!("ParseError: {}:{}: {}", span.line, span.col, e.message);
+                } else {
+                    eprintln!("ParseError: {}", e.message);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 /// Parse and type-check all `*.syma` files under `src/` without evaluating.
 pub fn cmd_check() {
     check_or_build(false);

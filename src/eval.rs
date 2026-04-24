@@ -15,9 +15,9 @@ use rug::ops::Pow;
 use rug::{Float, Integer};
 
 use crate::ast::*;
-use crate::env::LazyProvider;
-use crate::env::Env;
 use crate::builtins::parallel::{close_kernels, launch_kernels, parallel_batch, pool_size};
+use crate::env::Env;
+use crate::env::LazyProvider;
 use crate::ffi;
 use crate::pattern::{Bindings, MatchResult, collect_nested_guards, match_pattern};
 use crate::value::*;
@@ -331,9 +331,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         } => {
             // Check if symbol is protected
             if env.has_attribute(name, "Protected") && env.get(name).is_some() {
-                return Err(EvalError::Error(
-                    format!("Symbol {} is protected; cannot redefine", name)
-                ));
+                return Err(EvalError::Error(format!(
+                    "Symbol {} is protected; cannot redefine",
+                    name
+                )));
             }
             // Check if function already exists
             let func = if let Some(Value::Function(f)) = env.get(name) {
@@ -363,9 +364,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 Expr::Symbol(s) => {
                     // Check if symbol is protected
                     if env.has_attribute(s, "Protected") && env.get(s).is_some() {
-                        return Err(EvalError::Error(
-                            format!("Symbol {} is protected; cannot assign", s)
-                        ));
+                        return Err(EvalError::Error(format!(
+                            "Symbol {} is protected; cannot assign",
+                            s
+                        )));
                     }
                     env.set(s.clone(), val.clone());
                     Ok(val)
@@ -741,11 +743,22 @@ fn is_pattern_like(expr: &Expr) -> bool {
 }
 
 /// Evaluate function arguments, respecting HoldAll/HoldFirst/HoldRest attributes.
-fn eval_args_with_attributes(head: &Expr, args: &[Expr], head_val: &Value, env: &Env) -> Result<Vec<Value>, EvalError> {
+fn eval_args_with_attributes(
+    head: &Expr,
+    args: &[Expr],
+    head_val: &Value,
+    env: &Env,
+) -> Result<Vec<Value>, EvalError> {
     // Determine head name for attribute lookup
     let head_name = match head {
         Expr::Symbol(s) => Some(s.as_str()),
-        _ => if let Value::Symbol(s) = head_val { Some(s.as_str()) } else { None },
+        _ => {
+            if let Value::Symbol(s) = head_val {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        }
     };
 
     if let Some(name) = head_name {
@@ -931,56 +944,59 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
         Value::Symbol(s) => Some(s.as_str()),
         _ => None,
     };
-    if let Some(name) = func_name {
-        if env.has_attribute(name, "Listable") {
-            // Find which args are lists
-            let list_indices: Vec<usize> = args.iter().enumerate()
-                .filter(|(_, a)| matches!(a, Value::List(_)))
-                .map(|(i, _)| i)
-                .collect();
+    if let Some(name) = func_name
+        && env.has_attribute(name, "Listable")
+    {
+        // Find which args are lists
+        let list_indices: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(a, Value::List(_)))
+            .map(|(i, _)| i)
+            .collect();
 
-            if !list_indices.is_empty() {
-                if list_indices.len() == args.len() {
-                    // All args are lists — do element-wise threading
-                    if let Value::List(first) = &args[0] {
-                        let len = first.len();
-                        // All lists must be the same length
-                        let all_same_len = list_indices.iter().all(|&i| {
-                            if let Value::List(items) = &args[i] {
-                                items.len() == len
-                            } else {
-                                false
-                            }
-                        });
-                        if all_same_len {
-                            let mut result = Vec::with_capacity(len);
-                            for i in 0..len {
-                                let thread_args: Vec<Value> = args.iter()
-                                    .map(|a| {
-                                        if let Value::List(items) = a {
-                                            items[i].clone()
-                                        } else {
-                                            a.clone()
-                                        }
-                                    })
-                                    .collect();
-                                result.push(apply_function(func, &thread_args, env)?);
-                            }
-                            return Ok(Value::List(result));
+        if !list_indices.is_empty() {
+            if list_indices.len() == args.len() {
+                // All args are lists — do element-wise threading
+                if let Value::List(first) = &args[0] {
+                    let len = first.len();
+                    // All lists must be the same length
+                    let all_same_len = list_indices.iter().all(|&i| {
+                        if let Value::List(items) = &args[i] {
+                            items.len() == len
+                        } else {
+                            false
                         }
-                    }
-                } else {
-                    // Mixed: some args are lists, some are scalars
-                    let list_idx = list_indices[0];
-                    if let Value::List(items) = &args[list_idx] {
-                        let mut result = Vec::with_capacity(items.len());
-                        for elem in items {
-                            let mut thread_args: Vec<Value> = args.to_vec();
-                            thread_args[list_idx] = elem.clone();
+                    });
+                    if all_same_len {
+                        let mut result = Vec::with_capacity(len);
+                        for i in 0..len {
+                            let thread_args: Vec<Value> = args
+                                .iter()
+                                .map(|a| {
+                                    if let Value::List(items) = a {
+                                        items[i].clone()
+                                    } else {
+                                        a.clone()
+                                    }
+                                })
+                                .collect();
                             result.push(apply_function(func, &thread_args, env)?);
                         }
                         return Ok(Value::List(result));
                     }
+                }
+            } else {
+                // Mixed: some args are lists, some are scalars
+                let list_idx = list_indices[0];
+                if let Value::List(items) = &args[list_idx] {
+                    let mut result = Vec::with_capacity(items.len());
+                    for elem in items {
+                        let mut thread_args: Vec<Value> = args.to_vec();
+                        thread_args[list_idx] = elem.clone();
+                        result.push(apply_function(func, &thread_args, env)?);
+                    }
+                    return Ok(Value::List(result));
                 }
             }
         }
@@ -1209,12 +1225,12 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                 use crate::{lexer, parser};
                 return match provider {
                     LazyProvider::Custom(f) => {
-                        let val = f(&env)?;
+                        let val = f(env)?;
                         env.root_env().set(name.to_string(), val.clone());
                         apply_function(&val, args, env)
                     }
                     LazyProvider::File(path) => {
-                        let resolved = resolve_lazy_path(&path, &env)?;
+                        let resolved = resolve_lazy_path(&path, env)?;
                         let source = std::fs::read_to_string(&resolved).map_err(|e| {
                             EvalError::Error(format!(
                                 "Failed to read lazy provider file '{}': {}",
@@ -1224,8 +1240,8 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                         })?;
                         let tokens = lexer::tokenize(&source)
                             .map_err(|e| EvalError::Error(e.to_string()))?;
-                        let ast = parser::parse(tokens)
-                            .map_err(|e| EvalError::Error(e.to_string()))?;
+                        let ast =
+                            parser::parse(tokens).map_err(|e| EvalError::Error(e.to_string()))?;
                         // Evaluate in a child of root so definitions land in
                         // a scope that chains to root.
                         let file_env = env.root_env().child();
@@ -3333,10 +3349,7 @@ mod tests {
         // Sin has Listable, so Sin[{0}] should thread
         // Sin[0] returns Integer(0) (exact match), not Real(0.0)
         let result = eval_str("Sin[{0}]");
-        assert_eq!(
-            result,
-            Value::List(vec![Value::Integer(Integer::from(0))])
-        );
+        assert_eq!(result, Value::List(vec![Value::Integer(Integer::from(0))]));
     }
 
     #[test]
@@ -3386,7 +3399,10 @@ mod tests {
                 Ok(env.root_env().get("LazyFoo").unwrap())
             })),
         );
-        assert_eq!(eval_str_in_env("LazyFoo[]", &env), Value::Integer(Integer::from(42)));
+        assert_eq!(
+            eval_str_in_env("LazyFoo[]", &env),
+            Value::Integer(Integer::from(42))
+        );
     }
 
     #[test]
@@ -3429,10 +3445,16 @@ mod tests {
             })),
         );
         // First call: provider fires, loads function
-        assert_eq!(eval_str_in_env("Once[]", &env), Value::Integer(Integer::from(99)));
+        assert_eq!(
+            eval_str_in_env("Once[]", &env),
+            Value::Integer(Integer::from(99))
+        );
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Second call: uses env lookup, provider does NOT fire
-        assert_eq!(eval_str_in_env("Once[]", &env), Value::Integer(Integer::from(99)));
+        assert_eq!(
+            eval_str_in_env("Once[]", &env),
+            Value::Integer(Integer::from(99))
+        );
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -3444,7 +3466,10 @@ mod tests {
             val,
             Value::Call {
                 head: "NonExistentSymbol".to_string(),
-                args: vec![Value::Integer(Integer::from(1)), Value::Integer(Integer::from(2))],
+                args: vec![
+                    Value::Integer(Integer::from(1)),
+                    Value::Integer(Integer::from(2))
+                ],
             }
         );
     }
