@@ -1373,6 +1373,456 @@ pub fn builtin_factorial(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── Hyperbolic functions ──────────────────────────────────────────────────
+
+macro_rules! hyperbolic_builtin {
+    ($fn_name:ident, $sym_name:literal, $method:ident) => {
+        pub fn $fn_name(args: &[Value]) -> Result<Value, EvalError> {
+            if args.len() != 1 {
+                return Err(EvalError::Error(
+                    concat!($sym_name, " requires exactly 1 argument").to_string(),
+                ));
+            }
+            match &args[0] {
+                Value::Integer(n) => Ok(Value::Real(
+                    Float::with_val(DEFAULT_PRECISION, n).$method(),
+                )),
+                Value::Real(r) => Ok(Value::Real(r.clone().$method())),
+                _ => Ok(Value::Call {
+                    head: $sym_name.to_string(),
+                    args: args.to_vec(),
+                }),
+            }
+        }
+    };
+}
+
+hyperbolic_builtin!(builtin_sinh, "Sinh", sinh);
+hyperbolic_builtin!(builtin_cosh, "Cosh", cosh);
+hyperbolic_builtin!(builtin_tanh, "Tanh", tanh);
+hyperbolic_builtin!(builtin_arcsinh, "ArcSinh", asinh);
+hyperbolic_builtin!(builtin_arccosh, "ArcCosh", acosh);
+hyperbolic_builtin!(builtin_arctanh, "ArcTanh", atanh);
+
+pub fn builtin_csch(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Csch requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let s = Float::with_val(DEFAULT_PRECISION, n).sinh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / s))
+        }
+        Value::Real(r) => {
+            let s = r.clone().sinh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / s))
+        }
+        _ => Ok(Value::Call { head: "Csch".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_sech(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Sech requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let c = Float::with_val(DEFAULT_PRECISION, n).cosh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / c))
+        }
+        Value::Real(r) => {
+            let c = r.clone().cosh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / c))
+        }
+        _ => Ok(Value::Call { head: "Sech".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_coth(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Coth requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let t = f.clone().tanh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / t))
+        }
+        Value::Real(r) => {
+            let t = r.clone().tanh();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1) / t))
+        }
+        _ => Ok(Value::Call { head: "Coth".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_arccsch(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ArcCsch requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / f;
+            Ok(Value::Real(recip.asinh()))
+        }
+        Value::Real(r) => {
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
+            Ok(Value::Real(recip.asinh()))
+        }
+        _ => Ok(Value::Call { head: "ArcCsch".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_arcsech(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ArcSech requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / f;
+            Ok(Value::Real(recip.acosh()))
+        }
+        Value::Real(r) => {
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
+            Ok(Value::Real(recip.acosh()))
+        }
+        _ => Ok(Value::Call { head: "ArcSech".to_string(), args: args.to_vec() }),
+    }
+}
+
+pub fn builtin_arccoth(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ArcCoth requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / f;
+            Ok(Value::Real(recip.atanh()))
+        }
+        Value::Real(r) => {
+            let recip = Float::with_val(DEFAULT_PRECISION, 1) / r;
+            Ok(Value::Real(recip.atanh()))
+        }
+        _ => Ok(Value::Call { head: "ArcCoth".to_string(), args: args.to_vec() }),
+    }
+}
+
+/// Sinc[z] = Sin[z]/z, with Sinc[0] = 1
+pub fn builtin_sinc(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Sinc requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Integer(n) => {
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let r = f.clone().sin() / f;
+            Ok(Value::Real(r))
+        }
+        Value::Real(r) if r.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Real(r) => {
+            let s = r.clone().sin() / r;
+            Ok(Value::Real(s))
+        }
+        _ => Ok(Value::Call { head: "Sinc".to_string(), args: args.to_vec() }),
+    }
+}
+
+// ── Numerical / piecewise functions ──────────────────────────────────────
+
+/// IntegerPart[x] — truncation toward zero
+pub fn builtin_integer_part(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "IntegerPart requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Real(r) => {
+            let truncated = r.clone().trunc();
+            Ok(Value::Integer(truncated.to_integer().unwrap_or(Integer::from(0))))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// FractionalPart[x] — x - IntegerPart[x]
+pub fn builtin_fractional_part(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FractionalPart requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(_) => Ok(Value::Integer(Integer::from(0))),
+        Value::Real(r) => {
+            let frac = r.clone().fract();
+            Ok(Value::Real(frac))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// Sign[x] — 1 for x>0, -1 for x<0, 0 for x==0
+pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Sign requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            use std::cmp::Ordering;
+            let s = match n.cmp(&Integer::from(0)) {
+                Ordering::Greater => 1i64,
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
+        Value::Real(r) => {
+            let s = if r.is_sign_positive() && !r.is_zero() {
+                1i64
+            } else if r.is_sign_negative() {
+                -1
+            } else {
+                0
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
+        _ => Ok(Value::Call { head: "Sign".to_string(), args: args.to_vec() }),
+    }
+}
+
+/// UnitStep[x] — 1 for x≥0, 0 for x<0
+pub fn builtin_unit_step(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "UnitStep requires at least 1 argument".to_string(),
+        ));
+    }
+    // Multi-arg form: UnitStep[x1, x2, ...] = product of UnitStep[xi]
+    // (standard Wolfram behavior: 1 only if all xi ≥ 0)
+    for arg in args {
+        let is_neg = match arg {
+            Value::Integer(n) => n < &Integer::from(0),
+            Value::Real(r) => r.is_sign_negative() && !r.is_zero(),
+            _ => return Ok(Value::Call { head: "UnitStep".to_string(), args: args.to_vec() }),
+        };
+        if is_neg {
+            return Ok(Value::Integer(Integer::from(0)));
+        }
+    }
+    Ok(Value::Integer(Integer::from(1)))
+}
+
+/// Boole[expr] — 1 if True, 0 if False
+pub fn builtin_boole(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Boole requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Symbol(s) if s == "True" => Ok(Value::Integer(Integer::from(1))),
+        Value::Symbol(s) if s == "False" => Ok(Value::Integer(Integer::from(0))),
+        _ => Ok(Value::Call { head: "Boole".to_string(), args: args.to_vec() }),
+    }
+}
+
+/// Clip[x] — clamp to [-1, 1]; Clip[x, {min, max}] — clamp to [min, max]
+pub fn builtin_clip(args: &[Value]) -> Result<Value, EvalError> {
+    let (x, lo, hi) = match args.len() {
+        1 => (&args[0], None, None),
+        2 => {
+            if let Value::List(bounds) = &args[1] {
+                if bounds.len() == 2 {
+                    (&args[0], Some(&bounds[0]), Some(&bounds[1]))
+                } else {
+                    return Err(EvalError::Error(
+                        "Clip: second argument must be a 2-element list {min, max}".to_string(),
+                    ));
+                }
+            } else {
+                return Err(EvalError::Error(
+                    "Clip: second argument must be a list {min, max}".to_string(),
+                ));
+            }
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "Clip requires 1 or 2 arguments".to_string(),
+            ))
+        }
+    };
+
+    let to_f64 = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Integer(n) => Some(n.to_f64()),
+            Value::Real(r) => Some(r.to_f64()),
+            _ => None,
+        }
+    };
+
+    let x_f = to_f64(x).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: x.type_name().to_string(),
+    })?;
+    let lo_f = lo.and_then(to_f64).unwrap_or(-1.0);
+    let hi_f = hi.and_then(to_f64).unwrap_or(1.0);
+
+    let result = x_f.max(lo_f).min(hi_f);
+    if result == result.floor() && result.abs() < 1e15 {
+        Ok(Value::Integer(Integer::from(result as i64)))
+    } else {
+        Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, result)))
+    }
+}
+
+/// Rescale[x, {xmin, xmax}] — map x from [xmin,xmax] to [0,1]
+pub fn builtin_rescale(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Rescale requires 2 arguments: Rescale[x, {xmin, xmax}]".to_string(),
+        ));
+    }
+    let to_f64 = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Integer(n) => Some(n.to_f64()),
+            Value::Real(r) => Some(r.to_f64()),
+            _ => None,
+        }
+    };
+    let x = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    if let Value::List(bounds) = &args[1] {
+        if bounds.len() != 2 {
+            return Err(EvalError::Error(
+                "Rescale: second argument must be {xmin, xmax}".to_string(),
+            ));
+        }
+        let xmin = to_f64(&bounds[0]).ok_or_else(|| EvalError::Error(
+            "Rescale: xmin must be a number".to_string(),
+        ))?;
+        let xmax = to_f64(&bounds[1]).ok_or_else(|| EvalError::Error(
+            "Rescale: xmax must be a number".to_string(),
+        ))?;
+        if (xmax - xmin).abs() < f64::EPSILON {
+            return Err(EvalError::Error("Rescale: xmin == xmax".to_string()));
+        }
+        let r = (x - xmin) / (xmax - xmin);
+        Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, r)))
+    } else {
+        Err(EvalError::Error(
+            "Rescale: second argument must be {xmin, xmax}".to_string(),
+        ))
+    }
+}
+
+/// Quotient[m, n] — floor(m/n)
+pub fn builtin_quotient(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Quotient requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Integer(m), Value::Integer(n)) => {
+            if n.is_zero() {
+                return Err(EvalError::Error("Quotient: division by zero".to_string()));
+            }
+            Ok(Value::Integer(Integer::from(m / n)))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// QuotientRemainder[m, n] — {Quotient[m,n], Mod[m,n]}
+pub fn builtin_quotient_remainder(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "QuotientRemainder requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Integer(m), Value::Integer(n)) => {
+            if n.is_zero() {
+                return Err(EvalError::Error(
+                    "QuotientRemainder: division by zero".to_string(),
+                ));
+            }
+            let q = Integer::from(m / n);
+            // Wolfram Mod has the sign of the divisor
+            let r = Integer::from(m % n);
+            let r_adj = if !r.is_zero() && (r < 0) != (*n < 0) {
+                r + n
+            } else {
+                r
+            };
+            let q_adj = Integer::from(m / n);
+            // Recompute consistent with Mod convention
+            let q_final = if !r_adj.is_zero() && q_adj.clone() * n.clone() + r_adj.clone() != *m {
+                q - Integer::from(1)
+            } else {
+                q_adj
+            };
+            Ok(Value::List(vec![
+                Value::Integer(q_final),
+                Value::Integer(r_adj),
+            ]))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// KroneckerDelta[n1, n2, ...] — 1 if all equal, 0 otherwise
+pub fn builtin_kronecker_delta(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::Error(
+            "KroneckerDelta requires at least 2 arguments".to_string(),
+        ));
+    }
+    let first = &args[0];
+    for arg in &args[1..] {
+        if arg != first {
+            return Ok(Value::Integer(Integer::from(0)));
+        }
+    }
+    Ok(Value::Integer(Integer::from(1)))
+}
+
 // ── FixedPoint stub (evaluator handles this) ──
 
 pub fn builtin_fixed_point(args: &[Value], env: &Env) -> Result<Value, EvalError> {

@@ -313,6 +313,16 @@ impl VmState<'_> {
                     }
                 }
 
+                Instruction::MakeSeq(d, start) => {
+                    let start = *start as usize;
+                    let count = self.args.len().saturating_sub(start);
+                    let mut items = Vec::with_capacity(count);
+                    for i in 0..count {
+                        items.push(self.args[start + i].clone());
+                    }
+                    self.regs[*d as usize] = Value::List(items);
+                }
+
                 Instruction::Return(s) => return Ok(self.regs[*s as usize].clone()),
             }
         }
@@ -506,6 +516,9 @@ fn max_reg_index(instr: &Instruction) -> usize {
         Instruction::LoadConst(d, _)
         | Instruction::LoadArg(d, _)
         | Instruction::LoadSym(d, _) => *d as usize,
+
+        // MakeSeq: dest register only
+        Instruction::MakeSeq(d, _) => *d as usize,
 
         // StoreSym(idx, s) — s is source register
         Instruction::StoreSym(_, s) => *s as usize,

@@ -14,6 +14,7 @@ pub mod localsymbol;
 pub mod list;
 pub mod logical;
 pub mod math;
+pub mod number_theory;
 pub mod parallel;
 pub mod pattern;
 pub mod random;
@@ -198,6 +199,47 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "GCD", math::builtin_gcd);
     register_builtin(env, "LCM", math::builtin_lcm);
     register_builtin(env, "Factorial", math::builtin_factorial);
+
+    // ── Hyperbolic functions ──
+    register_builtin(env, "Sinh", math::builtin_sinh);
+    register_builtin(env, "Cosh", math::builtin_cosh);
+    register_builtin(env, "Tanh", math::builtin_tanh);
+    register_builtin(env, "Csch", math::builtin_csch);
+    register_builtin(env, "Sech", math::builtin_sech);
+    register_builtin(env, "Coth", math::builtin_coth);
+    register_builtin(env, "ArcSinh", math::builtin_arcsinh);
+    register_builtin(env, "ArcCosh", math::builtin_arccosh);
+    register_builtin(env, "ArcTanh", math::builtin_arctanh);
+    register_builtin(env, "ArcCsch", math::builtin_arccsch);
+    register_builtin(env, "ArcSech", math::builtin_arcsech);
+    register_builtin(env, "ArcCoth", math::builtin_arccoth);
+    register_builtin(env, "Sinc", math::builtin_sinc);
+
+    // ── Numerical / piecewise ──
+    register_builtin(env, "IntegerPart", math::builtin_integer_part);
+    register_builtin(env, "FractionalPart", math::builtin_fractional_part);
+    register_builtin(env, "Sign", math::builtin_sign);
+    register_builtin(env, "UnitStep", math::builtin_unit_step);
+    register_builtin(env, "Clip", math::builtin_clip);
+    register_builtin(env, "Rescale", math::builtin_rescale);
+    register_builtin(env, "Quotient", math::builtin_quotient);
+    register_builtin(env, "QuotientRemainder", math::builtin_quotient_remainder);
+    register_builtin(env, "KroneckerDelta", math::builtin_kronecker_delta);
+
+    // ── Number theory ──
+    register_builtin(env, "PrimeQ", number_theory::builtin_prime_q);
+    register_builtin(env, "FactorInteger", number_theory::builtin_factor_integer);
+    register_builtin(env, "Divisors", number_theory::builtin_divisors);
+    register_builtin(env, "Prime", number_theory::builtin_prime);
+    register_builtin(env, "PrimePi", number_theory::builtin_prime_pi);
+    register_builtin(env, "NextPrime", number_theory::builtin_next_prime);
+    register_builtin(env, "PowerMod", number_theory::builtin_power_mod);
+    register_builtin(env, "EulerPhi", number_theory::builtin_euler_phi);
+    register_builtin(env, "MoebiusMu", number_theory::builtin_moebius_mu);
+    register_builtin(env, "DivisorSigma", number_theory::builtin_divisor_sigma);
+    register_builtin(env, "Divisible", number_theory::builtin_divisible);
+    register_builtin(env, "CoprimeQ", number_theory::builtin_coprime_q);
+    register_builtin(env, "IntegerDigits", number_theory::builtin_integer_digits);
 
     // ── Reciprocal trig ──
     register_builtin(env, "Csc", math::builtin_csc);
@@ -581,7 +623,14 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         }
         _ => {
             // Fall back to file-based module loading
-            return crate::eval::load_module_from_file(&pkg_name, env);
+            let module_val = crate::eval::load_module_from_file(&pkg_name, env)?;
+            // Import all exported symbols into the current environment
+            if let Value::Module { exports, .. } = &module_val {
+                for (sym, val) in exports {
+                    env.set(sym.clone(), val.clone());
+                }
+            }
+            return Ok(module_val);
         }
     }
     Ok(Value::Null)

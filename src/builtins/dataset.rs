@@ -197,7 +197,7 @@ fn extract_column(data: &Value, key: &str) -> Result<Value, EvalError> {
 }
 
 /// Select a subset of columns from a list of assocs or a single assoc.
-fn select_columns<'a>(data: &Value, keys: &[&'a str]) -> Result<Value, EvalError> {
+fn select_columns(data: &Value, keys: &[&str]) -> Result<Value, EvalError> {
     match data {
         Value::List(items) => {
             let filtered: Result<Vec<Value>, EvalError> = items
@@ -379,6 +379,7 @@ mod tests {
     use crate::eval::eval_program;
     use crate::lexer;
     use crate::parser;
+    use rug::Integer;
     use std::collections::HashMap;
 
     fn eval_str(input: &str) -> Value {
@@ -387,10 +388,6 @@ mod tests {
         let tokens = lexer::tokenize(input).unwrap();
         let ast = parser::parse(tokens).unwrap();
         eval_program(&ast, &env).unwrap()
-    }
-
-    fn str_val(s: &str) -> Value {
-        Value::Str(s.to_string())
     }
 
     fn int(n: i64) -> Value {
@@ -509,15 +506,19 @@ mod tests {
     // ── Error cases ──
 
     #[test]
-    fn test_query_missing_key() {
-        let result = eval_str("(
+    fn test_query_missing_key_error() {
+        // Missing key should produce an error
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let input = "(
             ds = Dataset[{<|\"a\"->1|>}];
             ds[All, \"x\"]
-        )");
-        assert!(matches!(result, Value::Call { ref head, .. } if head == "Error")
-            || matches!(result, Value::Call { ref head, .. } if head == "Missing")
-            || matches!(&result, Value::Call { head, .. } if !head.is_empty())
-            || result == Value::Symbol("$Failed"));
+        )";
+        let tokens = lexer::tokenize(input).unwrap();
+        let ast = parser::parse(tokens).unwrap();
+        let result = eval_program(&ast, &env);
+        // Should be an error (key not found)
+        assert!(result.is_err());
     }
 
     // ── Normal ──
@@ -532,14 +533,15 @@ mod tests {
 
     #[test]
     fn test_sort_by_integers() {
-        let result = eval_str("SortBy[{3, 1, 2}, (#&)]");
+        // Use First as identity on single-element lists
+        let result = eval_str("id[x_] := x; SortBy[{3, 1, 2}, id]");
         assert_eq!(result, Value::List(vec![int(1), int(2), int(3)]));
     }
 
     #[test]
     fn test_sort_by_assoc() {
         // Sort list of assocs by the "a" key
-        let result = eval_str("SortBy[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}, (#a&)]");
+        let result = eval_str("key[x_] := Lookup[x, \"a\"]; SortBy[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}, key]");
         assert_eq!(
             result,
             Value::List(vec![
@@ -552,13 +554,13 @@ mod tests {
 
     #[test]
     fn test_sort_by_empty() {
-        let result = eval_str("SortBy[{}, (#&)]");
+        let result = eval_str("id[x_] := x; SortBy[{}, id]");
         assert_eq!(result, Value::List(vec![]));
     }
 
     #[test]
     fn test_sort_by_single() {
-        let result = eval_str("SortBy[{42}, (#&)]");
+        let result = eval_str("id[x_] := x; SortBy[{42}, id]");
         assert_eq!(result, Value::List(vec![int(42)]));
     }
 

@@ -182,6 +182,17 @@ impl BytecodeCompiler {
                     c.param_regs.insert(name.clone(), reg);
                 }
                 Expr::Blank { .. } => {}
+                // Sequence: collect remaining args into a list
+                Expr::BlankSequence {
+                    name: Some(name), ..
+                }
+                | Expr::BlankNullSequence {
+                    name: Some(name), ..
+                } => {
+                    let seq_reg = c.regs.alloc()?;
+                    c.emit(Instruction::MakeSeq(seq_reg, i as u16));
+                    c.param_regs.insert(name.clone(), seq_reg);
+                }
                 // Complex patterns — fall back to tree-walk
                 _ => {
                     return Err(CompileError::UnsupportedFeature(format!(
@@ -272,6 +283,19 @@ impl BytecodeCompiler {
                 head: func.clone(),
                 args: vec![*arg.clone()],
             }),
+            // ── Desugar Apply[func, expr] to Call["Apply", func, expr] ──
+            Expr::Apply { func, expr } => self.compile_expr(&Expr::Call {
+                head: Box::new(Expr::Symbol("Apply".to_string())),
+                args: vec![*func.clone(), *expr.clone()],
+            }),
+            // ── Which[cond1, val1, cond2, val2, ...] ──
+            Expr::Which { pairs } => self.compile_which(pairs),
+            // ── Switch[expr, pat1, val1, pat2, val2, ...] ──
+            Expr::Switch { expr, cases } => self.compile_switch(expr, cases),
+            // ── ReleaseHold — unwrap and compile inner expr ──
+            Expr::ReleaseHold(inner) => self.compile_expr(inner),
+            // ── Complex literal ──
+            Expr::Complex { re, im } => self.emit_const(Value::Complex { re: *re, im: *im }),
             // ── For loop ──
             Expr::For { init, condition, step, body } => self.compile_for(init, condition, step, body),
             // ── Do loop (range iterator only) ──
@@ -664,6 +688,87 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Compile a Which expression: Which[cond1, val1, cond2, val2, ...]
+    fn compile_which(&mut self, pairs: &[(Expr, Expr)]) -> Result<u16, CompileError> {
+        let result_reg = self.regs.alloc()?;
+        let mut patch_labels = Vec::new();
+
+        for (i, (cond, val)) in pairs.iter().enumerate() {
+            let cond_reg = self.compile_expr(cond)?;
+            let next_label = self.emit(Instruction::JumpIfZero(cond_reg, 0));
+            self.regs._free(cond_reg);
+
+            let val_reg = self.compile_expr(val)?;
+            if val_reg != result_reg {
+                self.emit(Instruction::Mov(result_reg, val_reg));
+            }
+            self.regs._free(val_reg);
+
+            if i < pairs.len() - 1 {
+                // Jump past remaining cases
+                let end_jump = self.emit(Instruction::Jump(0));
+                patch_labels.push((next_label, end_jump));
+            } else {
+                // Last case: just patch the JumpIfZero to fall through
+                self.patch_jump(next_label, self.code.len() as i32);
+            }
+        }
+
+        // No match — return Null
+        self.emit(Instruction::LoadNull(result_reg));
+
+        // Patch the end-jumps from each non-last case
+        for (next_label, end_jump) in patch_labels {
+            self.patch_jump(next_label, end_jump as i32 + 1);
+            self.patch_jump(end_jump, self.code.len() as i32);
+        }
+
+        Ok(result_reg)
+    }
+
+    /// Compile a Switch expression: Switch[expr, pat1, val1, pat2, val2, ...]
+    fn compile_switch(&mut self, expr: &Expr, cases: &[(Expr, Expr)]) -> Result<u16, CompileError> {
+        let switch_reg = self.compile_expr(expr)?;
+        let result_reg = self.regs.alloc()?;
+        let mut patch_labels = Vec::new();
+
+        for (i, (pat, val)) in cases.iter().enumerate() {
+            let pat_reg = self.compile_expr(pat)?;
+
+            // Compare switch value with pattern
+            let cmp_reg = self.regs.alloc()?;
+            self.emit(Instruction::Eq(cmp_reg, switch_reg, pat_reg));
+            self.regs._free(pat_reg);
+
+            let next_label = self.emit(Instruction::JumpIfZero(cmp_reg, 0));
+            self.regs._free(cmp_reg);
+
+            let val_reg = self.compile_expr(val)?;
+            if val_reg != result_reg {
+                self.emit(Instruction::Mov(result_reg, val_reg));
+            }
+            self.regs._free(val_reg);
+
+            if i < cases.len() - 1 {
+                let end_jump = self.emit(Instruction::Jump(0));
+                patch_labels.push((next_label, end_jump));
+            } else {
+                self.patch_jump(next_label, self.code.len() as i32);
+            }
+        }
+
+        // No match — return Null
+        self.emit(Instruction::LoadNull(result_reg));
+
+        for (next_label, end_jump) in patch_labels {
+            self.patch_jump(next_label, end_jump as i32 + 1);
+            self.patch_jump(end_jump, self.code.len() as i32);
+        }
+
+        self.regs._free(switch_reg);
+        Ok(result_reg)
+    }
+
     fn symbol_idx(&mut self, name: &str) -> u32 {
         if let Some(&idx) = self.symbol_cache.get(name) {
             return idx;
@@ -880,5 +985,132 @@ mod tests {
         let bc = compile(vec![], body);
         assert!(bc.instructions.iter().any(|i| matches!(i, Instruction::Apply(..))),
             "Prefix desugaring should produce Apply instruction");
+    }
+
+    #[test]
+    fn test_compile_apply_desugar() {
+        // Apply @@ desugars to Call["Apply", ...]
+        let body = Expr::Apply {
+            func: Box::new(Expr::Symbol("f".to_string())),
+            expr: Box::new(Expr::Symbol("x".to_string())),
+        };
+        let bc = compile(
+            vec![Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
+            body,
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Apply(..))),
+            "Apply desugaring should produce Apply instruction"
+        );
+    }
+
+    #[test]
+    fn test_compile_which() {
+        // Which[x > 0, x, True, 0]
+        let body = Expr::Which {
+            pairs: vec![
+                (
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Greater".to_string())),
+                        args: vec![Expr::Symbol("x".to_string()), Expr::Integer(0.into())],
+                    },
+                    Expr::Symbol("x".to_string()),
+                ),
+                (Expr::Bool(true), Expr::Integer(0.into())),
+            ],
+        };
+        let bc = compile(
+            vec![Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
+            body,
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "Which should contain JumpIfZero"
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Jump(..))),
+            "Which should contain Jump"
+        );
+    }
+
+    #[test]
+    fn test_compile_switch() {
+        // Switch[x, 1, 10, 2, 20]
+        let body = Expr::Switch {
+            expr: Box::new(Expr::Symbol("x".to_string())),
+            cases: vec![
+                (Expr::Integer(1.into()), Expr::Integer(10.into())),
+                (Expr::Integer(2.into()), Expr::Integer(20.into())),
+            ],
+        };
+        let bc = compile(
+            vec![Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            }],
+            body,
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Eq(..))),
+            "Switch should contain Eq"
+        );
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::JumpIfZero(..))),
+            "Switch should contain JumpIfZero"
+        );
+    }
+
+    #[test]
+    fn test_compile_release_hold() {
+        // ReleaseHold[42] should compile to a constant
+        let body = Expr::ReleaseHold(Box::new(Expr::Integer(42.into())));
+        let bc = compile(vec![], body);
+        assert_eq!(bc.constants.len(), 1);
+        assert_eq!(bc.constants[0], Value::Integer(42.into()));
+    }
+
+    #[test]
+    fn test_compile_complex() {
+        let body = Expr::Complex { re: 1.0, im: 2.0 };
+        let bc = compile(vec![], body);
+        assert!(
+            bc.constants
+                .iter()
+                .any(|v| matches!(v, Value::Complex { re, im } if *re == 1.0 && *im == 2.0)),
+            "Complex constant should be in the constant pool"
+        );
+    }
+
+    #[test]
+    fn test_compile_blank_sequence() {
+        // f[x__] := x -- should compile with MakeSeq instruction
+        let params = vec![Expr::BlankSequence {
+            name: Some("x".to_string()),
+            type_constraint: None,
+        }];
+        let body = Expr::Symbol("x".to_string());
+        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        assert!(
+            bc.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::MakeSeq(..))),
+            "BlankSequence should emit MakeSeq instruction"
+        );
     }
 }

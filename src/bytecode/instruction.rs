@@ -39,6 +39,7 @@ pub enum Opcode {
     Apply = 0x52,
     Call = 0x53,
     TailCall = 0x54,
+    MakeSeq = 0x55,
     LoadConst = 0x60,
     LoadArg = 0x61,
     LoadSym = 0x62,
@@ -92,6 +93,9 @@ pub enum Instruction {
     Apply(u16, u8),
     Call(u16, u8),
     TailCall(u16, u8),
+
+    // register + register (dest, first_arg_idx)
+    MakeSeq(u16, u16),
 
     // register + u32
     LoadConst(u16, u32),

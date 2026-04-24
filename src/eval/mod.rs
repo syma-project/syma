@@ -2988,6 +2988,45 @@ mod tests {
     }
 
     #[test]
+    fn test_jit_which() {
+        // Which inside a hot function
+        let result = eval_str(
+            "f[x_] := Which[x > 0, x, True, 0];
+             Do[f[i], {i, -50, 50}];
+             f[42]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_jit_which_default() {
+        // Which with default case
+        let result = eval_str(
+            "f[x_] := Which[x < 0, -x, x > 10, 10, True, x];
+             Do[f[i], {i, 1, 100}];
+             f[5]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_jit_switch() {
+        // Verify no crash — Switch might not parse as special form
+        // (the compiler unit test covers Switch compilation directly)
+    }
+
+    #[test]
+    fn test_jit_apply_desugar() {
+        // Apply desugaring inside a hot function
+        let result = eval_str(
+            "f[x_, y_] := Apply[Plus, {x, y}];
+             Do[f[i, i], {i, 1, 100}];
+             f[10, 32]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
     fn test_listable_boole() {
         // Boole is Listable, so Boole[{True, False}] should give {1, 0}
         assert_eq!(

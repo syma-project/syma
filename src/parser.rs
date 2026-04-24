@@ -1673,6 +1673,49 @@ impl Parser {
                 Ok(Expr::List(patterns))
             }
 
+            // Association: <|"key" -> expr, ...|>
+            Token::LAssoc => {
+                self.advance();
+                let mut entries = Vec::new();
+                while !self.at(&Token::RAssoc) && !self.at(&Token::Eof) {
+                    let key = match self.advance() {
+                        Token::Str(s) => s,
+                        Token::Ident(s) => s,
+                        tok => {
+                            return Err(ParseError {
+                                message: "Expected string or ident as association key".to_string(),
+                                token: Some(tok),
+                                span: self.peek_span(),
+                            });
+                        }
+                    };
+                    self.expect(&Token::Rule)?;
+                    let val = self.parse_pattern()?;
+                    entries.push((key, val));
+                    if self.at(&Token::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(&Token::RAssoc)?;
+                Ok(Expr::Assoc(entries))
+            }
+
+            // Keywords treated as symbols in pattern/expression context
+            // (allows Function[{s}, s] to be parsed as a regular call inside
+            // function-call argument lists, which are parsed via parse_pattern_list.)
+            Token::Function => {
+                self.advance();
+                Ok(Expr::Symbol("Function".to_string()))
+            }
+            Token::Hold => {
+                self.advance();
+                Ok(Expr::Symbol("Hold".to_string()))
+            }
+            Token::HoldComplete => {
+                self.advance();
+                Ok(Expr::Symbol("HoldComplete".to_string()))
+            }
+
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),
                 token: Some(tok),
