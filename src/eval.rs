@@ -323,6 +323,29 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     env.set(s.clone(), val.clone());
                     Ok(val)
                 }
+                // this.field = value  (desugared to Assign(field[this], value))
+                Expr::Call { head, args: call_args }
+                    if call_args.len() == 1 =>
+                {
+                    if let Expr::Symbol(field_name) = head.as_ref() {
+                        let target = eval(&call_args[0], env)?;
+                        match target {
+                            Value::Object { class_name, mut fields } => {
+                                fields.insert(field_name.clone(), val.clone());
+                                let updated = Value::Object { class_name, fields };
+                                if let Expr::Symbol(s) = &call_args[0] {
+                                    if s == "this" {
+                                        env.set("this".to_string(), updated.clone());
+                                    }
+                                }
+                                Ok(val)
+                            }
+                            _ => Err(EvalError::Error("Invalid assignment target".to_string())),
+                        }
+                    } else {
+                        Err(EvalError::Error("Invalid assignment target".to_string()))
+                    }
+                }
                 _ => Err(EvalError::Error("Invalid assignment target".to_string())),
             }
         }
@@ -950,22 +973,16 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
             // Look up the symbol and apply
             if let Some(f) = env.get(name) {
                 apply_function(&f, args, env)
-            } else if args.len() == 1 {
-                // Check if this is a field access on an object
-                if let Value::Object { fields, .. } = &args[0] {
-                    if let Some(val) = fields.get(name) {
-                        return Ok(val.clone());
-                    }
-                }
-                // Return unevaluated
-                Ok(Value::Call {
-                    head: name.clone(),
-                    args: args.to_vec(),
-                })
             } else if !args.is_empty() {
-                // Check if first arg is an object and this is a method call
+                // Check if first arg is an object — field access or method call
                 if let Value::Object { class_name, fields } = &args[0] {
-                    // Look up method on the class
+                    // Field access: single arg
+                    if args.len() == 1 {
+                        if let Some(val) = fields.get(name) {
+                            return Ok(val.clone());
+                        }
+                    }
+                    // Method dispatch: look up method on the class
                     if let Some(class_val) = env.get(class_name) {
                         if let Value::Class(class_def) = class_val {
                             if let Some(method) = class_def.methods.get(name) {
