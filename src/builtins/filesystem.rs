@@ -68,10 +68,7 @@ pub fn builtin_file_name_split(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = arg_string(args, 0, "FileNameSplit")?;
     let p = Path::new(&s);
-    let comps: Vec<Value> = path_components(p)
-        .into_iter()
-        .map(Value::Str)
-        .collect();
+    let comps: Vec<Value> = path_components(p).into_iter().map(Value::Str).collect();
     Ok(Value::List(comps))
 }
 
@@ -248,9 +245,7 @@ pub fn builtin_expand_file_name(args: &[Value]) -> Result<Value, EvalError> {
                 Ok(Value::Str(s))
             } else {
                 match std::env::current_dir() {
-                    Ok(cwd) => Ok(Value::Str(
-                        cwd.join(p).to_string_lossy().into_owned(),
-                    )),
+                    Ok(cwd) => Ok(Value::Str(cwd.join(p).to_string_lossy().into_owned())),
                     Err(e) => Err(EvalError::Error(format!(
                         "ExpandFileName: cannot resolve path: {}",
                         e

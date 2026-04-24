@@ -158,8 +158,7 @@ pub fn builtin_export(args: &[Value]) -> Result<Value, EvalError> {
             other => format!("{}", other),
         }
     };
-    std::fs::write(&path, &data)
-        .map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?;
+    std::fs::write(&path, &data).map_err(|e| EvalError::Error(format!("Export failed: {}", e)))?;
     Ok(Value::Null)
 }
 
@@ -185,8 +184,7 @@ pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| EvalError::Error(format!("Import failed: {}", e)))?;
     if path.ends_with(".json") {
-        json_to_value(&contents)
-            .map_err(|e| EvalError::Error(format!("Import JSON parse: {}", e)))
+        json_to_value(&contents).map_err(|e| EvalError::Error(format!("Import JSON parse: {}", e)))
     } else {
         Ok(Value::Str(contents))
     }
@@ -214,7 +212,9 @@ mod tests {
     #[test]
     fn test_write_string_errors() {
         assert!(builtin_write_string(&[str_val("x")]).is_err()); // too few args
-        assert!(builtin_write_string(&[Value::Integer(rug::Integer::from(1)), str_val("x")]).is_err()); // wrong type
+        assert!(
+            builtin_write_string(&[Value::Integer(rug::Integer::from(1)), str_val("x")]).is_err()
+        ); // wrong type
     }
 
     #[test]

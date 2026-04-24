@@ -1411,10 +1411,10 @@ mod tests {
     #[test]
     fn test_factor_linear_gcd() {
         // Factor[2x + 4] = 2(x + 2)
-        let expr = simplify_call("Plus", &[
-            simplify_call("Times", &[int(2), sym("x")]),
-            int(4),
-        ]);
+        let expr = simplify_call(
+            "Plus",
+            &[simplify_call("Times", &[int(2), sym("x")]), int(4)],
+        );
         let result = factor_expr(&expr);
         match &result {
             Value::Call { head, args } if head == "Times" => {
@@ -1428,10 +1428,10 @@ mod tests {
     #[test]
     fn test_factor_difference_of_squares() {
         // Factor[x^2 - 1] = (x - 1)(x + 1)
-        let expr = simplify_call("Plus", &[
-            simplify_call("Power", &[sym("x"), int(2)]),
-            int(-1),
-        ]);
+        let expr = simplify_call(
+            "Plus",
+            &[simplify_call("Power", &[sym("x"), int(2)]), int(-1)],
+        );
         let result = factor_expr(&expr);
         match &result {
             Value::Call { head, args } if head == "Times" => {
@@ -1444,11 +1444,14 @@ mod tests {
     #[test]
     fn test_factor_perfect_square() {
         // Factor[x^2 + 2x + 1] = (x + 1)^2
-        let expr = simplify_call("Plus", &[
-            simplify_call("Power", &[sym("x"), int(2)]),
-            simplify_call("Times", &[int(2), sym("x")]),
-            int(1),
-        ]);
+        let expr = simplify_call(
+            "Plus",
+            &[
+                simplify_call("Power", &[sym("x"), int(2)]),
+                simplify_call("Times", &[int(2), sym("x")]),
+                int(1),
+            ],
+        );
         let result = factor_expr(&expr);
         match &result {
             Value::Call { head, args } if head == "Times" => {

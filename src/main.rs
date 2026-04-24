@@ -275,7 +275,22 @@ fn main() {
     let file_arg = args
         .iter()
         .skip(1)
-        .find(|a| !a.starts_with('-') && a.as_str() != "new" && a.as_str() != "run" && a.as_str() != "build" && a.as_str() != "check" && a.as_str() != "test" && a.as_str() != "add" && a.as_str() != "remove" && a.as_str() != "rm" && a.as_str() != "install" && a.as_str() != "update" && a.as_str() != "publish" && a.as_str() != "search" && a.as_str() != "info")
+        .find(|a| {
+            !a.starts_with('-')
+                && a.as_str() != "new"
+                && a.as_str() != "run"
+                && a.as_str() != "build"
+                && a.as_str() != "check"
+                && a.as_str() != "test"
+                && a.as_str() != "add"
+                && a.as_str() != "remove"
+                && a.as_str() != "rm"
+                && a.as_str() != "install"
+                && a.as_str() != "update"
+                && a.as_str() != "publish"
+                && a.as_str() != "search"
+                && a.as_str() != "info"
+        })
         .map(|s| s.as_str());
 
     if has_dap {

@@ -324,13 +324,17 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     Ok(val)
                 }
                 // this.field = value  (desugared to Assign(field[this], value))
-                Expr::Call { head, args: call_args }
-                    if call_args.len() == 1 =>
-                {
+                Expr::Call {
+                    head,
+                    args: call_args,
+                } if call_args.len() == 1 => {
                     if let Expr::Symbol(field_name) = head.as_ref() {
                         let target = eval(&call_args[0], env)?;
                         match target {
-                            Value::Object { class_name, mut fields } => {
+                            Value::Object {
+                                class_name,
+                                mut fields,
+                            } => {
                                 fields.insert(field_name.clone(), val.clone());
                                 let updated = Value::Object { class_name, fields };
                                 if let Expr::Symbol(s) = &call_args[0] {
@@ -439,9 +443,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     } => {
                         let body_expr = match body {
                             crate::ast::MethodBody::Expr(e) => e.clone(),
-                            crate::ast::MethodBody::Block(stmts) => {
-                                Expr::Sequence(stmts.clone())
-                            }
+                            crate::ast::MethodBody::Block(stmts) => Expr::Sequence(stmts.clone()),
                         };
                         methods.insert(
                             method_name.clone(),
@@ -484,7 +486,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         }
                         // Merge parent methods (child methods override)
                         for (method_name, method) in &parent_class.methods {
-                            methods.entry(method_name.clone()).or_insert_with(|| method.clone());
+                            methods
+                                .entry(method_name.clone())
+                                .or_insert_with(|| method.clone());
                         }
                         // Use parent constructor if child doesn't have one
                         if constructor.is_none() {
@@ -499,7 +503,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 if let Some(mixin_val) = env.get(mixin_name) {
                     if let Value::Class(mixin_class) = mixin_val {
                         for (method_name, method) in &mixin_class.methods {
-                            methods.entry(method_name.clone()).or_insert_with(|| method.clone());
+                            methods
+                                .entry(method_name.clone())
+                                .or_insert_with(|| method.clone());
                         }
                     }
                 }
@@ -708,13 +714,17 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                         Ok(val)
                     }
                     // this.field = value  (desugared to Set[field[this], value])
-                    Expr::Call { head, args: call_args }
-                        if call_args.len() == 1 =>
-                    {
+                    Expr::Call {
+                        head,
+                        args: call_args,
+                    } if call_args.len() == 1 => {
                         if let Expr::Symbol(field_name) = head.as_ref() {
                             let target = eval(&call_args[0], env)?;
                             match target {
-                                Value::Object { class_name, mut fields } => {
+                                Value::Object {
+                                    class_name,
+                                    mut fields,
+                                } => {
                                     fields.insert(field_name.clone(), val.clone());
                                     let updated = Value::Object { class_name, fields };
                                     // If target is 'this', update it in the environment
@@ -856,7 +866,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                             return Err(EvalError::TypeError {
                                 expected: "String".to_string(),
                                 got: args[1].type_name().to_string(),
-                            })
+                            });
                         }
                     };
                     let sig = ffi::loader::parse_sig(&args[2])?;
@@ -876,7 +886,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                             return Err(EvalError::TypeError {
                                 expected: "String".to_string(),
                                 got: args[0].type_name().to_string(),
-                            })
+                            });
                         }
                     };
                     let sym = match &args[1] {
@@ -885,7 +895,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                             return Err(EvalError::TypeError {
                                 expected: "String".to_string(),
                                 got: args[1].type_name().to_string(),
-                            })
+                            });
                         }
                     };
                     let sig = ffi::loader::parse_sig(&args[2])?;
@@ -905,7 +915,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
                             return Err(EvalError::TypeError {
                                 expected: "String".to_string(),
                                 got: args[0].type_name().to_string(),
-                            })
+                            });
                         }
                     };
                     let (module, func, call_args) =
@@ -932,9 +942,7 @@ fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, Eval
         }
 
         Value::NativeFunction {
-            fn_ptr,
-            signature,
-            ..
+            fn_ptr, signature, ..
         } => ffi::loader::call_native(*fn_ptr, signature, args),
 
         Value::Function(func_def) => {
@@ -1598,10 +1606,12 @@ fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() == 2 {
         // Check if second arg is a plain integer (not a list)
         if let Expr::Integer(_) = &args[1] {
-            let n = eval(&args[1], env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: "non-Integer".to_string(),
-            })?;
+            let n = eval(&args[1], env)?
+                .to_integer()
+                .ok_or_else(|| EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "non-Integer".to_string(),
+                })?;
             if n < 0 {
                 return Err(EvalError::Error(
                     "Table count must be non-negative".to_string(),
@@ -1642,127 +1652,136 @@ fn eval_table_recursive(
     };
 
     // Parse the iterator spec and generate values
-    let (var_name, values) = match iter_items.len() {
-        2 => {
-            // {var, n} or {var, {values}}
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "Table iterator variable must be a symbol".to_string(),
-                    ));
-                }
-            };
-
-            // Check if second element is a list (explicit values)
-            if let Expr::List(_) = &iter_items[1] {
-                let list_val = eval(&iter_items[1], env)?;
-                match list_val {
-                    Value::List(items) => (var, items),
+    let (var_name, values) =
+        match iter_items.len() {
+            2 => {
+                // {var, n} or {var, {values}}
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
                     _ => {
-                        return Err(EvalError::TypeError {
-                            expected: "List".to_string(),
-                            got: list_val.type_name().to_string(),
-                        });
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
                     }
+                };
+
+                // Check if second element is a list (explicit values)
+                if let Expr::List(_) = &iter_items[1] {
+                    let list_val = eval(&iter_items[1], env)?;
+                    match list_val {
+                        Value::List(items) => (var, items),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "List".to_string(),
+                                got: list_val.type_name().to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    // {var, n} — iterate 1..=n
+                    let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                        EvalError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: "non-Integer".to_string(),
+                        }
+                    })?;
+                    let values: Vec<Value> =
+                        (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                    (var, values)
                 }
-            } else {
-                // {var, n} — iterate 1..=n
-                let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+            }
+            3 => {
+                // {var, min, max}
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
                     EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: "non-Integer".to_string(),
                     }
                 })?;
-                let values: Vec<Value> = (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let values: Vec<Value> = (min..=max)
+                    .map(|i| Value::Integer(Integer::from(i)))
+                    .collect();
                 (var, values)
             }
-        }
-        3 => {
-            // {var, min, max}
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "Table iterator variable must be a symbol".to_string(),
-                    ));
+            4 => {
+                // {var, min, max, step}
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Table iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                if step == 0 {
+                    return Err(EvalError::Error("Table step cannot be zero".to_string()));
                 }
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
+                let mut values = Vec::new();
+                if step > 0 {
+                    let mut i = min;
+                    while i <= max {
+                        values.push(Value::Integer(Integer::from(i)));
+                        i += step;
+                    }
+                } else {
+                    let mut i = min;
+                    while i >= max {
+                        values.push(Value::Integer(Integer::from(i)));
+                        i += step;
+                    }
                 }
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let values: Vec<Value> = (min..=max).map(|i| Value::Integer(Integer::from(i))).collect();
-            (var, values)
-        }
-        4 => {
-            // {var, min, max, step}
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "Table iterator variable must be a symbol".to_string(),
-                    ));
-                }
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            if step == 0 {
-                return Err(EvalError::Error("Table step cannot be zero".to_string()));
+                (var, values)
             }
-            let mut values = Vec::new();
-            if step > 0 {
-                let mut i = min;
-                while i <= max {
-                    values.push(Value::Integer(Integer::from(i)));
-                    i += step;
-                }
-            } else {
-                let mut i = min;
-                while i >= max {
-                    values.push(Value::Integer(Integer::from(i)));
-                    i += step;
-                }
+            _ => {
+                return Err(EvalError::Error(
+                    "Table iterator spec must have 2-4 elements".to_string(),
+                ));
             }
-            (var, values)
-        }
-        _ => {
-            return Err(EvalError::Error(
-                "Table iterator spec must have 2-4 elements".to_string(),
-            ));
-        }
-    };
+        };
 
     // Generate results for this iterator level
     let child_env = env.child();
     let mut result = Vec::new();
     for val in values {
         child_env.set(var_name.clone(), val);
-        result.push(eval_table_recursive(expr, iter_specs, &child_env, depth + 1)?);
+        result.push(eval_table_recursive(
+            expr,
+            iter_specs,
+            &child_env,
+            depth + 1,
+        )?);
     }
 
     Ok(Value::List(result))
@@ -1876,7 +1895,9 @@ fn builtin_parallel_map_eval(args: &[Value], env: &Env) -> Result<Value, EvalErr
                 Ok::<(), EvalError>(())
             })?;
 
-            Ok(Value::List(results.into_iter().map(|r| r.unwrap()).collect()))
+            Ok(Value::List(
+                results.into_iter().map(|r| r.unwrap()).collect(),
+            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
@@ -1905,119 +1926,120 @@ fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         }
     };
 
-    let (var_name, values) = match iter_items.len() {
-        2 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "ParallelTable iterator variable must be a symbol".to_string(),
-                    ));
-                }
-            };
-            if let Expr::List(_) = &iter_items[1] {
-                let list_val = eval(&iter_items[1], env)?;
-                match list_val {
-                    Value::List(items) => (var, items),
+    let (var_name, values) =
+        match iter_items.len() {
+            2 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
                     _ => {
-                        return Err(EvalError::TypeError {
-                            expected: "List".to_string(),
-                            got: list_val.type_name().to_string(),
-                        });
+                        return Err(EvalError::Error(
+                            "ParallelTable iterator variable must be a symbol".to_string(),
+                        ));
                     }
+                };
+                if let Expr::List(_) = &iter_items[1] {
+                    let list_val = eval(&iter_items[1], env)?;
+                    match list_val {
+                        Value::List(items) => (var, items),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "List".to_string(),
+                                got: list_val.type_name().to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                        EvalError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: "non-Integer".to_string(),
+                        }
+                    })?;
+                    let values: Vec<Value> =
+                        (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                    (var, values)
                 }
-            } else {
-                let n = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+            }
+            3 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "ParallelTable iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
                     EvalError::TypeError {
                         expected: "Integer".to_string(),
                         got: "non-Integer".to_string(),
                     }
                 })?;
-                let values: Vec<Value> =
-                    (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let values: Vec<Value> = (min..=max)
+                    .map(|i| Value::Integer(Integer::from(i)))
+                    .collect();
                 (var, values)
             }
-        }
-        3 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
+            4 => {
+                let var = match &iter_items[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "ParallelTable iterator variable must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
+                    EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: "non-Integer".to_string(),
+                    }
+                })?;
+                if step == 0 {
                     return Err(EvalError::Error(
-                        "ParallelTable iterator variable must be a symbol".to_string(),
+                        "ParallelTable step cannot be zero".to_string(),
                     ));
                 }
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
+                let mut values = Vec::new();
+                if step > 0 {
+                    let mut i = min;
+                    while i <= max {
+                        values.push(Value::Integer(Integer::from(i)));
+                        i += step;
+                    }
+                } else {
+                    let mut i = min;
+                    while i >= max {
+                        values.push(Value::Integer(Integer::from(i)));
+                        i += step;
+                    }
                 }
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let values: Vec<Value> = (min..=max)
-                .map(|i| Value::Integer(Integer::from(i)))
-                .collect();
-            (var, values)
-        }
-        4 => {
-            let var = match &iter_items[0] {
-                Expr::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "ParallelTable iterator variable must be a symbol".to_string(),
-                    ));
-                }
-            };
-            let min = eval(&iter_items[1], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let max = eval(&iter_items[2], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            let step = eval(&iter_items[3], env)?.to_integer().ok_or_else(|| {
-                EvalError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: "non-Integer".to_string(),
-                }
-            })?;
-            if step == 0 {
+                (var, values)
+            }
+            _ => {
                 return Err(EvalError::Error(
-                    "ParallelTable step cannot be zero".to_string(),
+                    "ParallelTable iterator spec must have 2-4 elements".to_string(),
                 ));
             }
-            let mut values = Vec::new();
-            if step > 0 {
-                let mut i = min;
-                while i <= max {
-                    values.push(Value::Integer(Integer::from(i)));
-                    i += step;
-                }
-            } else {
-                let mut i = min;
-                while i >= max {
-                    values.push(Value::Integer(Integer::from(i)));
-                    i += step;
-                }
-            }
-            (var, values)
-        }
-        _ => {
-            return Err(EvalError::Error(
-                "ParallelTable iterator spec must have 2-4 elements".to_string(),
-            ));
-        }
-    };
+        };
 
     // For small iteration counts, sequential is faster
     if values.len() < 4 {
@@ -2056,7 +2078,9 @@ fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         Ok::<(), EvalError>(())
     })?;
 
-    Ok(Value::List(results.into_iter().map(|r| r.unwrap()).collect()))
+    Ok(Value::List(
+        results.into_iter().map(|r| r.unwrap()).collect(),
+    ))
 }
 
 /// FixedPoint[f, x] — apply f until result stops changing.

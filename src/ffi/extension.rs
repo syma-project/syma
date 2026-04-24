@@ -13,13 +13,12 @@
 ///
 /// Arguments and results are exchanged as null-terminated JSON strings so
 /// that the `Value` binary layout never leaks through the ABI.
-
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
 use crate::env::Env;
-use crate::ffi::{lib_open, lib_sym};
 use crate::ffi::marshal::{json_to_value, values_to_json};
+use crate::ffi::{lib_open, lib_sym};
 use crate::value::{EvalError, Value};
 
 // ── Stable C ABI ──────────────────────────────────────────────────────────────
@@ -34,11 +33,8 @@ pub struct SymaExtensionContext {
     /// Version of this ABI.  Currently 1.
     pub abi_version: u32,
     /// Called by the extension to register a builtin.
-    pub register_fn: unsafe extern "C" fn(
-        ctx: *mut SymaExtensionContext,
-        name: *const c_char,
-        f: SymaBuiltinFn,
-    ),
+    pub register_fn:
+        unsafe extern "C" fn(ctx: *mut SymaExtensionContext, name: *const c_char, f: SymaBuiltinFn),
     /// Opaque back-pointer to the Rust `Env` (do not use from extension code).
     pub env_opaque: *mut c_void,
 }
@@ -64,8 +60,7 @@ pub type SymaBuiltinFn = unsafe extern "C" fn(
 
 /// Load a Syma extension from a dynamic library and register its builtins.
 pub fn load_extension(path: &str, env: &Env) -> Result<(), EvalError> {
-    let handle = lib_open(path)
-        .map_err(|e| EvalError::FfiError(format!("LoadExtension: {e}")))?;
+    let handle = lib_open(path).map_err(|e| EvalError::FfiError(format!("LoadExtension: {e}")))?;
 
     let init_ptr = lib_sym(&handle, "syma_init").ok_or_else(|| {
         EvalError::FfiError(format!(
@@ -87,8 +82,7 @@ pub fn load_extension(path: &str, env: &Env) -> Result<(), EvalError> {
 
     // SAFETY: the extension must implement `syma_init` with the documented signature.
     unsafe {
-        let init: unsafe extern "C" fn(*mut SymaExtensionContext) =
-            std::mem::transmute(init_ptr);
+        let init: unsafe extern "C" fn(*mut SymaExtensionContext) = std::mem::transmute(init_ptr);
         init(&mut ctx);
     }
 
@@ -139,24 +133,17 @@ fn ext_registry() -> &'static Mutex<HashMap<String, usize>> {
 }
 
 fn register_ext_fn(name: String, f: SymaBuiltinFn) {
-    ext_registry()
-        .lock()
-        .unwrap()
-        .insert(name, f as usize);
+    ext_registry().lock().unwrap().insert(name, f as usize);
 }
 
 /// Look up a registered extension function by name and call it.
 pub fn call_ext_fn(name: &str, args: &[Value]) -> Result<Value, EvalError> {
-    let fn_ptr = {
-        ext_registry()
-            .lock()
-            .unwrap()
-            .get(name)
-            .copied()
-    };
+    let fn_ptr = { ext_registry().lock().unwrap().get(name).copied() };
 
     let fn_ptr = fn_ptr.ok_or_else(|| {
-        EvalError::FfiError(format!("extension function \"{name}\" not found in registry"))
+        EvalError::FfiError(format!(
+            "extension function \"{name}\" not found in registry"
+        ))
     })?;
 
     let f: SymaBuiltinFn = unsafe { std::mem::transmute(fn_ptr) };
@@ -180,11 +167,21 @@ pub fn call_ext_fn(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     };
 
     if rc != 0 {
-        let msg = unsafe { CStr::from_ptr(err_buf.as_ptr()).to_string_lossy().into_owned() };
-        return Err(EvalError::FfiError(format!("extension \"{name}\" error: {msg}")));
+        let msg = unsafe {
+            CStr::from_ptr(err_buf.as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        };
+        return Err(EvalError::FfiError(format!(
+            "extension \"{name}\" error: {msg}"
+        )));
     }
 
-    let out_str = unsafe { CStr::from_ptr(out_buf.as_ptr()).to_string_lossy().into_owned() };
+    let out_str = unsafe {
+        CStr::from_ptr(out_buf.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    };
     json_to_value(&out_str)
 }
 

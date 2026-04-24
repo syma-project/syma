@@ -1,8 +1,7 @@
 /// Tier 1: Load raw C/C++/Rust dynamic libraries and call their functions.
-
 use crate::env::Env;
-use crate::ffi::{lib_open, lib_sym};
 use crate::ffi::marshal::{CArg, c_ret_to_value, value_to_c_arg};
+use crate::ffi::{lib_open, lib_sym};
 use crate::value::{EvalError, NativeSig, NativeType, Value};
 
 /// Open a dynamic library and return a `Value::NativeLib`.
@@ -15,8 +14,7 @@ pub fn load_native_library(path: &str, env: &Env) -> Result<Value, EvalError> {
         });
     }
 
-    let handle = lib_open(path)
-        .map_err(|e| EvalError::FfiError(format!("LoadLibrary: {e}")))?;
+    let handle = lib_open(path).map_err(|e| EvalError::FfiError(format!("LoadLibrary: {e}")))?;
 
     env.register_native_lib(path.to_string(), handle.clone());
 
@@ -27,18 +25,14 @@ pub fn load_native_library(path: &str, env: &Env) -> Result<Value, EvalError> {
 }
 
 /// Resolve a symbol from a `NativeLib` and return a `Value::NativeFunction`.
-pub fn library_function(
-    lib: &Value,
-    symbol: &str,
-    sig: NativeSig,
-) -> Result<Value, EvalError> {
+pub fn library_function(lib: &Value, symbol: &str, sig: NativeSig) -> Result<Value, EvalError> {
     let (lib_name, handle) = match lib {
         Value::NativeLib { name, handle } => (name.clone(), handle.clone()),
         _ => {
             return Err(EvalError::TypeError {
                 expected: "NativeLib".to_string(),
                 got: lib.type_name().to_string(),
-            })
+            });
         }
     };
 
@@ -97,8 +91,12 @@ unsafe fn dispatch_call(fn_ptr: usize, args: &[CArg], ret: &NativeType) -> Resul
         2 => call2(fn_ptr, ret, &args[0], &args[1]),
         3 => call3(fn_ptr, ret, &args[0], &args[1], &args[2]),
         4 => call4(fn_ptr, ret, &args[0], &args[1], &args[2], &args[3]),
-        5 => call5(fn_ptr, ret, &args[0], &args[1], &args[2], &args[3], &args[4]),
-        6 => call6(fn_ptr, ret, &args[0], &args[1], &args[2], &args[3], &args[4], &args[5]),
+        5 => call5(
+            fn_ptr, ret, &args[0], &args[1], &args[2], &args[3], &args[4],
+        ),
+        6 => call6(
+            fn_ptr, ret, &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
+        ),
         n => Err(EvalError::FfiError(format!(
             "too many arguments for direct FFI call ({n}); use an extension for wider signatures"
         ))),
@@ -154,12 +152,25 @@ unsafe fn raw_call_int_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
         5 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4])
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+            )
         }
         6 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4], raw_args[5])
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+            )
         }
         _ => unreachable!(),
     }
@@ -191,13 +202,27 @@ unsafe fn raw_call_f64_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
         5 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> f64 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4]).to_bits()
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+            )
+            .to_bits()
         }
         6 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> f64 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4], raw_args[5])
-                .to_bits()
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+            )
+            .to_bits()
         }
         _ => unreachable!(),
     }
@@ -223,20 +248,33 @@ unsafe fn raw_call_f32_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
             f(raw_args[0], raw_args[1], raw_args[2]).to_bits() as u64
         }
         4 => {
-            let f: unsafe extern "C" fn(u64, u64, u64, u64) -> f32 =
-                std::mem::transmute(fn_ptr);
+            let f: unsafe extern "C" fn(u64, u64, u64, u64) -> f32 = std::mem::transmute(fn_ptr);
             f(raw_args[0], raw_args[1], raw_args[2], raw_args[3]).to_bits() as u64
         }
         5 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> f32 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4]).to_bits() as u64
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+            )
+            .to_bits() as u64
         }
         6 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> f32 =
                 std::mem::transmute(fn_ptr);
-            f(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4], raw_args[5])
-                .to_bits() as u64
+            f(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+            )
+            .to_bits() as u64
         }
         _ => unreachable!(),
     }
@@ -274,7 +312,13 @@ unsafe fn call2(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg) -> Result
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn call3(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg) -> Result<u64, EvalError> {
+unsafe fn call3(
+    fn_ptr: usize,
+    ret: &NativeType,
+    a0: &CArg,
+    a1: &CArg,
+    a2: &CArg,
+) -> Result<u64, EvalError> {
     let r = [arg_bits(a0), arg_bits(a1), arg_bits(a2)];
     Ok(match ret {
         NativeType::F64 => raw_call_f64_ret(fn_ptr, &r),
@@ -284,7 +328,14 @@ unsafe fn call3(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn call4(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg, a3: &CArg) -> Result<u64, EvalError> {
+unsafe fn call4(
+    fn_ptr: usize,
+    ret: &NativeType,
+    a0: &CArg,
+    a1: &CArg,
+    a2: &CArg,
+    a3: &CArg,
+) -> Result<u64, EvalError> {
     let r = [arg_bits(a0), arg_bits(a1), arg_bits(a2), arg_bits(a3)];
     Ok(match ret {
         NativeType::F64 => raw_call_f64_ret(fn_ptr, &r),
@@ -294,8 +345,22 @@ unsafe fn call4(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn call5(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg, a3: &CArg, a4: &CArg) -> Result<u64, EvalError> {
-    let r = [arg_bits(a0), arg_bits(a1), arg_bits(a2), arg_bits(a3), arg_bits(a4)];
+unsafe fn call5(
+    fn_ptr: usize,
+    ret: &NativeType,
+    a0: &CArg,
+    a1: &CArg,
+    a2: &CArg,
+    a3: &CArg,
+    a4: &CArg,
+) -> Result<u64, EvalError> {
+    let r = [
+        arg_bits(a0),
+        arg_bits(a1),
+        arg_bits(a2),
+        arg_bits(a3),
+        arg_bits(a4),
+    ];
     Ok(match ret {
         NativeType::F64 => raw_call_f64_ret(fn_ptr, &r),
         NativeType::F32 => raw_call_f32_ret(fn_ptr, &r),
@@ -304,8 +369,24 @@ unsafe fn call5(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn call6(fn_ptr: usize, ret: &NativeType, a0: &CArg, a1: &CArg, a2: &CArg, a3: &CArg, a4: &CArg, a5: &CArg) -> Result<u64, EvalError> {
-    let r = [arg_bits(a0), arg_bits(a1), arg_bits(a2), arg_bits(a3), arg_bits(a4), arg_bits(a5)];
+unsafe fn call6(
+    fn_ptr: usize,
+    ret: &NativeType,
+    a0: &CArg,
+    a1: &CArg,
+    a2: &CArg,
+    a3: &CArg,
+    a4: &CArg,
+    a5: &CArg,
+) -> Result<u64, EvalError> {
+    let r = [
+        arg_bits(a0),
+        arg_bits(a1),
+        arg_bits(a2),
+        arg_bits(a3),
+        arg_bits(a4),
+        arg_bits(a5),
+    ];
     Ok(match ret {
         NativeType::F64 => raw_call_f64_ret(fn_ptr, &r),
         NativeType::F32 => raw_call_f32_ret(fn_ptr, &r),
@@ -339,9 +420,8 @@ fn parse_type_list(v: &Value) -> Result<Vec<NativeType>, EvalError> {
 
 fn parse_type_str(v: &Value) -> Result<NativeType, EvalError> {
     if let Value::Str(s) = v {
-        NativeType::from_syma_name(s).ok_or_else(|| {
-            EvalError::FfiError(format!("unknown native type \"{s}\""))
-        })
+        NativeType::from_syma_name(s)
+            .ok_or_else(|| EvalError::FfiError(format!("unknown native type \"{s}\"")))
     } else {
         Err(EvalError::FfiError(format!(
             "native type must be a string, got {}",

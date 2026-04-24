@@ -272,8 +272,7 @@ mod tests {
 
     #[test]
     fn test_plus_lists() {
-        let result =
-            add_values(&list(vec![int(1), int(2)]), &list(vec![int(3), int(4)])).unwrap();
+        let result = add_values(&list(vec![int(1), int(2)]), &list(vec![int(3), int(4)])).unwrap();
         assert_eq!(result, list(vec![int(4), int(6)]));
     }
 

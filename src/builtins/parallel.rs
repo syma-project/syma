@@ -9,7 +9,6 @@
 ///
 /// All evaluator-dependent functions return a sentinel error so the
 /// evaluator can dispatch them with access to `apply_function`.
-
 use crate::value::{EvalError, Value};
 
 // ── Stubs (evaluator-dependent) ──

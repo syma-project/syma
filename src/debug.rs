@@ -20,18 +20,14 @@ use crate::value::Value;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
 enum ClientMessage {
-    SetBreakpoints {
-        breakpoints: Vec<BreakpointInfo>,
-    },
+    SetBreakpoints { breakpoints: Vec<BreakpointInfo> },
     Continue,
     Next,
     StepIn,
     StepOut,
     Stop,
     GetVariables,
-    Evaluate {
-        expression: String,
-    },
+    Evaluate { expression: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,9 +269,7 @@ fn collect_variables(env: &Env) -> Vec<VariableInfo> {
         .into_iter()
         .filter(|(name, val)| {
             // Filter out built-in functions, internal symbols, and constants
-            !matches!(val, Value::Builtin(_, _))
-                && !name.starts_with("__")
-                && !is_constant(name)
+            !matches!(val, Value::Builtin(_, _)) && !name.starts_with("__") && !is_constant(name)
         })
         .map(|(name, val)| VariableInfo {
             var_type: val.type_name().to_string(),

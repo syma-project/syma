@@ -243,10 +243,10 @@ pub fn register_builtins(env: &Env) {
     // Degree = Pi / 180  (radians per degree)
     env.set(
         "Degree".to_string(),
-        Value::Real(rug::Float::with_val(
-            crate::value::DEFAULT_PRECISION,
-            rug::float::Constant::Pi,
-        ) / 180u32),
+        Value::Real(
+            rug::Float::with_val(crate::value::DEFAULT_PRECISION, rug::float::Constant::Pi)
+                / 180u32,
+        ),
     );
 }
 
@@ -375,7 +375,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "ArcSec" => "ArcSec[z] gives the inverse secant of z.",
         "ArcCot" => "ArcCot[z] gives the inverse cotangent of z.",
         "Haversine" => "Haversine[z] gives the haversine of z, (1 - Cos[z])/2.",
-        "InverseHaversine" => "InverseHaversine[z] gives the inverse haversine of z, 2 ArcSin[Sqrt[z]].",
+        "InverseHaversine" => {
+            "InverseHaversine[z] gives the inverse haversine of z, 2 ArcSin[Sqrt[z]]."
+        }
         "SinDegrees" => "SinDegrees[θ] gives the sine of θ degrees.",
         "CosDegrees" => "CosDegrees[θ] gives the cosine of θ degrees.",
         "TanDegrees" => "TanDegrees[θ] gives the tangent of θ degrees.",
@@ -415,8 +417,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Write" => "Write[stream, expr] writes expr to an output stream.",
         "WriteLine" => "WriteLine[stream, s] writes string s followed by a newline.",
         "PrintF" => "PrintF[fmt, args...] prints formatted output.",
-        "WriteString" => "WriteString[path, data] writes the string data to the file at path, creating or overwriting it.",
-        "ReadString" => "ReadString[path] reads the entire file at path and returns it as a string.",
+        "WriteString" => {
+            "WriteString[path, data] writes the string data to the file at path, creating or overwriting it."
+        }
+        "ReadString" => {
+            "ReadString[path] reads the entire file at path and returns it as a string."
+        }
         "Export" => {
             "Export[path, data] exports data to a file.\n\
              Format is detected by extension:\n\
@@ -457,7 +463,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "E" => "E is Euler's number e (2.71828...), the base of the natural logarithm.",
         "I" => "I is the imaginary unit, satisfying I^2 = -1.",
-        "Degree" => "Degree is the constant Pi/180, used to convert degrees to radians. E.g., 30 Degree = Pi/6.",
+        "Degree" => {
+            "Degree is the constant Pi/180, used to convert degrees to radians. E.g., 30 Degree = Pi/6."
+        }
         "Null" => "Null represents the absence of an expression or result.",
         "True" => "True represents the logical value true.",
         "False" => "False represents the logical value false.",
@@ -488,7 +496,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
 
         // ── Parallel ──
-        "ParallelMap" => "ParallelMap[f, list] applies f to each element of list in parallel, returning a list of results.",
+        "ParallelMap" => {
+            "ParallelMap[f, list] applies f to each element of list in parallel, returning a list of results."
+        }
         "ParallelTable" => {
             "ParallelTable[expr, {i, min, max}] evaluates expr for i from min to max in parallel.\n\
              ParallelTable[expr, {i, max}] evaluates expr for i from 1 to max in parallel."
@@ -500,10 +510,16 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "CloseKernels" => "CloseKernels[] resets the parallel worker pool. Returns Null.",
 
         // ── File system ──
-        "FileNameSplit" => "FileNameSplit[\"path\"] splits a file name into a list of its components.",
-        "FileNameJoin" => "FileNameJoin[{\"comp1\", \"comp2\", ...}] joins path components into a file name.",
+        "FileNameSplit" => {
+            "FileNameSplit[\"path\"] splits a file name into a list of its components."
+        }
+        "FileNameJoin" => {
+            "FileNameJoin[{\"comp1\", \"comp2\", ...}] joins path components into a file name."
+        }
         "FileNameTake" => "FileNameTake[\"path\", n] gives the last n components of the path.",
-        "FileNameDrop" => "FileNameDrop[\"path\", n] gives the path with the last n components removed.",
+        "FileNameDrop" => {
+            "FileNameDrop[\"path\", n] gives the path with the last n components removed."
+        }
         "FileBaseName" => "FileBaseName[\"path\"] gives the file name without its extension.",
         "FileExtension" => "FileExtension[\"path\"] gives the file extension (e.g., \"txt\").",
         "FileNameDepth" => "FileNameDepth[\"path\"] gives the number of path components.",
@@ -540,10 +556,11 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
             vec!["Listable", "NumericFunction"]
         }
         "Haversine" | "InverseHaversine" => vec!["Listable", "NumericFunction"],
-        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees"
-        | "CotDegrees" => vec!["Listable", "NumericFunction"],
-        "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees"
-        | "ArcSecDegrees" | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
+        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees" | "CotDegrees" => {
+            vec!["Listable", "NumericFunction"]
+        }
+        "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
+        | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
         "Factorial" => vec!["Listable"],
         "Max" | "Min" => vec!["Flat", "NumericFunction", "OneIdentity", "Orderless"],
         "And" | "Or" => vec!["Flat", "HoldAll", "Listable", "OneIdentity", "Orderless"],

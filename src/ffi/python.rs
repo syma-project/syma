@@ -4,7 +4,6 @@
 ///
 /// The bridge script (`bridge.py`) is embedded as a string literal.
 /// On first call it is written to a temporary file and reused on subsequent calls.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -83,8 +82,11 @@ pub fn call_python(module: &str, func: &str, args: &[Value]) -> Result<Value, Ev
     }
 
     // Parse the JSON response.
-    let resp: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|e| EvalError::FfiError(format!("python3 response parse error: {e}\nstdout={stdout}")))?;
+    let resp: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+        EvalError::FfiError(format!(
+            "python3 response parse error: {e}\nstdout={stdout}"
+        ))
+    })?;
 
     if let Some(err_msg) = resp.get("error") {
         return Err(EvalError::FfiError(format!(
@@ -93,9 +95,9 @@ pub fn call_python(module: &str, func: &str, args: &[Value]) -> Result<Value, Ev
         )));
     }
 
-    let result_jv = resp.get("ok").ok_or_else(|| {
-        EvalError::FfiError(format!("unexpected python3 response: {stdout}"))
-    })?;
+    let result_jv = resp
+        .get("ok")
+        .ok_or_else(|| EvalError::FfiError(format!("unexpected python3 response: {stdout}")))?;
 
     let result_str = serde_json::to_string(result_jv)
         .map_err(|e| EvalError::FfiError(format!("JSON result re-serialisation: {e}")))?;
@@ -121,18 +123,32 @@ pub fn parse_external_evaluate_args(
             return Err(EvalError::TypeError {
                 expected: "Assoc".to_string(),
                 got: opts.type_name().to_string(),
-            })
+            });
         }
     };
 
     let module = assoc
         .get("module")
-        .and_then(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None })
-        .ok_or_else(|| EvalError::FfiError("ExternalEvaluate: missing \"module\" key".to_string()))?;
+        .and_then(|v| {
+            if let Value::Str(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            EvalError::FfiError("ExternalEvaluate: missing \"module\" key".to_string())
+        })?;
 
     let func = assoc
         .get("func")
-        .and_then(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None })
+        .and_then(|v| {
+            if let Value::Str(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| EvalError::FfiError("ExternalEvaluate: missing \"func\" key".to_string()))?;
 
     let args = if let Some(a) = assoc.get("args") {

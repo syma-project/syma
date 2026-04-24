@@ -4,7 +4,6 @@
 /// access to the environment (`LibraryFunction`, `LibraryFunctionLoad`)
 /// are handled as special cases in `eval.rs`; the ones here are
 /// env-independent.
-
 use crate::value::{EvalError, Value};
 
 // ── LoadLibrary ───────────────────────────────────────────────────────────────

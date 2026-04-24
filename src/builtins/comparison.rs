@@ -1,7 +1,6 @@
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 
-
 pub fn builtin_equal(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(

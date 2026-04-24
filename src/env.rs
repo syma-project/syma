@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 /// Environment (scope) for variable bindings.
 ///
 /// Supports nested scopes with lexical scoping rules.
@@ -6,6 +5,7 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::value::{NativeLibHandle, Value};
 

@@ -3,10 +3,9 @@
 /// Two paths:
 ///   Direct C-ABI path (Tier 1): `value_to_c_arg` / `c_ret_to_value`
 ///   JSON wire path (Tier 2 Python, Tier 3 extensions): `values_to_json` / `json_to_value`
-
 use std::ffi::{CStr, CString};
 
-use crate::value::{EvalError, NativeType, Value, DEFAULT_PRECISION};
+use crate::value::{DEFAULT_PRECISION, EvalError, NativeType, Value};
 use rug::{Float, Integer};
 
 // ── Direct C-ABI marshalling ──────────────────────────────────────────────────
@@ -52,14 +51,11 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
             let r = require_real(v, "Real64")?;
             Ok(CArg::F64(r))
         }
-        NativeType::Bool => {
-            Ok(CArg::Bool(if v.to_bool() { 1 } else { 0 }))
-        }
+        NativeType::Bool => Ok(CArg::Bool(if v.to_bool() { 1 } else { 0 })),
         NativeType::CString => {
             if let Value::Str(s) = v {
-                let cs = CString::new(s.as_str()).map_err(|e| {
-                    EvalError::FfiError(format!("CString conversion failed: {e}"))
-                })?;
+                let cs = CString::new(s.as_str())
+                    .map_err(|e| EvalError::FfiError(format!("CString conversion failed: {e}")))?;
                 Ok(CArg::CStr(cs))
             } else {
                 Err(EvalError::TypeError {
@@ -111,10 +107,8 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
 /// `Integer`, `Real`, `Str`, `Bool`, `Null`, `List`, `Assoc`.
 /// Anything else returns `EvalError::FfiError`.
 pub fn values_to_json(args: &[Value]) -> Result<String, EvalError> {
-    let json_vals: Vec<serde_json::Value> = args
-        .iter()
-        .map(value_to_json)
-        .collect::<Result<_, _>>()?;
+    let json_vals: Vec<serde_json::Value> =
+        args.iter().map(value_to_json).collect::<Result<_, _>>()?;
     serde_json::to_string(&json_vals)
         .map_err(|e| EvalError::FfiError(format!("JSON serialisation failed: {e}")))
 }
@@ -128,9 +122,9 @@ pub fn json_to_value(json: &str) -> Result<Value, EvalError> {
 
 pub fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
     match v {
-        Value::Integer(n) => Ok(serde_json::Value::Number(
-            serde_json::Number::from(n.to_i64().unwrap_or(0)),
-        )),
+        Value::Integer(n) => Ok(serde_json::Value::Number(serde_json::Number::from(
+            n.to_i64().unwrap_or(0),
+        ))),
         Value::Real(r) => {
             let f = r.to_f64();
             serde_json::Number::from_f64(f)
@@ -168,7 +162,9 @@ fn json_val_to_value(jv: &serde_json::Value) -> Result<Value, EvalError> {
             } else if let Some(f) = n.as_f64() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, f)))
             } else {
-                Err(EvalError::FfiError(format!("unrepresentable JSON number: {n}")))
+                Err(EvalError::FfiError(format!(
+                    "unrepresentable JSON number: {n}"
+                )))
             }
         }
         serde_json::Value::String(s) => Ok(Value::Str(s.clone())),

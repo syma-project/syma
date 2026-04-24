@@ -31,8 +31,7 @@ fn extract_pi_multiple(val: &Value) -> Option<(i64, u32)> {
         // Times[n, Pi] or Times[Pi, n]
         Value::Call { head, args } if head == "Times" && args.len() == 2 => {
             match (&args[0], &args[1]) {
-                (Value::Integer(n), Value::Symbol(s))
-                | (Value::Symbol(s), Value::Integer(n))
+                (Value::Integer(n), Value::Symbol(s)) | (Value::Symbol(s), Value::Integer(n))
                     if s == "Pi" =>
                 {
                     if !n.is_negative() && !n.is_zero() {
@@ -167,15 +166,15 @@ fn neg_one_over(d: i64) -> Value {
 /// Compute exact sin for a known Pi fraction. (num, den) is in [0, 2) range.
 fn exact_sin(num: i64, den: u32) -> Option<Value> {
     let result = match (num, den) {
-        (0, _) | (1, 1) => val_int(0),           // sin(0) = sin(π) = 0
-        (1, 6) | (5, 6) => one_over(2),           // sin(π/6) = sin(5π/6) = 1/2
-        (1, 4) | (3, 4) => sqrt_over(2, 2),       // sin(π/4) = sin(3π/4) = √2/2
-        (1, 3) | (2, 3) => sqrt_over(3, 2),       // sin(π/3) = sin(2π/3) = √3/2
-        (1, 2) => val_int(1),                      // sin(π/2) = 1
-        (7, 6) | (11, 6) => neg_one_over(2),       // sin(7π/6) = sin(11π/6) = -1/2
-        (5, 4) | (7, 4) => neg_sqrt_over(2, 2),   // sin(5π/4) = sin(7π/4) = -√2/2
-        (4, 3) | (5, 3) => neg_sqrt_over(3, 2),   // sin(4π/3) = sin(5π/3) = -√3/2
-        (3, 2) => val_int(-1),                     // sin(3π/2) = -1
+        (0, _) | (1, 1) => val_int(0),          // sin(0) = sin(π) = 0
+        (1, 6) | (5, 6) => one_over(2),         // sin(π/6) = sin(5π/6) = 1/2
+        (1, 4) | (3, 4) => sqrt_over(2, 2),     // sin(π/4) = sin(3π/4) = √2/2
+        (1, 3) | (2, 3) => sqrt_over(3, 2),     // sin(π/3) = sin(2π/3) = √3/2
+        (1, 2) => val_int(1),                   // sin(π/2) = 1
+        (7, 6) | (11, 6) => neg_one_over(2),    // sin(7π/6) = sin(11π/6) = -1/2
+        (5, 4) | (7, 4) => neg_sqrt_over(2, 2), // sin(5π/4) = sin(7π/4) = -√2/2
+        (4, 3) | (5, 3) => neg_sqrt_over(3, 2), // sin(4π/3) = sin(5π/3) = -√3/2
+        (3, 2) => val_int(-1),                  // sin(3π/2) = -1
         _ => return None,
     };
     Some(result)
@@ -184,15 +183,15 @@ fn exact_sin(num: i64, den: u32) -> Option<Value> {
 /// Compute exact cos for a known Pi fraction. (num, den) is in [0, 2) range.
 fn exact_cos(num: i64, den: u32) -> Option<Value> {
     let result = match (num, den) {
-        (0, _) => val_int(1),                      // cos(0) = 1
-        (1, 6) | (11, 6) => sqrt_over(3, 2),       // cos(π/6) = cos(11π/6) = √3/2
-        (1, 4) | (7, 4) => sqrt_over(2, 2),        // cos(π/4) = cos(7π/4) = √2/2
-        (1, 3) | (5, 3) => one_over(2),            // cos(π/3) = cos(5π/3) = 1/2
-        (1, 2) | (3, 2) => val_int(0),             // cos(π/2) = cos(3π/2) = 0
-        (2, 3) | (4, 3) => neg_one_over(2),        // cos(2π/3) = cos(4π/3) = -1/2
-        (3, 4) | (5, 4) => neg_sqrt_over(2, 2),    // cos(3π/4) = cos(5π/4) = -√2/2
-        (5, 6) | (7, 6) => neg_sqrt_over(3, 2),    // cos(5π/6) = cos(7π/6) = -√3/2
-        (1, 1) => val_int(-1),                     // cos(π) = -1
+        (0, _) => val_int(1),                   // cos(0) = 1
+        (1, 6) | (11, 6) => sqrt_over(3, 2),    // cos(π/6) = cos(11π/6) = √3/2
+        (1, 4) | (7, 4) => sqrt_over(2, 2),     // cos(π/4) = cos(7π/4) = √2/2
+        (1, 3) | (5, 3) => one_over(2),         // cos(π/3) = cos(5π/3) = 1/2
+        (1, 2) | (3, 2) => val_int(0),          // cos(π/2) = cos(3π/2) = 0
+        (2, 3) | (4, 3) => neg_one_over(2),     // cos(2π/3) = cos(4π/3) = -1/2
+        (3, 4) | (5, 4) => neg_sqrt_over(2, 2), // cos(3π/4) = cos(5π/4) = -√2/2
+        (5, 6) | (7, 6) => neg_sqrt_over(3, 2), // cos(5π/6) = cos(7π/6) = -√3/2
+        (1, 1) => val_int(-1),                  // cos(π) = -1
         _ => return None,
     };
     Some(result)
@@ -205,13 +204,13 @@ fn exact_tan(num: i64, den: u32) -> Option<Value> {
         return None;
     }
     let result = match (num, den) {
-        (0, _) | (1, 1) => val_int(0),             // tan(0) = tan(π) = 0
-        (1, 6) | (7, 6) => val_div(val_int(1), val_sqrt(3)),   // 1/√3
-        (1, 4) | (5, 4) => val_int(1),             // tan(π/4) = tan(5π/4) = 1
-        (1, 3) | (4, 3) => val_sqrt(3),            // tan(π/3) = tan(4π/3) = √3
-        (2, 3) | (5, 3) => val_neg(val_sqrt(3)),   // -√3
-        (3, 4) | (7, 4) => val_int(-1),            // -1
-        (5, 6) | (11, 6) => val_neg(val_div(val_int(1), val_sqrt(3))),  // -1/√3
+        (0, _) | (1, 1) => val_int(0), // tan(0) = tan(π) = 0
+        (1, 6) | (7, 6) => val_div(val_int(1), val_sqrt(3)), // 1/√3
+        (1, 4) | (5, 4) => val_int(1), // tan(π/4) = tan(5π/4) = 1
+        (1, 3) | (4, 3) => val_sqrt(3), // tan(π/3) = tan(4π/3) = √3
+        (2, 3) | (5, 3) => val_neg(val_sqrt(3)), // -√3
+        (3, 4) | (7, 4) => val_int(-1), // -1
+        (5, 6) | (11, 6) => val_neg(val_div(val_int(1), val_sqrt(3))), // -1/√3
         _ => return None,
     };
     Some(result)
@@ -409,11 +408,11 @@ pub fn builtin_arctan(args: &[Value]) -> Result<Value, EvalError> {
 /// Compute exact csc for a known Pi fraction.
 fn exact_csc(num: i64, den: u32) -> Option<Value> {
     match (num, den) {
-        (0, _) | (1, 1) => None,                       // csc(0), csc(π) undefined
-        (1, 2) | (3, 2) => Some(val_int(1)),            // csc(±π/2) = 1 or -1
-        (1, 6) | (5, 6) => Some(val_int(2)),            // csc(π/6) = csc(5π/6) = 2
-        (1, 4) | (3, 4) => Some(val_sqrt(2)),           // csc(π/4) = csc(3π/4) = √2
-        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)),       // csc(π/3) = csc(2π/3) = 2√3/3
+        (0, _) | (1, 1) => None,                  // csc(0), csc(π) undefined
+        (1, 2) | (3, 2) => Some(val_int(1)),      // csc(±π/2) = 1 or -1
+        (1, 6) | (5, 6) => Some(val_int(2)),      // csc(π/6) = csc(5π/6) = 2
+        (1, 4) | (3, 4) => Some(val_sqrt(2)),     // csc(π/4) = csc(3π/4) = √2
+        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)), // csc(π/3) = csc(2π/3) = 2√3/3
         (7, 6) | (11, 6) => Some(val_int(-2)),
         (5, 4) | (7, 4) => Some(val_neg(val_sqrt(2))),
         (4, 3) | (5, 3) => Some(neg_sqrt_over(2, 3)),
@@ -424,15 +423,15 @@ fn exact_csc(num: i64, den: u32) -> Option<Value> {
 /// Compute exact sec for a known Pi fraction.
 fn exact_sec(num: i64, den: u32) -> Option<Value> {
     match (num, den) {
-        (0, _) => Some(val_int(1)),                     // sec(0) = 1
-        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)),      // sec(π/6) = sec(11π/6) = 2√3/3
-        (1, 4) | (7, 4) => Some(val_sqrt(2)),           // sec(π/4) = sec(7π/4) = √2
-        (1, 3) | (5, 3) => Some(val_int(2)),            // sec(π/3) = sec(5π/3) = 2
-        (1, 2) | (3, 2) => None,                        // sec(±π/2) undefined
+        (0, _) => Some(val_int(1)),                // sec(0) = 1
+        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)), // sec(π/6) = sec(11π/6) = 2√3/3
+        (1, 4) | (7, 4) => Some(val_sqrt(2)),      // sec(π/4) = sec(7π/4) = √2
+        (1, 3) | (5, 3) => Some(val_int(2)),       // sec(π/3) = sec(5π/3) = 2
+        (1, 2) | (3, 2) => None,                   // sec(±π/2) undefined
         (2, 3) | (4, 3) => Some(val_int(-2)),
         (3, 4) | (5, 4) => Some(val_neg(val_sqrt(2))),
         (5, 6) | (7, 6) => Some(neg_sqrt_over(2, 3)),
-        (1, 1) => Some(val_int(-1)),                    // sec(π) = -1
+        (1, 1) => Some(val_int(-1)), // sec(π) = -1
         _ => None,
     }
 }
@@ -440,10 +439,10 @@ fn exact_sec(num: i64, den: u32) -> Option<Value> {
 /// Compute exact cot for a known Pi fraction.
 fn exact_cot(num: i64, den: u32) -> Option<Value> {
     match (num, den) {
-        (0, _) | (1, 1) => None,                       // cot(0), cot(π) undefined
-        (1, 2) | (3, 2) => Some(val_int(0)),            // cot(π/2) = cot(3π/2) = 0
-        (1, 6) | (7, 6) => Some(val_sqrt(3)),           // cot(π/6) = cot(7π/6) = √3
-        (1, 4) | (5, 4) => Some(val_int(1)),            // cot(π/4) = cot(5π/4) = 1
+        (0, _) | (1, 1) => None,              // cot(0), cot(π) undefined
+        (1, 2) | (3, 2) => Some(val_int(0)),  // cot(π/2) = cot(3π/2) = 0
+        (1, 6) | (7, 6) => Some(val_sqrt(3)), // cot(π/6) = cot(7π/6) = √3
+        (1, 4) | (5, 4) => Some(val_int(1)),  // cot(π/4) = cot(5π/4) = 1
         (1, 3) | (4, 3) => Some(val_div(val_sqrt(3), val_int(3))), // cot(π/3) = √3/3
         (2, 3) | (5, 3) => Some(val_neg(val_div(val_sqrt(3), val_int(3)))),
         (3, 4) | (7, 4) => Some(val_int(-1)),
@@ -454,21 +453,28 @@ fn exact_cot(num: i64, den: u32) -> Option<Value> {
 
 pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Csc requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Csc requires exactly 1 argument".to_string(),
+        ));
     }
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_csc(num, den) {
             return Ok(result);
         }
-        return Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() });
+        return Ok(Value::Call {
+            head: "Csc".to_string(),
+            args: args.to_vec(),
+        });
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() })
-        }
-        Value::Integer(_) => {
-            Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() })
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Call {
+            head: "Csc".to_string(),
+            args: args.to_vec(),
+        }),
+        Value::Integer(_) => Ok(Value::Call {
+            head: "Csc".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Real(r) => {
             if let Some((num, den)) = pi_multiple(r) {
                 if let Some(result) = exact_csc(num, den) {
@@ -477,30 +483,42 @@ pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
             }
             let sin_val = r.clone().sin();
             if sin_val.is_zero() {
-                return Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() });
+                return Ok(Value::Call {
+                    head: "Csc".to_string(),
+                    args: args.to_vec(),
+                });
             }
             let prec = r.prec();
             Ok(Value::Real(Float::with_val(prec, 1.0) / sin_val))
         }
-        _ => Ok(Value::Call { head: "Csc".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Csc".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
 pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Sec requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Sec requires exactly 1 argument".to_string(),
+        ));
     }
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_sec(num, den) {
             return Ok(result);
         }
-        return Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() });
+        return Ok(Value::Call {
+            head: "Sec".to_string(),
+            args: args.to_vec(),
+        });
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
-        Value::Integer(_) => {
-            Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() })
-        }
+        Value::Integer(_) => Ok(Value::Call {
+            head: "Sec".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Real(r) => {
             if let Some((num, den)) = pi_multiple(r) {
                 if let Some(result) = exact_sec(num, den) {
@@ -509,32 +527,45 @@ pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
             }
             let cos_val = r.clone().cos();
             if cos_val.is_zero() {
-                return Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() });
+                return Ok(Value::Call {
+                    head: "Sec".to_string(),
+                    args: args.to_vec(),
+                });
             }
             let prec = r.prec();
             Ok(Value::Real(Float::with_val(prec, 1.0) / cos_val))
         }
-        _ => Ok(Value::Call { head: "Sec".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Sec".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
 pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Cot requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Cot requires exactly 1 argument".to_string(),
+        ));
     }
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_cot(num, den) {
             return Ok(result);
         }
-        return Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() });
+        return Ok(Value::Call {
+            head: "Cot".to_string(),
+            args: args.to_vec(),
+        });
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() })
-        }
-        Value::Integer(_) => {
-            Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() })
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Call {
+            head: "Cot".to_string(),
+            args: args.to_vec(),
+        }),
+        Value::Integer(_) => Ok(Value::Call {
+            head: "Cot".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Real(r) => {
             if let Some((num, den)) = pi_multiple(r) {
                 if let Some(result) = exact_cot(num, den) {
@@ -543,13 +574,21 @@ pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
             }
             let sin_val = r.clone().sin();
             if sin_val.is_zero() {
-                return Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() });
+                return Ok(Value::Call {
+                    head: "Cot".to_string(),
+                    args: args.to_vec(),
+                });
             }
             let cos_val = r.clone().cos();
             let prec = r.prec();
-            Ok(Value::Real(Float::with_val(prec, cos_val) / Float::with_val(prec, sin_val)))
+            Ok(Value::Real(
+                Float::with_val(prec, cos_val) / Float::with_val(prec, sin_val),
+            ))
         }
-        _ => Ok(Value::Call { head: "Cot".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Cot".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -557,57 +596,73 @@ pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arccsc(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcCsc requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcCsc requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() })
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Call {
+            head: "ArcCsc".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
             let inv = Float::with_val(DEFAULT_PRECISION, 1.0) / f;
             Ok(Value::Real(inv.asin()))
         }
-        Value::Real(r) if r.is_zero() => {
-            Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() })
-        }
+        Value::Real(r) if r.is_zero() => Ok(Value::Call {
+            head: "ArcCsc".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Real(r) => {
             let prec = r.prec();
             let inv = Float::with_val(prec, 1.0) / r;
             Ok(Value::Real(inv.asin()))
         }
-        _ => Ok(Value::Call { head: "ArcCsc".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcCsc".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
 pub fn builtin_arcsec(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcSec requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcSec requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() })
-        }
+        Value::Integer(n) if n.is_zero() => Ok(Value::Call {
+            head: "ArcSec".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
             let inv = Float::with_val(DEFAULT_PRECISION, 1.0) / f;
             Ok(Value::Real(inv.acos()))
         }
-        Value::Real(r) if r.is_zero() => {
-            Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() })
-        }
+        Value::Real(r) if r.is_zero() => Ok(Value::Call {
+            head: "ArcSec".to_string(),
+            args: args.to_vec(),
+        }),
         Value::Real(r) => {
             let prec = r.prec();
             let inv = Float::with_val(prec, 1.0) / r;
             Ok(Value::Real(inv.acos()))
         }
-        _ => Ok(Value::Call { head: "ArcSec".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcSec".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
 pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcCot requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcCot requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => {
@@ -629,7 +684,10 @@ pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
             let inv = Float::with_val(prec, 1.0) / r;
             Ok(Value::Real(inv.atan()))
         }
-        _ => Ok(Value::Call { head: "ArcCot".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "ArcCot".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -637,7 +695,9 @@ pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_haversine(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Haversine requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Haversine requires exactly 1 argument".to_string(),
+        ));
     }
     // Haversine[x] = Sin[x/2]^2 = (1 - Cos[x]) / 2
     match &args[0] {
@@ -655,13 +715,18 @@ pub fn builtin_haversine(args: &[Value]) -> Result<Value, EvalError> {
             let two = Float::with_val(prec, 2u32);
             Ok(Value::Real((one - cos_val) / two))
         }
-        _ => Ok(Value::Call { head: "Haversine".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "Haversine".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
 pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("InverseHaversine requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "InverseHaversine requires exactly 1 argument".to_string(),
+        ));
     }
     // InverseHaversine[x] = 2 * ArcSin[Sqrt[x]]
     match &args[0] {
@@ -669,22 +734,31 @@ pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
             if f.is_sign_negative() {
-                return Err(EvalError::Error("InverseHaversine: argument must be >= 0".to_string()));
+                return Err(EvalError::Error(
+                    "InverseHaversine: argument must be >= 0".to_string(),
+                ));
             }
             let sqrt_val = f.sqrt();
             let asin_val = sqrt_val.asin();
-            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 2) * asin_val))
+            Ok(Value::Real(
+                Float::with_val(DEFAULT_PRECISION, 2) * asin_val,
+            ))
         }
         Value::Real(r) => {
             if r.is_sign_negative() {
-                return Err(EvalError::Error("InverseHaversine: argument must be >= 0".to_string()));
+                return Err(EvalError::Error(
+                    "InverseHaversine: argument must be >= 0".to_string(),
+                ));
             }
             let prec = r.prec();
             let sqrt_val = r.clone().sqrt();
             let asin_val = sqrt_val.asin();
             Ok(Value::Real(Float::with_val(prec, 2u32) * asin_val))
         }
-        _ => Ok(Value::Call { head: "InverseHaversine".to_string(), args: args.to_vec() }),
+        _ => Ok(Value::Call {
+            head: "InverseHaversine".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -692,7 +766,9 @@ pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_sin_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("SinDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "SinDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     // SinDegrees[θ] = Sin[θ * π/180]
     let rad = degrees_to_radians(&args[0])?;
@@ -701,7 +777,9 @@ pub fn builtin_sin_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_cos_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("CosDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "CosDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = degrees_to_radians(&args[0])?;
     builtin_cos(&[rad])
@@ -709,7 +787,9 @@ pub fn builtin_cos_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_tan_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("TanDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "TanDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = degrees_to_radians(&args[0])?;
     builtin_tan(&[rad])
@@ -717,7 +797,9 @@ pub fn builtin_tan_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_csc_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("CscDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "CscDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = degrees_to_radians(&args[0])?;
     builtin_csc(&[rad])
@@ -725,7 +807,9 @@ pub fn builtin_csc_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_sec_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("SecDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "SecDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = degrees_to_radians(&args[0])?;
     builtin_sec(&[rad])
@@ -733,7 +817,9 @@ pub fn builtin_sec_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_cot_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("CotDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "CotDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = degrees_to_radians(&args[0])?;
     builtin_cot(&[rad])
@@ -743,7 +829,9 @@ pub fn builtin_cot_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arcsin_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcSinDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcSinDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arcsin(args)?;
     radians_to_degrees(&rad)
@@ -751,7 +839,9 @@ pub fn builtin_arcsin_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arccos_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcCosDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcCosDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arccos(args)?;
     radians_to_degrees(&rad)
@@ -759,7 +849,9 @@ pub fn builtin_arccos_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arctan_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcTanDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcTanDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arctan(args)?;
     radians_to_degrees(&rad)
@@ -767,7 +859,9 @@ pub fn builtin_arctan_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arccsc_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcCscDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcCscDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arccsc(args)?;
     radians_to_degrees(&rad)
@@ -775,7 +869,9 @@ pub fn builtin_arccsc_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arcsec_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcSecDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcSecDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arcsec(args)?;
     radians_to_degrees(&rad)
@@ -783,7 +879,9 @@ pub fn builtin_arcsec_degrees(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arccot_degrees(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArcCotDegrees requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArcCotDegrees requires exactly 1 argument".to_string(),
+        ));
     }
     let rad = builtin_arccot(args)?;
     radians_to_degrees(&rad)
@@ -1311,18 +1409,15 @@ mod tests {
     #[test]
     fn test_sin_pi_over_2() {
         // sin(π/2) = 1
-        let half_pi = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let half_pi =
+            Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         assert_eq!(builtin_sin(&[half_pi]).unwrap(), int(1));
     }
 
     #[test]
     fn test_sin_pi_over_6() {
         // sin(π/6) = 1/2 → Divide[1, 2]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32);
         let result = builtin_sin(&[arg]).unwrap();
         assert_eq!(result, val_div(val_int(1), val_int(2)));
     }
@@ -1330,9 +1425,7 @@ mod tests {
     #[test]
     fn test_sin_pi_over_4() {
         // sin(π/4) = √2/2 → Divide[Sqrt[2], 2]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         let result = builtin_sin(&[arg]).unwrap();
         assert_eq!(result, sqrt_over(2, 2));
     }
@@ -1340,9 +1433,7 @@ mod tests {
     #[test]
     fn test_sin_pi_over_3() {
         // sin(π/3) = √3/2 → Divide[Sqrt[3], 2]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32);
         let result = builtin_sin(&[arg]).unwrap();
         assert_eq!(result, sqrt_over(3, 2));
     }
@@ -1357,9 +1448,8 @@ mod tests {
     #[test]
     fn test_sin_negative_pi_over_2() {
         // sin(-π/2) = -1
-        let neg_half_pi = Value::Real(
-            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let neg_half_pi =
+            Value::Real(-Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         assert_eq!(builtin_sin(&[neg_half_pi]).unwrap(), int(-1));
     }
 
@@ -1375,18 +1465,15 @@ mod tests {
 
     #[test]
     fn test_cos_pi_over_2() {
-        let half_pi = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let half_pi =
+            Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         assert_eq!(builtin_cos(&[half_pi]).unwrap(), int(0));
     }
 
     #[test]
     fn test_cos_pi_over_3() {
         // cos(π/3) = 1/2 → Divide[1, 2]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32);
         let result = builtin_cos(&[arg]).unwrap();
         assert_eq!(result, one_over(2));
     }
@@ -1394,9 +1481,7 @@ mod tests {
     #[test]
     fn test_cos_pi_over_4() {
         // cos(π/4) = √2/2 → Divide[Sqrt[2], 2]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         let result = builtin_cos(&[arg]).unwrap();
         assert_eq!(result, sqrt_over(2, 2));
     }
@@ -1408,27 +1493,21 @@ mod tests {
 
     #[test]
     fn test_tan_pi_over_4() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         assert_eq!(builtin_tan(&[arg]).unwrap(), int(1));
     }
 
     #[test]
     fn test_tan_negative_pi_over_4() {
         // tan(-π/4) = -1
-        let arg = Value::Real(
-            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(-Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         assert_eq!(builtin_tan(&[arg]).unwrap(), int(-1));
     }
 
     #[test]
     fn test_tan_pi_over_3() {
         // tan(π/3) = √3 → Sqrt[3]
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32);
         let result = builtin_tan(&[arg]).unwrap();
         assert_eq!(result, val_sqrt(3));
     }
@@ -1447,9 +1526,7 @@ mod tests {
     #[test]
     fn test_sin_pi_over_5_symbolic() {
         // sin(π/5) is not a special angle — should stay symbolic
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 5u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 5u32);
         let result = builtin_sin(&[arg]).unwrap();
         match result {
             Value::Call { head, .. } => assert_eq!(head, "Sin"),
@@ -1535,25 +1612,19 @@ mod tests {
 
     #[test]
     fn test_csc_pi_over_6() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32);
         assert_eq!(builtin_csc(&[arg]).unwrap(), int(2));
     }
 
     #[test]
     fn test_csc_pi_over_2() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         assert_eq!(builtin_csc(&[arg]).unwrap(), int(1));
     }
 
     #[test]
     fn test_csc_pi_over_4() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         assert_eq!(builtin_csc(&[arg]).unwrap(), val_sqrt(2));
     }
 
@@ -1569,9 +1640,7 @@ mod tests {
 
     #[test]
     fn test_sec_pi_over_3() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32);
         assert_eq!(builtin_sec(&[arg]).unwrap(), int(2));
     }
 
@@ -1587,41 +1656,31 @@ mod tests {
 
     #[test]
     fn test_cot_pi_over_4() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 4u32);
         assert_eq!(builtin_cot(&[arg]).unwrap(), int(1));
     }
 
     #[test]
     fn test_cot_pi_over_6() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32);
         assert_eq!(builtin_cot(&[arg]).unwrap(), val_sqrt(3));
     }
 
     #[test]
     fn test_cot_pi_over_2() {
-        let arg = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let arg = Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         assert_eq!(builtin_cot(&[arg]).unwrap(), int(0));
     }
 
     #[test]
     fn test_csc_negative_pi_over_6() {
-        let arg = Value::Real(
-            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32,
-        );
+        let arg = Value::Real(-Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 6u32);
         assert_eq!(builtin_csc(&[arg]).unwrap(), int(-2));
     }
 
     #[test]
     fn test_sec_negative_pi_over_3() {
-        let arg = Value::Real(
-            -Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32,
-        );
+        let arg = Value::Real(-Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 3u32);
         assert_eq!(builtin_sec(&[arg]).unwrap(), int(2));
     }
 
@@ -1691,9 +1750,8 @@ mod tests {
 
     #[test]
     fn test_haversine_pi_over_2() {
-        let half_pi = Value::Real(
-            Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32,
-        );
+        let half_pi =
+            Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / 2u32);
         // Haversine[pi/2] = (1 - Cos[pi/2])/2 = 0.5 (Real)
         let result = builtin_haversine(&[half_pi]).unwrap();
         if let Value::Real(r) = result {

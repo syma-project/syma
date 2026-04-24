@@ -4,7 +4,6 @@
 ///   Tier 1 — Raw C/C++/Rust dynamic libraries via `dlopen`/`dlsym`.
 ///   Tier 2 — Python via subprocess JSON bridge.
 ///   Tier 3 — Native Syma extension packages (Rust crates with `syma_init` ABI).
-
 pub mod extension;
 pub mod loader;
 pub mod marshal;
@@ -72,9 +71,7 @@ mod platform {
                 if p.is_null() {
                     "unknown error".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(p)
-                        .to_string_lossy()
-                        .into_owned()
+                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
                 }
             };
             Err(format!("dlopen({path}): {msg}"))
@@ -90,7 +87,9 @@ mod platform {
     }
 
     pub fn close(handle: usize) {
-        unsafe { dlclose(handle); }
+        unsafe {
+            dlclose(handle);
+        }
     }
 }
 
@@ -121,6 +120,8 @@ mod platform {
     }
 
     pub fn close(handle: usize) {
-        unsafe { FreeLibrary(handle); }
+        unsafe {
+            FreeLibrary(handle);
+        }
     }
 }
