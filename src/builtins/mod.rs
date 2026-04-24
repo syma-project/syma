@@ -14,9 +14,7 @@ pub mod random;
 pub mod string;
 pub mod symbolic;
 
-use std::sync::Arc;
-
-use crate::env::{Env, LazyProvider};
+use crate::env::Env;
 use crate::value::{EvalError, Value};
 
 /// Register all built-in functions in the environment.
@@ -105,20 +103,10 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
     register_builtin(env, "Expand", symbolic::builtin_expand);
     register_builtin(env, "D", symbolic::builtin_d);
-    // Integrate is registered as a lazy provider to support deferred loading
-    // of large rule sets (e.g., Rubi's 7000+ integration rules).
-    env.register_lazy_provider(
-        "Integrate",
-        LazyProvider::Custom(Arc::new(|env| {
-            // Currently loads the builtin stub. In the future, this will be
-            // replaced with rule-based integration from Rubi rule files.
-            env.set(
-                "Integrate".to_string(),
-                Value::Builtin("Integrate".to_string(), symbolic::builtin_integrate),
-            );
-            Ok(env.get("Integrate").unwrap())
-        })),
-    );
+    // Integrate is registered as a lazy provider that loads the Rubi
+    // rule-based integration engine on first call.
+    #[cfg(feature = "rubi")]
+    crate::rubi::register(env);
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin(env, "Series", symbolic::builtin_series);

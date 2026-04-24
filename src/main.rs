@@ -25,7 +25,10 @@ fn print_usage() {
     println!("  syma -e <expr>             Evaluate an expression and print the result");
     println!("  syma --dap <file>          Run a file in debug mode (DAP protocol)");
     println!("  syma --check <file>        Parse-only check (no evaluation)");
-    println!("  syma --serve               Run in kernel mode (JSON over stdin/stdout)");
+    println!("  syma --serve              Start the notebook server (http://127.0.0.1:20559)");
+    println!("  syma --serve --port 8080   Start server on a custom port");
+    println!("  syma --serve --host 0.0.0.0 --port 8080  Custom host and port");
+    println!("  syma --kernel              Run in kernel mode (JSON over stdin/stdout)");
     println!("  syma --help                Show this help");
     println!("  syma --version             Show version");
     println!();
@@ -243,7 +246,22 @@ fn main() {
         Some("--version") | Some("-v") => println!("syma {}", VERSION),
 
         // ── Kernel / server mode ──────────────────────────────────────────────
-        Some("--serve") | Some("--kernel") => run_kernel(),
+        Some("--serve") => {
+            let host = args
+                .iter()
+                .position(|a| a == "--host")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("127.0.0.1");
+            let port = args
+                .iter()
+                .position(|a| a == "--port")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(20559);
+            syma::server::start_server(host, port);
+        }
+        Some("--kernel") => run_kernel(),
 
         // ── Expression evaluation ──────────────────────────────────────────────
         Some("--eval") | Some("-e") => {

@@ -1,0 +1,3 @@
+[submodule "notebook"]
+	path = notebook
+	url = https://github.com/syma-project/notebook
