@@ -281,6 +281,9 @@ pub enum Value {
         name: String,
         /// The exported symbols and their evaluated values.
         exports: HashMap<String, Value>,
+        /// All internal bindings (including non-exported helpers) from the module body.
+        /// Used by `Needs` to make internal symbols available to exported functions.
+        locals: HashMap<String, Value>,
     },
 
     // ── Image ──
@@ -472,10 +475,12 @@ impl PartialEq for Value {
                 Value::Module {
                     name: n1,
                     exports: e1,
+                    ..
                 },
                 Value::Module {
                     name: n2,
                     exports: e2,
+                    ..
                 },
             ) => n1 == n2 && e1 == e2,
             // NativeLib and NativeFunction: compare by name/symbol (pointer identity not stable)
@@ -971,7 +976,7 @@ impl fmt::Display for Value {
             Value::Class(class_def) => write!(f, "Class[{}]", class_def.name),
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
-            Value::Module { name, exports } => {
+            Value::Module { name, exports, .. } => {
                 write!(
                     f,
                     "Module[{}, {{{}}}]",

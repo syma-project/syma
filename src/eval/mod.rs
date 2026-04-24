@@ -619,9 +619,17 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     }
                 }
             }
+            // Collect all bindings from the module body's child_env
+            // so internal helper functions are accessible.
+            let local_map: std::collections::HashMap<String, Value> = child_env
+                .bindings()
+                .into_iter()
+                .filter(|(sym, _)| !export_map.contains_key(sym))
+                .collect();
             let module_val = Value::Module {
                 name: name.clone(),
                 exports: export_map,
+                locals: local_map,
             };
             // Register in the shared session registry so `import` can find it by name.
             env.register_module(name.clone(), module_val.clone());
@@ -653,7 +661,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             match &module_val {
                 Value::Module {
                     name: mod_name,
-                    exports,
+                    exports, ..
                 } => {
                     match (selective.as_deref(), alias.as_deref()) {
                         (Some(names), _) => {
@@ -678,6 +686,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             // import Foo  — bind all exports into current scope
                             for (sym, val) in exports {
                                 env.set(sym.clone(), val.clone());
+                            }
+                            // Also bind internal helpers so exported functions can find them
+                            if let Value::Module { locals, .. } = &module_val {
+                                for (sym, val) in locals {
+                                    env.set(sym.clone(), val.clone());
+                                }
                             }
                         }
                     }
@@ -982,6 +996,10 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 // Product[expr, {i, min, max}] — iterator spec has unevaluated symbols
                 table::eval_product(args, env)
             }
+            "RecurrenceTable" => {
+                // RecurrenceTable[eqns, f, {n, nmin, nmax}] — generate table from recurrence equations
+                table::eval_recurrence_table(args, env)
+            }
             "Plot" => {
                 // Plot[f, {x, xmin, xmax}] — needs unevaluated expr for sampling
                 plot::eval_plot(args, env)
@@ -1168,7 +1186,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     }
                     // First time past threshold — try to compile.
                     if prev + 1 == JIT_THRESHOLD + 1 {
-                        if let Some(jit_fn) = crate::jit::compile_jit(&bc_def) {
+                        if let Some(jit_fn) = crate::jit::compile_jit(bc_def) {
                             bc_def
                                 .jit_fn_ptr
                                 .store(jit_fn.fn_ptr as *mut (), Ordering::Relaxed);
@@ -1635,6 +1653,16 @@ pub(crate) fn load_module_from_file(name: &str, env: &Env) -> Result<Value, Eval
     // `ModuleDef` evaluation will register the module in the shared registry.
     let file_env = env.child();
     eval_program(&ast, &file_env)?;
+
+    // Import all file-level definitions into the caller's scope so that
+    // exported functions can reference internal helpers (e.g. `binomialLoop`
+    // used by `Binomial`, `fibIter` used by `Fibonacci`).
+    for (sym, val) in file_env.bindings() {
+        // Don't shadow builtins or the module symbol.
+        if env.get(&sym).is_none() && sym != name {
+            env.set(sym.clone(), val);
+        }
+    }
 
     env.get_module(name).ok_or_else(|| {
         EvalError::Error(format!(

@@ -289,7 +289,7 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("v".into(), JVal::String(format!("{expr}")));
             JVal::Object(m)
         }
-        Value::Module { name, exports } => {
+        Value::Module { name, exports, .. } => {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("mod".into()));
             m.insert("n".into(), JVal::String(name.clone()));

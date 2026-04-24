@@ -7,12 +7,15 @@ use std::collections::{BTreeSet, HashMap};
 
 use cranelift::codegen::binemit::Reloc;
 use cranelift::codegen::control::ControlPlane;
+use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::ir;
 use cranelift::codegen::ir::{
     types, AbiParam, Block, ExternalName, ExtFuncData, FuncRef, Signature,
+    UserExternalNameRef, UserFuncName,
 };
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Flags};
+use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::{Context, FinalizedMachReloc, FinalizedRelocTarget};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift::prelude::InstBuilder;
@@ -60,7 +63,7 @@ impl JitHelpers {
     fn new(builder: &mut FunctionBuilder) -> Self {
         // Helper: create a void SystemV signature.
         let void_sig = |params: &[types::Type]| -> Signature {
-            let mut sig = Signature::new(ir::CallConv::SystemV);
+            let mut sig = Signature::new(isa::CallConv::SystemV);
             for &p in params {
                 sig.params.push(AbiParam::new(p));
             }
@@ -69,7 +72,7 @@ impl JitHelpers {
 
         // Helper: create a signature with a return value.
         let ret_sig = |params: &[types::Type], ret: types::Type| -> Signature {
-            let mut sig = Signature::new(ir::CallConv::SystemV);
+            let mut sig = Signature::new(isa::CallConv::SystemV);
             for &p in params {
                 sig.params.push(AbiParam::new(p));
             }
@@ -79,9 +82,10 @@ impl JitHelpers {
 
         // Helper: import a function into the Cranelift IR.
         let import = |builder: &mut FunctionBuilder, name: &str, sig: Signature| -> FuncRef {
+            let sig_ref = builder.import_signature(sig);
             builder.import_function(ExtFuncData {
-                name: ExternalName::user(0, name.as_bytes().iter().map(|&b| b as u32).sum()),
-                signature: sig,
+                name: ExternalName::user(UserExternalNameRef::new(name.as_bytes().iter().map(|&b| b as usize).sum())),
+                signature: sig_ref,
                 colocated: true,
             })
         };
@@ -115,17 +119,17 @@ impl JitHelpers {
 pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompileError> {
     // ── Set up target ISA ──────────────────────────────────────────
     let triple = Triple::host();
-    let isa_builder =
-        isa::lookup(triple).map_err(|e| JitCompileError::Cranelift(format!("ISA lookup: {e}")))?;
-    let flags = Flags::new(settings::builder());
-    let isa = isa_builder.finish(flags);
+    let isa = isa::lookup(triple)
+        .map_err(|e| JitCompileError::Cranelift(format!("ISA lookup: {e:?}")))?
+        .finish(Flags::new(settings::builder()))
+        .map_err(|e| JitCompileError::Cranelift(format!("ISA finish: {e:?}")))?;
 
     // ── JIT function signature: fn(ctx: *mut JitContext) -> () ─────
-    let mut sig = Signature::new(ir::CallConv::SystemV);
+    let mut sig = Signature::new(isa::CallConv::SystemV);
     sig.params.push(AbiParam::new(types::I64));
 
     let mut ctx = Context::new();
-    ctx.func = ir::Function::with_name_signature(ir::ExternalName::user(0, 0), sig);
+    ctx.func = ir::Function::with_name_signature(UserFuncName::user(0, 0), sig);
 
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
@@ -157,7 +161,7 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     let mut terminated = false; // true → current block has a terminator
 
     let mut i = 0;
-    'instr_loop: while i < bc.instructions.len() {
+    while i < bc.instructions.len() {
         // Handle block switching.
         if i > 0 && block_starts_set.contains(&i) {
             builder.seal_block(current_block);
@@ -217,9 +221,10 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
                 let fallthrough = block_map[&(i + 1)];
                 let reg_val = i32_val(&mut builder, *reg as u32);
                 let call_inst = builder.ins().call(helpers.is_truthy, &[ctx_arg, reg_val]);
-                let cond = builder.inst_results(call_inst)[0];
-                builder.ins().brz(cond, target_block, &[ctx_arg]);
-                builder.ins().jump(fallthrough, &[ctx_arg]);
+                let truthy = builder.inst_results(call_inst)[0];
+                let zero = builder.ins().iconst(types::I8, 0);
+                let cond = builder.ins().icmp(IntCC::Equal, truthy, zero);
+                builder.ins().brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
                 terminated = true;
                 i += 1;
                 continue;
@@ -231,9 +236,10 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
                 let fallthrough = block_map[&(i + 1)];
                 let reg_val = i32_val(&mut builder, *reg as u32);
                 let call_inst = builder.ins().call(helpers.is_truthy, &[ctx_arg, reg_val]);
-                let cond = builder.inst_results(call_inst)[0];
-                builder.ins().brnz(cond, target_block, &[ctx_arg]);
-                builder.ins().jump(fallthrough, &[ctx_arg]);
+                let truthy = builder.inst_results(call_inst)[0];
+                let zero = builder.ins().iconst(types::I8, 0);
+                let cond = builder.ins().icmp(IntCC::NotEqual, truthy, zero);
+                builder.ins().brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
                 terminated = true;
                 i += 1;
                 continue;
@@ -254,7 +260,7 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     }
 
     // ── Seal all blocks and finalize ───────────────────────────────
-    for (_, block) in &block_map {
+    for block in block_map.values() {
         builder.seal_block(*block);
     }
     builder.finalize();
@@ -263,7 +269,7 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     let mut ctrl_plane = ControlPlane::default();
     let compiled = ctx
         .compile(&*isa, &mut ctrl_plane)
-        .map_err(|e| JitCompileError::Cranelift(format!("compile: {e}")))?;
+        .map_err(|e| JitCompileError::Cranelift(format!("compile: {e:?}")))?;
 
     let code_bytes = compiled.code_buffer();
     if code_bytes.is_empty() {
@@ -281,9 +287,9 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     // The imported functions use ExternalName::user(0, hash) where hash
     // is the sum of the name's byte values. We need to map these back
     // to actual function pointers.
-    let mut name_to_fn: HashMap<u32, usize> = HashMap::new();
-    for &(name, addr) in HELPER_ADDRESSES {
-        let hash = name.as_bytes().iter().map(|&b| b as u32).sum();
+    let mut name_to_fn: HashMap<usize, usize> = HashMap::new();
+    for &(name, addr) in &helper_addresses() {
+        let hash = name.as_bytes().iter().map(|&b| b as usize).sum();
         name_to_fn.insert(hash, addr);
     }
 
@@ -297,119 +303,36 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     Ok(code_base as *mut ())
 }
 
-/// Addresses of all runtime helpers, used for relocation.
-const HELPER_ADDRESSES: &[(&str, usize)] = &[
-    ("jit_load_const", jit_load_const_addr()),
-    ("jit_load_arg", jit_load_arg_addr()),
-    ("jit_load_true", jit_load_true_addr()),
-    ("jit_load_false", jit_load_false_addr()),
-    ("jit_load_null", jit_load_null_addr()),
-    ("jit_mov", jit_mov_addr()),
-    ("jit_neg", jit_neg_addr()),
-    ("jit_not", jit_not_addr()),
-    ("jit_and", jit_and_addr()),
-    ("jit_or", jit_or_addr()),
-    ("jit_binop", jit_binop_addr()),
-    ("jit_make_list", jit_make_list_addr()),
-    ("jit_make_assoc", jit_make_assoc_addr()),
-    ("jit_apply", jit_apply_addr()),
-    ("jit_make_seq", jit_make_seq_addr()),
-    ("jit_load_sym", jit_load_sym_addr()),
-    ("jit_store_sym", jit_store_sym_addr()),
-    ("jit_is_truthy", jit_is_truthy_addr()),
-];
-
-// Helper functions to get function pointers for each runtime helper.
-// Using transmute to convert function items to usize.
-fn jit_load_const_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_load_const)
+/// Build a map of runtime helper names to their function addresses.
+fn helper_addresses() -> Vec<(&'static str, usize)> {
+    // We use direct as-casting: extern "C" fn pointer → usize.
+    // This works because all extern "C" function pointers have the same
+    // representation regardless of parameter count.
+    macro_rules! fn_addr {
+        ($f:expr) => {
+            $f as *const () as usize
+        };
     }
-}
-fn jit_load_arg_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_load_arg)
-    }
-}
-fn jit_load_true_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32), usize>(
-        crate::jit::runtime::jit_load_true)
-    }
-}
-fn jit_load_false_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32), usize>(
-        crate::jit::runtime::jit_load_false)
-    }
-}
-fn jit_load_null_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32), usize>(
-        crate::jit::runtime::jit_load_null)
-    }
-}
-fn jit_mov_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_mov)
-    }
-}
-fn jit_neg_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_neg)
-    }
-}
-fn jit_not_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_not)
-    }
-}
-fn jit_and_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32, u32), usize>(
-        crate::jit::runtime::jit_and)
-    }
-}
-fn jit_or_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32, u32), usize>(
-        crate::jit::runtime::jit_or)
-    }
-}
-fn jit_binop_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32, u32, u32), usize>(
-        crate::jit::runtime::jit_binop)
-    }
-}
-fn jit_make_list_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_make_list)
-    }
-}
-fn jit_make_assoc_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_make_assoc)
-    }
-}
-fn jit_apply_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_apply)
-    }
-}
-fn jit_make_seq_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_make_seq)
-    }
-}
-fn jit_load_sym_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_load_sym)
-    }
-}
-fn jit_store_sym_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32, u32), usize>(
-        crate::jit::runtime::jit_store_sym)
-    }
-}
-fn jit_is_truthy_addr() -> usize {
-    unsafe { std::mem::transmute::<fn(&mut crate::jit::runtime::JitContext, u32) -> u8, usize>(
-        crate::jit::runtime::jit_is_truthy)
-    }
+    vec![
+        ("jit_load_const", fn_addr!(crate::jit::runtime::jit_load_const)),
+        ("jit_load_arg", fn_addr!(crate::jit::runtime::jit_load_arg)),
+        ("jit_load_true", fn_addr!(crate::jit::runtime::jit_load_true)),
+        ("jit_load_false", fn_addr!(crate::jit::runtime::jit_load_false)),
+        ("jit_load_null", fn_addr!(crate::jit::runtime::jit_load_null)),
+        ("jit_mov", fn_addr!(crate::jit::runtime::jit_mov)),
+        ("jit_neg", fn_addr!(crate::jit::runtime::jit_neg)),
+        ("jit_not", fn_addr!(crate::jit::runtime::jit_not)),
+        ("jit_and", fn_addr!(crate::jit::runtime::jit_and)),
+        ("jit_or", fn_addr!(crate::jit::runtime::jit_or)),
+        ("jit_binop", fn_addr!(crate::jit::runtime::jit_binop)),
+        ("jit_make_list", fn_addr!(crate::jit::runtime::jit_make_list)),
+        ("jit_make_assoc", fn_addr!(crate::jit::runtime::jit_make_assoc)),
+        ("jit_apply", fn_addr!(crate::jit::runtime::jit_apply)),
+        ("jit_make_seq", fn_addr!(crate::jit::runtime::jit_make_seq)),
+        ("jit_load_sym", fn_addr!(crate::jit::runtime::jit_load_sym)),
+        ("jit_store_sym", fn_addr!(crate::jit::runtime::jit_store_sym)),
+        ("jit_is_truthy", fn_addr!(crate::jit::runtime::jit_is_truthy)),
+    ]
 }
 
 // ── Pre-scan ──────────────────────────────────────────────────────────────
@@ -602,12 +525,12 @@ fn apply_relocations(
     code: &mut [u8],
     code_base: usize,
     relocs: &[FinalizedMachReloc],
-    name_map: &HashMap<u32, usize>,
+    name_map: &HashMap<usize, usize>,
 ) {
     for reloc in relocs {
         let target_addr = match &reloc.target {
-            FinalizedRelocTarget::ExternalName(ExternalName::User { namespace: _, index }) => {
-                match name_map.get(index) {
+            FinalizedRelocTarget::ExternalName(ExternalName::User(index)) => {
+                match name_map.get(&index.index()) {
                     Some(&addr) => addr,
                     None => continue,
                 }
@@ -626,17 +549,13 @@ fn apply_relocations(
                     code[offset..offset + 4].copy_from_slice(&(delta as i32).to_le_bytes());
                 }
             }
-            Reloc::Abs4 => {
-                if offset + 4 <= code.len() {
-                    code[offset..offset + 4]
-                        .copy_from_slice(&((target_addr as u32).wrapping_add(reloc.addend as u32)).to_le_bytes());
-                }
+            Reloc::Abs4 if offset + 4 <= code.len() => {
+                code[offset..offset + 4]
+                    .copy_from_slice(&((target_addr as u32).wrapping_add(reloc.addend as u32)).to_le_bytes());
             }
-            Reloc::Abs8 => {
-                if offset + 8 <= code.len() {
-                    code[offset..offset + 8]
-                        .copy_from_slice(&(target_addr.wrapping_add(reloc.addend as usize)).to_le_bytes());
-                }
+            Reloc::Abs8 if offset + 8 <= code.len() => {
+                code[offset..offset + 8]
+                    .copy_from_slice(&(target_addr.wrapping_add(reloc.addend as usize)).to_le_bytes());
             }
             _ => {
                 // Unsupported relocation kind — skip.
@@ -655,18 +574,27 @@ unsafe fn make_executable(code: &[u8]) -> *mut u8 {
     {
         use std::alloc::{alloc, Layout};
         let page_size = 4096;
-        let size = ((code.len() + page_size - 1) / page_size) * page_size;
+        let size = code.len().div_ceil(page_size) * page_size;
         let layout = Layout::from_size_align(size, page_size).unwrap();
-        let ptr = alloc(layout);
+        // SAFETY: layout is page-aligned and sized correctly.
+        let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
-        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
-        libc::mprotect(
-            ptr as *mut libc::c_void,
-            size,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-        );
+        // SAFETY: ptr points to at least code.len() bytes of allocated memory,
+        // and the source/destination don't overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
+        }
+        // SAFETY: ptr is page-aligned, size is a multiple of page_size,
+        // and the memory was just allocated so making it executable is safe.
+        unsafe {
+            libc::mprotect(
+                ptr as *mut libc::c_void,
+                size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+        }
         ptr
     }
     #[cfg(not(unix))]

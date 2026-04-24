@@ -429,7 +429,7 @@ fn signed_offset(pc: usize, offset: i32) -> usize {
 
 // ── is_truthy on Value ─────────────────────────────────────────────────────────
 
-trait Truthy {
+pub(crate) trait Truthy {
     fn is_truthy(&self) -> bool;
 }
 

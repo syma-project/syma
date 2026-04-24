@@ -3,7 +3,9 @@
 /// Defines the `JitContext` that a compiled function receives, and
 /// `extern "C"` helpers that compiled code can call for complex
 /// operations (env lookup, function calls, list construction, etc.).
+use std::collections::HashMap;
 
+use crate::bytecode::vm::Truthy;
 use crate::bytecode::CompiledBytecode;
 use crate::env::Env;
 use crate::eval;
@@ -70,7 +72,7 @@ pub const JIT_OP_GREATEREQUAL: u32 = 9;
 
 // ── Runtime helpers (extern "C" callable from compiled code) ───────────────
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_const(ctx: &mut JitContext, dst: u32, idx: u32) {
     if (idx as usize) < ctx.nconstants as usize {
         unsafe {
@@ -80,7 +82,7 @@ pub extern "C" fn jit_load_const(ctx: &mut JitContext, dst: u32, idx: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_arg(ctx: &mut JitContext, dst: u32, idx: u32) {
     if (idx as usize) < ctx.nargs as usize {
         unsafe {
@@ -90,28 +92,28 @@ pub extern "C" fn jit_load_arg(ctx: &mut JitContext, dst: u32, idx: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_true(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
         unsafe { *ctx.regs.add(dst as usize) = Value::Bool(true); }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_false(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
         unsafe { *ctx.regs.add(dst as usize) = Value::Bool(false); }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_null(ctx: &mut JitContext, dst: u32) {
     if (dst as usize) < ctx.nregs as usize {
         unsafe { *ctx.regs.add(dst as usize) = Value::Null; }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_mov(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) < ctx.nregs as usize && (src as usize) < ctx.nregs as usize {
         unsafe {
@@ -120,23 +122,22 @@ pub extern "C" fn jit_mov(ctx: &mut JitContext, dst: u32, src: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_neg(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) >= ctx.nregs as usize || (src as usize) >= ctx.nregs as usize {
         return;
     }
     let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
     let env = unsafe { &*ctx.env };
-    if let Some(func) = env.get("Minus") {
-        if let Ok(result) = eval::apply_function(&func, &[val], env) {
+    if let Some(func) = env.get("Minus")
+        && let Ok(result) = eval::apply_function(&func, &[val], env) {
             unsafe { *ctx.regs.add(dst as usize) = result; }
             return;
-        }
     }
     unsafe { *ctx.regs.add(dst as usize) = Value::Null; }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_not(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) < ctx.nregs as usize && (src as usize) < ctx.nregs as usize {
         let val = unsafe { &*ctx.regs.add(src as usize) };
@@ -144,7 +145,7 @@ pub extern "C" fn jit_not(ctx: &mut JitContext, dst: u32, src: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_and(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     if (dst as usize) < ctx.nregs as usize && (a as usize) < ctx.nregs as usize && (b as usize) < ctx.nregs as usize {
         let va = unsafe { &*ctx.regs.add(a as usize) };
@@ -153,7 +154,7 @@ pub extern "C" fn jit_and(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_or(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     if (dst as usize) < ctx.nregs as usize && (a as usize) < ctx.nregs as usize && (b as usize) < ctx.nregs as usize {
         let va = unsafe { &*ctx.regs.add(a as usize) };
@@ -162,7 +163,7 @@ pub extern "C" fn jit_or(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_is_truthy(ctx: &mut JitContext, reg: u32) -> u8 {
     if (reg as usize) < ctx.nregs as usize {
         let val = unsafe { &*ctx.regs.add(reg as usize) };
@@ -172,7 +173,7 @@ pub extern "C" fn jit_is_truthy(ctx: &mut JitContext, reg: u32) -> u8 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: u32) {
     if (dst as usize) >= ctx.nregs as usize || (a as usize) >= ctx.nregs as usize || (b as usize) >= ctx.nregs as usize {
         return;
@@ -192,14 +193,13 @@ pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: 
         JIT_OP_GREATEREQUAL => "GreaterEqual",
         _ => return,
     };
-    if let Some(func) = env.get(name) {
-        if let Ok(result) = eval::apply_function(&func, &[va, vb], env) {
+    if let Some(func) = env.get(name)
+        && let Ok(result) = eval::apply_function(&func, &[va, vb], env) {
             unsafe { *ctx.regs.add(dst as usize) = result; }
-        }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_make_list(ctx: &mut JitContext, dst: u32, n: u32) {
     if (dst as usize) >= ctx.nregs as usize {
         return;
@@ -213,7 +213,7 @@ pub extern "C" fn jit_make_list(ctx: &mut JitContext, dst: u32, n: u32) {
     unsafe { *ctx.regs.add(dst as usize) = Value::List(items); }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_make_assoc(ctx: &mut JitContext, dst: u32, n: u32) {
     if (dst as usize) >= ctx.nregs as usize {
         return;
@@ -228,10 +228,16 @@ pub extern "C" fn jit_make_assoc(ctx: &mut JitContext, dst: u32, n: u32) {
             pairs.push((key, val));
         }
     }
-    unsafe { *ctx.regs.add(dst as usize) = Value::Assoc(crate::value::AssocData::from_pairs(pairs)); }
+    let mut map = HashMap::new();
+    for (key, val) in pairs {
+        if let Value::Str(k) = key {
+            map.insert(k, val);
+        }
+    }
+    unsafe { *ctx.regs.add(dst as usize) = Value::Assoc(map); }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_make_seq(ctx: &mut JitContext, dst: u32, start: u32) {
     if (dst as usize) >= ctx.nregs as usize {
         return;
@@ -248,13 +254,13 @@ pub extern "C" fn jit_make_seq(ctx: &mut JitContext, dst: u32, start: u32) {
     unsafe { *ctx.regs.add(dst as usize) = Value::List(items); }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_load_sym(ctx: &mut JitContext, dst: u32, idx: u32) {
     if (idx as usize) >= ctx.nconstants as usize || (dst as usize) >= ctx.nregs as usize {
         return;
     }
     let name_const = unsafe { &*ctx.constants.add(idx as usize) };
-    if let Value::String(name) = name_const {
+    if let Value::Str(name) = name_const {
         let env = unsafe { &*ctx.env };
         if let Some(val) = env.get(name) {
             unsafe { *ctx.regs.add(dst as usize) = val.clone(); }
@@ -262,20 +268,20 @@ pub extern "C" fn jit_load_sym(ctx: &mut JitContext, dst: u32, idx: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_store_sym(ctx: &mut JitContext, idx: u32, src: u32) {
     if (idx as usize) >= ctx.nconstants as usize || (src as usize) >= ctx.nregs as usize {
         return;
     }
     let name_const = unsafe { &*ctx.constants.add(idx as usize) };
-    if let Value::String(name) = name_const {
+    if let Value::Str(name) = name_const {
         let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
         let env = unsafe { &*ctx.env };
         env.set(name.clone(), val);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_apply(ctx: &mut JitContext, dst: u32, nargs: u32) {
     if (dst as usize) >= ctx.nregs as usize {
         return;

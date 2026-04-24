@@ -187,6 +187,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "BernoulliB", discrete::builtin_bernoulli_b);
     register_builtin(env, "LinearRecurrence", discrete::builtin_linear_recurrence);
     register_builtin_env(env, "RSolve", discrete::builtin_rsolve);
+    register_builtin(env, "RecurrenceTable", discrete::builtin_recurrence_table);
 
     // ── Control (evaluator-dependent) ──
     register_builtin_env(env, "FixedPoint", math::builtin_fixed_point);
@@ -252,6 +253,18 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Divisible", number_theory::builtin_divisible);
     register_builtin(env, "CoprimeQ", number_theory::builtin_coprime_q);
     register_builtin(env, "IntegerDigits", number_theory::builtin_integer_digits);
+    register_builtin(env, "ModularInverse", number_theory::builtin_modular_inverse);
+    register_builtin(env, "PrimeOmega", number_theory::builtin_prime_omega);
+    register_builtin(env, "PrimeNu", number_theory::builtin_prime_nu);
+    register_builtin(env, "DigitCount", number_theory::builtin_digit_count);
+    register_builtin(env, "JacobiSymbol", number_theory::builtin_jacobi_symbol);
+    register_builtin(env, "ChineseRemainder", number_theory::builtin_chinese_remainder);
+    register_builtin(env, "MultiplicativeOrder", number_theory::builtin_multiplicative_order);
+    register_builtin(env, "PrimitiveRoot", number_theory::builtin_primitive_root);
+    register_builtin(env, "PerfectNumberQ", number_theory::builtin_perfect_number_q);
+    register_builtin(env, "MangoldtLambda", number_theory::builtin_mangoldt_lambda);
+    register_builtin(env, "LiouvilleLambda", number_theory::builtin_liouville_lambda);
+    register_builtin_env(env, "DivisorSum", number_theory::builtin_divisor_sum);
 
     // ── Reciprocal trig ──
     register_builtin(env, "Csc", math::builtin_csc);
@@ -559,6 +572,7 @@ fn register_lazy_package(
                     Value::Module {
                         name: pkg_name_clone.clone(),
                         exports,
+                        locals: std::collections::HashMap::new(),
                     },
                 );
 
@@ -606,6 +620,7 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             let module = Value::Module {
                 name: "LinearAlgebra".to_string(),
                 exports,
+                locals: HashMap::new(),
             };
             env.register_module("LinearAlgebra".to_string(), module);
         }
@@ -618,6 +633,7 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             let module = Value::Module {
                 name: "Statistics".to_string(),
                 exports,
+                locals: std::collections::HashMap::new(),
             };
             env.register_module("Statistics".to_string(), module);
         }
@@ -630,15 +646,22 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             let module = Value::Module {
                 name: "Graphics".to_string(),
                 exports,
+                locals: std::collections::HashMap::new(),
             };
             env.register_module("Graphics".to_string(), module);
         }
         _ => {
             // Fall back to file-based module loading
             let module_val = crate::eval::load_module_from_file(&pkg_name, env)?;
-            // Import all exported symbols into the current environment
-            if let Value::Module { exports, .. } = &module_val {
+            // Import all exported symbols AND internal helpers into the current environment
+            if let Value::Module {
+                exports, locals, ..
+            } = &module_val
+            {
                 for (sym, val) in exports {
+                    env.set(sym.clone(), val.clone());
+                }
+                for (sym, val) in locals {
                     env.set(sym.clone(), val.clone());
                 }
             }
@@ -946,6 +969,10 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "BernoulliB" => "BernoulliB[n] gives the n-th Bernoulli number B_n.",
         "LinearRecurrence" => "LinearRecurrence[kernel, init, n] gives the n-th term of a linear recurrence with kernel coefficients and initial values.",
+        "RecurrenceTable" => {
+            "RecurrenceTable[eqns, f, {n, nmin, nmax}] generates a list of values from recurrence equations.\n\
+             Example: RecurrenceTable[{a[1] == 1, a[n+1] == 2*a[n]}, a, {n, 1, 5}]"
+        }
         "RSolve" => "RSolve[eqn, f[n], n] attempts to solve a recurrence equation for f[n].",
 
         // ── Control ──
@@ -1346,6 +1373,56 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "ImageConvolve" => {
             "ImageConvolve[image, kernel] convolves image with a 2D kernel (list of lists, odd dimensions)."
+        }
+
+        // ── Number theory help ──
+        "ModularInverse" => {
+            "ModularInverse[a, m] gives the modular inverse of a modulo m, or returns unevaluated if no inverse exists."
+        }
+        "PrimeOmega" => {
+            "PrimeOmega[n] gives the total number of prime factors of n, counting multiplicities (Ω(n)).\n\
+             PrimeOmega[12] = 3 (2^2 * 3^1)."
+        }
+        "PrimeNu" => {
+            "PrimeNu[n] gives the number of distinct prime factors of n (ω(n)).\n\
+             PrimeNu[12] = 2 (2 and 3)."
+        }
+        "DigitCount" => {
+            "DigitCount[n] returns a list of digit counts for n in base 10.\n\
+             DigitCount[n, base] uses the given base.\n\
+             DigitCount[n, base, d] returns the count of digit d."
+        }
+        "JacobiSymbol" => {
+            "JacobiSymbol[a, n] computes the Jacobi symbol (a/n), where n is a positive odd integer.\n\
+             Returns -1, 0, or 1."
+        }
+        "ChineseRemainder" => {
+            "ChineseRemainder[{a1, a2, ...}, {n1, n2, ...}] solves the system of congruences\n\
+             x ≡ a_i (mod n_i) for pairwise coprime moduli."
+        }
+        "MultiplicativeOrder" => {
+            "MultiplicativeOrder[a, n] gives the smallest positive integer k such that a^k ≡ 1 (mod n).\n\
+             Requires gcd(a, n) = 1."
+        }
+        "PrimitiveRoot" => {
+            "PrimitiveRoot[n] gives the smallest primitive root of n, or raises an error\n\
+             if no primitive root exists."
+        }
+        "PerfectNumberQ" => {
+            "PerfectNumberQ[n] returns True if n is a perfect number (sum of proper divisors equals n),\n\
+             False otherwise."
+        }
+        "MangoldtLambda" => {
+            "MangoldtLambda[n] returns ln(p) if n = p^k for prime p and k ≥ 1, or 0 otherwise.\n\
+             The von Mangoldt function Λ(n)."
+        }
+        "LiouvilleLambda" => {
+            "LiouvilleLambda[n] returns (-1)^Ω(n), where Ω(n) is the total number of prime factors\n\
+             with multiplicity. The Liouville function λ(n)."
+        }
+        "DivisorSum" => {
+            "DivisorSum[n, form] sums form[d] for all positive divisors d of n.\n\
+             The form function must return an integer for each divisor."
         }
 
         _ => return None,

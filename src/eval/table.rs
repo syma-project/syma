@@ -242,6 +242,228 @@ pub(super) fn eval_product(args: &[Expr], env: &Env) -> Result<Value, EvalError>
     Ok(acc)
 }
 
+/// RecurrenceTable[{eqns, ...}, f, {n, nmin, nmax}] — generate a table from recurrence equations.
+///
+/// Handles the common pattern: a[1] == init, a[n+1] == expr_involving_a[n].
+/// Returns a list of f[n] values for n = nmin .. nmax.
+pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "RecurrenceTable requires 3 arguments: RecurrenceTable[eqns, f, {n, nmin, nmax}]"
+                .to_string(),
+        ));
+    }
+
+    // Parse the function name (arg 2)
+    let func_name = match &args[1] {
+        Expr::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::Error(
+                "RecurrenceTable: second argument must be a symbol (function name)".to_string(),
+            ));
+        }
+    };
+
+    // Parse iterator spec (arg 3) — {n, nmin, nmax}
+    let iter_items = match &args[2] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "RecurrenceTable: third argument must be an iterator spec list".to_string(),
+            ));
+        }
+    };
+    let (var_name, _) = eval_iterator_spec(iter_items, env)?;
+
+    // Evaluate iterator bounds to get nmin and nmax
+    let nmin = match iter_items.get(1) {
+        Some(expr) => super::eval(expr, env)?
+            .to_integer()
+            .ok_or_else(|| EvalError::Error(
+                "RecurrenceTable: nmin must be an integer".to_string(),
+            ))?,
+        None => 1,
+    };
+    let nmax = match iter_items.get(2) {
+        Some(expr) => super::eval(expr, env)?
+            .to_integer()
+            .ok_or_else(|| EvalError::Error(
+                "RecurrenceTable: nmax must be an integer".to_string(),
+            ))?,
+        None => nmin,
+    };
+
+    // Parse equations (arg 1) — a list of equations
+    let eqns = match &args[0] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "RecurrenceTable: first argument must be a list of equations".to_string(),
+            ));
+        }
+    };
+
+    // Extract initial conditions and recurrence bodies
+    // init_map: index -> value (pre-computed initial values)
+    // recurrence_body: the Expr to evaluate at each step (the RHS of the recurrence)
+    // recurrence_delta: how many steps forward the recurrence goes (default 1 for a[n+1])
+    use std::collections::HashMap;
+    let mut init_conds: HashMap<i64, Expr> = HashMap::new();
+    let mut recurrence_body: Option<Expr> = None;
+
+    for eqn in eqns {
+        // Each equation should be Equal[lhs, rhs]
+        let (lhs, rhs) = match eqn {
+            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Equal") && args.len() == 2 => {
+                (&args[0], &args[1])
+            }
+            _ => {
+                return Err(EvalError::Error(
+                    "RecurrenceTable: each equation must be of the form lhs == rhs".to_string(),
+                ));
+            }
+        };
+
+        // LHS should be func_name[...]
+        let lhs_args = match lhs {
+            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if *s == func_name) => args,
+            _ => {
+                return Err(EvalError::Error(
+                    format!("RecurrenceTable: LHS of equation must be {}[...]", func_name),
+                ));
+            }
+        };
+
+        if lhs_args.len() != 1 {
+            return Err(EvalError::Error(
+                format!("RecurrenceTable: {}[...] takes exactly 1 argument", func_name),
+            ));
+        }
+
+        let arg = &lhs_args[0];
+
+        // Check if this is an initial condition: f[k] where k is an integer
+        if let Expr::Integer(k) = arg {
+            let idx = k.to_i64().ok_or_else(|| {
+                EvalError::Error("RecurrenceTable: initial condition index too large".to_string())
+            })?;
+            init_conds.insert(idx, rhs.clone());
+            continue;
+        }
+
+        // Check if this is a recurrence: f[var + 1] or f[1 + var]
+        let is_recurrence = match arg {
+            Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Plus") && args.len() == 2 => {
+                let has_var = matches!(&args[0], Expr::Symbol(v) if *v == var_name)
+                    || matches!(&args[1], Expr::Symbol(v) if *v == var_name);
+                let has_one = matches!(&args[0], Expr::Integer(n) if *n == 1)
+                    || matches!(&args[1], Expr::Integer(n) if *n == 1);
+                has_var && has_one
+            }
+            _ => false,
+        };
+
+        if is_recurrence {
+            recurrence_body = Some(rhs.clone());
+        } else {
+            return Err(EvalError::Error(
+                "RecurrenceTable: unrecognized equation form".to_string(),
+            ));
+        }
+    }
+
+    let body = recurrence_body.ok_or_else(|| {
+        EvalError::Error(
+            "RecurrenceTable: no recurrence equation found (e.g., f[n+1] == expr)".to_string(),
+        )
+    })?;
+
+    // Store computed values for substitution into the recurrence body
+    let mut computed: HashMap<i64, Value> = HashMap::new();
+
+    // Evaluate initial conditions first
+    for (idx, expr) in &init_conds {
+        let val = super::eval(expr, env)?;
+        computed.insert(*idx, val);
+    }
+
+    // Helper: walk an Expr and substitute f[idx] with computed values.
+    // Handles both f[k] (integer literal) and f[var_name] (current step).
+    fn substitute_fn_refs(
+        expr: &Expr,
+        func_name: &str,
+        var_name: &str,
+        current_i: i64,
+        computed: &HashMap<i64, Value>,
+    ) -> Expr {
+        match expr {
+            Expr::Call { head, args } if args.len() == 1 => {
+                if let Expr::Symbol(s) = head.as_ref() {
+                    if s == func_name {
+                        // Determine the index: integer literal, or the var_name symbol → use current_i
+                        let idx = match &args[0] {
+                            Expr::Integer(k) => k.to_i64().unwrap_or(0),
+                            Expr::Symbol(v) if *v == var_name => current_i,
+                            _ => {
+                                // Unknown index form — recurse and return a call
+                                return Expr::Call {
+                                    head: Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed)),
+                                    args: vec![substitute_fn_refs(&args[0], func_name, var_name, current_i, computed)],
+                                };
+                            }
+                        };
+                        if let Some(val) = computed.get(&idx) {
+                            return match val {
+                                Value::Integer(n) => Expr::Integer(n.clone()),
+                                Value::Real(r) => Expr::Real(r.clone()),
+                                _ => expr.clone(),
+                            };
+                        }
+                    }
+                }
+                // Not a func_name call — recurse into head and args
+                let new_head = Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed));
+                let new_args: Vec<Expr> = args.iter()
+                    .map(|a| substitute_fn_refs(a, func_name, var_name, current_i, computed))
+                    .collect();
+                Expr::Call { head: new_head, args: new_args }
+            }
+            Expr::Call { head, args } => {
+                let new_head = Box::new(substitute_fn_refs(head, func_name, var_name, current_i, computed));
+                let new_args: Vec<Expr> = args.iter()
+                    .map(|a| substitute_fn_refs(a, func_name, var_name, current_i, computed))
+                    .collect();
+                Expr::Call { head: new_head, args: new_args }
+            }
+            Expr::List(items) => Expr::List(
+                items.iter().map(|i| substitute_fn_refs(i, func_name, var_name, current_i, computed)).collect()
+            ),
+            other => other.clone(),
+        }
+    }
+
+    // Evaluate iterations
+    let child_env = env.child();
+    let mut results = Vec::new();
+
+    for i in nmin..=nmax {
+        if let Some(val) = computed.get(&i) {
+            // Already computed (initial condition)
+            results.push(val.clone());
+        } else {
+            // The recurrence is a[n+1] == body; to compute a[i], evaluate body at n = i-1
+            let n_val = i - 1;
+            let substituted_body = substitute_fn_refs(&body, &func_name, &var_name, n_val, &computed);
+            child_env.set(var_name.clone(), Value::Integer(Integer::from(n_val)));
+            let val = super::eval(&substituted_body, &child_env)?;
+            computed.insert(i, val.clone());
+            results.push(val);
+        }
+    }
+
+    Ok(Value::List(results))
+}
+
 /// ParallelTable[expr, {i, ...}] — evaluate expr for each iterator value in parallel.
 pub(super) fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {

@@ -1841,6 +1841,14 @@ impl Parser {
     /// into the appropriate pattern AST node.
     fn convert_pattern(expr: Expr) -> Expr {
         match expr {
+            // Recurse into PatternGuard to convert the inner pattern
+            Expr::PatternGuard { pattern, condition } => {
+                let converted = Self::convert_pattern(*pattern);
+                return Expr::PatternGuard {
+                    pattern: Box::new(converted),
+                    condition,
+                };
+            }
             Expr::Symbol(ref s) if s.contains('_') => {
                 match s.as_str() {
                     "_" => {

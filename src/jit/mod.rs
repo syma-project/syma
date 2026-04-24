@@ -22,7 +22,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::bytecode::BytecodeFunctionDef;
-use crate::value::Value;
 
 pub use runtime::JitContext;
 

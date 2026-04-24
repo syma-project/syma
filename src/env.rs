@@ -100,6 +100,11 @@ impl Scope {
     pub fn set_local(&mut self, name: String, value: Value) {
         self.bindings.insert(name, value);
     }
+
+    /// Get all bindings from this scope (without traversing parents).
+    pub fn all_bindings(&self) -> HashMap<String, Value> {
+        self.bindings.clone()
+    }
 }
 
 impl Env {

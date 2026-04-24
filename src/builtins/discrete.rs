@@ -281,6 +281,13 @@ pub fn builtin_rsolve(args: &[Value], _env: &crate::env::Env) -> Result<Value, E
     })
 }
 
+/// RecurrenceTable stub — handled by evaluator as a special form.
+pub fn builtin_recurrence_table(_args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::Error(
+        "RecurrenceTable should be handled by evaluator".to_string(),
+    ))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -374,8 +381,10 @@ mod tests {
     fn test_factorial_power_real() {
         let result = builtin_factorial_power(&[real(5.0), int(3)]).unwrap();
         // 5 * 4 * 3 = 60
-        let f = result.to_f64().unwrap();
-        assert!((f - 60.0).abs() < 1e-10);
+        match result {
+            Value::Real(r) => assert!((r.to_f64() - 60.0).abs() < 1e-10),
+            _ => panic!("Expected Real"),
+        }
     }
 
     #[test]
@@ -412,15 +421,19 @@ mod tests {
     #[test]
     fn test_bernoulli_b_2() {
         let result = builtin_bernoulli_b(&[int(2)]).unwrap();
-        let f = result.to_f64().unwrap();
-        assert!((f - 1.0 / 6.0).abs() < 1e-10);
+        match result {
+            Value::Real(r) => assert!((r.to_f64() - 1.0 / 6.0).abs() < 1e-10),
+            _ => panic!("Expected Real"),
+        }
     }
 
     #[test]
     fn test_bernoulli_b_4() {
         let result = builtin_bernoulli_b(&[int(4)]).unwrap();
-        let f = result.to_f64().unwrap();
-        assert!((f - (-1.0 / 30.0)).abs() < 1e-10);
+        match result {
+            Value::Real(r) => assert!((r.to_f64() - (-1.0 / 30.0)).abs() < 1e-10),
+            _ => panic!("Expected Real"),
+        }
     }
 
     // ── LinearRecurrence ──
