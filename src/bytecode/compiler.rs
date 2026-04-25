@@ -472,7 +472,10 @@ impl BytecodeCompiler {
         if func_reg != dst {
             self.emit(Instruction::Mov(dst, func_reg));
         }
-        for (i, arg_reg) in arg_regs.iter().enumerate() {
+        // Emit arg Movs in reverse order to avoid overwriting source
+        // registers that later args still reference (e.g. when an inner
+        // compile_call returns a register that overlaps an earlier target).
+        for (i, arg_reg) in arg_regs.iter().enumerate().rev() {
             let target = dst.checked_add(1 + i as u16).ok_or_else(|| {
                 CompileError::UnsupportedFeature("register overflow in call".to_string())
             })?;

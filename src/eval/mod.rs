@@ -366,15 +366,24 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 IteratorSpec::List { var, list } => {
                     let list_val = eval(list, &child_env)?;
                     match list_val {
+                        // Do[body, {i, {val1, val2, ...}}] — iterate over list elements
                         Value::List(items) => {
                             for item in items {
                                 child_env.set(var.clone(), item);
                                 eval(body, &child_env)?;
                             }
                         }
+                        // Do[body, {i, max}] — short form for range 1..max
+                        Value::Integer(max_val) => {
+                            let max_i64 = max_val.to_i64().unwrap_or(0);
+                            for i in 1..=max_i64 {
+                                child_env.set(var.clone(), Value::Integer(Integer::from(i)));
+                                eval(body, &child_env)?;
+                            }
+                        }
                         _ => {
                             return Err(EvalError::TypeError {
-                                expected: "List".to_string(),
+                                expected: "List or Integer".to_string(),
                                 got: list_val.type_name().to_string(),
                             });
                         }
@@ -508,7 +517,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let updated = set_part(current, &indices, val.clone())?;
-                    env.set(var_name, updated);
+                    env.set_propagate(var_name, updated);
                     Ok(val)
                 }
                 _ => Err(EvalError::Error("Invalid assignment target".to_string())),
@@ -4019,5 +4028,36 @@ mod tests {
             Value::Module { .. } => {} // OK
             _ => panic!("Expected Module, got {:?}", result),
         }
+    }
+
+    // ── Bytecode compilation register-overlap bug ──
+
+    #[test]
+    fn test_jit_fold_with_pure_function() {
+        // Fold with a pure function inside a hot function.
+        // g[n_] := Fold[(#1 + #2) &, 0, Range[n]]
+        // After bytecode compilation, the compiler's `compile_call` emitted
+        // Mov instructions in forward order, which could overwrite source
+        // registers still needed by later arguments. This test verifies
+        // the fix: reverse-order Mov emission.
+        let result = eval_str(
+            "g[n_] := Fold[(#1 + #2) &, 0, Range[n]];
+             g[8]; (* verify before compilation *)
+             Do[g[8], {i, 105}]; (* trigger hot-compilation *)
+             g[8]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(36)));
+    }
+
+    #[test]
+    fn test_jit_nest_with_pure_function() {
+        // Nest with a pure function after hot compilation.
+        let result = eval_str(
+            "g[n_] := Nest[(# + 1) &, 0, n];
+             g[5]; (* verify before *)
+             Do[g[5], {i, 105}]; (* trigger hot-compilation *)
+             g[5]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(5)));
     }
 }

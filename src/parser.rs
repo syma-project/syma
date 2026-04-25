@@ -1154,7 +1154,7 @@ impl Parser {
                 self.expect(&Token::LBracket)?;
                 let condition = self.parse_expression()?;
                 self.expect(&Token::Comma)?;
-                let body = self.parse_expression()?;
+                let body = self.parse_statement()?;
                 self.expect(&Token::RBracket)?;
                 Ok(Expr::While {
                     condition: Box::new(condition),
@@ -1278,8 +1278,21 @@ impl Parser {
             pattern
         };
 
+        // Check for assignment: pattern = expr
+        // = has lower precedence than // and /; but higher than &
+        let result = if self.at(&Token::Assign) {
+            self.advance();
+            let rhs = self.parse_pattern()?; // right-associative via recursion
+            Expr::Assign {
+                lhs: Box::new(result),
+                rhs: Box::new(rhs),
+            }
+        } else {
+            result
+        };
+
         // Check for pure function: pattern &
-        // & has the lowest precedence (below /; and //)
+        // & has the lowest precedence (below =, /;, and //)
         if self.at(&Token::FuncRef) {
             self.advance();
             Ok(Expr::Pure {
@@ -1307,6 +1320,18 @@ impl Parser {
             }
         } else {
             pattern
+        };
+
+        // Check for assignment: pattern = expr
+        let result = if self.at(&Token::Assign) {
+            self.advance();
+            let rhs = self.parse_pattern_no_rule()?;
+            Expr::Assign {
+                lhs: Box::new(result),
+                rhs: Box::new(rhs),
+            }
+        } else {
+            result
         };
 
         // Check for pure function: pattern &
