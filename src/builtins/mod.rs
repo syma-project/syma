@@ -190,10 +190,10 @@ pub fn register_builtins(env: &Env) {
     // ── Symbolic ──
     register_builtin(env, "Simplify", symbolic::builtin_simplify);
     register_builtin(env, "Expand", symbolic::builtin_expand);
-    register_builtin(env, "D", symbolic::builtin_d);
+    register_builtin_env(env, "D", symbolic::builtin_d);
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
-    register_builtin(env, "Series", symbolic::builtin_series);
+    register_builtin_env(env, "Series", symbolic::builtin_series);
     register_builtin(env, "Integrate", symbolic::builtin_integrate);
 
     // ── Discrete Calculus ──
@@ -218,6 +218,7 @@ pub fn register_builtins(env: &Env) {
     // ── Attributes ──
     register_builtin_env(env, "SetAttributes", symbolic::builtin_set_attributes);
     register_builtin_env(env, "Attributes", symbolic::builtin_attributes);
+    register_builtin_env(env, "ClearAttributes", symbolic::builtin_clear_attributes);
 
     // ── Extended math ──
     register_builtin(env, "ArcSin", math::builtin_arcsin);
@@ -1655,55 +1656,91 @@ pub fn get_help(name: &str) -> Option<&'static str> {
 
 /// Get known attributes for a built-in function.
 pub fn get_attributes(name: &str) -> Vec<&'static str> {
+    // Helper to build the common pattern: Listable + NumericFunction + Locked + ReadProtected
+    fn lnlr() -> Vec<&'static str> {
+        vec!["Listable", "Locked", "NumericFunction", "ReadProtected"]
+    }
+    fn llr() -> Vec<&'static str> {
+        vec!["Listable", "Locked", "ReadProtected"]
+    }
     match name {
         "Plus" | "Times" | "Min" | "Max" => vec![
+            "Flat", "Listable", "Locked", "NumericFunction", "OneIdentity", "Orderless",
+            "ReadProtected",
+        ],
+        "Power" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
+        "Divide" | "Minus" | "Abs" => lnlr(),
+        "Sin" | "Cos" | "Tan" | "Log" | "Exp" | "Sqrt" | "Floor" | "Ceiling" | "Round" => lnlr(),
+        "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => lnlr(),
+        "Csc" | "Sec" | "Cot" | "ArcCsc" | "ArcSec" | "ArcCot" => lnlr(),
+        "Haversine" | "InverseHaversine" => lnlr(),
+        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees"
+        | "CotDegrees" => lnlr(),
+        "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
+        | "ArcCotDegrees" => lnlr(),
+        "Factorial" => llr(),
+        "And" | "Or" => vec![
             "Flat",
-            "Listable",
-            "NumericFunction",
+            "HoldAll",
+            "Locked",
             "OneIdentity",
             "Orderless",
+            "ReadProtected",
         ],
-        "Power" => vec!["Listable", "NumericFunction"],
-        "Divide" | "Minus" | "Abs" => vec!["Listable", "NumericFunction"],
-        "Sin" | "Cos" | "Tan" | "Log" | "Exp" | "Sqrt" | "Floor" | "Ceiling" | "Round" => {
-            vec!["Listable", "NumericFunction"]
-        }
-        "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => vec!["Listable", "NumericFunction"],
-        "Csc" | "Sec" | "Cot" | "ArcCsc" | "ArcSec" | "ArcCot" => {
-            vec!["Listable", "NumericFunction"]
-        }
-        "Haversine" | "InverseHaversine" => vec!["Listable", "NumericFunction"],
-        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees" | "CotDegrees" => {
-            vec!["Listable", "NumericFunction"]
-        }
-        "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
-        | "ArcCotDegrees" => vec!["Listable", "NumericFunction"],
-        "Factorial" => vec!["Listable"],
-        "And" | "Or" => vec!["Flat", "HoldAll", "OneIdentity", "Orderless"],
-        "Not" => vec!["Listable"],
-        "Xor" => vec!["Flat", "Listable", "OneIdentity", "Orderless"],
-        "Nand" => vec!["Listable"],
-        "Nor" => vec!["Listable"],
-        "Implies" => vec!["HoldFirst"],
-        "Equivalent" => vec!["Flat", "Listable", "OneIdentity", "Orderless"],
-        "Boole" => vec!["Listable"],
-        "Chop" => vec!["Listable"],
-        "Unitize" => vec!["Listable"],
-        "Ramp" => vec!["Listable", "NumericFunction"],
-        "RealAbs" => vec!["Listable", "NumericFunction"],
-        "RealSign" => vec!["Listable"],
-        "LogisticSigmoid" => vec!["Listable", "NumericFunction"],
-        "UnitBox" => vec!["Listable"],
-        "UnitTriangle" => vec!["Listable"],
+        "Not" => llr(),
+        "Xor" => vec![
+            "Flat",
+            "Listable",
+            "Locked",
+            "OneIdentity",
+            "Orderless",
+            "ReadProtected",
+        ],
+        "Nand" => llr(),
+        "Nor" => llr(),
+        "Implies" => vec!["HoldFirst", "Locked", "ReadProtected"],
+        "Equivalent" => vec![
+            "Flat",
+            "Listable",
+            "Locked",
+            "OneIdentity",
+            "Orderless",
+            "ReadProtected",
+        ],
+        "Boole" => llr(),
+        "Chop" => llr(),
+        "Unitize" => llr(),
+        "Ramp" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
+        "RealAbs" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
+        "RealSign" => llr(),
+        "LogisticSigmoid" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
+        "UnitBox" => llr(),
+        "UnitTriangle" => llr(),
         "Majority" => vec![],
         "BooleanQ" => vec![],
-        "Hold" => vec!["HoldAll"],
-        "HoldComplete" => vec!["HoldAllComplete"],
-        "Defer" => vec!["HoldAll"],
-        "MessageName" => vec!["HoldFirst"],
+        "Hold" => vec!["HoldAll", "Locked", "ReadProtected"],
+        "HoldComplete" => vec!["HoldAllComplete", "Locked", "ReadProtected"],
+        "Defer" => vec!["HoldAll", "Locked", "ReadProtected"],
+        "MessageName" => vec!["HoldFirst", "Locked", "ReadProtected"],
+        // -- Sequence --
+        "Sequence" => vec!["HoldAll", "Locked", "ReadProtected", "SequenceHold"],
+        "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
+        // -- Constants --
+        "Pi" | "E" | "Degree" => vec!["Constant", "Locked", "ReadProtected"],
+        // -- Math functions (Listable + NumericFunction) --
+        "Mod" | "GCD" | "LCM" | "IntegerPart" | "FractionalPart" | "Sign" | "UnitStep"
+        | "Clip" | "Rescale" | "Quotient" | "KroneckerDelta" => {
+            vec!["Listable", "Locked", "NumericFunction", "ReadProtected"]
+        }
+        // -- Predicates (Listable only) --
+        "IntegerQ" | "PrimeQ" | "EvenQ" | "OddQ" | "Divisible" | "CoprimeQ" | "PrimeOmega"
+        | "PrimeNu" => llr(),
+        // -- String functions (Listable only) --
+        "StringLength" | "StringReverse" | "StringContainsQ" | "StringStartsQ" | "StringEndsQ"
+        | "StringFreeQ" | "ToUpperCase" | "ToLowerCase" => llr(),
         // -- Developer context --
         "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify" | "ZetaSimplify"
-        | "PolyLogSimplify" | "TrigToRadicals" => vec!["Listable"],
+        | "PolyLogSimplify" | "TrigToRadicals" => llr(),
         _ => vec![],
     }
 }

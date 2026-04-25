@@ -131,7 +131,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── List ──
         Expr::List(items) => {
             let values: Result<Vec<Value>, _> = items.iter().map(|item| eval(item, env)).collect();
-            Ok(Value::List(flatten_sequences(values?)))
+            Ok(Value::List(flatten_sequences(values?, false)))
         }
 
         // ── Association ──
@@ -230,7 +230,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Pipe { expr, func } => {
             let val = eval(expr, env)?;
             let f = eval(func, env)?;
-            let args = flatten_sequences(vec![val]);
+            let args = flatten_sequences(vec![val], false);
             apply_function(&f, &args, env)
         }
 
@@ -238,7 +238,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Prefix { func, arg } => {
             let f = eval(func, env)?;
             let a = eval(arg, env)?;
-            let args = flatten_sequences(vec![a]);
+            let args = flatten_sequences(vec![a], false);
             apply_function(&f, &args, env)
         }
 
@@ -1117,7 +1117,7 @@ fn eval_args_with_attributes(
     };
 
     if let Some(name) = head_name {
-        let hold_all = env.has_attribute(name, "HoldAll");
+        let hold_all = env.has_attribute(name, "HoldAll") || env.has_attribute(name, "HoldAllComplete");
         let hold_first = env.has_attribute(name, "HoldFirst");
         let hold_rest = env.has_attribute(name, "HoldRest");
 
@@ -1373,13 +1373,18 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 let head_val = eval(head, env)?;
                 let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
 
-                apply_function(&head_val, &flatten_sequences(arg_vals), env)
+                // Respect SequenceHold and HoldAllComplete attributes:
+                // these prevent Sequence[...] from splicing.
+                let skip_seq =
+                    env.has_attribute(s.as_str(), "SequenceHold")
+                    || env.has_attribute(s.as_str(), "HoldAllComplete");
+                apply_function(&head_val, &flatten_sequences(arg_vals, skip_seq), env)
             }
         }
     } else {
         let head_val = eval(head, env)?;
         let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
-        apply_function(&head_val, &flatten_sequences(arg_vals), env)
+        apply_function(&head_val, &flatten_sequences(arg_vals, false), env)
     }
 }
 
@@ -1902,7 +1907,12 @@ fn apply_defaults(params: &[Expr], bindings: &mut Bindings, env: &Env) -> Result
 
 /// Flatten Sequence values into the surrounding list or call arguments.
 /// In Wolfram Language semantics, Sequence[...] automatically splats.
-fn flatten_sequences(items: Vec<Value>) -> Vec<Value> {
+/// Functions with `SequenceHold` or `HoldAllComplete` pass `skip_sequence = true`
+/// to preserve Sequence objects intact.
+fn flatten_sequences(items: Vec<Value>, skip_sequence: bool) -> Vec<Value> {
+    if skip_sequence {
+        return items;
+    }
     let mut result = Vec::with_capacity(items.len());
     for item in items {
         match item {
@@ -1948,6 +1958,10 @@ fn eval_information(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Symbol(s) => {
             // 1. Check if the symbol has a user-defined value
             if let Some(val) = env.get(s) {
+                // ReadProtected — hide definition details
+                if env.has_attribute(s, "ReadProtected") {
+                    return Ok(Value::Str(format!("Symbol `{}` is read protected.", s)));
+                }
                 let info = match &val {
                     Value::Function(func_def) => {
                         // Show function definitions

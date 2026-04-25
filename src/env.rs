@@ -283,6 +283,14 @@ impl Env {
     pub fn has_attribute(&self, name: &str, attr: &str) -> bool {
         self.get_attributes(name).iter().any(|a| a == attr)
     }
+
+    /// Clear (remove) all attributes for a symbol.
+    pub fn clear_attributes(&self, name: &str) {
+        self.attributes
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), vec![]);
+    }
 }
 
 impl Default for Env {

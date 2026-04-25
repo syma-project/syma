@@ -1222,7 +1222,8 @@ impl fmt::Display for Value {
                 ..
             } => write!(f, "NativeFunction[\"{}::{}\"]", lib_name, symbol_name),
             Value::Formatted { format, value } => match format {
-                Format::Standard | Format::FullForm => write!(f, "{}", value),
+                Format::Standard => write!(f, "{}", value),
+                Format::FullForm => format_full_form(value, f),
                 Format::InputForm => format_input_form(value, f),
                 Format::Short(n) => format_short(value, *n, f),
                 Format::Shallow(depth) => format_shallow(value, *depth, 0, f),
@@ -1487,6 +1488,72 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     write!(f, "]")
                 }
             }
+        }
+        _ => write!(f, "{}", v),
+    }
+}
+
+/// Format a value in FullForm: lists as `List[...]`, calls as `Head[...]`.
+fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::List(items) => {
+            write!(f, "List[")?;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_full_form(item, f)?;
+            }
+            write!(f, "]")
+        }
+        Value::Call { head, args } => {
+            write!(f, "{}[", head)?;
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_full_form(arg, f)?;
+            }
+            write!(f, "]")
+        }
+        Value::Assoc(map) => {
+            write!(f, "Association[")?;
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "\"{}\" -> ", k)?;
+                format_full_form(v, f)?;
+            }
+            write!(f, "]")
+        }
+        Value::Rule { lhs, rhs, delayed: _ } => {
+            write!(f, "Rule[")?;
+            format_full_form(lhs, f)?;
+            write!(f, ", ")?;
+            format_full_form(rhs, f)?;
+            write!(f, "]")
+        }
+        Value::Sequence(items) => {
+            write!(f, "Sequence[")?;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_full_form(item, f)?;
+            }
+            write!(f, "]")
+        }
+        Value::PackedArray(pa) => {
+            let items = pa.to_values();
+            write!(f, "List[")?;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_full_form(item, f)?;
+            }
+            write!(f, "]")
         }
         _ => write!(f, "{}", v),
     }

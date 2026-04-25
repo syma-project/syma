@@ -340,7 +340,7 @@ fn binomial(n: i64, k: i64) -> i64 {
 // ── Differentiation ──
 
 /// D[expr, x] — Symbolic differentiation.
-pub fn builtin_d(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "D requires exactly 2 arguments".to_string(),
@@ -355,10 +355,10 @@ pub fn builtin_d(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    Ok(differentiate(&args[0], &var))
+    Ok(differentiate(&args[0], &var, env))
 }
 
-pub fn differentiate(expr: &Value, var: &str) -> Value {
+pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
     match expr {
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
             Value::Integer(Integer::from(0))
@@ -366,20 +366,22 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
         Value::Symbol(s) => {
             if s == var {
                 Value::Integer(Integer::from(1))
+            } else if env.has_attribute(s, "Constant") {
+                Value::Integer(Integer::from(0))
             } else {
                 Value::Integer(Integer::from(0))
             }
         }
         Value::Call { head, args } => match head.as_str() {
             "Plus" => {
-                let terms: Vec<Value> = args.iter().map(|arg| differentiate(arg, var)).collect();
+                let terms: Vec<Value> = args.iter().map(|arg| differentiate(arg, var, env)).collect();
                 simplify_call("Plus", &terms)
             }
             "Times" => {
                 if args.len() == 2 {
                     let (u, v) = (&args[0], &args[1]);
-                    let du = differentiate(u, var);
-                    let dv = differentiate(v, var);
+                    let du = differentiate(u, var, env);
+                    let dv = differentiate(v, var, env);
                     simplify_call(
                         "Plus",
                         &[
@@ -388,18 +390,18 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                         ],
                     )
                 } else if args.len() == 1 {
-                    differentiate(&args[0], var)
+                    differentiate(&args[0], var, env)
                 } else {
                     let mut result = args[0].clone();
                     for item in args.iter().skip(1) {
                         result = simplify_call("Times", &[result, item.clone()]);
                     }
-                    differentiate(&result, var)
+                    differentiate(&result, var, env)
                 }
             }
             "Power" if args.len() == 2 => {
                 let (base, exp) = (&args[0], &args[1]);
-                let dbase = differentiate(base, var);
+                let dbase = differentiate(base, var, env);
                 match exp {
                     Value::Integer(n) => simplify_call(
                         "Times",
@@ -424,7 +426,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                         )
                     }
                     _ => {
-                        let dexp = differentiate(exp, var);
+                        let dexp = differentiate(exp, var, env);
                         simplify_call(
                             "Times",
                             &[
@@ -466,7 +468,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                 "Times",
                 &[
                     simplify_call("Cos", &[args[0].clone()]),
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                 ],
             ),
             "Cos" if args.len() == 1 => simplify_call(
@@ -474,13 +476,13 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                 &[
                     Value::Integer(Integer::from(-1)),
                     simplify_call("Sin", &[args[0].clone()]),
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                 ],
             ),
             "Tan" if args.len() == 1 => simplify_call(
                 "Times",
                 &[
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[
@@ -494,13 +496,13 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                 "Times",
                 &[
                     simplify_call("Exp", &[args[0].clone()]),
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                 ],
             ),
             "Log" if args.len() == 1 => simplify_call(
                 "Times",
                 &[
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[args[0].clone(), Value::Integer(Integer::from(-1))],
@@ -510,7 +512,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
             "Sqrt" if args.len() == 1 => simplify_call(
                 "Times",
                 &[
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[
@@ -529,7 +531,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
             "ArcSin" if args.len() == 1 => simplify_call(
                 "Times",
                 &[
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[
@@ -561,7 +563,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
                 "Times",
                 &[
                     Value::Integer(Integer::from(-1)),
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[
@@ -592,7 +594,7 @@ pub fn differentiate(expr: &Value, var: &str) -> Value {
             "ArcTan" if args.len() == 1 => simplify_call(
                 "Times",
                 &[
-                    differentiate(&args[0], var),
+                    differentiate(&args[0], var, env),
                     simplify_call(
                         "Power",
                         &[
@@ -1304,7 +1306,7 @@ fn extract_term_coeff_degree(term: &Value, var: &str) -> (Value, i64) {
 // ── Series ──
 
 /// Series[expr, {x, x0, n}] — Taylor series expansion.
-pub fn builtin_series(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Series requires exactly 2 arguments".to_string(),
@@ -1381,7 +1383,7 @@ pub fn builtin_series(args: &[Value]) -> Result<Value, EvalError> {
             };
             terms.push(simplify_call("Times", &[coeff, power_term]));
         }
-        derivative = differentiate(&derivative, &var);
+        derivative = differentiate(&derivative, &var, env);
     }
     Ok(simplify_call("Plus", &terms))
 }
@@ -1528,8 +1530,46 @@ pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalEr
             });
         }
     };
+    // Locked attribute prevents modification
+    if env.has_attribute(&sym_name, "Locked") {
+        return Ok(Value::Null);
+    }
     let attrs: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
     env.set_attributes(&sym_name, attrs);
+    Ok(Value::Null)
+}
+
+pub fn builtin_clear_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 1 {
+        return Err(EvalError::Error(
+            "ClearAttributes requires at least 1 argument: symbol and optionally attributes to clear"
+                .to_string(),
+        ));
+    }
+    let sym_name = match &args[0] {
+        Value::Symbol(s) | Value::Str(s) => s.clone(),
+        Value::Builtin(name, _) => name.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    // Locked attribute prevents modification
+    if env.has_attribute(&sym_name, "Locked") {
+        return Ok(Value::Null);
+    }
+    if args.len() == 1 {
+        // Clear all attributes
+        env.clear_attributes(&sym_name);
+    } else {
+        // Clear specific attributes
+        let mut current = env.get_attributes(&sym_name);
+        let to_remove: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
+        current.retain(|a| !to_remove.contains(a));
+        env.set_attributes(&sym_name, current);
+    }
     Ok(Value::Null)
 }
 
@@ -1565,6 +1605,10 @@ mod tests {
 
     fn int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
+    }
+
+    fn env() -> crate::env::Env {
+        crate::env::Env::new()
     }
 
     #[test]
@@ -1664,7 +1708,7 @@ mod tests {
     fn test_d_power_rule() {
         // D[x^3, x] = 3x^2
         let expr = simplify_call("Power", &[sym("x"), int(3)]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         match &result {
             Value::Call { head, args } if head == "Times" => {
                 assert!(args.iter().any(|a| *a == int(3)));
@@ -1677,7 +1721,7 @@ mod tests {
     fn test_d_sin() {
         // D[Sin[x], x] = Cos[x]
         let expr = simplify_call("Sin", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         assert_eq!(result, simplify_call("Cos", &[sym("x")]));
     }
 
@@ -1685,7 +1729,7 @@ mod tests {
     fn test_d_cos() {
         // D[Cos[x], x] = -Sin[x]
         let expr = simplify_call("Cos", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         match &result {
             Value::Call { head, .. } if head == "Times" => {}
             _ => panic!("Expected Times (for -Sin[x]), got {:?}", result),
@@ -1696,7 +1740,7 @@ mod tests {
     fn test_d_exp() {
         // D[Exp[x], x] = Exp[x]
         let expr = simplify_call("Exp", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         assert_eq!(result, simplify_call("Exp", &[sym("x")]));
     }
 
@@ -1704,7 +1748,7 @@ mod tests {
     fn test_d_log() {
         // D[Log[x], x] = 1/x = x^(-1)
         let expr = simplify_call("Log", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         match &result {
             Value::Call { head, .. } if head == "Power" => {}
             _ => panic!("Expected Power (for 1/x = x^-1), got {:?}", result),
@@ -1721,7 +1765,7 @@ mod tests {
                 simplify_call("Sin", &[sym("x")]),
             ],
         );
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         match &result {
             Value::Call { head, .. } if head == "Plus" => {}
             _ => panic!("Expected Plus (sum rule), got {:?}", result),
@@ -1731,7 +1775,7 @@ mod tests {
     #[test]
     fn test_d_constant() {
         // D[5, x] = 0
-        let result = builtin_d(&[int(5), sym("x")]).unwrap();
+        let result = builtin_d(&[int(5), sym("x")], &env()).unwrap();
         assert_eq!(result, int(0));
     }
 
@@ -1739,7 +1783,7 @@ mod tests {
     fn test_d_linear() {
         // D[3*x, x] = 3
         let expr = simplify_call("Times", &[int(3), sym("x")]);
-        let result = builtin_d(&[expr, sym("x")]).unwrap();
+        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
         assert_eq!(result, int(3));
     }
 
@@ -1843,7 +1887,7 @@ mod tests {
         // Series[Sin[x], {x, 0, 1}] — minimal to avoid recursion issues
         let var_spec = Value::List(vec![sym("x"), int(0), int(1)]);
         let expr = simplify_call("Sin", &[sym("x")]);
-        let result = builtin_series(&[expr, var_spec]).unwrap();
+        let result = builtin_series(&[expr, var_spec], &env()).unwrap();
         let result_str = format!("{:?}", result);
         assert!(
             !result_str.is_empty(),

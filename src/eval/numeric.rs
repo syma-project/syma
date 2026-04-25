@@ -32,9 +32,25 @@ pub(super) fn numeric_eval_expr(
         // Recursively evaluate calls at the requested precision.
         Expr::Call { head, args } => {
             if let Expr::Symbol(name) = head.as_ref() {
+                // NHold* attributes: prevent numeric evaluation of certain arguments
+                let nhold_all = env.has_attribute(name, "NHoldAll");
+                let nhold_first = env.has_attribute(name, "NHoldFirst");
+                let nhold_rest = env.has_attribute(name, "NHoldRest");
+
                 let evaluated_args: Result<Vec<Value>, _> = args
                     .iter()
-                    .map(|a| numeric_eval_expr(a, prec_bits, env))
+                    .enumerate()
+                    .map(|(i, a)| {
+                        if nhold_all {
+                            super::eval(a, env)
+                        } else if nhold_first && i == 0 {
+                            super::eval(a, env)
+                        } else if nhold_rest && i > 0 {
+                            super::eval(a, env)
+                        } else {
+                            numeric_eval_expr(a, prec_bits, env)
+                        }
+                    })
                     .collect();
                 let evaluated_args = evaluated_args?;
                 match name.as_str() {
