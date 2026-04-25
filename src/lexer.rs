@@ -63,7 +63,7 @@ pub enum Token {
     Rule,            // ->
     DelayedRule,     // :>
     ReplaceAll,      // /.
-    ReplaceRepeated, // /.
+    ReplaceRepeated, // //.
     MapOp,           // /@
     ApplyOp,         // @@
     At,              // @
@@ -81,6 +81,16 @@ pub enum Token {
     StringJoinOp,    // <>
     PipeAlt,         // | (pattern alternatives)
     FuncRef,         // & (function reference / pure function)
+
+    // ── Compound assignment ──
+    PlusAssign,      // +=
+    MinusAssign,     // -=
+    StarAssign,      // *=
+    SlashAssign,     // /=
+    CaretAssign,     // ^=
+    Increment,       // ++
+    Decrement,       // --
+    Unset,           // =.  (clear definition)
 
     // ── Special ──
     Quote,        // ' (quote)
@@ -211,6 +221,14 @@ impl fmt::Display for Token {
             Token::HoldComplete => write!(f, "HoldComplete"),
             Token::ReleaseHold => write!(f, "ReleaseHold"),
             Token::Mixin => write!(f, "mixin"),
+            Token::PlusAssign => write!(f, "+="),
+            Token::MinusAssign => write!(f, "-="),
+            Token::StarAssign => write!(f, "*="),
+            Token::SlashAssign => write!(f, "/="),
+            Token::CaretAssign => write!(f, "^="),
+            Token::Increment => write!(f, "++"),
+            Token::Decrement => write!(f, "--"),
+            Token::Unset => write!(f, "=."),
             Token::ColonSlashSemicolon => write!(f, "/;"),
             Token::AtTransform => write!(f, "@transform"),
             Token::Eof => write!(f, "EOF"),
@@ -575,7 +593,12 @@ impl Lexer {
                 }
                 '^' => {
                     self.advance();
-                    push!(Token::Caret);
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        push!(Token::CaretAssign);
+                    } else {
+                        push!(Token::Caret);
+                    }
                 }
                 '\'' => {
                     self.advance();
@@ -590,7 +613,7 @@ impl Lexer {
                     push!(Token::QuestionMark);
                 }
 
-                // Dot: member access or decimal
+                // Dot: . (member access or decimal)
                 '.' => {
                     self.advance();
                     push!(Token::Dot);
@@ -620,10 +643,14 @@ impl Lexer {
                     }
                 }
 
-                // Operators starting with /
+                // Operators starting with /: /=, /., //., //, /@, /;
                 '/' => {
                     self.advance();
                     match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            push!(Token::SlashAssign);
+                        }
                         Some('.') => {
                             self.advance();
                             push!(Token::ReplaceAll);
@@ -673,21 +700,35 @@ impl Lexer {
                     }
                 }
 
-                // Operators starting with -
+                // Operators starting with -: --, -=, ->, -
                 '-' => {
                     self.advance();
-                    if self.peek() == Some('>') {
-                        self.advance();
-                        push!(Token::Rule);
-                    } else {
-                        push!(Token::Minus);
+                    match self.peek() {
+                        Some('-') => {
+                            self.advance();
+                            push!(Token::Decrement);
+                        }
+                        Some('=') => {
+                            self.advance();
+                            push!(Token::MinusAssign);
+                        }
+                        Some('>') => {
+                            self.advance();
+                            push!(Token::Rule);
+                        }
+                        _ => {
+                            push!(Token::Minus);
+                        }
                     }
                 }
 
-                // Operators starting with =
+                // Operators starting with =: =. (Unset), ==, =>, =
                 '=' => {
                     self.advance();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        push!(Token::Unset);
+                    } else if self.peek() == Some('=') {
                         self.advance();
                         push!(Token::Equal);
                     } else if self.peek() == Some('>') {
@@ -794,16 +835,33 @@ impl Lexer {
                     }
                 }
 
-                // + operator
+                // + operator: ++, +=, +
                 '+' => {
                     self.advance();
-                    push!(Token::Plus);
+                    match self.peek() {
+                        Some('+') => {
+                            self.advance();
+                            push!(Token::Increment);
+                        }
+                        Some('=') => {
+                            self.advance();
+                            push!(Token::PlusAssign);
+                        }
+                        _ => {
+                            push!(Token::Plus);
+                        }
+                    }
                 }
 
-                // * operator
+                // * operator: *=, *
                 '*' => {
                     self.advance();
-                    push!(Token::Star);
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        push!(Token::StarAssign);
+                    } else {
+                        push!(Token::Star);
+                    }
                 }
 
                 _ => {
@@ -1224,5 +1282,121 @@ mod tests {
     fn test_whitespace_only() {
         let toks = tokens("   \t\n  ");
         assert_eq!(toks, vec![Token::Eof]);
+    }
+
+    #[test]
+    fn test_compound_assignment_tokens() {
+        // Test +=
+        let toks = tokens("x += 1");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::PlusAssign,
+                Token::Integer("1".to_string()),
+                Token::Eof,
+            ]
+        );
+        // Test -=
+        let toks = tokens("x -= 1");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::MinusAssign,
+                Token::Integer("1".to_string()),
+                Token::Eof,
+            ]
+        );
+        // Test *=
+        let toks = tokens("x *= 2");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::StarAssign,
+                Token::Integer("2".to_string()),
+                Token::Eof,
+            ]
+        );
+        // Test /=
+        let toks = tokens("x /= 2");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::SlashAssign,
+                Token::Integer("2".to_string()),
+                Token::Eof,
+            ]
+        );
+        // Test ^=
+        let toks = tokens("x ^= 2");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::CaretAssign,
+                Token::Integer("2".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_increment_decrement_tokens() {
+        // Test ++
+        let toks = tokens("x++");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Increment,
+                Token::Eof,
+            ]
+        );
+        // Test --
+        let toks = tokens("x--");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Decrement,
+                Token::Eof,
+            ]
+        );
+        // Test ++ prefix
+        let toks = tokens("++x");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Increment,
+                Token::Ident("x".to_string()),
+                Token::Eof,
+            ]
+        );
+        // Test -- prefix
+        let toks = tokens("--x");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Decrement,
+                Token::Ident("x".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unset_token() {
+        let toks = tokens("x =.");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Unset,
+                Token::Eof,
+            ]
+        );
     }
 }

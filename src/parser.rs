@@ -557,23 +557,106 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_pipe_expr()?;
-        // Check for assignment: pattern = expr
-        // = has lower precedence than // but higher than &
-        if self.at(&Token::Assign) {
-            self.advance();
-            let rhs = self.parse_expression()?;
-            Ok(Expr::Assign {
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            })
-        // Check for pure function: pattern &
-        } else if self.at(&Token::FuncRef) {
-            self.advance();
-            Ok(Expr::Pure {
-                body: Box::new(lhs),
-            })
-        } else {
-            Ok(lhs)
+        // Check for assignment-like operators at the lowest precedence level.
+        let token = self.peek().clone();
+        match token {
+            // Simple assignment: pat = expr
+            Token::Assign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                // If the LHS is a list literal, this is destructuring assignment
+                if let Expr::List(patterns) = lhs {
+                    Ok(Expr::DestructAssign {
+                        patterns,
+                        rhs: Box::new(rhs),
+                    })
+                } else {
+                    Ok(Expr::Assign {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    })
+                }
+            }
+            // Compound assignment: desugar at parse time
+            // x += y → x = x + y
+            Token::PlusAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![lhs, rhs],
+                    }),
+                })
+            }
+            // x -= y → x = x + (-y)
+            Token::MinusAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                let neg_rhs = Expr::Call {
+                    head: Box::new(Expr::Symbol("Times".to_string())),
+                    args: vec![Expr::Integer(Integer::from(-1)), rhs],
+                };
+                Ok(Expr::Assign {
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![lhs, neg_rhs],
+                    }),
+                })
+            }
+            // x *= y → x = x * y
+            Token::StarAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Times".to_string())),
+                        args: vec![lhs, rhs],
+                    }),
+                })
+            }
+            // x /= y → x = x / y
+            Token::SlashAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Divide".to_string())),
+                        args: vec![lhs, rhs],
+                    }),
+                })
+            }
+            // x ^= y → x = x ^ y
+            Token::CaretAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(lhs.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Power".to_string())),
+                        args: vec![lhs, rhs],
+                    }),
+                })
+            }
+            // x =. — unset / clear definition
+            Token::Unset => {
+                self.advance();
+                Ok(Expr::Unset {
+                    expr: Box::new(lhs),
+                })
+            }
+            // Pure function: expr &
+            Token::FuncRef => {
+                self.advance();
+                Ok(Expr::Pure {
+                    body: Box::new(lhs),
+                })
+            }
+            _ => Ok(lhs),
         }
     }
 
@@ -787,6 +870,30 @@ impl Parser {
                     args: vec![Expr::Integer(Integer::from(-1)), expr],
                 })
             }
+            // Prefix increment: ++x → x = x + 1  (returns new value)
+            Token::Increment => {
+                self.advance();
+                let expr = self.parse_unary_expr()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(expr.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![expr, Expr::Integer(Integer::from(1))],
+                    }),
+                })
+            }
+            // Prefix decrement: --x → x = x + (-1)  (returns new value)
+            Token::Decrement => {
+                self.advance();
+                let expr = self.parse_unary_expr()?;
+                Ok(Expr::Assign {
+                    lhs: Box::new(expr.clone()),
+                    rhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![expr, Expr::Integer(Integer::from(-1))],
+                    }),
+                })
+            }
             Token::Not => {
                 self.advance();
                 let expr = self.parse_unary_expr()?;
@@ -946,6 +1053,22 @@ impl Parser {
                     expr = Expr::Call {
                         head: Box::new(Expr::Symbol("MessageName".to_string())),
                         args: vec![expr, Expr::Str(tag)],
+                    };
+                }
+
+                // Post-increment: expr++
+                Token::Increment => {
+                    self.advance();
+                    expr = Expr::PostIncrement {
+                        expr: Box::new(expr),
+                    };
+                }
+
+                // Post-decrement: expr--
+                Token::Decrement => {
+                    self.advance();
+                    expr = Expr::PostDecrement {
+                        expr: Box::new(expr),
                     };
                 }
 
@@ -2620,5 +2743,213 @@ mod tests {
     fn test_empty_input() {
         let stmts = parse_str("");
         assert_eq!(stmts.len(), 0);
+    }
+
+    // ── Compound assignment tests ──
+
+    #[test]
+    fn test_plus_assign() {
+        let expr = parse_one("x += 5");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(5)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_minus_assign() {
+        let expr = parse_one("x -= 3");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Call {
+                                head: Box::new(Expr::Symbol("Times".to_string())),
+                                args: vec![
+                                    Expr::Integer(Integer::from(-1)),
+                                    Expr::Integer(Integer::from(3)),
+                                ],
+                            },
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_times_assign() {
+        let expr = parse_one("x *= 2");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Times".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(2)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_divide_assign() {
+        let expr = parse_one("x /= 2");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Divide".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(2)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_caret_assign() {
+        let expr = parse_one("x ^= 3");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Power".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(3)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_post_increment() {
+        let expr = parse_one("x++");
+        match expr {
+            Expr::PostIncrement { expr: e } => {
+                assert_eq!(*e, Expr::Symbol("x".to_string()));
+            }
+            _ => panic!("Expected PostIncrement"),
+        }
+    }
+
+    #[test]
+    fn test_post_decrement() {
+        let expr = parse_one("x--");
+        match expr {
+            Expr::PostDecrement { expr: e } => {
+                assert_eq!(*e, Expr::Symbol("x".to_string()));
+            }
+            _ => panic!("Expected PostDecrement"),
+        }
+    }
+
+    #[test]
+    fn test_pre_increment() {
+        let expr = parse_one("++x");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(1)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_pre_decrement() {
+        let expr = parse_one("--x");
+        match expr {
+            Expr::Assign { lhs, rhs } => {
+                assert_eq!(*lhs, Expr::Symbol("x".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::Call {
+                        head: Box::new(Expr::Symbol("Plus".to_string())),
+                        args: vec![
+                            Expr::Symbol("x".to_string()),
+                            Expr::Integer(Integer::from(-1)),
+                        ],
+                    }
+                );
+            }
+            _ => panic!("Expected Assign"),
+        }
+    }
+
+    #[test]
+    fn test_unset() {
+        let expr = parse_one("x =.");
+        match expr {
+            Expr::Unset { expr: e } => {
+                assert_eq!(*e, Expr::Symbol("x".to_string()));
+            }
+            _ => panic!("Expected Unset"),
+        }
+    }
+
+    #[test]
+    fn test_destructuring_assign() {
+        let expr = parse_one("{a, b} = {1, 2}");
+        match expr {
+            Expr::DestructAssign { patterns, rhs } => {
+                assert_eq!(patterns.len(), 2);
+                assert_eq!(patterns[0], Expr::Symbol("a".to_string()));
+                assert_eq!(patterns[1], Expr::Symbol("b".to_string()));
+                assert_eq!(
+                    *rhs,
+                    Expr::List(vec![
+                        Expr::Integer(Integer::from(1)),
+                        Expr::Integer(Integer::from(2)),
+                    ])
+                );
+            }
+            _ => panic!("Expected DestructAssign"),
+        }
     }
 }

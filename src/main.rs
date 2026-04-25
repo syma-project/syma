@@ -4,12 +4,83 @@
 use std::io::{self, BufRead};
 use std::process;
 
-use rustyline::DefaultEditor;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Context, Editor, Helper};
 use syma::format::{cyan, dim, green, red};
 use syma::kernel::SymaKernel;
 use syma::value::{Format, Value};
 use syma::{VERSION, eval_input, run_file};
+
+/// Symbol completer for the REPL tab completion.
+struct SymaCompleter {
+    symbols: Vec<String>,
+}
+
+impl Completer for SymaCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> Result<(usize, Vec<Pair>), ReadlineError> {
+        // Find the start of the current word
+        let start = line[..pos]
+            .rfind(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == '{' || c == ',')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &line[start..pos];
+
+        if prefix.is_empty() {
+            return Ok((start, vec![]));
+        }
+
+        let candidates: Vec<Pair> = self
+            .symbols
+            .iter()
+            .filter(|s| s.starts_with(prefix))
+            .take(100)
+            .map(|s| Pair {
+                display: s.clone(),
+                replacement: s.clone(),
+            })
+            .collect();
+
+        Ok((start, candidates))
+    }
+}
+
+/// REPL helper providing tab completion via SymaCompleter.
+struct SymaHelper {
+    completer: SymaCompleter,
+}
+
+impl Helper for SymaHelper {}
+impl Highlighter for SymaHelper {}
+impl Hinter for SymaHelper {
+    type Hint = String;
+}
+impl Validator for SymaHelper {
+    fn validate(&self, _ctx: &mut ValidationContext<'_>) -> Result<ValidationResult, ReadlineError> {
+        Ok(ValidationResult::Valid(None))
+    }
+}
+impl Completer for SymaHelper {
+    type Candidate = Pair;
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &Context<'_>,
+    ) -> Result<(usize, Vec<Pair>), ReadlineError> {
+        self.completer.complete(line, pos, ctx)
+    }
+}
 
 const HISTORY_FILE: &str = ".syma_history";
 const MAX_OUTPUT_CHARS: usize = 2000;
@@ -84,13 +155,28 @@ fn run_repl() {
     let env = syma::env::Env::new();
     syma::builtins::register_builtins(&env);
 
-    let mut rl = match DefaultEditor::new() {
+    // Collect all symbols for tab completion
+    let mut symbols: Vec<String> = env
+        .all_bindings()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    symbols.extend(["help", "quit", "exit"].map(String::from));
+    symbols.sort();
+    symbols.dedup();
+
+    let helper = SymaHelper {
+        completer: SymaCompleter { symbols },
+    };
+
+    let mut rl: Editor<SymaHelper, rustyline::history::FileHistory> = match Editor::new() {
         Ok(rl) => rl,
         Err(e) => {
             eprintln!("Failed to initialize REPL: {}", e);
             process::exit(1);
         }
     };
+    rl.set_helper(Some(helper));
 
     // Load history from file
     let history_path = dirs_or_default().map(|d| d.join(HISTORY_FILE));

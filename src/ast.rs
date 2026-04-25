@@ -205,6 +205,21 @@ pub enum Expr {
         rhs: Box<Expr>,
     },
 
+    /// x++ — post-increment (returns old value)
+    PostIncrement {
+        expr: Box<Expr>,
+    },
+
+    /// x-- — post-decrement (returns old value)
+    PostDecrement {
+        expr: Box<Expr>,
+    },
+
+    /// x =. — unset (clear definition)
+    Unset {
+        expr: Box<Expr>,
+    },
+
     /// rule name = { ... }
     RuleDef {
         name: Symbol,
@@ -898,6 +913,9 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "}} = {}", rhs)
             }
+            Expr::PostIncrement { expr } => write!(f, "{}++", expr),
+            Expr::PostDecrement { expr } => write!(f, "{}--", expr),
+            Expr::Unset { expr } => write!(f, "{} =.", expr),
             Expr::RuleDef { name, rules } => {
                 writeln!(f, "rule {} = {{", name)?;
                 for (lhs, rhs) in rules {

@@ -434,6 +434,13 @@ impl BytecodeCompiler {
             Expr::DestructAssign { .. } => Err(CompileError::UnsupportedFeature(
                 "destructuring assignment".to_string(),
             )),
+            Expr::PostIncrement { .. } => Err(CompileError::UnsupportedFeature(
+                "post-increment".to_string(),
+            )),
+            Expr::PostDecrement { .. } => Err(CompileError::UnsupportedFeature(
+                "post-decrement".to_string(),
+            )),
+            Expr::Unset { .. } => Err(CompileError::UnsupportedFeature("unset".to_string())),
             Expr::RuleDef { .. } => Err(CompileError::UnsupportedFeature(
                 "rule definition".to_string(),
             )),
@@ -1041,6 +1048,9 @@ fn count_slots(expr: &Expr) -> usize {
         | Expr::Assign { .. }
         | Expr::FuncDef { .. }
         | Expr::DestructAssign { .. }
+        | Expr::PostIncrement { .. }
+        | Expr::PostDecrement { .. }
+        | Expr::Unset { .. }
         | Expr::RuleDef { .. }
         | Expr::ClassDef { .. }
         | Expr::ModuleDef { .. }

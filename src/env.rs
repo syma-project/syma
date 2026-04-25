@@ -119,6 +119,24 @@ impl Scope {
         self.bindings.insert(name, value);
     }
 
+    /// Remove a binding from this scope only.
+    pub fn remove(&mut self, name: &str) -> Option<Value> {
+        self.bindings.remove(name)
+    }
+
+    /// Remove a binding, walking up the parent chain.
+    /// Returns true if the binding was found and removed.
+    pub fn remove_propagate(&mut self, name: &str) -> bool {
+        if self.bindings.contains_key(name) {
+            self.bindings.remove(name);
+            true
+        } else if let Some(ref parent) = self.parent {
+            parent.lock().unwrap().remove_propagate(name)
+        } else {
+            false
+        }
+    }
+
     /// Get all bindings from this scope (without traversing parents).
     pub fn all_bindings(&self) -> HashMap<String, Value> {
         self.bindings.clone()
@@ -223,6 +241,12 @@ impl Env {
     /// Set a variable in the current (local) scope only.
     pub fn set_local(&self, name: String, value: Value) {
         self.scope.lock().unwrap().set_local(name, value);
+    }
+
+    /// Remove a variable, propagating to the scope where it was originally defined.
+    /// Returns true if the variable was found and removed.
+    pub fn remove(&self, name: &str) -> bool {
+        self.scope.lock().unwrap().remove_propagate(name)
     }
 
     /// Check if a variable exists in the current scope (not parents).

@@ -342,7 +342,7 @@ pub fn builtin_string_match_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// Simple glob-style pattern matching (* = any substring, ? = any single char).
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = text.chars().collect();
     glob_match_chars(&pat, &txt)

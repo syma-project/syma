@@ -16,6 +16,7 @@ pub mod list;
 pub mod localsymbol;
 pub mod logical;
 pub mod math;
+pub mod names;
 pub mod number_theory;
 pub mod parallel;
 pub mod pattern;
@@ -462,6 +463,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "FileExistsQ", filesystem::builtin_file_exists_q);
     register_builtin(env, "DirectoryQ", filesystem::builtin_directory_q);
     register_builtin(env, "FileNames", filesystem::builtin_file_names);
+
+    // ── Symbol Names ──
+    register_builtin_env(env, "Names", names::builtin_names);
 
     // ── Format/display ──
     register_builtin(env, "InputForm", format::builtin_input_form);
@@ -1519,6 +1523,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "FileNames" => {
             "FileNames[] lists files in the current directory.\nFileNames[\"pattern\"] lists files matching the glob pattern.\nFileNames[\"pattern\", {\"dir1\", \"dir2\"}] searches in the given directories."
         }
+        "Names" => {
+            "Names[] returns a sorted list of all known symbol names.\nNames[\"pattern\"] returns symbol names matching a string pattern, where * matches any sequence of characters and ? matches any single character."
+        }
 
         // ── Image Processing ──
         "Image" => {
@@ -1745,6 +1752,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Developer context --
         "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify" | "ZetaSimplify"
         | "PolyLogSimplify" | "TrigToRadicals" => llr(),
+        // -- Symbol Names --
+        "Names" => vec!["Locked", "ReadProtected"],
         _ => vec![],
     }
 }
