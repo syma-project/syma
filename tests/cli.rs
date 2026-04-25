@@ -517,16 +517,29 @@ fn test_run_monte_carlo_pi_example() {
 
 #[test]
 fn test_run_module_example() {
-    // Module/import are partially implemented (stored as symbol markers)
+    // Module/import are fully implemented
     let output = syma_run(&["examples/advanced/01-modules.syma"]);
-    // The module syntax should parse without crash
+    assert!(
+        output.status.success(),
+        "Module example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        // Modules may not be fully evaluated, but should not crash
-        assert!(
-            stdout.contains("square") || stderr.contains("not implemented"),
-            "Module example should either run or give a graceful message, stdout: {stdout}, stderr: {stderr}"
-        );
-    }
+    assert!(
+        stdout.contains("25") && stdout.contains("8"),
+        "Module example should compute square[5] = 25 and rectArea[2,4] = 8, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_run_oop_example() {
+    // OOP with classes, inheritance, mixins — fully implemented
+    // The example file is a specification with all usage in comments,
+    // so we just verify it parses and evaluates without error.
+    let output = syma_run(&["examples/advanced/02-oop.syma"]);
+    assert!(
+        output.status.success(),
+        "OOP example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

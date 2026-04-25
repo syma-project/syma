@@ -71,6 +71,56 @@ fn matrix_dims(m: &[Value]) -> Option<(usize, usize)> {
     }
 }
 
+// ── Rational helpers ────────────────────────────────────────────────────────
+
+/// Convert a Value to a rug::Rational (accepts Integer and Rational variants).
+fn value_to_rational(v: &Value) -> Result<Rational, EvalError> {
+    match v {
+        Value::Integer(i) => Ok(Rational::from(i)),
+        Value::Rational(r) => Ok(r.as_ref().clone()),
+        _ => Err(EvalError::TypeError {
+            expected: "Integer or Rational".to_string(),
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+/// Convert a rug::Rational back to Value, canonicalizing to Integer when den==1.
+fn rational_to_value(r: Rational) -> Value {
+    let (num, den) = r.into_numer_denom();
+    rational_value(num, den)
+}
+
+/// Convert a matrix Value (Vec of Lists) to Vec<Vec<Rational>>.
+fn value_to_rational_matrix(m: &[Value]) -> Result<Vec<Vec<Rational>>, EvalError> {
+    let rows = m.len();
+    let mut out = Vec::with_capacity(rows);
+    for row_val in m {
+        let row = as_list(row_val)?;
+        let mut rrow = Vec::with_capacity(row.len());
+        for v in row {
+            rrow.push(value_to_rational(v)?);
+        }
+        out.push(rrow);
+    }
+    Ok(out)
+}
+
+/// Convert a Vec<Vec<Rational>> matrix back to Value (List of Lists).
+fn rational_matrix_to_value(m: &[Vec<Rational>]) -> Value {
+    Value::List(
+        m.iter()
+            .map(|row| {
+                Value::List(
+                    row.iter()
+                        .map(|r| rational_to_value(r.clone()))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
 // ── Builtins ────────────────────────────────────────────────────────────────
 
 /// Dimensions[m] — returns {rows, cols} for a matrix or {n} for a vector.
@@ -98,7 +148,7 @@ pub fn builtin_dimensions(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-/// Dot[a, b] — generalized dot product / matrix multiply.
+/// Dot[a, b] — generalized dot product / matrix multiply (exact arithmetic).
 pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -125,28 +175,15 @@ pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
                     b.len()
                 )));
             }
-            let mut sum = 0.0f64;
+            let mut sum = int(0);
             for (ai, bi) in a.iter().zip(b.iter()) {
-                let af = to_f64(ai).ok_or_else(|| EvalError::TypeError {
-                    expected: "Number".to_string(),
-                    got: ai.type_name().to_string(),
-                })?;
-                let bf = to_f64(bi).ok_or_else(|| EvalError::TypeError {
-                    expected: "Number".to_string(),
-                    got: bi.type_name().to_string(),
-                })?;
-                sum += af * bf;
+                let prod = mul_values_public(ai, bi)?;
+                sum = add_values_public(&sum, &prod)?;
             }
-            // Try to return integer if exact
-            if sum.fract() == 0.0 && sum.abs() < i64::MAX as f64 {
-                Ok(int(sum as i64))
-            } else {
-                Ok(real(sum))
-            }
+            Ok(sum)
         }
         (true, false) => {
             // Vector × matrix: treat vector as 1×n row matrix
-            // Result is a vector of dot products with each column
             let n = a.len();
             let cols = b[0..1]
                 .iter()
@@ -155,24 +192,13 @@ pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
             let num_cols = cols[0];
             let mut result = Vec::with_capacity(num_cols);
             for j in 0..num_cols {
-                let mut sum = 0.0f64;
+                let mut sum = int(0);
                 for i in 0..n {
                     let row = as_list(&b[i])?;
-                    let af = to_f64(&a[i]).ok_or_else(|| EvalError::TypeError {
-                        expected: "Number".to_string(),
-                        got: a[i].type_name().to_string(),
-                    })?;
-                    let bf = to_f64(&row[j]).ok_or_else(|| EvalError::TypeError {
-                        expected: "Number".to_string(),
-                        got: row[j].type_name().to_string(),
-                    })?;
-                    sum += af * bf;
+                    let prod = mul_values_public(&a[i], &row[j])?;
+                    sum = add_values_public(&sum, &prod)?;
                 }
-                if sum.fract() == 0.0 && sum.abs() < i64::MAX as f64 {
-                    result.push(int(sum as i64));
-                } else {
-                    result.push(real(sum));
-                }
+                result.push(sum);
             }
             Ok(Value::List(result))
         }
@@ -190,23 +216,12 @@ pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
                         b.len()
                     )));
                 }
-                let mut sum = 0.0f64;
+                let mut sum = int(0);
                 for (rij, bj) in row.iter().zip(b.iter()) {
-                    let rf = to_f64(rij).ok_or_else(|| EvalError::TypeError {
-                        expected: "Number".to_string(),
-                        got: rij.type_name().to_string(),
-                    })?;
-                    let bf = to_f64(bj).ok_or_else(|| EvalError::TypeError {
-                        expected: "Number".to_string(),
-                        got: bj.type_name().to_string(),
-                    })?;
-                    sum += rf * bf;
+                    let prod = mul_values_public(rij, bj)?;
+                    sum = add_values_public(&sum, &prod)?;
                 }
-                if sum.fract() == 0.0 && sum.abs() < i64::MAX as f64 {
-                    result.push(int(sum as i64));
-                } else {
-                    result.push(real(sum));
-                }
+                result.push(sum);
             }
             Ok(Value::List(result))
         }
@@ -225,28 +240,20 @@ pub fn builtin_dot(args: &[Value]) -> Result<Value, EvalError> {
                 )));
             }
             let mut result = Vec::with_capacity(m);
+            // Transpose b for efficient column access: bt[j][i] = b[i][j]
+            let bt: Vec<Vec<&Value>> = (0..n)
+                .map(|j| (0..k1).map(|i| &as_list(&b[i]).unwrap()[j]).collect())
+                .collect();
             for i in 0..m {
                 let row_a = as_list(&a[i])?;
                 let mut new_row = Vec::with_capacity(n);
                 for j in 0..n {
-                    let mut sum = 0.0f64;
+                    let mut sum = int(0);
                     for p in 0..k1 {
-                        let row_b = as_list(&b[p])?;
-                        let af = to_f64(&row_a[p]).ok_or_else(|| EvalError::TypeError {
-                            expected: "Number".to_string(),
-                            got: row_a[p].type_name().to_string(),
-                        })?;
-                        let bf = to_f64(&row_b[j]).ok_or_else(|| EvalError::TypeError {
-                            expected: "Number".to_string(),
-                            got: row_b[j].type_name().to_string(),
-                        })?;
-                        sum += af * bf;
+                        let prod = mul_values_public(&row_a[p], bt[j][p])?;
+                        sum = add_values_public(&sum, &prod)?;
                     }
-                    if sum.fract() == 0.0 && sum.abs() < i64::MAX as f64 {
-                        new_row.push(int(sum as i64));
-                    } else {
-                        new_row.push(real(sum));
-                    }
+                    new_row.push(sum);
                 }
                 result.push(Value::List(new_row));
             }
@@ -522,7 +529,7 @@ pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
     Ok(real(sum_sq.sqrt()))
 }
 
-/// Cross[a, b] — 3D cross product.
+/// Cross[a, b] — 3D cross product (exact arithmetic).
 pub fn builtin_cross(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -536,41 +543,23 @@ pub fn builtin_cross(args: &[Value]) -> Result<Value, EvalError> {
             "Cross requires two 3-element vectors".to_string(),
         ));
     }
-    let (a0, a1, a2) = (
-        to_f64(&a[0]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: a[0].type_name().into(),
-        })?,
-        to_f64(&a[1]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: a[1].type_name().into(),
-        })?,
-        to_f64(&a[2]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: a[2].type_name().into(),
-        })?,
-    );
-    let (b0, b1, b2) = (
-        to_f64(&b[0]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: b[0].type_name().into(),
-        })?,
-        to_f64(&b[1]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: b[1].type_name().into(),
-        })?,
-        to_f64(&b[2]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: b[2].type_name().into(),
-        })?,
-    );
-    let r0 = a1 * b2 - a2 * b1;
-    let r1 = a2 * b0 - a0 * b2;
-    let r2 = a0 * b1 - a1 * b0;
-    Ok(Value::List(vec![real(r0), real(r1), real(r2)]))
+    // Cross product: a × b = (a1*b2 - a2*b1, a2*b0 - a0*b2, a0*b1 - a1*b0)
+    let r0 = sub_values_public(
+        &mul_values_public(&a[1], &b[2])?,
+        &mul_values_public(&a[2], &b[1])?,
+    )?;
+    let r1 = sub_values_public(
+        &mul_values_public(&a[2], &b[0])?,
+        &mul_values_public(&a[0], &b[2])?,
+    )?;
+    let r2 = sub_values_public(
+        &mul_values_public(&a[0], &b[1])?,
+        &mul_values_public(&a[1], &b[0])?,
+    )?;
+    Ok(Value::List(vec![r0, r1, r2]))
 }
 
-/// LinearSolve[A, b] — solve Ax = b via Gaussian elimination.
+/// LinearSolve[A, b] — solve Ax = b via exact rational Gaussian elimination.
 pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -597,61 +586,59 @@ pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
         )));
     }
 
-    // Build augmented matrix [A|b] as f64
-    let mut aug: Vec<Vec<f64>> = Vec::with_capacity(n);
+    // Build augmented matrix [A|b] as Vec<Vec<Rational>>
+    let mut aug: Vec<Vec<Rational>> = Vec::with_capacity(n);
     for i in 0..n {
         let row = as_list(&a[i])?;
         let mut aug_row = Vec::with_capacity(n + 1);
         for j in 0..n {
-            aug_row.push(to_f64(&row[j]).ok_or_else(|| EvalError::TypeError {
-                expected: "Number".into(),
-                got: row[j].type_name().into(),
-            })?);
+            aug_row.push(value_to_rational(&row[j])?);
         }
-        aug_row.push(to_f64(&b_list[i]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".into(),
-            got: b_list[i].type_name().into(),
-        })?);
+        aug_row.push(value_to_rational(&b_list[i])?);
         aug.push(aug_row);
     }
 
-    // Forward elimination with partial pivoting
+    // Forward elimination with exact pivot detection
     for col in 0..n {
-        // Find pivot
-        let mut max_val = aug[col][col].abs();
-        let mut max_row = col;
-        for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
+        // Find pivot: first non-zero element at or below current row
+        let mut pivot_row = None;
+        for row in col..n {
+            if aug[row][col] != 0 {
+                pivot_row = Some(row);
+                break;
             }
         }
-        if max_val < 1e-15 {
-            return Err(EvalError::Error("LinearSolve: singular matrix".to_string()));
-        }
-        aug.swap(col, max_row);
+        let pr = pivot_row.ok_or_else(|| {
+            EvalError::Error("LinearSolve: singular matrix".to_string())
+        })?;
+        aug.swap(col, pr);
 
         // Eliminate below
-        let pivot = aug[col][col];
         for row in (col + 1)..n {
-            let factor = aug[row][col] / pivot;
+            if aug[row][col] == 0 {
+                continue;
+            }
+            // factor = aug[row][col] / aug[col][col]
+            let factor = Rational::from(&aug[row][col] / &aug[col][col]);
             for j in col..=n {
-                aug[row][j] -= factor * aug[col][j];
+                let sub = Rational::from(&factor * &aug[col][j]);
+                aug[row][j] = Rational::from(&aug[row][j] - &sub);
             }
         }
     }
 
     // Back substitution
-    let mut x = vec![0.0f64; n];
+    let mut x = vec![Rational::from(0); n];
     for i in (0..n).rev() {
-        let mut sum = aug[i][n];
+        let mut sum = Rational::from(&aug[i][n]);
         for j in (i + 1)..n {
-            sum -= aug[i][j] * x[j];
+            let prod = Rational::from(&aug[i][j] * &x[j]);
+            sum = Rational::from(&sum - &prod);
         }
-        x[i] = sum / aug[i][i];
+        x[i] = Rational::from(&sum / &aug[i][i]);
     }
 
-    let result: Vec<Value> = x.iter().map(|&v| real(v)).collect();
+    let result: Vec<Value> = x.into_iter().map(|r| rational_to_value(r)).collect();
     Ok(Value::List(result))
 }
 
@@ -1079,8 +1066,8 @@ pub fn builtin_unit_vector(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(v))
 }
 
-/// RowReduce[m] — reduced row echelon form via Gaussian elimination.
-/// Returns the RREF of matrix m.
+/// RowReduce[m] — reduced row echelon form via exact rational Gaussian elimination.
+/// Returns the RREF of matrix m using exact rational arithmetic.
 pub fn builtin_row_reduce(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -1093,18 +1080,13 @@ pub fn builtin_row_reduce(args: &[Value]) -> Result<Value, EvalError> {
     }
     let (rows, cols) = matrix_dims(m)
         .ok_or_else(|| EvalError::Error("RowReduce: argument must be a matrix".to_string()))?;
-    let a = matrix_to_f64(m)?;
-    let (rref, _) = rref_f64(&a, rows, cols);
-    // Convert back to Value
-    let result: Vec<Value> = rref
-        .into_iter()
-        .map(|row| Value::List(row.into_iter().map(real).collect()))
-        .collect();
-    Ok(Value::List(result))
+    let a = value_to_rational_matrix(m)?;
+    let (rref, _) = rref_rational(&a, rows, cols);
+    Ok(rational_matrix_to_value(&rref))
 }
 
 /// MatrixRank[m] — rank of a matrix (number of linearly independent rows/columns).
-/// Computed via Gaussian elimination to RREF.
+/// Computed via exact rational Gaussian elimination.
 pub fn builtin_matrix_rank(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -1117,48 +1099,44 @@ pub fn builtin_matrix_rank(args: &[Value]) -> Result<Value, EvalError> {
     }
     let dims = matrix_dims(m)
         .ok_or_else(|| EvalError::Error("MatrixRank: argument must be a matrix".to_string()))?;
-    let a = matrix_to_f64(m)?;
-    let (_, rank) = rref_f64(&a, dims.0, dims.1);
+    let a = value_to_rational_matrix(m)?;
+    let (_, rank) = rref_rational(&a, dims.0, dims.1);
     Ok(int(rank as i64))
 }
 
-/// Helper: compute RREF and rank for an f64 matrix.
-fn rref_f64(a: &[Vec<f64>], rows: usize, cols: usize) -> (Vec<Vec<f64>>, usize) {
+/// Helper: compute RREF and rank for a Vec<Vec<Rational>> matrix using exact arithmetic.
+/// Pivot detection is exact: first non-zero element.
+fn rref_rational(a: &[Vec<Rational>], rows: usize, cols: usize) -> (Vec<Vec<Rational>>, usize) {
     let mut m = a.to_vec();
     let mut rank = 0;
 
     for col in 0..cols {
-        // Find pivot (largest absolute value at or below current row)
+        // Find pivot: first non-zero element at or below current row
         let mut pivot_row = None;
-        let mut max_val = 0.0f64;
         for r in rank..rows {
-            let v = m[r][col].abs();
-            if v > max_val {
-                max_val = v;
+            if m[r][col] != 0 {
                 pivot_row = Some(r);
+                break;
             }
         }
 
         if let Some(pr) = pivot_row {
-            if max_val < 1e-14 {
-                continue;
-            }
             m.swap(rank, pr);
 
             // Scale pivot row to make pivot = 1
-            let pivot = m[rank][col];
+            let pivot = m[rank][col].clone();
             for j in col..cols {
-                m[rank][j] /= pivot;
+                m[rank][j] = Rational::from(&m[rank][j] / &pivot);
             }
 
             // Eliminate in all other rows
             for r in 0..rows {
-                if r != rank {
-                    let factor = m[r][col];
-                    if factor.abs() > 1e-14 {
-                        for j in col..cols {
-                            m[r][j] -= factor * m[rank][j];
-                        }
+                if r != rank && m[r][col] != 0 {
+                    let factor = m[r][col].clone();
+                    for j in col..cols {
+                        let prod = Rational::from(&factor * &m[rank][j]);
+                        let diff = Rational::from(&m[r][j] - &prod);
+                        m[r][j] = diff;
                     }
                 }
             }
@@ -1171,7 +1149,7 @@ fn rref_f64(a: &[Vec<f64>], rows: usize, cols: usize) -> (Vec<Vec<f64>>, usize) 
 }
 
 /// NullSpace[m] — basis vectors for the null space of matrix m.
-/// Returns a list of vectors; each vector v satisfies m·v = 0.
+/// Returns exact rational basis vectors satisfying m·v = 0.
 pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -1184,8 +1162,8 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     }
     let (rows, cols) = matrix_dims(m)
         .ok_or_else(|| EvalError::Error("NullSpace: argument must be a matrix".to_string()))?;
-    let a = matrix_to_f64(m)?;
-    let (rref, rank) = rref_f64(&a, rows, cols);
+    let a = value_to_rational_matrix(m)?;
+    let (rref, rank) = rref_rational(&a, rows, cols);
 
     if rank == cols {
         // Full column rank — null space is trivial
@@ -1196,7 +1174,7 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     let mut pivot_cols = vec![false; cols];
     let mut r = 0;
     for c in 0..cols {
-        if r < rows && (rref[r][c] - 1.0).abs() < 1e-10 {
+        if r < rows && rref[r][c] == 1 {
             pivot_cols[c] = true;
             r += 1;
         }
@@ -1208,19 +1186,20 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
         if pivot_cols[free_col] {
             continue;
         }
-        let mut v = vec![0.0; cols];
-        v[free_col] = 1.0;
+        let mut v = vec![Rational::from(0); cols];
+        v[free_col] = Rational::from(1);
         // For each pivot row, back-substitute
         r = 0;
         for c in 0..cols {
             if pivot_cols[c] {
                 if r < rows {
-                    v[c] = -rref[r][free_col];
+                    // v[c] = -rref[r][free_col]
+                    v[c] = Rational::from(&Rational::from(0) - &rref[r][free_col]);
                 }
                 r += 1;
             }
         }
-        basis.push(Value::List(v.into_iter().map(real).collect()));
+        basis.push(Value::List(v.into_iter().map(|r| rational_to_value(r)).collect()));
     }
 
     Ok(Value::List(basis))
@@ -1300,7 +1279,7 @@ pub fn builtin_column(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(col))
 }
 
-/// KroneckerProduct[a, b] — Kronecker product of two matrices.
+/// KroneckerProduct[a, b] — Kronecker product of two matrices (exact arithmetic).
 /// Returns a block matrix where a[i][j] * b is the (i,j)-th block.
 pub fn builtin_kronecker_product(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
@@ -1317,27 +1296,156 @@ pub fn builtin_kronecker_product(args: &[Value]) -> Result<Value, EvalError> {
         EvalError::Error("KroneckerProduct: arguments must be matrices".to_string())
     })?;
 
-    // Build b as f64 for scalar multiplication
-    let b_f64 = matrix_to_f64(b_list)?;
-
     let mut result = Vec::with_capacity(ar * br);
     for i in 0..ar {
         let a_row = as_list(&a_list[i])?;
         for bi in 0..br {
             let mut new_row = Vec::with_capacity(ac * bc);
             for j in 0..ac {
-                let a_val = to_f64(&a_row[j]).ok_or_else(|| EvalError::TypeError {
-                    expected: "Number".to_string(),
-                    got: a_row[j].type_name().to_string(),
-                })?;
                 for bj in 0..bc {
-                    new_row.push(real(a_val * b_f64[bi][bj]));
+                    new_row.push(mul_values_public(&a_row[j], &as_list(&b_list[bi])?[bj])?);
                 }
             }
             result.push(Value::List(new_row));
         }
     }
     Ok(Value::List(result))
+}
+
+// ── Rational matrix helpers (for PseudoInverse) ──────────────────────────
+
+/// Multiply two matrices of Rational values.
+fn mat_mul_rational(a: &[Vec<Rational>], b: &[Vec<Rational>]) -> Vec<Vec<Rational>> {
+    let m = a.len();
+    if m == 0 {
+        return vec![];
+    }
+    let k = b.len();
+    if k == 0 {
+        return vec![vec![Rational::from(0); 0]; m];
+    }
+    let n = b[0].len();
+    let mut c = vec![vec![Rational::from(0); n]; m];
+    for i in 0..m {
+        for p in 0..k {
+            if a[i][p] == 0 {
+                continue;
+            }
+            for j in 0..n {
+                let prod = Rational::from(&a[i][p] * &b[p][j]);
+                c[i][j] = Rational::from(&c[i][j] + &prod);
+            }
+        }
+    }
+    c
+}
+
+/// Transpose a matrix of Rational values.
+fn transpose_rational(a: &[Vec<Rational>]) -> Vec<Vec<Rational>> {
+    if a.is_empty() {
+        return vec![];
+    }
+    let rows = a.len();
+    let cols = a[0].len();
+    (0..cols)
+        .map(|j| (0..rows).map(|i| a[i][j].clone()).collect())
+        .collect()
+}
+
+/// PseudoInverse[m] — Moore-Penrose pseudoinverse (exact rational arithmetic).
+/// For full-rank matrices, computes A⁺ = (AᵀA)⁻¹Aᵀ.
+pub fn builtin_pseudo_inverse(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PseudoInverse requires exactly 1 argument".to_string(),
+        ));
+    }
+    let m = as_list(&args[0])?;
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (_rows, _cols) = matrix_dims(m)
+        .ok_or_else(|| EvalError::Error("PseudoInverse: argument must be a matrix".to_string()))?;
+
+    // Convert to Vec<Vec<Rational>>
+    let a = value_to_rational_matrix(m)?;
+
+    // Compute A^T (cols × rows)
+    let at = transpose_rational(&a);
+
+    // Compute A^T * A (cols × cols)
+    let ata = mat_mul_rational(&at, &a);
+
+    // Compute (A^T A)^(-1) using exact rational Gaussian elimination
+    let ata_inv = matrix_inverse_rational(&ata).ok_or_else(|| {
+        EvalError::Error(
+            "PseudoInverse: AᵀA is singular, cannot compute pseudoinverse".to_string(),
+        )
+    })?;
+
+    // A⁺ = (A^T A)^(-1) * A^T  (cols × rows)
+    let result = mat_mul_rational(&ata_inv, &at);
+
+    Ok(rational_matrix_to_value(&result))
+}
+
+/// Compute the inverse of a square matrix via exact rational Gaussian elimination.
+fn matrix_inverse_rational(a: &[Vec<Rational>]) -> Option<Vec<Vec<Rational>>> {
+    let n = a.len();
+    if n == 0 {
+        return None;
+    }
+    let zero = Rational::from(0);
+    let one = Rational::from(1);
+
+    // Augment with identity: [A | I]
+    let mut aug = vec![vec![zero.clone(); 2 * n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            aug[i][j] = a[i][j].clone();
+        }
+        aug[i][n + i] = one.clone();
+    }
+
+    // Forward elimination with exact pivot detection
+    for col in 0..n {
+        // Find pivot: first non-zero element at or below current row
+        let mut pivot_row = None;
+        for row in col..n {
+            if aug[row][col] != 0 {
+                pivot_row = Some(row);
+                break;
+            }
+        }
+        let pr = pivot_row?; // Singular
+        aug.swap(col, pr);
+
+        // Scale pivot row
+        let pivot = aug[col][col].clone();
+        for j in 0..2 * n {
+            aug[col][j] = Rational::from(&aug[col][j] / &pivot);
+        }
+
+        // Eliminate in other rows
+        for row in 0..n {
+            if row != col && aug[row][col] != 0 {
+                let factor = aug[row][col].clone();
+                for j in 0..2 * n {
+                    let prod = Rational::from(&factor * &aug[col][j]);
+                    aug[row][j] = Rational::from(&aug[row][j] - &prod);
+                }
+            }
+        }
+    }
+
+    // Extract inverse from the right half
+    let mut inv = vec![vec![zero; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            inv[i][j] = aug[i][n + j].clone();
+        }
+    }
+    Some(inv)
 }
 
 /// VectorAngle[u, v] — angle between two vectors in radians.
@@ -1397,130 +1505,6 @@ pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
 
     let cos_theta = (dot / (norm_u * norm_v)).clamp(-1.0, 1.0);
     Ok(real(cos_theta.acos()))
-}
-
-/// PseudoInverse[m] — Moore-Penrose pseudoinverse.
-/// For full-rank matrices, computes A⁺ = (AᵀA)⁻¹Aᵀ.
-pub fn builtin_pseudo_inverse(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "PseudoInverse requires exactly 1 argument".to_string(),
-        ));
-    }
-    let m = as_list(&args[0])?;
-    if m.is_empty() {
-        return Ok(Value::List(vec![]));
-    }
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("PseudoInverse: argument must be a matrix".to_string()))?;
-
-    // Convert to f64
-    let a = matrix_to_f64(m)?;
-
-    // Compute A^T
-    let mut at = vec![vec![0.0f64; rows]; cols];
-    for i in 0..rows {
-        for j in 0..cols {
-            at[j][i] = a[i][j];
-        }
-    }
-
-    // Compute A^T * A (cols × cols)
-    let mut ata = vec![vec![0.0f64; cols]; cols];
-    for i in 0..cols {
-        for k in 0..rows {
-            for j in 0..cols {
-                ata[i][j] += at[i][k] * a[k][j];
-            }
-        }
-    }
-
-    // Compute (A^T A)^(-1)
-    // Use Gaussian elimination for the inverse
-    let ata_inv = match matrix_inverse_f64(&ata) {
-        Some(inv) => inv,
-        None => {
-            return Err(EvalError::Error(
-                "PseudoInverse: AᵀA is singular, cannot compute pseudoinverse".to_string(),
-            ));
-        }
-    };
-
-    // A⁺ = (A^T A)^(-1) * A^T
-    let mut result = vec![vec![0.0f64; rows]; cols];
-    for i in 0..cols {
-        for k in 0..cols {
-            for j in 0..rows {
-                result[i][j] += ata_inv[i][k] * at[k][j];
-            }
-        }
-    }
-
-    let result_value: Vec<Value> = result
-        .into_iter()
-        .map(|row| Value::List(row.into_iter().map(real).collect()))
-        .collect();
-    Ok(Value::List(result_value))
-}
-
-/// Compute the inverse of a square f64 matrix via Gaussian elimination.
-fn matrix_inverse_f64(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
-    let n = a.len();
-    if n == 0 {
-        return None;
-    }
-    // Augment with identity
-    let mut aug = vec![vec![0.0f64; 2 * n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            aug[i][j] = a[i][j];
-        }
-        aug[i][n + i] = 1.0;
-    }
-
-    // Forward elimination with partial pivoting
-    for col in 0..n {
-        // Find pivot
-        let mut max_val = aug[col][col].abs();
-        let mut max_row = col;
-        for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
-            }
-        }
-        if max_val < 1e-15 {
-            return None; // Singular
-        }
-        aug.swap(col, max_row);
-
-        // Scale pivot row
-        let pivot = aug[col][col];
-        for j in 0..2 * n {
-            aug[col][j] /= pivot;
-        }
-
-        // Eliminate in other rows
-        for row in 0..n {
-            if row != col {
-                let factor = aug[row][col];
-                if factor.abs() > 1e-15 {
-                    for j in 0..2 * n {
-                        aug[row][j] -= factor * aug[col][j];
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract inverse from the right half
-    let mut inv = vec![vec![0.0f64; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            inv[i][j] = aug[i][n + j];
-        }
-    }
-    Some(inv)
 }
 
 /// Minors[m] — matrix of minors (determinant of submatrix after removing row i, column j).
@@ -1775,24 +1759,20 @@ mod tests {
         let b = list(vec![int_val(0), int_val(1), int_val(0)]);
         let result = builtin_cross(&[a, b]).unwrap();
         // i×j = k = (0,0,1)
-        let expected = list(vec![real(0.0), real(0.0), real(1.0)]);
+        let expected = list(vec![int_val(0), int_val(0), int_val(1)]);
         assert_eq!(result, expected);
     }
 
     #[test]
     fn test_linear_solve() {
-        // Solve [[2,0],[0,3]] x = [4, 9] → x = [2, 3]
+        // Solve [[2,0],[0,3]] x = [4, 9] → x = [2, 3] (exact)
         let a = matrix(vec![vec![2, 0], vec![0, 3]]);
         let b = list(vec![int_val(4), int_val(9)]);
         let result = builtin_linear_solve(&[a, b]).unwrap();
         let result_list = as_list(&result).unwrap();
         assert_eq!(result_list.len(), 2);
-        if let (Value::Real(x0), Value::Real(x1)) = (&result_list[0], &result_list[1]) {
-            assert!((x0.to_f64() - 2.0).abs() < 1e-10);
-            assert!((x1.to_f64() - 3.0).abs() < 1e-10);
-        } else {
-            panic!("Expected Real values");
-        }
+        assert_eq!(result_list[0], int_val(2));
+        assert_eq!(result_list[1], int_val(3));
     }
 
     #[test]

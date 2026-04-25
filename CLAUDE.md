@@ -60,10 +60,8 @@ The pipeline is: **Source → Lexer → Parser → AST → Evaluator → Value**
 
 ### What's Not Yet Implemented
 
-- Class/module evaluation (parsed but only stores a symbol marker)
-- Import system
-- Guard condition evaluation in pattern matching
-- Pure function (`#`/`#1`) evaluation is basic — only via `PureFunction` value type
+- `@transform` class member type (lexer/parser/AST ready, evaluator skips)
+- `##` slot sequence, `#0` (function self-reference) in pure functions
 - Bytecode compilation and JIT (Phase 2/3)
 
 ## CI

@@ -179,3 +179,92 @@ pub fn builtin_greater_equal(args: &[Value]) -> Result<Value, EvalError> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Integer;
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+    fn real(r: f64) -> Value {
+        Value::Real(rug::Float::with_val(DEFAULT_PRECISION, r))
+    }
+    fn rational(n: i64, d: i64) -> Value {
+        Value::Rational(Box::new(rug::Rational::from((n, d))))
+    }
+
+    #[test]
+    fn test_equal_integers() {
+        assert_eq!(builtin_equal(&[int(5), int(5)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_equal(&[int(5), int(3)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_equal_strings() {
+        assert_eq!(
+            builtin_equal(&[Value::Str("hi".into()), Value::Str("hi".into())]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_equal(&[Value::Str("hi".into()), Value::Str("bye".into())]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_unequal_integers() {
+        assert_eq!(builtin_unequal(&[int(5), int(3)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_unequal(&[int(5), int(5)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_less_integers() {
+        assert_eq!(builtin_less(&[int(3), int(5)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_less(&[int(5), int(3)]).unwrap(), Value::Bool(false));
+        assert_eq!(builtin_less(&[int(5), int(5)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_less_mixed_types() {
+        assert_eq!(builtin_less(&[int(3), real(5.0)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_less(&[real(5.0), int(3)]).unwrap(), Value::Bool(false));
+        assert_eq!(builtin_less(&[int(1), rational(3, 2)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_less(&[real(1.5), rational(1, 2)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_less_strings() {
+        assert_eq!(
+            builtin_less(&[Value::Str("a".into()), Value::Str("b".into())]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_greater_integers() {
+        assert_eq!(builtin_greater(&[int(5), int(3)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_greater(&[int(3), int(5)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_greater_mixed() {
+        assert_eq!(builtin_greater(&[int(5), real(3.0)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_greater(&[rational(5, 2), int(2)]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_less_equal() {
+        assert_eq!(builtin_less_equal(&[int(3), int(5)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_less_equal(&[int(5), int(5)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_less_equal(&[int(5), int(3)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_greater_equal() {
+        assert_eq!(builtin_greater_equal(&[int(5), int(3)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_greater_equal(&[int(5), int(5)]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_greater_equal(&[int(3), int(5)]).unwrap(), Value::Bool(false));
+    }
+}

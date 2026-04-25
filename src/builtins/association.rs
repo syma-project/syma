@@ -1111,4 +1111,70 @@ mod tests {
             _ => panic!("Expected List"),
         }
     }
+
+    // ── Keys, Values, Lookup tests ──
+
+    #[test]
+    fn test_keys_basic() {
+        let a = assoc(vec![("x", integer(10)), ("y", integer(20))]);
+        let result = builtin_keys(&[a]).unwrap();
+        match result {
+            Value::List(items) => {
+                let key_strs: Vec<String> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(s) => s.clone(),
+                        _ => panic!("Expected Str"),
+                    })
+                    .collect();
+                assert!(key_strs.contains(&"x".to_string()));
+                assert!(key_strs.contains(&"y".to_string()));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_keys_empty() {
+        let a = assoc(vec![]);
+        let result = builtin_keys(&[a]).unwrap();
+        assert_eq!(result, Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_values_basic() {
+        let a = assoc(vec![("a", integer(1)), ("b", integer(2))]);
+        let result = builtin_values(&[a]).unwrap();
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(items.contains(&integer(1)));
+                assert!(items.contains(&integer(2)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_lookup_found() {
+        let a = assoc(vec![("key", integer(42))]);
+        let key = Value::Str("key".to_string());
+        let result = builtin_lookup(&[a, key]).unwrap();
+        assert_eq!(result, integer(42));
+    }
+
+    #[test]
+    fn test_lookup_not_found() {
+        let a = assoc(vec![("key", integer(42))]);
+        let key = Value::Str("nope".to_string());
+        let result = builtin_lookup(&[a, key.clone()]).unwrap();
+        // Non-existent keys return Missing["key"]
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Missing".to_string(),
+                args: vec![key],
+            }
+        );
+    }
 }

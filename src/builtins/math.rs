@@ -2423,4 +2423,36 @@ mod tests {
             panic!("Expected Real");
         }
     }
+
+    // ── GCD / LCM ──
+
+    #[test]
+    fn test_gcd_basic() {
+        let result = builtin_gcd(&[int(12), int(8)]).unwrap();
+        assert_eq!(result, int(4));
+    }
+
+    #[test]
+    fn test_gcd_coprime() {
+        let result = builtin_gcd(&[int(7), int(13)]).unwrap();
+        assert_eq!(result, int(1));
+    }
+
+    #[test]
+    fn test_gcd_zero() {
+        let result = builtin_gcd(&[int(0), int(5)]).unwrap();
+        assert_eq!(result, int(5));
+    }
+
+    #[test]
+    fn test_lcm_basic() {
+        let result = builtin_lcm(&[int(4), int(6)]).unwrap();
+        assert_eq!(result, int(12));
+    }
+
+    #[test]
+    fn test_lcm_coprime() {
+        let result = builtin_lcm(&[int(3), int(5)]).unwrap();
+        assert_eq!(result, int(15));
+    }
 }

@@ -1403,4 +1403,27 @@ mod tests {
             panic!("expected List");
         }
     }
+
+    // ── StringSplit ──
+
+    #[test]
+    fn test_string_split_basic() {
+        let result = builtin_string_split(&[string("a,b,c"), string(",")]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![string("a"), string("b"), string("c")])
+        );
+    }
+
+    #[test]
+    fn test_string_split_no_match() {
+        let result = builtin_string_split(&[string("hello"), string(",")]).unwrap();
+        assert_eq!(result, Value::List(vec![string("hello")]));
+    }
+
+    #[test]
+    fn test_string_split_empty() {
+        let result = builtin_string_split(&[string(""), string(",")]).unwrap();
+        assert_eq!(result, Value::List(vec![string("")]));
+    }
 }

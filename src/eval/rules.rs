@@ -23,12 +23,21 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                 {
                     // Evaluate guards if present
                     let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
+                    // Bind numbered slots for guard evaluation based on value structure
+                    let slot_values: Vec<Value> = match value {
+                        Value::Call { args, .. } => args.clone(),
+                        Value::List(items) => items.clone(),
+                        _ => vec![],
+                    };
                     if let Some(guard_expr) = guard {
                         let guard_env = env.child();
                         for (name, val) in &bindings {
                             guard_env.set(name.clone(), val.clone());
                         }
                         guard_env.set("#".to_string(), value.clone());
+                        for (i, sv) in slot_values.iter().enumerate() {
+                            guard_env.set(format!("#{}", i + 1), sv.clone());
+                        }
                         if !super::eval(guard_expr, &guard_env)?.to_bool() {
                             continue 'next_rule;
                         }
@@ -42,6 +51,9 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                             guard_env.set(name.clone(), val.clone());
                         }
                         guard_env.set("#".to_string(), value.clone());
+                        for (i, sv) in slot_values.iter().enumerate() {
+                            guard_env.set(format!("#{}", i + 1), sv.clone());
+                        }
                         if !super::eval(guard_expr, &guard_env)?.to_bool() {
                             continue 'next_rule;
                         }
@@ -67,12 +79,21 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
             {
                 // Evaluate guards if present
                 let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
+                // Bind numbered slots for guard evaluation based on value structure
+                let slot_values: Vec<Value> = match value {
+                    Value::Call { args, .. } => args.clone(),
+                    Value::List(items) => items.clone(),
+                    _ => vec![],
+                };
                 if let Some(guard_expr) = guard {
                     let guard_env = env.child();
                     for (name, val) in &bindings {
                         guard_env.set(name.clone(), val.clone());
                     }
                     guard_env.set("#".to_string(), value.clone());
+                    for (i, sv) in slot_values.iter().enumerate() {
+                        guard_env.set(format!("#{}", i + 1), sv.clone());
+                    }
                     if !super::eval(guard_expr, &guard_env)?.to_bool() {
                         return Ok(value.clone());
                     }
@@ -85,6 +106,9 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                         guard_env.set(name.clone(), val.clone());
                     }
                     guard_env.set("#".to_string(), value.clone());
+                    for (i, sv) in slot_values.iter().enumerate() {
+                        guard_env.set(format!("#{}", i + 1), sv.clone());
+                    }
                     if !super::eval(guard_expr, &guard_env)?.to_bool() {
                         return Ok(value.clone());
                     }

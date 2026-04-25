@@ -233,12 +233,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── Switch ──
         Expr::Switch { expr, cases } => {
             let val = eval(expr, env)?;
-            for (pattern, result) in cases {
+            'next_case: for (pattern, result) in cases {
                 let (inner_pat, guard) = extract_guard_expr(pattern);
                 if let MatchResult::Match(bindings) =
                     match_pattern(inner_pat, &val, Some(&_attr_checker))
                 {
-                    // Evaluate guard if present
+                    // Evaluate top-level guard if present
                     if let Some(guard_expr) = guard {
                         let guard_env = env.child();
                         for (name, value) in &bindings {
@@ -246,7 +246,20 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         }
                         guard_env.set("#".to_string(), val.clone());
                         if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue;
+                            continue 'next_case;
+                        }
+                    }
+                    // Evaluate nested guards inside compound patterns (e.g., {a_, b_ /; a < b})
+                    let mut guard_exprs = Vec::new();
+                    collect_nested_guards(inner_pat, &mut guard_exprs);
+                    for guard_expr in &guard_exprs {
+                        let guard_env = env.child();
+                        for (name, value) in &bindings {
+                            guard_env.set(name.clone(), value.clone());
+                        }
+                        guard_env.set("#".to_string(), val.clone());
+                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                            continue 'next_case;
                         }
                     }
                     let child_env = env.child();
@@ -267,8 +280,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 if let MatchResult::Match(bindings) =
                     match_pattern(inner_pat, &val, Some(&_attr_checker))
                 {
-                    // Evaluate guard if present
+                    // Evaluate top-level guard if present
                     if let Some(guard_expr) = guard {
+                        let guard_env = env.child();
+                        for (name, value) in &bindings {
+                            guard_env.set(name.clone(), value.clone());
+                        }
+                        guard_env.set("#".to_string(), val.clone());
+                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                            continue;
+                        }
+                    }
+                    // Evaluate nested guards inside compound patterns
+                    let mut guard_exprs = Vec::new();
+                    collect_nested_guards(inner_pat, &mut guard_exprs);
+                    for guard_expr in &guard_exprs {
                         let guard_env = env.child();
                         for (name, value) in &bindings {
                             guard_env.set(name.clone(), value.clone());
@@ -2534,6 +2560,71 @@ mod tests {
     }
 
     #[test]
+    fn test_pattern_guard_replace_all() {
+        // Guard in ReplaceAll via rule keyword: only match when guard succeeds
+        let result = eval_str("rule r = { x_ /; x > 3 -> 42 }; 5 /. r");
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+
+        // Guard fails → no match → value unchanged
+        let result2 = eval_str("rule r = { x_ /; x > 3 -> 42 }; 2 /. r");
+        assert_eq!(result2, Value::Integer(Integer::from(2)));
+    }
+
+    #[test]
+    fn test_pattern_guard_replace_all_no_match() {
+        // Guard that never matches via rule keyword
+        let result = eval_str("rule r = { x_ /; x > 10 -> 99 }; 5 /. r");
+        assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_pattern_guard_replace_repeated() {
+        // Guard with ReplaceRepeated: repeatedly apply until guard fails
+        let result = eval_str("rule r = { x_ /; x > 1 -> 1 }; 5 //. r");
+        assert_eq!(result, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_pattern_guard_switch_nested() {
+        // Nested guard inside a compound pattern in Switch
+        let result = eval_str(r#"
+            f[a_, b_ /; a + b > 0] := "big";
+            f[a_, b_] := "small";
+            f[3, -1]
+        "#);
+        assert_eq!(result, Value::Str("big".to_string()));
+
+        // Second case: condition fails, triggers fallback
+        let result2 = eval_str(r#"
+            f[a_, b_ /; a + b > 10] := "big";
+            f[a_, b_] := "small";
+            f[3, 2]
+        "#);
+        assert_eq!(result2, Value::Str("small".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_guard_match_nested() {
+        // Nested guard in match expression with compound pattern
+        let result = eval_str(r#"match {5, 3} {
+            {a_, b_ /; a > b} => "descending";
+            {a_, b_ /; a < b} => "ascending";
+            _ => "equal"
+        }"#);
+        assert_eq!(result, Value::Str("descending".to_string()));
+    }
+
+    #[test]
+    fn test_pattern_test_via_match_q() {
+        // _?IntegerQ via PatternGuard desugaring
+        let result = eval_str("MatchQ[5, _?IntegerQ]");
+        assert_eq!(result, Value::Bool(true));
+
+        let result2 = eval_str("MatchQ[3.14, _?IntegerQ]");
+        assert_eq!(result2, Value::Bool(false));
+    }
+
+    #[test]
     fn test_switch_literal() {
         // Switch with literal integer patterns
         let result = eval_str(r#"Switch[2, 1, "one", 2, "two", 3, "three"]"#);
@@ -2552,6 +2643,24 @@ mod tests {
         // Switch with named blank pattern (y_ parsed as Symbol but matched as NamedBlank)
         let result = eval_str(r#"Switch[x, y_, y]"#);
         assert_eq!(result, Value::Symbol("x".to_string()));
+    }
+
+    #[test]
+    fn test_switch_nested_guard() {
+        // Switch with nested guard in compound pattern — tests collect_nested_guards
+        let result = eval_str(r#"
+            f[p_List /; Length[p] > 2] := "long";
+            f[p_List] := "short";
+            f[{1, 2, 3}]
+        "#);
+        assert_eq!(result, Value::Str("long".to_string()));
+
+        let result2 = eval_str(r#"
+            f[p_List /; Length[p] > 2] := "long";
+            f[p_List] := "short";
+            f[{1, 2}]
+        "#);
+        assert_eq!(result2, Value::Str("short".to_string()));
     }
 
     // ── Catch/Throw ──
@@ -3545,5 +3654,238 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn test_pure_function_named_params() {
+        // Function[{x, y}, x + y] — named-parameter lambda
+        assert_eq!(
+            eval_str("Function[{x, y}, x + y][3, 7]"),
+            Value::Integer(Integer::from(10))
+        );
+    }
+
+    #[test]
+    fn test_pure_function_named_params_map() {
+        // Function with named params used with Map
+        assert_eq!(
+            eval_str("Map[Function[{x}, x^2], {1, 2, 3, 4}]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(16)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_pure_function_zero_arg() {
+        // Zero-arg pure function (constant)
+        assert_eq!(eval_str("(42&)[]"), Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_pure_function_extra_args() {
+        // Extra args beyond slot_count are silently accepted
+        assert_eq!(eval_str("(#&)[1, 2, 3]"), Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_pure_function_multi_arity() {
+        // #1 + #2 & with exactly 2 args
+        assert_eq!(
+            eval_str("(#1 + #2 &)[10, 32]"),
+            Value::Integer(Integer::from(42))
+        );
+    }
+
+    #[test]
+    fn test_pure_function_with_select_complex() {
+        // More complex select with pure function
+        assert_eq!(
+            eval_str("Select[Range[10], # > 5 && # < 9 &]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(6)),
+                Value::Integer(Integer::from(7)),
+                Value::Integer(Integer::from(8)),
+            ])
+        );
+    }
+
+    // ── Class / Object tests ──
+
+    #[test]
+    fn test_class_basic() {
+        // Basic class with constructor, field assignment, and method
+        let result = eval_str(
+            r#"
+            class Point {
+                field x
+                field y
+                constructor[x_, y_] {
+                    this.x = x
+                    this.y = y
+                }
+                method distance[] := Sqrt[x^2 + y^2]
+            }
+            p = Point[3, 4]
+            p.distance[]
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_class_field_access() {
+        // Field access via obj.field
+        let result = eval_str(
+            r#"
+            class Point {
+                field x
+                field y
+                constructor[x_, y_] { this.x = x; this.y = y }
+            }
+            p = Point[3, 4]
+            p.x
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(3)));
+    }
+
+    #[test]
+    fn test_class_inheritance() {
+        // Inheritance: child class gets parent fields and methods
+        let result = eval_str(
+            r#"
+            class Shape {
+                field color
+                constructor[c_] { this.color = c }
+            }
+            class Rectangle extends Shape {
+                field width
+                field height
+                constructor[c_, w_, h_] {
+                    this.color = c
+                    this.width = w
+                    this.height = h
+                }
+                method area[] := width * height
+            }
+            r = Rectangle["red", 3, 4]
+            r.area[]
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(12)));
+    }
+
+    #[test]
+    fn test_class_mixin() {
+        // Mixin composition: methods from mixin are available on the class
+        let result = eval_str(
+            r#"
+            mixin Printable {
+                method toString[] := "printed"
+            }
+            class MyClass with Printable {
+                field value
+                constructor[v_] { this.value = v }
+            }
+            obj = MyClass[42]
+            obj.toString[]
+            "#,
+        );
+        assert_eq!(result, Value::Str("printed".to_string()));
+    }
+
+    #[test]
+    fn test_class_method_with_this() {
+        // Method can reference this fields
+        let result = eval_str(
+            r#"
+            class Point {
+                field x
+                field y
+                constructor[x_, y_] { this.x = x; this.y = y }
+                method mag[] := x^2 + y^2
+            }
+            p = Point[3, 4]
+            p.mag[]
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(25)));
+    }
+
+    #[test]
+    fn test_class_field_default() {
+        // Field with default value
+        let result = eval_str(
+            r#"
+            class Circle {
+                field radius
+                field color = "black"
+                constructor[r_] { this.radius = r }
+            }
+            c = Circle[5]
+            c.color
+            "#,
+        );
+        assert_eq!(result, Value::Str("black".to_string()));
+    }
+
+    // ── Module / Import tests ──
+
+    #[test]
+    fn test_module_basic() {
+        // Module definition and bare import
+        let result = eval_str(
+            r#"
+            module MathUtils {
+                export square, cube
+                square[x_] := x^2
+                cube[x_] := x^3
+            }
+            import MathUtils
+            square[5]
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(25)));
+    }
+
+    #[test]
+    fn test_module_selective_import() {
+        // Selective import: only bring specific exports into scope
+        let result = eval_str(
+            r#"
+            module M {
+                export a, b
+                a[x_] := x + 1
+                b[x_] := x + 2
+            }
+            import M.{b}
+            b[5]
+            "#,
+        );
+        assert_eq!(result, Value::Integer(Integer::from(7)));
+    }
+
+    #[test]
+    fn test_module_alias_import() {
+        // Alias import: bind module to a name
+        let result = eval_str(
+            r#"
+            module M {
+                export f
+                f[x_] := x^2
+            }
+            import M as N
+            N
+            "#,
+        );
+        // The alias should produce a Module value
+        match result {
+            Value::Module { .. } => {} // OK
+            _ => panic!("Expected Module, got {:?}", result),
+        }
     }
 }
