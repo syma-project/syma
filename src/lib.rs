@@ -54,6 +54,35 @@ pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
     }
 }
 
+/// Evaluate multi-statement input, returning the result of each statement.
+/// `None` in the returned vector means the statement was suppressed by `;`.
+pub fn eval_input_with_results(
+    input: &str,
+    env: &env::Env,
+) -> Option<Vec<Option<value::Value>>> {
+    let tokens = match lexer::tokenize(input) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            print_error("LexError", &e.to_string(), input);
+            return None;
+        }
+    };
+    let ast = match parser::parse_with_suppress(tokens) {
+        Ok(ast) => ast,
+        Err(e) => {
+            print_error("ParseError", &e.to_string(), input);
+            return None;
+        }
+    };
+    match eval::eval_program_with_results(&ast, env) {
+        Ok(results) => Some(results),
+        Err(e) => {
+            print_error("Error", &e.to_string(), input);
+            None
+        }
+    }
+}
+
 pub fn run_file(path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(path).map_err(|e| format!("Error reading '{}': {}", path, e))?;

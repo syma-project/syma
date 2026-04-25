@@ -39,6 +39,24 @@ pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
     Ok(result)
 }
 
+/// Evaluate a program where each statement may be suppressed by `;`.
+/// Returns `None` for suppressed statements, `Some(value)` otherwise.
+pub fn eval_program_with_results(
+    stmts: &[(Expr, bool)],
+    env: &Env,
+) -> Result<Vec<Option<Value>>, EvalError> {
+    let mut results = Vec::with_capacity(stmts.len());
+    for (stmt, suppressed) in stmts {
+        let val = eval(stmt, env)?;
+        if *suppressed {
+            results.push(None);
+        } else {
+            results.push(Some(val));
+        }
+    }
+    Ok(results)
+}
+
 /// Convert an AST expression to a value without performing evaluation.
 /// Used by Hold/HoldComplete to preserve the syntactic form.
 fn expr_to_value(expr: &Expr) -> Value {

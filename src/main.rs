@@ -125,32 +125,37 @@ fn run_repl() {
                     _ => {}
                 }
 
-                if let Some(value) = eval_input(input, &env)
-                    && value != Value::Null
-                {
-                    // Information queries display directly without Out[n]: prefix
-                    if input.starts_with('?') {
-                        let s = value.to_string();
-                        // Strip surrounding quotes from Str values for display
-                        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                            println!("{}", &s[1..s.len() - 1]);
-                        } else {
-                            println!("{}", s);
+                if let Some(results) = syma::eval_input_with_results(input, &env) {
+                    for opt_val in &results {
+                        match opt_val {
+                            Some(val) if val != &Value::Null => {
+                                if input.starts_with('?') {
+                                    let s = val.to_string();
+                                    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                                        println!("{}", &s[1..s.len() - 1]);
+                                    } else {
+                                        println!("{}", s);
+                                    }
+                                } else {
+                                    let display_val = Value::Formatted {
+                                        format: Format::InputForm,
+                                        value: Box::new(val.clone()),
+                                    };
+                                    let output = display_val.to_string();
+                                    println!(
+                                        "{} {}",
+                                        red(&format!("Out[{}]:", counter)),
+                                        truncate_output(&output)
+                                    );
+                                }
+                                counter += 1;
+                            }
+                            _ => {
+                                counter += 1;
+                            }
                         }
-                    } else {
-                        let display_val = Value::Formatted {
-                            format: Format::InputForm,
-                            value: Box::new(value),
-                        };
-                        let output = display_val.to_string();
-                        println!(
-                            "{} {}",
-                            red(&format!("Out[{}]:", counter)),
-                            truncate_output(&output)
-                        );
                     }
                 }
-                counter += 1;
             }
             Err(ReadlineError::Interrupted) => {
                 // Ctrl+C: cancel current input
