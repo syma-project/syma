@@ -2,10 +2,34 @@
 ///
 /// Messages are stored as `"Symbol::tag"` → template string.
 /// In templates, `` `1` ``, `` `2` `` etc. are positional argument placeholders.
+///
+/// Messages can be captured into a buffer (instead of printing to stderr) by
+/// calling [`with_buffer`]. The kernel uses this to include messages in JSON
+/// responses.
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+thread_local! {
+    static MESSAGE_BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
 static MESSAGES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+
+/// Run `f` with a message buffer active. Messages emitted during `f` are
+/// collected into the returned `Vec` instead of printed to stderr.
+/// Returns `(result_of_f, messages)`.
+pub fn with_buffer<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    MESSAGE_BUFFER.with(|buf| {
+        let prev = buf.replace(Some(Vec::new()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let messages = buf.replace(prev).unwrap_or_default();
+        match result {
+            Ok(val) => (val, messages),
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
 
 fn registry() -> &'static Mutex<HashMap<&'static str, &'static str>> {
     MESSAGES.get_or_init(|| {
@@ -50,9 +74,28 @@ pub fn format_message(template: &str, args: &[String]) -> String {
 
 /// Emit a message to stderr, formatted like Wolfram Language:
 /// `Symbol::tag: Message text.`
+///
+/// If a message buffer is active (via [`with_buffer`]), the message is
+/// collected there instead of printed to stderr.
 pub fn emit(tag: &str, args: &[String]) {
-    if let Some(template) = get_template(tag) {
-        let text = format_message(&template, args);
-        eprintln!("{}: {}", tag, text);
+    let captured = MESSAGE_BUFFER.with(|buf| {
+        if let Some(ref mut messages) = *buf.borrow_mut() {
+            let text = if let Some(template) = get_template(tag) {
+                format_message(&template, args)
+            } else {
+                args.join(", ")
+            };
+            messages.push(format!("{}: {}", tag, text));
+            true
+        } else {
+            false
+        }
+    });
+    if !captured {
+        // No buffer active — print to stderr as before
+        if let Some(template) = get_template(tag) {
+            let text = format_message(&template, args);
+            eprintln!("{}: {}", tag, text);
+        }
     }
 }

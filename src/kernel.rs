@@ -10,7 +10,7 @@ use crate::eval;
 use crate::ffi::marshal::value_to_json_full;
 use crate::lexer;
 use crate::parser;
-use crate::value::{EvalError, Value};
+use crate::value::{EvalError, Format, Value};
 
 /// Structured result from a single evaluation request.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -21,6 +21,9 @@ pub struct KernelResult {
     pub value: Option<serde_json::Value>,
     /// Display string of the result.
     pub output: String,
+    /// Warning/error messages generated during evaluation (e.g. "Power::infy: ...").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
     /// Error message if evaluation failed.
     pub error: Option<String>,
     /// Execution time in milliseconds.
@@ -49,7 +52,17 @@ impl SymaKernel {
     ///
     /// The input is lexed, parsed, and evaluated. The result value is serialised
     /// to tagged JSON and also returned as a display string.
+    /// Uses standard (FullForm-style) output format.
     pub fn eval(&self, input: &str) -> KernelResult {
+        self.eval_inner(input, None)
+    }
+
+    /// Evaluate with an explicit display format.
+    ///
+    /// When `display_format` is `Some(Format::InputForm)`, the output string uses
+    /// infix notation (e.g. `x^2 + 2 x y + y^2`) instead of FullForm
+    /// (e.g. `Plus[Power[x, 2], Times[2, x, y], Power[y, 2]]`).
+    fn eval_inner(&self, input: &str, display_format: Option<Format>) -> KernelResult {
         let start = Instant::now();
 
         let tokens = match lexer::tokenize(input) {
@@ -60,6 +73,7 @@ impl SymaKernel {
                     success: false,
                     value: None,
                     output: String::new(),
+                    messages: vec![],
                     error: Some(format!("Lexical error: {e}")),
                     timing_ms: elapsed.as_millis() as u64,
                 };
@@ -74,21 +88,32 @@ impl SymaKernel {
                     success: false,
                     value: None,
                     output: String::new(),
+                    messages: vec![],
                     error: Some(format!("Parse error: {e}")),
                     timing_ms: elapsed.as_millis() as u64,
                 };
             }
         };
 
-        match eval::eval_program(&ast, &self.env) {
+        let (val_result, messages) = crate::messages::with_buffer(|| eval::eval_program(&ast, &self.env));
+
+        match val_result {
             Ok(val) => {
                 let elapsed = start.elapsed();
                 let json_val = value_to_json_full(&val);
-                let output = val.to_string();
+                let output = match display_format {
+                    Some(fmt) => Value::Formatted {
+                        format: fmt,
+                        value: Box::new(val),
+                    }
+                    .to_string(),
+                    None => val.to_string(),
+                };
                 KernelResult {
                     success: true,
                     value: Some(json_val),
                     output,
+                    messages,
                     error: None,
                     timing_ms: elapsed.as_millis() as u64,
                 }
@@ -99,6 +124,7 @@ impl SymaKernel {
                     success: false,
                     value: None,
                     output: String::new(),
+                    messages,
                     error: Some(format!("{e}")),
                     timing_ms: elapsed.as_millis() as u64,
                 }
@@ -126,13 +152,20 @@ impl SymaKernel {
     /// This is the entry point for the stdin/stdout protocol.
     pub fn eval_json(&self, request: &str) -> String {
         let req: Result<serde_json::Value, _> = serde_json::from_str(request);
-        let input = match req {
+        let (input, format_opt) = match req {
             Ok(serde_json::Value::Object(ref m)) => {
-                m.get("input").and_then(|v| v.as_str()).unwrap_or("")
+                let input = m.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                let format_str = m.get("format").and_then(|v| v.as_str());
+                let fmt = format_str.and_then(|s| match s.to_lowercase().as_str() {
+                    "inputform" => Some(Format::InputForm),
+                    "fullform" => Some(Format::FullForm),
+                    _ => None,
+                });
+                (input, fmt)
             }
-            _ => "",
+            _ => ("", None),
         };
-        let result = self.eval(input);
+        let result = self.eval_inner(input, format_opt);
         serde_json::to_string(&result).unwrap_or_else(|e| {
             format!(r#"{{"success":false,"error":"JSON serialisation failed: {e}"}}"#)
         })
@@ -239,6 +272,39 @@ mod tests {
         let response = kernel.eval_json(r#"{}"#);
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(parsed["success"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_eval_json_inputform_format() {
+        let kernel = make_kernel();
+        // Default (no format) returns FullForm: Plus[Power[x, 2], Times[2, x, y], Power[y, 2]]
+        let default_response = kernel.eval_json(r#"{"input": "Expand[(x+y)^2]"}"#);
+        let default_parsed: serde_json::Value =
+            serde_json::from_str(&default_response).unwrap();
+        let default_output = default_parsed["output"].as_str().unwrap_or("");
+
+        // InputForm returns infix notation: x^2 + 2*x*y + y^2
+        let inputform_response =
+            kernel.eval_json(r#"{"input": "Expand[(x+y)^2]", "format": "inputform"}"#);
+        let inputform_parsed: serde_json::Value =
+            serde_json::from_str(&inputform_response).unwrap();
+        let inputform_output = inputform_parsed["output"].as_str().unwrap_or("");
+
+        // The two outputs should be different
+        assert_ne!(
+            default_output, inputform_output,
+            "InputForm and default output should differ for symbolic expressions"
+        );
+        // InputForm should contain infix operators
+        assert!(
+            inputform_output.contains('+') || inputform_output.contains('^'),
+            "InputForm output should contain infix operators, got: {inputform_output}"
+        );
+        // Default (FullForm) should contain '[' and ']'
+        assert!(
+            default_output.contains('['),
+            "Default output should be FullForm with brackets, got: {default_output}"
+        );
     }
 
     #[test]

@@ -467,22 +467,42 @@ pub fn builtin_range(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_table(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() == 2 {
-        if let Value::Integer(n) = &args[1] {
-            if let Some(n_usize) = n.to_usize() {
-                let mut result = Vec::with_capacity(n_usize);
-                for _ in 0..n_usize {
-                    result.push(args[0].clone());
-                }
-                return Ok(Value::List(result));
-            }
-        }
+    if args.len() < 2 {
+        return Err(EvalError::Error(
+            "Table: requires at least 2 arguments (Table[expr, n] or Table[expr, d1, d2, ...])"
+                .to_string(),
+        ));
     }
-    Err(EvalError::Error(
-        "Table: unsupported form (use Table[expr, n] for n copies, \
-         or the special form for iterator specs)"
-            .to_string(),
-    ))
+    let n = match &args[1] {
+        Value::Integer(n) => n,
+        _ => {
+            return Err(EvalError::Error(
+                "Table: dimension spec must be an integer".to_string(),
+            ))
+        }
+    };
+    let Some(n_usize) = n.to_usize() else {
+        return Err(EvalError::Error(
+            "Table: dimension must be a non-negative integer".to_string(),
+        ));
+    };
+    if args.len() == 2 {
+        let mut result = Vec::with_capacity(n_usize);
+        for _ in 0..n_usize {
+            result.push(args[0].clone());
+        }
+        Ok(Value::List(result))
+    } else {
+        let remaining = &args[2..];
+        let mut result = Vec::with_capacity(n_usize);
+        for _ in 0..n_usize {
+            let mut sub_args = Vec::with_capacity(1 + remaining.len());
+            sub_args.push(args[0].clone());
+            sub_args.extend_from_slice(remaining);
+            result.push(builtin_table(&sub_args)?);
+        }
+        Ok(Value::List(result))
+    }
 }
 
 pub fn builtin_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {

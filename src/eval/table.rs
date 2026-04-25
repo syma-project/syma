@@ -163,6 +163,26 @@ fn eval_table_recursive(
         return super::eval(expr, env);
     }
 
+    // Bare integer — count-only form, equivalent to {n}
+    if let Expr::Integer(_) = &iter_specs[depth] {
+        let n = super::eval(&iter_specs[depth], env)?
+            .to_integer()
+            .ok_or_else(|| EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: "non-Integer".to_string(),
+            })?;
+        if n < 0 {
+            return Err(EvalError::Error(
+                "Table count must be non-negative".to_string(),
+            ));
+        }
+        let mut result = Vec::new();
+        for _ in 0..n {
+            result.push(eval_table_recursive(expr, iter_specs, env, depth + 1)?);
+        }
+        return Ok(Value::List(result));
+    }
+
     let iter_items = match &iter_specs[depth] {
         Expr::List(items) => items,
         _ => {
