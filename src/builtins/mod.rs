@@ -102,7 +102,6 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Diagonal", list::builtin_diagonal);
     register_builtin(env, "Accumulate", list::builtin_accumulate);
     register_builtin(env, "Differences", list::builtin_differences);
-    register_builtin(env, "Clip", list::builtin_clip);
     register_builtin_env(env, "Array", list::builtin_array);
     register_builtin_env(env, "SplitBy", list::builtin_split_by);
     register_builtin_env(env, "GatherBy", list::builtin_gather_by);
@@ -257,6 +256,15 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "QuotientRemainder", math::builtin_quotient_remainder);
     register_builtin(env, "KroneckerDelta", math::builtin_kronecker_delta);
     register_builtin(env, "IntegerQ", math::builtin_integer_q);
+    register_builtin(env, "Chop", math::builtin_chop);
+    register_builtin(env, "Unitize", math::builtin_unitize);
+    register_builtin(env, "Ramp", math::builtin_ramp);
+    register_builtin(env, "RealAbs", math::builtin_real_abs);
+    register_builtin(env, "RealSign", math::builtin_real_sign);
+    register_builtin(env, "LogisticSigmoid", math::builtin_logistic_sigmoid);
+    register_builtin(env, "NumericalOrder", math::builtin_numerical_order);
+    register_builtin(env, "UnitBox", math::builtin_unit_box);
+    register_builtin(env, "UnitTriangle", math::builtin_unit_triangle);
 
     // ── Number theory ──
     register_builtin(env, "PrimeQ", number_theory::builtin_prime_q);
@@ -469,6 +477,9 @@ pub fn register_builtins(env: &Env) {
 
     // ── Persistent storage ──
     register_builtin(env, "LocalSymbol", localsymbol::builtin_local_symbol);
+
+    // ── Sequence ──
+    register_builtin(env, "Sequence", builtin_sequence);
 
     // ── Image Processing ──
     register_builtin(env, "Image", image::builtin_image);
@@ -739,6 +750,18 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(Value::Null)
 }
 
+// ── Sequence ──
+
+/// `Sequence[expr1, expr2, ...]` — wraps arguments into a sequence that
+/// automatically splices into function calls.
+///
+/// Sequence objects are automatically flattened out in all functions except
+/// those with attribute SequenceHold or HoldAllComplete.
+/// `Sequence[]` evaporates entirely; `Sequence[expr]` acts like Identity.
+fn builtin_sequence(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(Value::Sequence(args.to_vec()))
+}
+
 /// Re-export for use by eval.rs
 pub use arithmetic::add_values_public;
 pub use arithmetic::mul_values_public;
@@ -943,8 +966,23 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "Differences" => "Differences[list] computes the adjacent differences of list elements.",
         "Clip" => {
-            "Clip[val] clamps val to the range [0, 1].\nClip[val, {min, max}] clamps val to the range [min, max]."
+            "Clip[x] clamps x to the range [-1, 1].\nClip[x, {min, max}] clamps x to the range [min, max]."
         }
+        "Chop" => {
+            "Chop[expr] replaces approximate real numbers close to 0 with exact 0.\nChop[expr, tol] uses tolerance tol (default 1e-10)."
+        }
+        "Unitize" => "Unitize[x] returns 0 if x == 0, 1 otherwise.",
+        "Ramp" => "Ramp[x] returns max(0, x).",
+        "RealAbs" => "RealAbs[x] returns the absolute value of a real number x.",
+        "RealSign" => "RealSign[x] returns -1, 0, or 1 for real x.",
+        "LogisticSigmoid" => "LogisticSigmoid[x] returns 1/(1+exp(-x)).",
+        "NumericalOrder" => {
+            "NumericalOrder[x, y] returns -1 if x < y, 0 if x == y, 1 if x > y (numeric comparison)."
+        }
+        "UnitBox" => {
+            "UnitBox[x] returns 1 if |x| < 1/2, 1/2 if |x| == 1/2, 0 otherwise."
+        }
+        "UnitTriangle" => "UnitTriangle[x] returns max(0, 1-|x|).",
         "Array" => {
             "Array[f, n] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n}] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n, m}] generates {f[n], f[n+1], ..., f[m]}."
         }
@@ -1346,6 +1384,15 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "True" => "True represents the logical value true.",
         "False" => "False represents the logical value false.",
 
+        // ── Sequence ──
+        "Sequence" => {
+            "Sequence[expr1, expr2, ...] represents a sequence of arguments \
+             that automatically splices into function calls.\n\
+             Sequence[] evaporates entirely; Sequence[expr] acts like Identity.\n\
+             Most functions automatically splice Sequence; those with \
+             SequenceHold or HoldAllComplete do not."
+        }
+
         // ── Control flow ──
         "If" => {
             "If[cond, t, f] evaluates t if cond is True, f if False.\nIf[cond, t] evaluates t if cond is True, returns Null otherwise."
@@ -1640,6 +1687,14 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Implies" => vec!["HoldFirst"],
         "Equivalent" => vec!["Flat", "Listable", "OneIdentity", "Orderless"],
         "Boole" => vec!["Listable"],
+        "Chop" => vec!["Listable"],
+        "Unitize" => vec!["Listable"],
+        "Ramp" => vec!["Listable", "NumericFunction"],
+        "RealAbs" => vec!["Listable", "NumericFunction"],
+        "RealSign" => vec!["Listable"],
+        "LogisticSigmoid" => vec!["Listable", "NumericFunction"],
+        "UnitBox" => vec!["Listable"],
+        "UnitTriangle" => vec!["Listable"],
         "Majority" => vec![],
         "BooleanQ" => vec![],
         "Hold" => vec!["HoldAll"],

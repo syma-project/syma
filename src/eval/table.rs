@@ -5,8 +5,40 @@ use crate::ast::*;
 use crate::env::Env;
 use crate::value::*;
 
+/// Convert a Value back to an Expr for re-processing by special forms.
+fn value_to_expr(v: &Value) -> Expr {
+    match v {
+        Value::Integer(n) => Expr::Integer(n.clone()),
+        Value::Real(r) => Expr::Real(r.clone()),
+        Value::Bool(b) => Expr::Bool(*b),
+        Value::Str(s) => Expr::Str(s.clone()),
+        Value::Symbol(s) => Expr::Symbol(s.clone()),
+        Value::Null => Expr::Null,
+        Value::List(items) => Expr::List(items.iter().map(value_to_expr).collect()),
+        Value::Call { head, args } => Expr::Call {
+            head: Box::new(Expr::Symbol(head.clone())),
+            args: args.iter().map(value_to_expr).collect(),
+        },
+        Value::Sequence(items) => Expr::Call {
+            head: Box::new(Expr::Symbol("Sequence".to_string())),
+            args: items.iter().map(value_to_expr).collect(),
+        },
+        _ => Expr::Symbol(v.to_string()),
+    }
+}
+
 /// Table[expr, {i, ...}] / Table[expr, n] — generate lists by iteration.
 pub(super) fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    // Handle Sequence splicing: if a single arg evaluates to a Sequence,
+    // expand it and retry.
+    if args.len() == 1 {
+        let evaluated = super::eval(&args[0], env)?;
+        if let Value::Sequence(seq) = evaluated {
+            let expanded: Vec<Expr> = seq.iter().map(|v| value_to_expr(v)).collect();
+            return eval_table(&expanded, env);
+        }
+    }
+
     if args.len() < 2 {
         return Err(EvalError::Error(
             "Table requires at least 2 arguments".to_string(),

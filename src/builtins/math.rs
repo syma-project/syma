@@ -1903,6 +1903,291 @@ pub fn builtin_integer_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(matches!(&args[0], Value::Integer(_))))
 }
 
+/// Chop[x] — replace approximate real numbers close to 0 with exact 0.
+/// Chop[x, tol] — use tolerance `tol` (default 1e-10).
+pub fn builtin_chop(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "Chop requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let tol = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(n) => n.to_f64(),
+            Value::Real(r) => r.to_f64(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Number".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
+            }
+        }
+    } else {
+        1e-10
+    };
+    chop_value(&args[0], tol)
+}
+
+fn chop_value(val: &Value, tol: f64) -> Result<Value, EvalError> {
+    match val {
+        Value::Real(r) => {
+            if r.to_f64().abs() < tol {
+                Ok(Value::Integer(Integer::from(0)))
+            } else {
+                Ok(val.clone())
+            }
+        }
+        Value::Integer(_) => Ok(val.clone()),
+        Value::Rational(_) => {
+            // Chop numerical rationals close to 0
+            let f = val.to_real().unwrap_or(f64::INFINITY);
+            if f.abs() < tol {
+                Ok(Value::Integer(Integer::from(0)))
+            } else {
+                Ok(val.clone())
+            }
+        }
+        Value::List(items) => {
+            let chopped: Result<Vec<Value>, EvalError> =
+                items.iter().map(|v| chop_value(v, tol)).collect();
+            Ok(Value::List(chopped?))
+        }
+        Value::PackedArray(pa) => {
+            // Convert to list, chop recursively, then repack
+            let items = pa.to_values();
+            let chopped: Result<Vec<Value>, EvalError> =
+                items.iter().map(|v| chop_value(v, tol)).collect();
+            Ok(Value::List(chopped?))
+        }
+        _ => Ok(val.clone()),
+    }
+}
+
+/// Unitize[x] — 0 if x == 0, 1 otherwise.
+pub fn builtin_unitize(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Unitize requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Real(r) if r.to_f64() == 0.0 => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(_) | Value::Real(_) => Ok(Value::Integer(Integer::from(1))),
+        _ => Ok(Value::Call {
+            head: "Unitize".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Ramp[x] — max(0, x).
+pub fn builtin_ramp(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Ramp requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if n.is_negative() => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Real(r) if r.to_f64() <= 0.0 => Ok(Value::Integer(Integer::from(0))),
+        Value::Real(r) => Ok(Value::Real(r.clone())),
+        _ => {
+            // Check if it might be a list (for listable attribute handling)
+            Ok(Value::Call {
+                head: "Ramp".to_string(),
+                args: args.to_vec(),
+            })
+        }
+    }
+}
+
+/// RealAbs[x] — absolute value for real numbers.
+pub fn builtin_real_abs(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "RealAbs requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => Ok(Value::Integer(n.clone().abs())),
+        Value::Real(r) => Ok(Value::Real(Float::with_val(r.prec(), r.clone().abs()))),
+        _ => Ok(Value::Call {
+            head: "RealAbs".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// RealSign[x] — -1 for x < 0, 0 for x == 0, 1 for x > 0 (real numbers only).
+pub fn builtin_real_sign(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "RealSign requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            use std::cmp::Ordering;
+            let s = match n.cmp(&Integer::from(0)) {
+                Ordering::Greater => 1i64,
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
+        Value::Real(r) => {
+            let s = if r.is_sign_positive() && !r.is_zero() {
+                1i64
+            } else if r.is_sign_negative() {
+                -1
+            } else {
+                0
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
+        _ => Ok(Value::Call {
+            head: "RealSign".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// LogisticSigmoid[x] — 1/(1+exp(-x)).
+pub fn builtin_logistic_sigmoid(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "LogisticSigmoid requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let x = n.to_f64();
+            let result = 1.0 / (1.0 + (-x).exp());
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, result)))
+        }
+        Value::Real(r) => {
+            let x = r.to_f64();
+            let result = 1.0 / (1.0 + (-x).exp());
+            Ok(Value::Real(Float::with_val(r.prec(), result)))
+        }
+        _ => Ok(Value::Call {
+            head: "LogisticSigmoid".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// NumericalOrder[x, y] — -1 if x < y, 0 if x == y, 1 if x > y (numeric comparison).
+pub fn builtin_numerical_order(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "NumericalOrder requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let to_f64 = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Integer(n) => Some(n.to_f64()),
+            Value::Real(r) => Some(r.to_f64()),
+            _ => None,
+        }
+    };
+    let a = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let b = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    if a < b {
+        Ok(Value::Integer(Integer::from(-1)))
+    } else if a > b {
+        Ok(Value::Integer(Integer::from(1)))
+    } else {
+        Ok(Value::Integer(Integer::from(0)))
+    }
+}
+
+/// UnitBox[x] — 1 if |x| < 1/2, 1/2 if |x| == 1/2, 0 otherwise.
+pub fn builtin_unit_box(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "UnitBox requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let x = n.to_f64();
+            if x.abs() < 0.5 {
+                Ok(Value::Integer(Integer::from(1)))
+            } else if (x.abs() - 0.5).abs() < f64::EPSILON {
+                Ok(Value::Rational(Box::new(rug::Rational::from((
+                    Integer::from(1),
+                    Integer::from(2),
+                )))))
+            } else {
+                Ok(Value::Integer(Integer::from(0)))
+            }
+        }
+        Value::Real(r) => {
+            let x = r.to_f64();
+            if x.abs() < 0.5 {
+                Ok(Value::Integer(Integer::from(1)))
+            } else if (x.abs() - 0.5).abs() < f64::EPSILON {
+                Ok(Value::Rational(Box::new(rug::Rational::from((
+                    Integer::from(1),
+                    Integer::from(2),
+                )))))
+            } else {
+                Ok(Value::Integer(Integer::from(0)))
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "UnitBox".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// UnitTriangle[x] — max(0, 1 - |x|).
+pub fn builtin_unit_triangle(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "UnitTriangle requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            let x = n.to_f64();
+            let val = (1.0 - x.abs()).max(0.0);
+            if val == 0.0 {
+                Ok(Value::Integer(Integer::from(0)))
+            } else if val == 1.0 {
+                Ok(Value::Integer(Integer::from(1)))
+            } else {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, val)))
+            }
+        }
+        Value::Real(r) => {
+            let x = r.to_f64();
+            let val = (1.0 - x.abs()).max(0.0);
+            if val == 0.0 {
+                Ok(Value::Integer(Integer::from(0)))
+            } else if val == 1.0 {
+                Ok(Value::Integer(Integer::from(1)))
+            } else {
+                Ok(Value::Real(Float::with_val(r.prec(), val)))
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "UnitTriangle".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

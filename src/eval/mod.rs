@@ -226,17 +226,20 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Pipe: expr // func ──
+        // expr // f → f[expr]; Sequence values in expr are flattened.
         Expr::Pipe { expr, func } => {
             let val = eval(expr, env)?;
             let f = eval(func, env)?;
-            apply_function(&f, &[val], env)
+            let args = flatten_sequences(vec![val]);
+            apply_function(&f, &args, env)
         }
 
         // ── Prefix: f @ x ──
         Expr::Prefix { func, arg } => {
             let f = eval(func, env)?;
             let a = eval(arg, env)?;
-            apply_function(&f, &[a], env)
+            let args = flatten_sequences(vec![a]);
+            apply_function(&f, &args, env)
         }
 
         // ── If ──
