@@ -929,6 +929,16 @@ impl Parser {
                     };
                 }
 
+                // MessageName: sym::tag  → MessageName[sym, "tag"]
+                Token::ColonColon => {
+                    self.advance();
+                    let tag = self.expect_ident()?;
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Symbol("MessageName".to_string())),
+                        args: vec![expr, Expr::Str(tag)],
+                    };
+                }
+
                 _ => break,
             }
         }
@@ -1563,6 +1573,16 @@ impl Parser {
                             head: Box::new(test),
                             args: vec![Expr::Slot(None)],
                         }),
+                    };
+                }
+
+                // MessageName: sym::tag  → MessageName[sym, "tag"]
+                Token::ColonColon => {
+                    self.advance();
+                    let tag = self.expect_ident()?;
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Symbol("MessageName".to_string())),
+                        args: vec![expr, Expr::Str(tag)],
                     };
                 }
 

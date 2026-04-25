@@ -299,17 +299,39 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
     {
         return Ok(args[0].clone());
     }
+    // Check for zero denominator first (before zero numerator check)
+    let denom_zero = matches!(&args[1], Value::Integer(b) if b.is_zero())
+        || matches!(&args[1], Value::Real(b) if b.is_zero())
+        || matches!(&args[1], Value::Rational(b) if b.is_zero());
+    if denom_zero {
+        let numer_zero = matches!(&args[0], Value::Integer(a) if a.is_zero())
+            || matches!(&args[0], Value::Real(a) if a.is_zero())
+            || matches!(&args[0], Value::Rational(a) if a.is_zero());
+        if numer_zero {
+            // 0/0: emit Power::infy then Infinity::indet
+            crate::messages::emit(
+                "Power::infy",
+                &[format!("{}/{}", args[0], args[1])],
+            );
+            crate::messages::emit(
+                "Infinity::indet",
+                &[format!("{} ComplexInfinity", args[0])],
+            );
+            return Ok(Value::Symbol("Indeterminate".to_string()));
+        }
+        // nonzero / 0
+        crate::messages::emit(
+            "Power::infy",
+            &[format!("{}/{}", args[0], args[1])],
+        );
+        return Ok(Value::Symbol("ComplexInfinity".to_string()));
+    }
     if matches!(&args[0], Value::Integer(n) if n.is_zero())
         || matches!(&args[0], Value::Rational(n) if n.is_zero())
     {
         return Ok(Value::Integer(Integer::from(0)));
     }
     match (&args[0], &args[1]) {
-        (Value::Integer(_), Value::Integer(b)) if b.is_zero() => Err(EvalError::DivisionByZero),
-        (Value::Real(_), Value::Real(b)) if b.is_zero() => Err(EvalError::DivisionByZero),
-        (Value::Rational(_), Value::Rational(b)) if b.is_zero() => Err(EvalError::DivisionByZero),
-        (Value::Rational(_), Value::Integer(b)) if b.is_zero() => Err(EvalError::DivisionByZero),
-        (Value::Integer(_), Value::Rational(b)) if b.is_zero() => Err(EvalError::DivisionByZero),
         (Value::Integer(a), Value::Integer(b)) => {
             if a.is_divisible(b) {
                 Ok(Value::Integer(a.clone() / b))
@@ -489,8 +511,16 @@ mod tests {
 
     #[test]
     fn test_divide_by_zero() {
-        let result = builtin_divide(&[int(1), int(0)]);
-        assert!(matches!(result, Err(EvalError::DivisionByZero)));
+        // Non-zero / 0 => ComplexInfinity (Wolfram Language behavior)
+        let result = builtin_divide(&[int(1), int(0)]).unwrap();
+        assert_eq!(result, Value::Symbol("ComplexInfinity".to_string()));
+    }
+
+    #[test]
+    fn test_divide_zero_by_zero() {
+        // 0 / 0 => Indeterminate
+        let result = builtin_divide(&[int(0), int(0)]).unwrap();
+        assert_eq!(result, Value::Symbol("Indeterminate".to_string()));
     }
 
     #[test]

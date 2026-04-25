@@ -101,8 +101,7 @@ fn run_repl() {
     let mut counter: usize = 1;
 
     loop {
-        // \x01 / \x02 bracket non-printing chars so rustyline measures width correctly
-        let prompt = format!("\x01\x1b[32m\x02In [{}]: \x01\x1b[0m\x02", counter);
+        let prompt = format!("\x1b[32mIn [{}]: \x1b[0m", counter);
         match rl.readline(&prompt) {
             Ok(line) => {
                 let input = line.trim();

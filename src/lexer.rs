@@ -54,7 +54,8 @@ pub enum Token {
     Dot,       // .
     Comma,     // ,
     Semicolon, // ;
-    Colon,     // :
+    Colon,      // :
+    ColonColon, // ::  (MessageName separator)
 
     // ── Multi-char operators ──
     Assign,          // =
@@ -154,6 +155,7 @@ impl fmt::Display for Token {
             Token::Comma => write!(f, ","),
             Token::Semicolon => write!(f, ";"),
             Token::Colon => write!(f, ":"),
+            Token::ColonColon => write!(f, "::"),
             Token::Assign => write!(f, "="),
             Token::DelayedAssign => write!(f, ":="),
             Token::Rule => write!(f, "->"),
@@ -660,6 +662,10 @@ impl Lexer {
                         Some('>') => {
                             self.advance();
                             push!(Token::DelayedRule);
+                        }
+                        Some(':') => {
+                            self.advance();
+                            push!(Token::ColonColon);
                         }
                         _ => {
                             push!(Token::Colon);

@@ -147,6 +147,10 @@ pub fn register_builtins(env: &Env) {
     // ── I/O ──
     register_builtin(env, "Print", io::builtin_print);
 
+    // ── Message system ──
+    register_builtin(env, "Message", builtin_message);
+    register_builtin(env, "MessageName", builtin_message_name);
+
     // ── Association ──
     register_builtin(env, "Keys", association::builtin_keys);
     register_builtin(env, "Values", association::builtin_values);
@@ -722,6 +726,72 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 pub use arithmetic::add_values_public;
 pub use arithmetic::mul_values_public;
 pub use arithmetic::sub_values_public;
+
+// ── Message system ──
+
+/// `Message[sym::tag, args...]` — emit a formatted message to stderr.
+///
+/// The first argument must be a `MessageName[sym, "tag"]` call (produced by
+/// the `sym::tag` syntax).  Remaining arguments are substituted into the
+/// message template at `` `1` ``, `` `2` `` etc.
+fn builtin_message(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "Message requires at least 1 argument".to_string(),
+        ));
+    }
+    // First arg should be MessageName[sym, "tag"] (produced by sym::tag syntax)
+    let tag = match &args[0] {
+        Value::Call { head, args: mn_args }
+            if head == "MessageName" && mn_args.len() == 2 =>
+        {
+            let sym = extract_held_symbol_name(&mn_args[0]);
+            let tag_str = match &mn_args[1] {
+                Value::Str(s) => s.clone(),
+                other => other.to_string(),
+            };
+            format!("{}::{}", sym, tag_str)
+        }
+        Value::Str(s) => s.clone(), // allow plain string key as convenience
+        other => other.to_string(),
+    };
+    let fmt_args: Vec<String> = args[1..].iter().map(|v| v.to_string()).collect();
+    crate::messages::emit(&tag, &fmt_args);
+    Ok(Value::Null)
+}
+
+/// `MessageName[sym, "tag"]` — produces a symbolic message name object.
+///
+/// Returns `MessageName[sym, "tag"]` as a `Call` value for use with `Message`.
+/// The symbol argument is held (not evaluated) due to the `HoldFirst` attribute.
+fn builtin_message_name(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MessageName requires exactly 2 arguments".to_string(),
+        ));
+    }
+    // Extract the symbol name; it arrives as Value::Pattern(Expr::Symbol(...)) due to HoldFirst
+    let sym_name = extract_held_symbol_name(&args[0]);
+    let tag = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => other.to_string(),
+    };
+    // Return the symbolic MessageName form so Message can look it up
+    Ok(Value::Call {
+        head: "MessageName".to_string(),
+        args: vec![Value::Symbol(sym_name), Value::Str(tag)],
+    })
+}
+
+/// Extract the symbol name from a held or direct symbol value.
+fn extract_held_symbol_name(v: &Value) -> String {
+    match v {
+        Value::Symbol(s) => s.clone(),
+        Value::Pattern(crate::ast::Expr::Symbol(s)) => s.clone(),
+        Value::Builtin(name, _) => name.clone(),
+        other => other.to_string(),
+    }
+}
 
 // ── Help documentation ──
 
@@ -1513,6 +1583,7 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Hold" => vec!["HoldAll"],
         "HoldComplete" => vec!["HoldAllComplete"],
         "Defer" => vec!["HoldAll"],
+        "MessageName" => vec!["HoldFirst"],
         _ => vec![],
     }
 }

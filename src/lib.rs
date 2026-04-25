@@ -16,6 +16,7 @@ pub mod lexer;
 pub mod manifest;
 pub mod parser;
 pub mod pattern;
+pub mod messages;
 pub mod profiler;
 pub mod value;
 
