@@ -1117,7 +1117,8 @@ fn eval_args_with_attributes(
     };
 
     if let Some(name) = head_name {
-        let hold_all = env.has_attribute(name, "HoldAll") || env.has_attribute(name, "HoldAllComplete");
+        let hold_all =
+            env.has_attribute(name, "HoldAll") || env.has_attribute(name, "HoldAllComplete");
         let hold_first = env.has_attribute(name, "HoldFirst");
         let hold_rest = env.has_attribute(name, "HoldRest");
 
@@ -1375,8 +1376,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
 
                 // Respect SequenceHold and HoldAllComplete attributes:
                 // these prevent Sequence[...] from splicing.
-                let skip_seq =
-                    env.has_attribute(s.as_str(), "SequenceHold")
+                let skip_seq = env.has_attribute(s.as_str(), "SequenceHold")
                     || env.has_attribute(s.as_str(), "HoldAllComplete");
                 apply_function(&head_val, &flatten_sequences(arg_vals, skip_seq), env)
             }
@@ -1462,15 +1462,21 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 if std::ptr::fn_addr_eq(*f, ffi::extension::EXT_DISPATCH_PTR) {
                     return ffi::extension::call_ext_fn(name, args);
                 }
-                f(args).map_err(|e| match e {
-                    EvalError::NoMatch { .. } => EvalError::NoMatch {
+                f(args).or_else(|e| match e {
+                    EvalError::NoMatch { .. } => Ok(Value::Call {
                         head: name.clone(),
                         args: args.to_vec(),
-                    },
-                    other => other,
+                    }),
+                    other => Err(other),
                 })
             }
-            BuiltinFn::Env(f) => f(args, env),
+            BuiltinFn::Env(f) => f(args, env).or_else(|e| match e {
+                EvalError::NoMatch { .. } => Ok(Value::Call {
+                    head: name.clone(),
+                    args: args.to_vec(),
+                }),
+                other => Err(other),
+            }),
         },
 
         Value::NativeFunction {

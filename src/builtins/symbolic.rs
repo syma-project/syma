@@ -374,7 +374,10 @@ pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
         }
         Value::Call { head, args } => match head.as_str() {
             "Plus" => {
-                let terms: Vec<Value> = args.iter().map(|arg| differentiate(arg, var, env)).collect();
+                let terms: Vec<Value> = args
+                    .iter()
+                    .map(|arg| differentiate(arg, var, env))
+                    .collect();
                 simplify_call("Plus", &terms)
             }
             "Times" => {

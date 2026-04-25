@@ -1527,7 +1527,11 @@ fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             }
             write!(f, "]")
         }
-        Value::Rule { lhs, rhs, delayed: _ } => {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: _,
+        } => {
             write!(f, "Rule[")?;
             format_full_form(lhs, f)?;
             write!(f, ", ")?;

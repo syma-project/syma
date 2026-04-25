@@ -980,9 +980,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "NumericalOrder" => {
             "NumericalOrder[x, y] returns -1 if x < y, 0 if x == y, 1 if x > y (numeric comparison)."
         }
-        "UnitBox" => {
-            "UnitBox[x] returns 1 if |x| < 1/2, 1/2 if |x| == 1/2, 0 otherwise."
-        }
+        "UnitBox" => "UnitBox[x] returns 1 if |x| < 1/2, 1/2 if |x| == 1/2, 0 otherwise.",
         "UnitTriangle" => "UnitTriangle[x] returns max(0, 1-|x|).",
         "Array" => {
             "Array[f, n] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n}] generates {f[1], f[2], ..., f[n]}.\nArray[f, {n, m}] generates {f[n], f[n+1], ..., f[m]}."
@@ -1665,7 +1663,12 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
     }
     match name {
         "Plus" | "Times" | "Min" | "Max" => vec![
-            "Flat", "Listable", "Locked", "NumericFunction", "OneIdentity", "Orderless",
+            "Flat",
+            "Listable",
+            "Locked",
+            "NumericFunction",
+            "OneIdentity",
+            "Orderless",
             "ReadProtected",
         ],
         "Power" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
@@ -1674,8 +1677,9 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => lnlr(),
         "Csc" | "Sec" | "Cot" | "ArcCsc" | "ArcSec" | "ArcCot" => lnlr(),
         "Haversine" | "InverseHaversine" => lnlr(),
-        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees"
-        | "CotDegrees" => lnlr(),
+        "SinDegrees" | "CosDegrees" | "TanDegrees" | "CscDegrees" | "SecDegrees" | "CotDegrees" => {
+            lnlr()
+        }
         "ArcSinDegrees" | "ArcCosDegrees" | "ArcTanDegrees" | "ArcCscDegrees" | "ArcSecDegrees"
         | "ArcCotDegrees" => lnlr(),
         "Factorial" => llr(),
@@ -1728,8 +1732,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Constants --
         "Pi" | "E" | "Degree" => vec!["Constant", "Locked", "ReadProtected"],
         // -- Math functions (Listable + NumericFunction) --
-        "Mod" | "GCD" | "LCM" | "IntegerPart" | "FractionalPart" | "Sign" | "UnitStep"
-        | "Clip" | "Rescale" | "Quotient" | "KroneckerDelta" => {
+        "Mod" | "GCD" | "LCM" | "IntegerPart" | "FractionalPart" | "Sign" | "UnitStep" | "Clip"
+        | "Rescale" | "Quotient" | "KroneckerDelta" => {
             vec!["Listable", "Locked", "NumericFunction", "ReadProtected"]
         }
         // -- Predicates (Listable only) --
