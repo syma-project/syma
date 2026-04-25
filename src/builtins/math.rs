@@ -1875,6 +1875,16 @@ pub fn builtin_fixed_point(args: &[Value], env: &Env) -> Result<Value, EvalError
     let mut val = args[1].clone();
     for _ in 0..max_iter {
         let new_val = apply_function(f, &[val.clone()], env)?;
+
+        // Floating-point convergence check: |new - old| < 1e-12
+        if let (Value::Real(a), Value::Real(b)) = (&new_val, &val) {
+            let diff = Float::with_val(DEFAULT_PRECISION, a - b).abs();
+            if diff < 1e-12 {
+                return Ok(new_val);
+            }
+        }
+
+        // Exact structural equality (works for integers, rationals, lists, etc.)
         if new_val.struct_eq(&val) {
             return Ok(new_val);
         }

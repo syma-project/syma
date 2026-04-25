@@ -351,6 +351,7 @@ impl BytecodeCompiler {
                     body: *body.clone(),
                     slot_count,
                     params: vec![],
+                    env: None,
                 })
             }
             // ── Function constructor ──
@@ -361,6 +362,7 @@ impl BytecodeCompiler {
                 },
                 slot_count: params.len(),
                 params: params.clone(),
+                env: None,
             }),
             // ── Pattern literals ──
             Expr::Blank { type_constraint } => self.emit_const(Value::Pattern(Expr::Blank {

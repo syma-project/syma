@@ -490,21 +490,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         _ => {
                             return Err(EvalError::Error(
                                 "Part assignment: collection must be a symbol".to_string(),
-                            ))
+                            ));
                         }
                     };
-                    let current =
-                        env.get(&var_name).ok_or_else(|| EvalError::Error(format!(
-                            "Symbol {} is not defined",
-                            var_name
-                        )))?;
+                    let current = env.get(&var_name).ok_or_else(|| {
+                        EvalError::Error(format!("Symbol {} is not defined", var_name))
+                    })?;
                     let indices: Vec<i64> = part_args[1..]
                         .iter()
                         .map(|idx| {
-                            eval(idx, env)?.to_integer().ok_or_else(|| EvalError::TypeError {
-                                expected: "Integer".to_string(),
-                                got: "non-Integer".to_string(),
-                            })
+                            eval(idx, env)?
+                                .to_integer()
+                                .ok_or_else(|| EvalError::TypeError {
+                                    expected: "Integer".to_string(),
+                                    got: "non-Integer".to_string(),
+                                })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let updated = set_part(current, &indices, val.clone())?;
@@ -851,6 +851,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 body: body.as_ref().clone(),
                 slot_count,
                 params: vec![],
+                env: Some(env.clone()),
             })
         }
 
@@ -862,6 +863,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             body: body.as_ref().clone(),
             slot_count: params.len(),
             params: params.clone(),
+            env: Some(env.clone()),
         }),
     }
 }
@@ -1457,8 +1459,13 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             body,
             slot_count: _,
             params,
+            env: captured_env,
         } => {
-            let child_env = env.child();
+            // Use the captured defining environment for lexical scoping (closures).
+            // Fall back to the call-site environment when no env was captured
+            // (e.g., PureFunction created by the bytecode compiler).
+            let parent_env = captured_env.as_ref().unwrap_or(env);
+            let child_env = parent_env.child();
             // Bind slots
             for (i, arg) in args.iter().enumerate() {
                 child_env.set(format!("#{}", i + 1), arg.clone());
@@ -2641,30 +2648,36 @@ mod tests {
     #[test]
     fn test_pattern_guard_switch_nested() {
         // Nested guard inside a compound pattern in Switch
-        let result = eval_str(r#"
+        let result = eval_str(
+            r#"
             f[a_, b_ /; a + b > 0] := "big";
             f[a_, b_] := "small";
             f[3, -1]
-        "#);
+        "#,
+        );
         assert_eq!(result, Value::Str("big".to_string()));
 
         // Second case: condition fails, triggers fallback
-        let result2 = eval_str(r#"
+        let result2 = eval_str(
+            r#"
             f[a_, b_ /; a + b > 10] := "big";
             f[a_, b_] := "small";
             f[3, 2]
-        "#);
+        "#,
+        );
         assert_eq!(result2, Value::Str("small".to_string()));
     }
 
     #[test]
     fn test_pattern_guard_match_nested() {
         // Nested guard in match expression with compound pattern
-        let result = eval_str(r#"match {5, 3} {
+        let result = eval_str(
+            r#"match {5, 3} {
             {a_, b_ /; a > b} => "descending";
             {a_, b_ /; a < b} => "ascending";
             _ => "equal"
-        }"#);
+        }"#,
+        );
         assert_eq!(result, Value::Str("descending".to_string()));
     }
 
@@ -2702,18 +2715,22 @@ mod tests {
     #[test]
     fn test_switch_nested_guard() {
         // Switch with nested guard in compound pattern — tests collect_nested_guards
-        let result = eval_str(r#"
+        let result = eval_str(
+            r#"
             f[p_List /; Length[p] > 2] := "long";
             f[p_List] := "short";
             f[{1, 2, 3}]
-        "#);
+        "#,
+        );
         assert_eq!(result, Value::Str("long".to_string()));
 
-        let result2 = eval_str(r#"
+        let result2 = eval_str(
+            r#"
             f[p_List /; Length[p] > 2] := "long";
             f[p_List] := "short";
             f[{1, 2}]
-        "#);
+        "#,
+        );
         assert_eq!(result2, Value::Str("short".to_string()));
     }
 
@@ -3763,6 +3780,67 @@ mod tests {
                 Value::Integer(Integer::from(6)),
                 Value::Integer(Integer::from(7)),
                 Value::Integer(Integer::from(8)),
+            ])
+        );
+    }
+
+    // ── Closure / lexical capture tests ──
+
+    #[test]
+    fn test_closure_basic() {
+        // Basic closure: createAdder[x_] returns a function that captures x
+        assert_eq!(
+            eval_str("createAdder[x_] := Function[{y}, x + y]; f = createAdder[10]; f[5]"),
+            Value::Integer(Integer::from(15))
+        );
+    }
+
+    #[test]
+    fn test_closure_nested() {
+        // Nested closure: outer function captures outer param, inner captures outer closure
+        assert_eq!(
+            eval_str("Function[{x}, Function[{y}, x + y]][5][3]"),
+            Value::Integer(Integer::from(8))
+        );
+    }
+
+    #[test]
+    fn test_closure_double_nested() {
+        // Double nesting: three levels of closure capture
+        assert_eq!(
+            eval_str("Function[{x}, Function[{y}, Function[{z}, x + y + z]]][1][2][3]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_closure_with_map() {
+        // Closure used with Map: adder captures outer x = 10
+        assert_eq!(
+            eval_str("adder = Function[{x}, Function[{y}, x + y]][10]; Map[adder, {1, 2, 3}]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(11)),
+                Value::Integer(Integer::from(12)),
+                Value::Integer(Integer::from(13)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_closure_multiple_free_vars() {
+        // Multiple free variables captured from outer scope
+        assert_eq!(
+            eval_str(
+                r#"
+                makeF[mult_, add_] := Function[{x}, mult * x + add];
+                f = makeF[3, 1];
+                {f[0], f[5], f[10]}
+                "#
+            ),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(16)),
+                Value::Integer(Integer::from(31)),
             ])
         );
     }

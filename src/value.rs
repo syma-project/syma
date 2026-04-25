@@ -264,6 +264,9 @@ pub enum Value {
         /// Named parameter names (e.g., ["k"] for Function[{k}, body]).
         /// Non-empty when created via Function[{x, y}, body]; empty for slot-based (#, #1) lambdas.
         params: Vec<String>,
+        /// The defining environment for lexical closure capture.
+        /// `None` when created by the bytecode compiler (falls back to call-site env).
+        env: Option<Env>,
     },
 
     /// A method bound to an object.

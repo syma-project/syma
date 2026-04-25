@@ -742,9 +742,10 @@ fn builtin_message(args: &[Value]) -> Result<Value, EvalError> {
     }
     // First arg should be MessageName[sym, "tag"] (produced by sym::tag syntax)
     let tag = match &args[0] {
-        Value::Call { head, args: mn_args }
-            if head == "MessageName" && mn_args.len() == 2 =>
-        {
+        Value::Call {
+            head,
+            args: mn_args,
+        } if head == "MessageName" && mn_args.len() == 2 => {
             let sym = extract_held_symbol_name(&mn_args[0]);
             let tag_str = match &mn_args[1] {
                 Value::Str(s) => s.clone(),

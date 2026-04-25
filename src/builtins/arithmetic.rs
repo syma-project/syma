@@ -309,21 +309,12 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
             || matches!(&args[0], Value::Rational(a) if a.is_zero());
         if numer_zero {
             // 0/0: emit Power::infy then Infinity::indet
-            crate::messages::emit(
-                "Power::infy",
-                &[format!("{}/{}", args[0], args[1])],
-            );
-            crate::messages::emit(
-                "Infinity::indet",
-                &[format!("{} ComplexInfinity", args[0])],
-            );
+            crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
+            crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
             return Ok(Value::Symbol("Indeterminate".to_string()));
         }
         // nonzero / 0
-        crate::messages::emit(
-            "Power::infy",
-            &[format!("{}/{}", args[0], args[1])],
-        );
+        crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
         return Ok(Value::Symbol("ComplexInfinity".to_string()));
     }
     if matches!(&args[0], Value::Integer(n) if n.is_zero())

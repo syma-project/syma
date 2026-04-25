@@ -1753,10 +1753,14 @@ mod tests {
         match &result {
             Value::Call { head, args } if head == "Times" => {
                 // Contains Power[x, 3]
-                assert!(args.iter().any(|a| matches!(a,
-                    Value::Call { head, args: a_args } if head == "Power" && a_args.len() == 2
-                        && a_args[0] == sym("x") && a_args[1] == int(3)
-                )), "Expected Power[x,3] in result, got {:?}", result);
+                assert!(
+                    args.iter().any(|a| matches!(a,
+                        Value::Call { head, args: a_args } if head == "Power" && a_args.len() == 2
+                            && a_args[0] == sym("x") && a_args[1] == int(3)
+                    )),
+                    "Expected Power[x,3] in result, got {:?}",
+                    result
+                );
             }
             _ => panic!("Expected Times (x^3/3), got {:?}", result),
         }
@@ -1770,8 +1774,11 @@ mod tests {
         match &result {
             Value::Call { head, args } if head == "Times" => {
                 // Should contain Cos[x]
-                assert!(args.iter().any(|a| *a == simplify_call("Cos", &[sym("x")])),
-                    "Expected Cos[x] in result, got {:?}", result);
+                assert!(
+                    args.iter().any(|a| *a == simplify_call("Cos", &[sym("x")])),
+                    "Expected Cos[x] in result, got {:?}",
+                    result
+                );
             }
             _ => panic!("Expected Times containing Cos[x], got {:?}", result),
         }

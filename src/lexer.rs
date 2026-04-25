@@ -46,14 +46,14 @@ pub enum Token {
     RDoubleBracket, // ]]
 
     // ── Operators ──
-    Plus,      // +
-    Minus,     // -
-    Star,      // *
-    Slash,     // /
-    Caret,     // ^
-    Dot,       // .
-    Comma,     // ,
-    Semicolon, // ;
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Caret,      // ^
+    Dot,        // .
+    Comma,      // ,
+    Semicolon,  // ;
     Colon,      // :
     ColonColon, // ::  (MessageName separator)
 

@@ -6,7 +6,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::value::{rational_value, EvalError, Value};
+use crate::value::{EvalError, Value, rational_value};
 use rug::Float;
 use rug::Integer;
 use rug::Rational;
@@ -110,13 +110,7 @@ fn value_to_rational_matrix(m: &[Value]) -> Result<Vec<Vec<Rational>>, EvalError
 fn rational_matrix_to_value(m: &[Vec<Rational>]) -> Value {
     Value::List(
         m.iter()
-            .map(|row| {
-                Value::List(
-                    row.iter()
-                        .map(|r| rational_to_value(r.clone()))
-                        .collect(),
-                )
-            })
+            .map(|row| Value::List(row.iter().map(|r| rational_to_value(r.clone())).collect()))
             .collect(),
     )
 }
@@ -608,9 +602,8 @@ pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
                 break;
             }
         }
-        let pr = pivot_row.ok_or_else(|| {
-            EvalError::Error("LinearSolve: singular matrix".to_string())
-        })?;
+        let pr = pivot_row
+            .ok_or_else(|| EvalError::Error("LinearSolve: singular matrix".to_string()))?;
         aug.swap(col, pr);
 
         // Eliminate below
@@ -1199,7 +1192,9 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
                 r += 1;
             }
         }
-        basis.push(Value::List(v.into_iter().map(|r| rational_to_value(r)).collect()));
+        basis.push(Value::List(
+            v.into_iter().map(|r| rational_to_value(r)).collect(),
+        ));
     }
 
     Ok(Value::List(basis))
@@ -1378,9 +1373,7 @@ pub fn builtin_pseudo_inverse(args: &[Value]) -> Result<Value, EvalError> {
 
     // Compute (A^T A)^(-1) using exact rational Gaussian elimination
     let ata_inv = matrix_inverse_rational(&ata).ok_or_else(|| {
-        EvalError::Error(
-            "PseudoInverse: AᵀA is singular, cannot compute pseudoinverse".to_string(),
-        )
+        EvalError::Error("PseudoInverse: AᵀA is singular, cannot compute pseudoinverse".to_string())
     })?;
 
     // A⁺ = (A^T A)^(-1) * A^T  (cols × rows)

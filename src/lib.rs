@@ -14,9 +14,9 @@ pub mod format;
 pub mod kernel;
 pub mod lexer;
 pub mod manifest;
+pub mod messages;
 pub mod parser;
 pub mod pattern;
-pub mod messages;
 pub mod profiler;
 pub mod value;
 

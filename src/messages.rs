@@ -12,10 +12,7 @@ fn registry() -> &'static Mutex<HashMap<&'static str, &'static str>> {
         let mut m: HashMap<&'static str, &'static str> = HashMap::new();
 
         // Power messages
-        m.insert(
-            "Power::infy",
-            "Infinite expression `1` encountered.",
-        );
+        m.insert("Power::infy", "Infinite expression `1` encountered.");
 
         // Infinity messages
         m.insert(
@@ -24,10 +21,7 @@ fn registry() -> &'static Mutex<HashMap<&'static str, &'static str>> {
         );
 
         // General numeric messages
-        m.insert(
-            "General::zero",
-            "The argument `1` should be nonzero.",
-        );
+        m.insert("General::zero", "The argument `1` should be nonzero.");
 
         Mutex::new(m)
     })
