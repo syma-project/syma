@@ -34,7 +34,12 @@ use crate::builtins::dataset;
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
     let mut result = Value::Null;
     for stmt in stmts {
-        result = eval(stmt, env)?;
+        match eval(stmt, env) {
+            Ok(v) => result = v,
+            // Return at top-level just yields the value
+            Err(EvalError::Return(v)) => result = v,
+            Err(e) => return Err(e),
+        }
     }
     Ok(result)
 }
@@ -47,11 +52,23 @@ pub fn eval_program_with_results(
 ) -> Result<Vec<Option<Value>>, EvalError> {
     let mut results = Vec::with_capacity(stmts.len());
     for (stmt, suppressed) in stmts {
-        let val = eval(stmt, env)?;
-        if *suppressed {
-            results.push(None);
-        } else {
-            results.push(Some(val));
+        match eval(stmt, env) {
+            Ok(val) => {
+                if *suppressed {
+                    results.push(None);
+                } else {
+                    results.push(Some(val));
+                }
+            }
+            // Return at top-level just yields the value
+            Err(EvalError::Return(v)) => {
+                if *suppressed {
+                    results.push(None);
+                } else {
+                    results.push(Some(v));
+                }
+            }
+            Err(e) => return Err(e),
         }
     }
     Ok(results)
@@ -345,8 +362,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let child_env = env.child();
             eval(init, &child_env)?;
             while eval(condition, &child_env)?.to_bool() {
-                eval(body, &child_env)?;
-                eval(step, &child_env)?;
+                // Body
+                match eval(body, &child_env) {
+                    Ok(_) | Err(EvalError::Continue) => {}
+                    Err(EvalError::Break) => break,
+                    Err(e) => return Err(e),
+                }
+                // Step (always runs after body unless Break)
+                match eval(step, &child_env) {
+                    Ok(_) | Err(EvalError::Continue) => {}
+                    Err(EvalError::Break) => break,
+                    Err(e) => return Err(e),
+                }
             }
             Ok(Value::Null)
         }
@@ -354,7 +381,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── While loop ──
         Expr::While { condition, body } => {
             while eval(condition, env)?.to_bool() {
-                eval(body, env)?;
+                match eval(body, env) {
+                    Ok(_) | Err(EvalError::Continue) => {}
+                    Err(EvalError::Break) => break,
+                    Err(e) => return Err(e),
+                }
             }
             Ok(Value::Null)
         }
@@ -378,7 +409,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     })?;
                     for i in min_val..=max_val {
                         child_env.set(var.clone(), Value::Integer(Integer::from(i)));
-                        eval(body, &child_env)?;
+                        match eval(body, &child_env) {
+                            Ok(_) | Err(EvalError::Continue) => {}
+                            Err(EvalError::Break) => break,
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 IteratorSpec::List { var, list } => {
@@ -388,7 +423,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         Value::List(items) => {
                             for item in items {
                                 child_env.set(var.clone(), item);
-                                eval(body, &child_env)?;
+                                match eval(body, &child_env) {
+                                    Ok(_) | Err(EvalError::Continue) => {}
+                                    Err(EvalError::Break) => break,
+                                    Err(e) => return Err(e),
+                                }
                             }
                         }
                         // Do[body, {i, max}] — short form for range 1..max
@@ -396,7 +435,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             let max_i64 = max_val.to_i64().unwrap_or(0);
                             for i in 1..=max_i64 {
                                 child_env.set(var.clone(), Value::Integer(Integer::from(i)));
-                                eval(body, &child_env)?;
+                                match eval(body, &child_env) {
+                                    Ok(_) | Err(EvalError::Continue) => {}
+                                    Err(EvalError::Break) => break,
+                                    Err(e) => return Err(e),
+                                }
                             }
                         }
                         _ => {
@@ -1265,6 +1308,38 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     Err(e) => Err(e),
                 }
             }
+            "Return" => {
+                // Return[expr] — return expr from the enclosing function
+                // Return[] returns Null
+                let val = if args.is_empty() {
+                    Value::Null
+                } else if args.len() == 1 {
+                    eval(&args[0], env)?
+                } else {
+                    return Err(EvalError::Error(
+                        "Return requires 0 or 1 arguments".to_string(),
+                    ));
+                };
+                Err(EvalError::Return(val))
+            }
+            "Break" => {
+                // Break[] — exit the enclosing loop
+                if !args.is_empty() {
+                    return Err(EvalError::Error(
+                        "Break takes no arguments".to_string(),
+                    ));
+                }
+                Err(EvalError::Break)
+            }
+            "Continue" => {
+                // Continue[] — skip to next loop iteration
+                if !args.is_empty() {
+                    return Err(EvalError::Error(
+                        "Continue takes no arguments".to_string(),
+                    ));
+                }
+                Err(EvalError::Continue)
+            }
             "ReleaseHold" => {
                 if args.len() != 1 {
                     return Err(EvalError::Error(
@@ -1473,7 +1548,12 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     for (name, value) in &bindings {
                         child_env.set(name.clone(), value.clone());
                     }
-                    return eval(&def.body, &child_env);
+                    // Catch Return[expr] and unwrap it as the function result
+                    match eval(&def.body, &child_env) {
+                        Ok(v) => return Ok(v),
+                        Err(EvalError::Return(v)) => return Ok(v),
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Err(EvalError::NoMatch {
@@ -1506,7 +1586,11 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     child_env.set(param.clone(), args[i].clone());
                 }
             }
-            eval(body, &child_env)
+            // Catch Return[expr] and unwrap it as the pure function result
+            eval(body, &child_env).or_else(|e| match e {
+                EvalError::Return(v) => Ok(v),
+                other => Err(other),
+            })
         }
 
         Value::Symbol(name) => {
@@ -2805,6 +2889,135 @@ mod tests {
         // rethrow caught by outer Catch
         let result = eval_str("Catch[try { Throw[42] } catch e { Throw[e + 1] }]");
         assert_eq!(result, Value::Integer(Integer::from(43)));
+    }
+
+    // ── Return ──
+
+    #[test]
+    fn test_return_from_function() {
+        let result = eval_str(
+            "f[x_] := Return[x * 2]; f[5]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(10)));
+    }
+
+    #[test]
+    fn test_return_early() {
+        let result = eval_str(
+            r#"
+            f[x_] := If[x > 0, Return["positive"], "non-positive"];
+            f[5]
+            "#,
+        );
+        assert_eq!(result, Value::Str("positive".to_string()));
+    }
+
+    #[test]
+    fn test_return_early_false_branch() {
+        let result = eval_str(
+            r#"
+            f[x_] := If[x > 0, Return["positive"], "non-positive"];
+            f[-1]
+            "#,
+        );
+        assert_eq!(result, Value::Str("non-positive".to_string()));
+    }
+
+    #[test]
+    fn test_return_empty() {
+        let result = eval_str("f[x_] := Return[]; f[5]");
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_return_at_top_level() {
+        let result = eval_str("Return[42]");
+        assert_eq!(result, Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_return_from_pure_function() {
+        let result = eval_str("Function[{x}, Return[x * 3]][7]");
+        assert_eq!(result, Value::Integer(Integer::from(21)));
+    }
+
+    #[test]
+    fn test_return_inside_while() {
+        // Body is a single If expression (no ; inside loop bodies)
+        let result = eval_str(
+            "i = 0; While[True, If[i >= 5, Return[i * 10], i = i + 1]]",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(50)));
+    }
+
+    // ── Break/Continue ──
+
+    #[test]
+    fn test_break_from_while() {
+        // Body: when i > 5, Break exits. i = i + 1 runs only when i <= 5 (the else branch).
+        // When i becomes 6, Break fires immediately, so final i = 6.
+        let result = eval_str(
+            "i = 1; While[i < 100, If[i > 5, Break[], i = i + 1]]; i",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(6)));
+    }
+
+    #[test]
+    fn test_continue_in_while() {
+        // Increment in condition, Continue/append in single-expression body
+        let result = eval_str(
+            "result = {}; i = 0; While[(i = i + 1) < 6, If[i == 3, Continue[], result = Append[result, i]]]; result",
+        );
+        assert_eq!(result, Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(4)),
+            Value::Integer(Integer::from(5)),
+        ]));
+    }
+
+    #[test]
+    fn test_break_from_for() {
+        // Initialize i in the outer scope so set_propagate can update it from inside For
+        let result = eval_str(
+            "i = 0; For[i = 1, i < 100, i = i + 1, If[i > 5, Break[]]]; i",
+        );
+        assert_eq!(result, Value::Integer(Integer::from(6)));
+    }
+
+    #[test]
+    fn test_continue_in_for() {
+        let result = eval_str(
+            "result = {}; For[i = 1, i <= 5, i = i + 1, If[i == 3, Continue[], result = Append[result, i]]]; result",
+        );
+        assert_eq!(result, Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(4)),
+            Value::Integer(Integer::from(5)),
+        ]));
+    }
+
+    #[test]
+    fn test_break_from_do() {
+        // Do body is parsed as statement, use single-expression body
+        let result = eval_str(
+            "Do[If[i > 3, Break[]], {i, 1, 10}]",
+        );
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_continue_in_do() {
+        let result = eval_str(
+            "result = {}; Do[If[i == 3 || i == 5, Continue[], result = Append[result, i]], {i, 1, 6}]; result",
+        );
+        assert_eq!(result, Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(4)),
+            Value::Integer(Integer::from(6)),
+        ]));
     }
 
     // ── Parallel computation ──

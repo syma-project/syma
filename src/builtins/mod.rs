@@ -2,6 +2,7 @@ pub mod arithmetic;
 pub mod association;
 pub mod comparison;
 pub mod dataset;
+pub mod developer;
 pub mod discrete;
 pub mod error;
 pub mod ffi;
@@ -542,6 +543,9 @@ pub fn register_builtins(env: &Env) {
         graphics::register,
     );
 
+    // -- Developer context --
+    developer::register(env);
+
     // ── Add SYMA_HOME/Packages to module search path ───────────────
     // This enables `Needs["PackageName"]` to find pure-Syma packages.
     if let Some(syma_home) = std::env::var_os("SYMA_HOME") {
@@ -699,6 +703,19 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 locals: std::collections::HashMap::new(),
             };
             env.register_module("Graphics".to_string(), module);
+        }
+        "Developer" => {
+            // Already registered eagerly during startup; just register the module.
+            let exports: HashMap<String, Value> = crate::builtins::developer::SYMBOLS
+                .iter()
+                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
+                .collect();
+            let module = Value::Module {
+                name: "Developer".to_string(),
+                exports,
+                locals: std::collections::HashMap::new(),
+            };
+            env.register_module("Developer".to_string(), module);
         }
         _ => {
             // Strip trailing backtick context marker ("Combinatorics`" -> "Combinatorics")
@@ -1350,6 +1367,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "HoldComplete[expr] prevents evaluation and attribute processing of expr."
         }
         "Catch" => "Catch[expr] evaluates expr, returning any value passed to Throw.",
+        "Return" => "Return[expr] returns expr from the enclosing function.\nReturn[] returns Null.",
+        "Break" => "Break[] exits the enclosing For, While, or Do loop.",
+        "Continue" => "Continue[] skips to the next iteration of the enclosing loop.",
         "N" => {
             "N[expr] evaluates expr numerically.\nN[expr, prec] uses prec decimal digits of precision."
         }
@@ -1541,6 +1561,53 @@ pub fn get_help(name: &str) -> Option<&'static str> {
              The form function must return an integer for each divisor."
         }
 
+        // -- Developer context --
+        "$MaxMachineInteger" => {
+            "$MaxMachineInteger is the maximum machine-sized integer (2^63 - 1 on 64-bit systems)."
+        }
+        "MachineIntegerQ" => {
+            "MachineIntegerQ[expr] returns True if expr is an integer that fits in a machine-sized integer."
+        }
+        "ToPackedArray" => {
+            "ToPackedArray[list] converts a list of integers or reals to a packed array."
+        }
+        "FromPackedArray" => {
+            "FromPackedArray[packed] converts a packed array back to a regular list."
+        }
+        "PackedArrayQ" => {
+            "PackedArrayQ[expr] returns True if expr is a packed array."
+        }
+        "PackedArrayForm" => {
+            "PackedArrayForm is an option symbol for PackedArray display."
+        }
+        "BesselSimplify" => {
+            "BesselSimplify[expr] attempts to simplify Bessel function expressions."
+        }
+        "GammaSimplify" => {
+            "GammaSimplify[expr] attempts to simplify Gamma function expressions."
+        }
+        "PolyGammaSimplify" => {
+            "PolyGammaSimplify[expr] attempts to simplify PolyGamma expressions."
+        }
+        "ZetaSimplify" => {
+            "ZetaSimplify[expr] attempts to simplify Zeta function expressions."
+        }
+        "PolyLogSimplify" => {
+            "PolyLogSimplify[expr] attempts to simplify PolyLog function expressions."
+        }
+        "TrigToRadicals" => {
+            "TrigToRadicals[expr] converts trigonometric expressions to radical form."
+        }
+        "CellInformation" => {
+            "CellInformation[expr] returns cell information (notebook frontend not yet available)."
+        }
+        "NotebookConvert" => {
+            "NotebookConvert[source] converts notebooks (notebook frontend not yet available)."
+        }
+        "ReplaceAllUnheld" => {
+            "ReplaceAllUnheld[expr, rules] applies replacement rules without holding (wraps ReplaceAll)."
+        }
+
         _ => return None,
     })
 }
@@ -1585,6 +1652,9 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "HoldComplete" => vec!["HoldAllComplete"],
         "Defer" => vec!["HoldAll"],
         "MessageName" => vec!["HoldFirst"],
+        // -- Developer context --
+        "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify"
+        | "ZetaSimplify" | "PolyLogSimplify" | "TrigToRadicals" => vec!["Listable"],
         _ => vec![],
     }
 }

@@ -5,7 +5,7 @@
 ///   JSON wire path (Tier 2 Python, Tier 3 extensions): `values_to_json` / `json_to_value`
 use std::ffi::{CStr, CString};
 
-use crate::value::{DEFAULT_PRECISION, EvalError, NativeType, Value};
+use crate::value::{DEFAULT_PRECISION, EvalError, NativeType, PackedArrayType, Value};
 use rug::{Float, Integer};
 
 // ── Direct C-ABI marshalling ──────────────────────────────────────────────────
@@ -119,6 +119,16 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("w".into(), JVal::Number((img.width() as u64).into()));
             m.insert("h".into(), JVal::Number((img.height() as u64).into()));
             m.insert("c".into(), JVal::String(format!("{:?}", img.color())));
+            let cs = match img.color() {
+                image::ColorType::L8 | image::ColorType::L16 => "Grayscale",
+                image::ColorType::La8 | image::ColorType::La16 => "GrayAlpha",
+                image::ColorType::Rgb8 | image::ColorType::Rgb16
+                | image::ColorType::Rgb32F => "RGB",
+                image::ColorType::Rgba8 | image::ColorType::Rgba16
+                | image::ColorType::Rgba32F => "RGBA",
+                _ => "Unknown",
+            };
+            m.insert("cs".into(), JVal::String(cs.into()));
             JVal::Object(m)
         }
         Value::Dataset(inner) => {
@@ -342,6 +352,18 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("bytecode".into()));
             m.insert("name".into(), JVal::String(bc.name.clone()));
+            JVal::Object(m)
+        }
+        Value::PackedArray(pa) => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("packedarray".into()));
+            let vs: Vec<JVal> = pa.to_values().iter().map(value_to_json_full).collect();
+            m.insert("v".into(), JVal::Array(vs));
+            let type_name = match pa {
+                PackedArrayType::Integer64(_) => "Integer64",
+                PackedArrayType::Real64(_) => "Real64",
+            };
+            m.insert("type".into(), JVal::String(type_name.into()));
             JVal::Object(m)
         }
     }

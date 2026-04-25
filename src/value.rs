@@ -317,6 +317,11 @@ pub enum Value {
     /// Primarily useful for tabular data (lists of associations).
     Dataset(Arc<Value>),
 
+    // ── Packed Array ──
+    /// A packed array of integers or reals stored as flat contiguous vectors.
+    /// Mirrors Wolfram's Developer`PackedArray.
+    PackedArray(PackedArrayType),
+
     // ── Hold ──
     Hold(Box<Value>),
     HoldComplete(Box<Value>),
@@ -336,6 +341,44 @@ pub enum Value {
         fn_ptr: usize,
         signature: NativeSig,
     },
+}
+
+/// Type of data stored in a packed array.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackedArrayType {
+    /// A packed array of 64-bit signed integers.
+    Integer64(Vec<i64>),
+    /// A packed array of 64-bit floating-point numbers.
+    Real64(Vec<f64>),
+}
+
+impl PackedArrayType {
+    /// Convert packed array data back to a Vec<Value>.
+    pub fn to_values(&self) -> Vec<Value> {
+        match self {
+            PackedArrayType::Integer64(v) => v
+                .iter()
+                .map(|&n| Value::Integer(Integer::from(n)))
+                .collect(),
+            PackedArrayType::Real64(v) => v
+                .iter()
+                .map(|&n| Value::Real(Float::with_val(DEFAULT_PRECISION, n)))
+                .collect(),
+        }
+    }
+
+    /// Return the number of elements in this packed array.
+    pub fn len(&self) -> usize {
+        match self {
+            PackedArrayType::Integer64(v) => v.len(),
+            PackedArrayType::Real64(v) => v.len(),
+        }
+    }
+
+    /// Returns true if the packed array is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// A built-in function implementation.
@@ -415,6 +458,12 @@ pub enum EvalError {
     UnknownSymbol(String),
     /// User-thrown error.
     Thrown(Value),
+    /// Return[expr] — return from a function.
+    Return(Value),
+    /// Break[] — break from a loop.
+    Break,
+    /// Continue[] — skip to next iteration in a loop.
+    Continue,
     /// General error message.
     Error(String),
     /// FFI / foreign-function error.
@@ -443,6 +492,9 @@ impl fmt::Display for EvalError {
             }
             EvalError::UnknownSymbol(s) => write!(f, "Unknown symbol: {}", s),
             EvalError::Thrown(v) => write!(f, "Thrown: {}", v),
+            EvalError::Return(v) => write!(f, "Return: {}", v),
+            EvalError::Break => write!(f, "Break"),
+            EvalError::Continue => write!(f, "Continue"),
             EvalError::Error(s) => write!(f, "Error: {}", s),
             EvalError::FfiError(s) => write!(f, "FFI error: {}", s),
         }
@@ -534,6 +586,8 @@ impl PartialEq for Value {
             (Value::Dataset(a), Value::Dataset(b)) => a.as_ref() == b.as_ref(),
             // BytecodeFunction: never equal (like other function types)
             (Value::BytecodeFunction(_), Value::BytecodeFunction(_)) => false,
+            // PackedArray: compare element-by-element
+            (Value::PackedArray(a), Value::PackedArray(b)) => a == b,
             _ => false,
         }
     }
@@ -568,6 +622,7 @@ impl Value {
             Value::Module { .. } => "Module",
             Value::Image(_) => "Image",
             Value::Dataset(_) => "Dataset",
+            Value::PackedArray(_) => "PackedArray",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
             Value::NativeLib { .. } => "NativeLib",
@@ -612,6 +667,7 @@ impl Value {
             ),
             "Module" => matches!(self, Value::Module { .. }),
             "Dataset" => matches!(self, Value::Dataset(_)),
+            "PackedArray" => matches!(self, Value::PackedArray(_)),
             "Object" => matches!(self, Value::Object { .. }),
             "Expr" => true,
             _ => {
@@ -635,6 +691,7 @@ impl Value {
             Value::Rational(r) => !r.is_zero(),
             Value::Null => false,
             Value::List(l) => !l.is_empty(),
+            Value::PackedArray(pa) => !pa.is_empty(),
             _ => true,
         }
     }
@@ -695,6 +752,7 @@ impl Value {
             (Value::Dataset(a), Value::Dataset(b)) => a.as_ref().struct_eq(b.as_ref()),
             (Value::Dataset(a), other) => a.as_ref().struct_eq(other),
             (other, Value::Dataset(a)) => other.struct_eq(a.as_ref()),
+            (Value::PackedArray(a), Value::PackedArray(b)) => a == b,
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
@@ -1033,15 +1091,41 @@ impl fmt::Display for Value {
                     | image::ColorType::Rgba32F => "RGBA",
                     _ => "Unknown",
                 };
-                write!(
-                    f,
-                    "Image[{{{}, {}}}, {}]",
-                    img.width(),
-                    img.height(),
-                    color_space
-                )
+                let is_rgb = matches!(
+                    img.color(),
+                    image::ColorType::Rgb8
+                        | image::ColorType::Rgb16
+                        | image::ColorType::Rgb32F
+                        | image::ColorType::Rgba8
+                        | image::ColorType::Rgba16
+                        | image::ColorType::Rgba32F
+                );
+                if is_rgb {
+                    write!(
+                        f,
+                        "Image[{{{}, {}}}, ColorSpace -> \"{}\", Interleaving -> True]",
+                        img.width(),
+                        img.height(),
+                        color_space
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Image[{{{}, {}}}, ColorSpace -> \"{}\"]",
+                        img.width(),
+                        img.height(),
+                        color_space
+                    )
+                }
             }
             Value::Dataset(inner) => format_dataset(inner, f),
+            Value::PackedArray(ty) => {
+                let (items, type_name) = match ty {
+                    PackedArrayType::Integer64(v) => (v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(), "Integer64"),
+                    PackedArrayType::Real64(v) => (v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(), "Real64"),
+                };
+                write!(f, "PackedArray[{}, {}]", items.join(", "), type_name)
+            }
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),
             Value::NativeLib { name, .. } => write!(f, "NativeLib[\"{}\"]", name),

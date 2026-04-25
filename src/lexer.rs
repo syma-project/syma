@@ -418,7 +418,7 @@ impl Lexer {
         ident.push(first);
 
         while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '`' {
                 ident.push(ch);
                 self.advance();
             } else {
@@ -1203,7 +1203,8 @@ mod tests {
 
     #[test]
     fn test_unexpected_char() {
-        let result = tokenize("1 ` 2");
+        // Backtick is now valid in identifiers (e.g., Developer`MachineIntegerQ).
+        let result = tokenize("1 \\ 2");
         assert!(result.is_err());
     }
 

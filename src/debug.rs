@@ -334,6 +334,7 @@ fn format_value(val: &Value) -> String {
         Value::Image(img) => format!("<image {}x{}>", img.width(), img.height()),
         Value::BytecodeFunction(bc) => format!("<bytecode {}>", bc.name),
         Value::Dataset(_) => "<dataset>".to_string(),
+        Value::PackedArray(pa) => format!("<packedarray {}>", pa.len()),
     }
 }
 

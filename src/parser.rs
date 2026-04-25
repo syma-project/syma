@@ -557,7 +557,17 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_pipe_expr()?;
-        if self.at(&Token::FuncRef) {
+        // Check for assignment: pattern = expr
+        // = has lower precedence than // but higher than &
+        if self.at(&Token::Assign) {
+            self.advance();
+            let rhs = self.parse_expression()?;
+            Ok(Expr::Assign {
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            })
+        // Check for pure function: pattern &
+        } else if self.at(&Token::FuncRef) {
             self.advance();
             Ok(Expr::Pure {
                 body: Box::new(lhs),

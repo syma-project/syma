@@ -69,8 +69,13 @@ fn clamp01(v: f64) -> f64 {
 ///   - 3D (inner len=3): `{{{r,g,b}, ...}, ...}`      → RGB
 ///   - 3D (inner len=4): `{{{r,g,b,a}, ...}, ...}`    → RGBA
 ///
+/// `color_space_hint` can be `"RGB"`, `"Grayscale"`, or `None` for auto-detect.
 /// All pixel values are expected in [0,1].
-fn img_from_list(data: &[Value]) -> Result<image::DynamicImage, EvalError> {
+#[allow(unused_variables)]
+fn img_from_list(
+    data: &[Value],
+    color_space_hint: Option<&str>,
+) -> Result<image::DynamicImage, EvalError> {
     if data.is_empty() {
         return Err(EvalError::Error("Image: data cannot be empty".to_string()));
     }
@@ -295,11 +300,14 @@ fn gamma_correct(v: u8, gamma: f64) -> u8 {
 ///
 /// Create an image from a 2D or 3D list of pixel values.
 /// Values are expected in [0, 1] range.
-/// Auto-detects grayscale (scalar), RGB (3-element), or RGBA (4-element).
+///
+/// Accepts Mathematica-compatible options:
+/// - `ColorSpace -> "RGB"` / `"Grayscale"` / `Automatic` (default)
+/// - `Interleaving -> True` (default) / `False`
 pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "Image requires 1 or 2 arguments: Image[data] or Image[data, \"type\"]".to_string(),
+            "Image requires at least 1 argument".to_string(),
         ));
     }
 
@@ -313,20 +321,46 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
 
-    let _type_hint = if args.len() >= 2 {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
+    // Parse optional arguments: type strings and Rule options
+    let mut _type_hint = "Byte".to_string();
+    let mut color_space: Option<String> = None;
+    let mut _interleaving = true;
+
+    for arg in &args[1..] {
+        match arg {
+            Value::Str(s) => {
+                _type_hint = s.clone();
+            }
+            Value::Rule { lhs, rhs, .. } => {
+                let key = match lhs.as_ref() {
+                    Value::Symbol(s) => s.as_str(),
+                    _ => continue,
+                };
+                match key {
+                    "ColorSpace" => match rhs.as_ref() {
+                        Value::Str(s) => color_space = Some(s.clone()),
+                        Value::Symbol(s) if s == "Automatic" => {
+                            // Automatic = auto-detect (default)
+                        }
+                        _ => {}
+                    },
+                    "Interleaving" => match rhs.as_ref() {
+                        Value::Bool(b) => _interleaving = *b,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
             _ => {
                 return Err(EvalError::Error(
-                    "Image: second argument must be a string type".to_string(),
+                    "Image: unexpected argument type — expected string type or Rule option"
+                        .to_string(),
                 ));
             }
         }
-    } else {
-        "Byte".to_string()
-    };
+    }
 
-    let img = img_from_list(data)?;
+    let img = img_from_list(data, color_space.as_deref())?;
     Ok(Value::Image(Arc::new(img)))
 }
 
