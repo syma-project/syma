@@ -122,10 +122,12 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             let cs = match img.color() {
                 image::ColorType::L8 | image::ColorType::L16 => "Grayscale",
                 image::ColorType::La8 | image::ColorType::La16 => "GrayAlpha",
-                image::ColorType::Rgb8 | image::ColorType::Rgb16
-                | image::ColorType::Rgb32F => "RGB",
-                image::ColorType::Rgba8 | image::ColorType::Rgba16
-                | image::ColorType::Rgba32F => "RGBA",
+                image::ColorType::Rgb8 | image::ColorType::Rgb16 | image::ColorType::Rgb32F => {
+                    "RGB"
+                }
+                image::ColorType::Rgba8 | image::ColorType::Rgba16 | image::ColorType::Rgba32F => {
+                    "RGBA"
+                }
                 _ => "Unknown",
             };
             m.insert("cs".into(), JVal::String(cs.into()));

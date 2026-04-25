@@ -478,7 +478,7 @@ pub fn builtin_table(args: &[Value]) -> Result<Value, EvalError> {
         _ => {
             return Err(EvalError::Error(
                 "Table: dimension spec must be an integer".to_string(),
-            ))
+            ));
         }
     };
     let Some(n_usize) = n.to_usize() else {

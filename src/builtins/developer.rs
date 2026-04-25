@@ -130,17 +130,11 @@ fn builtin_to_packed_array(args: &[Value]) -> Result<Value, EvalError> {
         Value::List(items) => {
             // If all items are Integer, pack as Integer64
             if items.iter().all(|v| matches!(v, Value::Integer(_))) {
-                let ints: Vec<i64> = items
-                    .iter()
-                    .filter_map(|v| v.to_integer())
-                    .collect();
+                let ints: Vec<i64> = items.iter().filter_map(|v| v.to_integer()).collect();
                 return Ok(Value::PackedArray(PackedArrayType::Integer64(ints)));
             }
             // If all items are convertible to Real, pack as Real64
-            let reals: Vec<f64> = items
-                .iter()
-                .filter_map(|v| v.to_real())
-                .collect();
+            let reals: Vec<f64> = items.iter().filter_map(|v| v.to_real()).collect();
             if reals.len() == items.len() {
                 return Ok(Value::PackedArray(PackedArrayType::Real64(reals)));
             }
@@ -185,7 +179,9 @@ fn bessel_simplify_value(val: &Value) -> Value {
             let inner = simplify_wide(&args[1]);
             match &args[0] {
                 // BesselJ[1/2, z] = Sqrt[2/(Pi*z)] * Sin[z]
-                Value::Rational(r) if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Times",
                         &[
@@ -216,7 +212,9 @@ fn bessel_simplify_value(val: &Value) -> Value {
                     )
                 }
                 // BesselJ[-1/2, z] = Sqrt[2/(Pi*z)] * Cos[z]
-                Value::Rational(r) if *r.numer() == Integer::from(-1) && *r.denom() == Integer::from(2) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(-1) && *r.denom() == Integer::from(2) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Times",
                         &[
@@ -248,10 +246,7 @@ fn bessel_simplify_value(val: &Value) -> Value {
                 }
                 _ => {
                     // Fall through to general simplification
-                    crate::builtins::symbolic::simplify_call(
-                        "BesselJ",
-                        &[args[0].clone(), inner],
-                    )
+                    crate::builtins::symbolic::simplify_call("BesselJ", &[args[0].clone(), inner])
                 }
             }
         }
@@ -280,7 +275,9 @@ fn gamma_simplify_value(val: &Value) -> Value {
             let inner = gamma_simplify_value(&args[0]);
             match &inner {
                 // Gamma[1/2] = Sqrt[Pi]
-                Value::Rational(r) if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Sqrt",
                         &[Value::Symbol("Pi".to_string())],
@@ -298,7 +295,9 @@ fn gamma_simplify_value(val: &Value) -> Value {
                 Value::Call {
                     head: h,
                     args: plus_args,
-                } if h == "Plus" && plus_args.len() == 2 && plus_args[1] == Value::Integer(Integer::from(1)) =>
+                } if h == "Plus"
+                    && plus_args.len() == 2
+                    && plus_args[1] == Value::Integer(Integer::from(1)) =>
                 {
                     if let Some(n) = plus_args[0].to_integer() {
                         if n >= 0 {
@@ -347,17 +346,17 @@ fn poly_gamma_simplify_value(val: &Value) -> Value {
             let inner = poly_gamma_simplify_value(&call_args[0]);
             match &inner {
                 // PolyGamma[1] = -EulerGamma
-                Value::Integer(n) if *n == 1 => {
-                    crate::builtins::symbolic::simplify_call(
-                        "Times",
-                        &[
-                            Value::Integer(Integer::from(-1)),
-                            Value::Symbol("EulerGamma".to_string()),
-                        ],
-                    )
-                }
+                Value::Integer(n) if *n == 1 => crate::builtins::symbolic::simplify_call(
+                    "Times",
+                    &[
+                        Value::Integer(Integer::from(-1)),
+                        Value::Symbol("EulerGamma".to_string()),
+                    ],
+                ),
                 // PolyGamma[1/2] = -EulerGamma - 2*Log[2]
-                Value::Rational(r) if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Plus",
                         &[
@@ -412,53 +411,50 @@ fn zeta_simplify_value(val: &Value) -> Value {
             let inner = zeta_simplify_value(&args[0]);
             match &inner {
                 // Zeta[2] = Pi^2/6
-                Value::Integer(n) if *n == 2 => {
-                    crate::builtins::symbolic::simplify_call(
-                        "Times",
-                        &[
-                            crate::builtins::symbolic::simplify_call(
-                                "Power",
-                                &[
-                                    Value::Symbol("Pi".to_string()),
-                                    Value::Integer(Integer::from(2)),
-                                ],
-                            ),
-                            crate::builtins::symbolic::simplify_call(
-                                "Power",
-                                &[
-                                    Value::Integer(Integer::from(6)),
-                                    Value::Integer(Integer::from(-1)),
-                                ],
-                            ),
-                        ],
-                    )
-                }
+                Value::Integer(n) if *n == 2 => crate::builtins::symbolic::simplify_call(
+                    "Times",
+                    &[
+                        crate::builtins::symbolic::simplify_call(
+                            "Power",
+                            &[
+                                Value::Symbol("Pi".to_string()),
+                                Value::Integer(Integer::from(2)),
+                            ],
+                        ),
+                        crate::builtins::symbolic::simplify_call(
+                            "Power",
+                            &[
+                                Value::Integer(Integer::from(6)),
+                                Value::Integer(Integer::from(-1)),
+                            ],
+                        ),
+                    ],
+                ),
                 // Zeta[4] = Pi^4/90
-                Value::Integer(n) if *n == 4 => {
-                    crate::builtins::symbolic::simplify_call(
-                        "Times",
-                        &[
-                            crate::builtins::symbolic::simplify_call(
-                                "Power",
-                                &[
-                                    Value::Symbol("Pi".to_string()),
-                                    Value::Integer(Integer::from(4)),
-                                ],
-                            ),
-                            crate::builtins::symbolic::simplify_call(
-                                "Power",
-                                &[
-                                    Value::Integer(Integer::from(90)),
-                                    Value::Integer(Integer::from(-1)),
-                                ],
-                            ),
-                        ],
-                    )
-                }
+                Value::Integer(n) if *n == 4 => crate::builtins::symbolic::simplify_call(
+                    "Times",
+                    &[
+                        crate::builtins::symbolic::simplify_call(
+                            "Power",
+                            &[
+                                Value::Symbol("Pi".to_string()),
+                                Value::Integer(Integer::from(4)),
+                            ],
+                        ),
+                        crate::builtins::symbolic::simplify_call(
+                            "Power",
+                            &[
+                                Value::Integer(Integer::from(90)),
+                                Value::Integer(Integer::from(-1)),
+                            ],
+                        ),
+                    ],
+                ),
                 // Zeta[0] = -1/2
-                Value::Integer(n) if *n == 0 => {
-                    Value::Rational(Box::new(rug::Rational::from((Integer::from(-1), Integer::from(2)))))
-                }
+                Value::Integer(n) if *n == 0 => Value::Rational(Box::new(rug::Rational::from((
+                    Integer::from(-1),
+                    Integer::from(2),
+                )))),
                 _ => Value::Call {
                     head: "Zeta".to_string(),
                     args: vec![inner],
@@ -555,9 +551,13 @@ fn trig_to_radicals_value(val: &Value) -> Value {
                     let c = simplify_trig_cos(&inner);
                     crate::builtins::symbolic::simplify_call(
                         "Times",
-                        &[s, crate::builtins::symbolic::simplify_call(
-                            "Power", &[c, Value::Integer(Integer::from(-1))]
-                        )],
+                        &[
+                            s,
+                            crate::builtins::symbolic::simplify_call(
+                                "Power",
+                                &[c, Value::Integer(Integer::from(-1))],
+                            ),
+                        ],
                     )
                 }
                 _ => Value::Call {
@@ -581,20 +581,21 @@ fn trig_to_radicals_value(val: &Value) -> Value {
 fn simplify_trig_sin(arg: &Value) -> Value {
     match arg {
         // Sin[Pi/4] = 1/Sqrt[2]
-        Value::Call {
-            head,
-            args,
-        } if head == "Times"
-            && args.len() == 2
-            && args[0] == Value::Symbol("Pi".to_string()) =>
+        Value::Call { head, args }
+            if head == "Times" && args.len() == 2 && args[0] == Value::Symbol("Pi".to_string()) =>
         {
             match &args[1] {
-                Value::Rational(r) if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Power",
                         &[
                             Value::Integer(Integer::from(2)),
-                            Value::Rational(Box::new(rug::Rational::from((Integer::from(-1), Integer::from(2))))),
+                            Value::Rational(Box::new(rug::Rational::from((
+                                Integer::from(-1),
+                                Integer::from(2),
+                            )))),
                         ],
                     )
                 }
@@ -617,20 +618,21 @@ fn simplify_trig_sin(arg: &Value) -> Value {
 fn simplify_trig_cos(arg: &Value) -> Value {
     match arg {
         // Cos[Pi/4] = 1/Sqrt[2]
-        Value::Call {
-            head,
-            args,
-        } if head == "Times"
-            && args.len() == 2
-            && args[0] == Value::Symbol("Pi".to_string()) =>
+        Value::Call { head, args }
+            if head == "Times" && args.len() == 2 && args[0] == Value::Symbol("Pi".to_string()) =>
         {
             match &args[1] {
-                Value::Rational(r) if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) => {
+                Value::Rational(r)
+                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) =>
+                {
                     crate::builtins::symbolic::simplify_call(
                         "Power",
                         &[
                             Value::Integer(Integer::from(2)),
-                            Value::Rational(Box::new(rug::Rational::from((Integer::from(-1), Integer::from(2))))),
+                            Value::Rational(Box::new(rug::Rational::from((
+                                Integer::from(-1),
+                                Integer::from(2),
+                            )))),
                         ],
                     )
                 }
@@ -672,12 +674,10 @@ fn builtin_notebook_convert(_args: &[Value]) -> Result<Value, EvalError> {
 /// Helper: simplify a value tree broadly (recursively call simplify_value).
 fn simplify_wide(val: &Value) -> Value {
     match val {
-        Value::Call { head, args } => {
-            crate::builtins::symbolic::simplify_call(
-                head,
-                &args.iter().map(simplify_wide).collect::<Vec<_>>(),
-            )
-        }
+        Value::Call { head, args } => crate::builtins::symbolic::simplify_call(
+            head,
+            &args.iter().map(simplify_wide).collect::<Vec<_>>(),
+        ),
         _ => val.clone(),
     }
 }
@@ -714,9 +714,9 @@ mod tests {
 
     #[test]
     fn test_machine_integer_q_false_real() {
-        let result = builtin_machine_integer_q(&[Value::Rational(Box::new(
-            rug::Rational::from((Integer::from(1), Integer::from(2))),
-        ))])
+        let result = builtin_machine_integer_q(&[Value::Rational(Box::new(rug::Rational::from(
+            (Integer::from(1), Integer::from(2)),
+        )))])
         .unwrap();
         assert_eq!(result, Value::Bool(false));
     }
@@ -724,8 +724,7 @@ mod tests {
     #[test]
     fn test_machine_integer_q_false_bigint() {
         let big = Integer::from(i64::MAX) + Integer::from(1);
-        let result =
-            builtin_machine_integer_q(&[Value::Integer(big)]).unwrap();
+        let result = builtin_machine_integer_q(&[Value::Integer(big)]).unwrap();
         assert_eq!(result, Value::Bool(false));
     }
 
@@ -737,7 +736,9 @@ mod tests {
             Value::Integer(Integer::from(3)),
         ]);
         let result = builtin_to_packed_array(&[list]).unwrap();
-        assert!(matches!(result, Value::PackedArray(PackedArrayType::Integer64(v)) if v == vec![1i64, 2, 3]));
+        assert!(
+            matches!(result, Value::PackedArray(PackedArrayType::Integer64(v)) if v == vec![1i64, 2, 3])
+        );
     }
 
     #[test]
@@ -802,10 +803,7 @@ mod tests {
         // Gamma[1/2] simplifies to Sqrt[Pi], which is Power[Pi, 1/2]
         assert_eq!(
             result,
-            crate::builtins::symbolic::simplify_call(
-                "Sqrt",
-                &[Value::Symbol("Pi".to_string())],
-            )
+            crate::builtins::symbolic::simplify_call("Sqrt", &[Value::Symbol("Pi".to_string())],)
         );
     }
 
@@ -817,10 +815,7 @@ mod tests {
         };
         let result = zeta_simplify_value(&expr);
         // Should be Pi^2/6
-        assert!(matches!(
-            result,
-            Value::Call { .. }
-        ));
+        assert!(matches!(result, Value::Call { .. }));
     }
 
     #[test]

@@ -1325,18 +1325,14 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             "Break" => {
                 // Break[] — exit the enclosing loop
                 if !args.is_empty() {
-                    return Err(EvalError::Error(
-                        "Break takes no arguments".to_string(),
-                    ));
+                    return Err(EvalError::Error("Break takes no arguments".to_string()));
                 }
                 Err(EvalError::Break)
             }
             "Continue" => {
                 // Continue[] — skip to next loop iteration
                 if !args.is_empty() {
-                    return Err(EvalError::Error(
-                        "Continue takes no arguments".to_string(),
-                    ));
+                    return Err(EvalError::Error("Continue takes no arguments".to_string()));
                 }
                 Err(EvalError::Continue)
             }
@@ -2895,9 +2891,7 @@ mod tests {
 
     #[test]
     fn test_return_from_function() {
-        let result = eval_str(
-            "f[x_] := Return[x * 2]; f[5]",
-        );
+        let result = eval_str("f[x_] := Return[x * 2]; f[5]");
         assert_eq!(result, Value::Integer(Integer::from(10)));
     }
 
@@ -2944,9 +2938,7 @@ mod tests {
     #[test]
     fn test_return_inside_while() {
         // Body is a single If expression (no ; inside loop bodies)
-        let result = eval_str(
-            "i = 0; While[True, If[i >= 5, Return[i * 10], i = i + 1]]",
-        );
+        let result = eval_str("i = 0; While[True, If[i >= 5, Return[i * 10], i = i + 1]]");
         assert_eq!(result, Value::Integer(Integer::from(50)));
     }
 
@@ -2956,9 +2948,7 @@ mod tests {
     fn test_break_from_while() {
         // Body: when i > 5, Break exits. i = i + 1 runs only when i <= 5 (the else branch).
         // When i becomes 6, Break fires immediately, so final i = 6.
-        let result = eval_str(
-            "i = 1; While[i < 100, If[i > 5, Break[], i = i + 1]]; i",
-        );
+        let result = eval_str("i = 1; While[i < 100, If[i > 5, Break[], i = i + 1]]; i");
         assert_eq!(result, Value::Integer(Integer::from(6)));
     }
 
@@ -2968,20 +2958,21 @@ mod tests {
         let result = eval_str(
             "result = {}; i = 0; While[(i = i + 1) < 6, If[i == 3, Continue[], result = Append[result, i]]]; result",
         );
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(5)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(5)),
+            ])
+        );
     }
 
     #[test]
     fn test_break_from_for() {
         // Initialize i in the outer scope so set_propagate can update it from inside For
-        let result = eval_str(
-            "i = 0; For[i = 1, i < 100, i = i + 1, If[i > 5, Break[]]]; i",
-        );
+        let result = eval_str("i = 0; For[i = 1, i < 100, i = i + 1, If[i > 5, Break[]]]; i");
         assert_eq!(result, Value::Integer(Integer::from(6)));
     }
 
@@ -2990,20 +2981,21 @@ mod tests {
         let result = eval_str(
             "result = {}; For[i = 1, i <= 5, i = i + 1, If[i == 3, Continue[], result = Append[result, i]]]; result",
         );
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(5)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(5)),
+            ])
+        );
     }
 
     #[test]
     fn test_break_from_do() {
         // Do body is parsed as statement, use single-expression body
-        let result = eval_str(
-            "Do[If[i > 3, Break[]], {i, 1, 10}]",
-        );
+        let result = eval_str("Do[If[i > 3, Break[]], {i, 1, 10}]");
         assert_eq!(result, Value::Null);
     }
 
@@ -3012,12 +3004,15 @@ mod tests {
         let result = eval_str(
             "result = {}; Do[If[i == 3 || i == 5, Continue[], result = Append[result, i]], {i, 1, 6}]; result",
         );
-        assert_eq!(result, Value::List(vec![
-            Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(2)),
-            Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(6)),
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(4)),
+                Value::Integer(Integer::from(6)),
+            ])
+        );
     }
 
     // ── Parallel computation ──

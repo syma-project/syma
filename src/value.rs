@@ -13,6 +13,7 @@ use rug::Rational;
 use crate::ast::Expr;
 use crate::bytecode::BytecodeFunctionDef;
 use crate::env::Env;
+use image::GenericImageView;
 
 // ── FFI types ─────────────────────────────────────────────────────────────────
 
@@ -1080,18 +1081,109 @@ impl fmt::Display for Value {
                 )
             }
             Value::Image(img) => {
+                // Image[NumericArray[<pixels>, "Real32"], "Real32", ColorSpace -> <cs>, Interleaving -> <il>]
+                write!(f, "Image[NumericArray[")?;
+                let (w, h) = (img.width(), img.height());
+                match img.color() {
+                    // Grayscale: 2D list of scalars
+                    image::ColorType::L8 | image::ColorType::L16 => {
+                        write!(f, "{{")?;
+                        for y in 0..h {
+                            if y > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{{")?;
+                            for x in 0..w {
+                                if x > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                let v = img.get_pixel(x, y)[0] as f64 / 255.0;
+                                write!(f, "{:.6}", v)?;
+                            }
+                            write!(f, "}}")?;
+                        }
+                        write!(f, "}}")?;
+                    }
+                    // RGB/RGBA: 3D list of channel tuples
+                    image::ColorType::Rgb8
+                    | image::ColorType::Rgb16
+                    | image::ColorType::Rgb32F
+                    | image::ColorType::Rgba8
+                    | image::ColorType::Rgba16
+                    | image::ColorType::Rgba32F => {
+                        let channels = match img.color() {
+                            image::ColorType::Rgba8
+                            | image::ColorType::Rgba16
+                            | image::ColorType::Rgba32F => 4,
+                            _ => 3,
+                        };
+                        write!(f, "{{")?;
+                        for y in 0..h {
+                            if y > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{{")?;
+                            for x in 0..w {
+                                if x > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                write!(f, "{{")?;
+                                let p = img.get_pixel(x, y);
+                                for c in 0..channels {
+                                    if c > 0 {
+                                        write!(f, ", ")?;
+                                    }
+                                    write!(f, "{:.6}", p[c] as f64 / 255.0)?;
+                                }
+                                write!(f, "}}")?;
+                            }
+                            write!(f, "}}")?;
+                        }
+                        write!(f, "}}")?;
+                    }
+                    _ => {
+                        // Fallback: convert to RGB8
+                        let rgb = img.to_rgb8();
+                        write!(f, "{{")?;
+                        for y in 0..h {
+                            if y > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{{")?;
+                            for x in 0..w {
+                                if x > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                write!(f, "{{")?;
+                                let p = rgb.get_pixel(x, y);
+                                for c in 0..3 {
+                                    if c > 0 {
+                                        write!(f, ", ")?;
+                                    }
+                                    write!(f, "{:.6}", p[c] as f64 / 255.0)?;
+                                }
+                                write!(f, "}}")?;
+                            }
+                            write!(f, "}}")?;
+                        }
+                        write!(f, "}}")?;
+                    }
+                }
+                write!(f, ", \"Real32\"]")?;
+                write!(f, ", \"Real32\"")?;
                 let color_space = match img.color() {
-                    image::ColorType::L8 | image::ColorType::L16 => "Grayscale",
-                    image::ColorType::La8 | image::ColorType::La16 => "GrayAlpha",
+                    image::ColorType::L8 | image::ColorType::L16 => "Automatic",
+                    image::ColorType::La8 | image::ColorType::La16 => "Automatic",
                     image::ColorType::Rgb8 | image::ColorType::Rgb16 | image::ColorType::Rgb32F => {
                         "RGB"
                     }
                     image::ColorType::Rgba8
                     | image::ColorType::Rgba16
                     | image::ColorType::Rgba32F => "RGBA",
-                    _ => "Unknown",
+                    _ => "Automatic",
                 };
-                let is_rgb = matches!(
+                write!(f, ", ColorSpace -> {}", color_space)?;
+                let is_color = matches!(
                     img.color(),
                     image::ColorType::Rgb8
                         | image::ColorType::Rgb16
@@ -1100,29 +1192,24 @@ impl fmt::Display for Value {
                         | image::ColorType::Rgba16
                         | image::ColorType::Rgba32F
                 );
-                if is_rgb {
-                    write!(
-                        f,
-                        "Image[{{{}, {}}}, ColorSpace -> \"{}\", Interleaving -> True]",
-                        img.width(),
-                        img.height(),
-                        color_space
-                    )
+                if is_color {
+                    write!(f, ", Interleaving -> True")?;
                 } else {
-                    write!(
-                        f,
-                        "Image[{{{}, {}}}, ColorSpace -> \"{}\"]",
-                        img.width(),
-                        img.height(),
-                        color_space
-                    )
+                    write!(f, ", Interleaving -> None")?;
                 }
+                write!(f, "]")
             }
             Value::Dataset(inner) => format_dataset(inner, f),
             Value::PackedArray(ty) => {
                 let (items, type_name) = match ty {
-                    PackedArrayType::Integer64(v) => (v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(), "Integer64"),
-                    PackedArrayType::Real64(v) => (v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(), "Real64"),
+                    PackedArrayType::Integer64(v) => (
+                        v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(),
+                        "Integer64",
+                    ),
+                    PackedArrayType::Real64(v) => (
+                        v.iter().map(|n| format!("{}", n)).collect::<Vec<_>>(),
+                        "Real64",
+                    ),
                 };
                 write!(f, "PackedArray[{}, {}]", items.join(", "), type_name)
             }

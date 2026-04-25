@@ -56,10 +56,7 @@ pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
 
 /// Evaluate multi-statement input, returning the result of each statement.
 /// `None` in the returned vector means the statement was suppressed by `;`.
-pub fn eval_input_with_results(
-    input: &str,
-    env: &env::Env,
-) -> Option<Vec<Option<value::Value>>> {
+pub fn eval_input_with_results(input: &str, env: &env::Env) -> Option<Vec<Option<value::Value>>> {
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
         Err(e) => {

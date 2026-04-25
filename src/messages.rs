@@ -47,6 +47,12 @@ fn registry() -> &'static Mutex<HashMap<&'static str, &'static str>> {
         // General numeric messages
         m.insert("General::zero", "The argument `1` should be nonzero.");
 
+        // Image messages
+        m.insert(
+            "Image::imgarray",
+            "The specified argument `1` should be an array of rank 2 or 3 with machine-sized numbers.",
+        );
+
         Mutex::new(m)
     })
 }

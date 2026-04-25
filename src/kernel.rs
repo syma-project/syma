@@ -226,10 +226,7 @@ mod tests {
         let results = result.results.expect("expected results");
         let stmt = results[0].as_ref().expect("expected a result");
         assert_eq!(stmt.output, "3");
-        assert_eq!(
-            stmt.value.get("v").and_then(|v| v.as_str()),
-            Some("3")
-        );
+        assert_eq!(stmt.value.get("v").and_then(|v| v.as_str()), Some("3"));
     }
 
     #[test]
@@ -302,8 +299,7 @@ mod tests {
         let kernel = make_kernel();
         // Default (no format) returns FullForm: Plus[Power[x, 2], Times[2, x, y], Power[y, 2]]
         let default_response = kernel.eval_json(r#"{"input": "Expand[(x+y)^2]"}"#);
-        let default_parsed: serde_json::Value =
-            serde_json::from_str(&default_response).unwrap();
+        let default_parsed: serde_json::Value = serde_json::from_str(&default_response).unwrap();
         let default_output = default_parsed["results"][0]["output"]
             .as_str()
             .unwrap_or("");

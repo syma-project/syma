@@ -1367,7 +1367,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "HoldComplete[expr] prevents evaluation and attribute processing of expr."
         }
         "Catch" => "Catch[expr] evaluates expr, returning any value passed to Throw.",
-        "Return" => "Return[expr] returns expr from the enclosing function.\nReturn[] returns Null.",
+        "Return" => {
+            "Return[expr] returns expr from the enclosing function.\nReturn[] returns Null."
+        }
         "Break" => "Break[] exits the enclosing For, While, or Do loop.",
         "Continue" => "Continue[] skips to the next iteration of the enclosing loop.",
         "N" => {
@@ -1574,24 +1576,16 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "FromPackedArray" => {
             "FromPackedArray[packed] converts a packed array back to a regular list."
         }
-        "PackedArrayQ" => {
-            "PackedArrayQ[expr] returns True if expr is a packed array."
-        }
-        "PackedArrayForm" => {
-            "PackedArrayForm is an option symbol for PackedArray display."
-        }
+        "PackedArrayQ" => "PackedArrayQ[expr] returns True if expr is a packed array.",
+        "PackedArrayForm" => "PackedArrayForm is an option symbol for PackedArray display.",
         "BesselSimplify" => {
             "BesselSimplify[expr] attempts to simplify Bessel function expressions."
         }
-        "GammaSimplify" => {
-            "GammaSimplify[expr] attempts to simplify Gamma function expressions."
-        }
+        "GammaSimplify" => "GammaSimplify[expr] attempts to simplify Gamma function expressions.",
         "PolyGammaSimplify" => {
             "PolyGammaSimplify[expr] attempts to simplify PolyGamma expressions."
         }
-        "ZetaSimplify" => {
-            "ZetaSimplify[expr] attempts to simplify Zeta function expressions."
-        }
+        "ZetaSimplify" => "ZetaSimplify[expr] attempts to simplify Zeta function expressions.",
         "PolyLogSimplify" => {
             "PolyLogSimplify[expr] attempts to simplify PolyLog function expressions."
         }
@@ -1653,8 +1647,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Defer" => vec!["HoldAll"],
         "MessageName" => vec!["HoldFirst"],
         // -- Developer context --
-        "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify"
-        | "ZetaSimplify" | "PolyLogSimplify" | "TrigToRadicals" => vec!["Listable"],
+        "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify" | "ZetaSimplify"
+        | "PolyLogSimplify" | "TrigToRadicals" => vec!["Listable"],
         _ => vec![],
     }
 }

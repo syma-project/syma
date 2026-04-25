@@ -314,9 +314,10 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
     let data = match &args[0] {
         Value::List(items) => items,
         other => {
-            return Err(EvalError::TypeError {
-                expected: "List".to_string(),
-                got: other.type_name().to_string(),
+            crate::messages::emit("Image::imgarray", &[format!("{}", other)]);
+            return Ok(Value::Call {
+                head: "Image".to_string(),
+                args: args.to_vec(),
             });
         }
     };
@@ -360,7 +361,16 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
 
-    let img = img_from_list(data, color_space.as_deref())?;
+    let img = match img_from_list(data, color_space.as_deref()) {
+        Ok(img) => img,
+        Err(_) => {
+            crate::messages::emit("Image::imgarray", &[format!("{}", args[0])]);
+            return Ok(Value::Call {
+                head: "Image".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
     Ok(Value::Image(Arc::new(img)))
 }
 
@@ -978,7 +988,11 @@ mod tests {
     #[test]
     fn test_image_empty_data() {
         let result = builtin_image(&[Value::List(vec![])]);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Ok(Value::Call { ref head, .. }) if head == "Image"),
+            "empty list should return unevaluated, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -991,7 +1005,22 @@ mod tests {
             ]),
         ]);
         let result = builtin_image(&[ragged]);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Ok(Value::Call { ref head, .. }) if head == "Image"),
+            "ragged array should return unevaluated, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_image_invalid_arg_returns_unevaluated() {
+        // Image[42] should not error; should return unevaluated Image[42]
+        let result = builtin_image(&[Value::Integer(rug::Integer::from(42))]);
+        assert!(
+            matches!(result, Ok(Value::Call { ref head, ref args }) if head == "Image" && args.len() == 1),
+            "expected Image[42] unevaluated, got {:?}",
+            result
+        );
     }
 
     #[test]
