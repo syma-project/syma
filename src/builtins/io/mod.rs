@@ -17,11 +17,11 @@ use crate::value::Value;
 use std::io::Write as IoWrite;
 
 pub fn builtin_print(args: &[Value]) -> Result<Value, EvalError> {
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            print!(" ");
+    for arg in args {
+        match arg {
+            Value::Str(s) => print!("{}", s),
+            other => print!("{}", other),
         }
-        print!("{}", arg);
     }
     println!();
     Ok(Value::Null)
@@ -45,25 +45,25 @@ pub fn builtin_input(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(input.trim().to_string()))
 }
 
-/// Write[args...] — print space-separated args without a trailing newline.
+/// Write[args...] — print concatenated args without a trailing newline.
 pub fn builtin_write(args: &[Value]) -> Result<Value, EvalError> {
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            print!(" ");
+    for arg in args {
+        match arg {
+            Value::Str(s) => print!("{}", s),
+            other => print!("{}", other),
         }
-        print!("{}", arg);
     }
     std::io::stdout().flush().ok();
     Ok(Value::Null)
 }
 
-/// WriteLine[args...] — print space-separated args followed by a newline.
+/// WriteLine[args...] — print concatenated args followed by a newline.
 pub fn builtin_write_line(args: &[Value]) -> Result<Value, EvalError> {
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            print!(" ");
+    for arg in args {
+        match arg {
+            Value::Str(s) => print!("{}", s),
+            other => print!("{}", other),
         }
-        print!("{}", arg);
     }
     println!();
     Ok(Value::Null)

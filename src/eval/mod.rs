@@ -431,7 +431,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             s
                         )));
                     }
-                    env.set(s.clone(), val.clone());
+                    // Propagate assignment to the scope where the symbol was defined,
+                    // so that assignments inside Do/For/While bodies update outer bindings.
+                    env.set_propagate(s.clone(), val.clone());
                     Ok(val)
                 }
                 // LocalSymbol["name"] = value
@@ -475,6 +477,39 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     } else {
                         Err(EvalError::Error("Invalid assignment target".to_string()))
                     }
+                }
+                // x[[i]] = val  (desugared to Assign(Part[x, i], val))
+                Expr::Call {
+                    head,
+                    args: part_args,
+                } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
+                    && !part_args.is_empty() =>
+                {
+                    let var_name = match &part_args[0] {
+                        Expr::Symbol(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::Error(
+                                "Part assignment: collection must be a symbol".to_string(),
+                            ))
+                        }
+                    };
+                    let current =
+                        env.get(&var_name).ok_or_else(|| EvalError::Error(format!(
+                            "Symbol {} is not defined",
+                            var_name
+                        )))?;
+                    let indices: Vec<i64> = part_args[1..]
+                        .iter()
+                        .map(|idx| {
+                            eval(idx, env)?.to_integer().ok_or_else(|| EvalError::TypeError {
+                                expected: "Integer".to_string(),
+                                got: "non-Integer".to_string(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let updated = set_part(current, &indices, val.clone())?;
+                    env.set(var_name, updated);
+                    Ok(val)
                 }
                 _ => Err(EvalError::Error("Invalid assignment target".to_string())),
             }
@@ -1055,7 +1090,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 let val = eval(&args[1], env)?;
                 match &args[0] {
                     Expr::Symbol(name) => {
-                        env.set(name.clone(), val.clone());
+                        env.set_propagate(name.clone(), val.clone());
                         Ok(val)
                     }
                     // this.field = value  (desugared to Set[field[this], value])
@@ -1768,6 +1803,25 @@ fn has_sequence_pattern(expr: &Expr) -> bool {
         Expr::List(items) => items.iter().any(has_sequence_pattern),
         Expr::Call { args, .. } => args.iter().any(has_sequence_pattern),
         _ => false,
+    }
+}
+
+/// Recursively update a nested structure at the given index path.
+/// Used to implement `x[[i]] = val` and `x[[i, j]] = val`.
+fn set_part(current: Value, indices: &[i64], val: Value) -> Result<Value, EvalError> {
+    if indices.is_empty() {
+        return Ok(val);
+    }
+    match current {
+        Value::List(mut items) => {
+            let idx = crate::builtins::list::normalize_index(indices[0], items.len())?;
+            items[idx] = set_part(items[idx].clone(), &indices[1..], val)?;
+            Ok(Value::List(items))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: other.type_name().to_string(),
+        }),
     }
 }
 

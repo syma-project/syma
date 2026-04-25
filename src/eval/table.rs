@@ -172,6 +172,26 @@ fn eval_table_recursive(
         }
     };
 
+    // {n} — count-only form (no iterator variable)
+    if iter_items.len() == 1 {
+        let n = super::eval(&iter_items[0], env)?
+            .to_integer()
+            .ok_or_else(|| EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: "non-Integer".to_string(),
+            })?;
+        if n < 0 {
+            return Err(EvalError::Error(
+                "Table count must be non-negative".to_string(),
+            ));
+        }
+        let mut result = Vec::new();
+        for _ in 0..n {
+            result.push(eval_table_recursive(expr, iter_specs, env, depth + 1)?);
+        }
+        return Ok(Value::List(result));
+    }
+
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
     // Generate results for this iterator level

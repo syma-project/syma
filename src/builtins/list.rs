@@ -42,7 +42,7 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// Normalize a 1-indexed position to a 0-indexed usize.
 /// Supports negative indices (count from end).
 /// `size` is the number of valid slots.
-fn normalize_index(index: i64, size: usize) -> Result<usize, EvalError> {
+pub(crate) fn normalize_index(index: i64, size: usize) -> Result<usize, EvalError> {
     if index == 0 {
         return Err(EvalError::IndexOutOfBounds {
             index,

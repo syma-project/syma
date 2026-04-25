@@ -1156,7 +1156,7 @@ impl Parser {
             Token::Do => {
                 self.advance();
                 self.expect(&Token::LBracket)?;
-                let body = self.parse_expression()?;
+                let body = self.parse_statement()?;
                 self.expect(&Token::Comma)?;
                 self.expect(&Token::LBrace)?;
                 let var = self.expect_ident()?;

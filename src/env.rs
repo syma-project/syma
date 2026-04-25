@@ -97,6 +97,24 @@ impl Scope {
         self.bindings.insert(name, value);
     }
 
+    /// Set a variable, walking up the parent chain to update an existing binding.
+    /// If not found in any parent, creates a new binding in the current scope.
+    pub fn set_propagate(&mut self, name: String, value: Value) {
+        if self.bindings.contains_key(&name) {
+            self.bindings.insert(name, value);
+        } else if let Some(ref parent) = self.parent {
+            let mut p = parent.lock().unwrap();
+            if p.get(&name).is_some() {
+                p.set_propagate(name, value);
+                return;
+            }
+            drop(p);
+            self.bindings.insert(name, value);
+        } else {
+            self.bindings.insert(name, value);
+        }
+    }
+
     pub fn set_local(&mut self, name: String, value: Value) {
         self.bindings.insert(name, value);
     }
@@ -194,6 +212,12 @@ impl Env {
     /// Set a variable in the current scope.
     pub fn set(&self, name: String, value: Value) {
         self.scope.lock().unwrap().set(name, value);
+    }
+
+    /// Set a variable, propagating to the scope where it was originally defined.
+    /// If not found in any ancestor scope, creates it in the current scope.
+    pub fn set_propagate(&self, name: String, value: Value) {
+        self.scope.lock().unwrap().set_propagate(name, value);
     }
 
     /// Set a variable in the current (local) scope only.
