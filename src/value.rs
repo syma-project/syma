@@ -1342,11 +1342,24 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                         if i > 0 {
                             write!(f, " ")?;
                         }
-                        if matches!(
-                            arg,
-                            Value::Call { head: h, .. } if h == "Power" || h == "Plus"
-                        ) || is_negative_number(arg)
-                        {
+                        let needs_parens = matches!(arg, Value::Call { head: h, .. } if h == "Plus")
+                            || is_negative_number(arg)
+                            || (match arg {
+                                Value::Call {
+                                    head: h,
+                                    args: pa,
+                                    ..
+                                } if h == "Power" && pa.len() >= 2 =>
+                                {
+                                    matches!(
+                                        &pa[0],
+                                        Value::Call { head: b, .. }
+                                            if b == "Plus" || b == "Times"
+                                    )
+                                }
+                                _ => false,
+                            });
+                        if needs_parens {
                             write!(f, "(")?;
                             format_input_form(arg, f)?;
                             write!(f, ")")?;

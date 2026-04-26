@@ -584,6 +584,33 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     env.set_propagate(var_name, updated);
                     Ok(val)
                 }
+                // Attributes[sym] = {attr1, attr2}  — set attributes
+                Expr::Call {
+                    head,
+                    args: call_args,
+                } if call_args.len() == 1
+                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+                {
+                    let sym_name = match &call_args[0] {
+                        Expr::Symbol(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::Error(
+                                "Attributes assignment requires a symbol name".to_string(),
+                            ));
+                        }
+                    };
+                    if env.has_attribute(&sym_name, "Locked") {
+                        return Ok(Value::Null);
+                    }
+                    let attrs = match &val {
+                        Value::List(items) => {
+                            items.iter().map(|v| v.to_string()).collect()
+                        }
+                        other => vec![other.to_string()],
+                    };
+                    env.set_attributes(&sym_name, attrs);
+                    Ok(val)
+                }
                 _ => Err(EvalError::Error("Invalid assignment target".to_string())),
             }
         }
@@ -1264,7 +1291,34 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                             Err(EvalError::Error("Invalid assignment target".to_string()))
                         }
                     }
-                    _ => Err(EvalError::Error("Invalid assignment target".to_string())),
+                    // Attributes[sym] = value  via Set[Attributes[sym], value]
+                Expr::Call {
+                    head,
+                    args: call_args,
+                } if call_args.len() == 1
+                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+                {
+                    let sym_name = match &call_args[0] {
+                        Expr::Symbol(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::Error(
+                                "Attributes assignment requires a symbol name".to_string(),
+                            ));
+                        }
+                    };
+                    if env.has_attribute(&sym_name, "Locked") {
+                        return Ok(Value::Null);
+                    }
+                    let attrs = match &val {
+                        Value::List(items) => {
+                            items.iter().map(|v| v.to_string()).collect()
+                        }
+                        other => vec![other.to_string()],
+                    };
+                    env.set_attributes(&sym_name, attrs);
+                    Ok(val)
+                }
+                _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                 }
             }
             "Hold" => {
@@ -1467,15 +1521,40 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
     }
 }
 
+/// Recursively flatten nested calls with same head for Flat attribute.
+fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
+    let mut result = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Value::Call { head, args: inner } = arg {
+            if head == name {
+                result.extend(flatten_flat_args(name, inner));
+                continue;
+            }
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
 /// Apply a function value to arguments.
 pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    // ── Listable attribute: auto-thread over lists ──
+    // ── Flat attribute: flatten nested calls with same head ──
     let func_name = match func {
         Value::Builtin(name, _) => Some(name.as_str()),
         Value::Function(fd) => Some(fd.name.as_str()),
         Value::Symbol(s) => Some(s.as_str()),
         _ => None,
     };
+    if let Some(name) = func_name
+        && env.has_attribute(name, "Flat")
+    {
+        let flat = flatten_flat_args(name, args);
+        if flat.len() != args.len() || flat.as_slice() != args {
+            return apply_function(func, &flat, env);
+        }
+    }
+
+    // ── Listable attribute: auto-thread over lists ──
     if let Some(name) = func_name
         && env.has_attribute(name, "Listable")
     {

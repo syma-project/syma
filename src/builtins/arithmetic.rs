@@ -185,11 +185,123 @@ fn power_val(base: Value, exp: Value) -> Value {
 }
 
 pub fn builtin_times(args: &[Value]) -> Result<Value, EvalError> {
-    let mut result = Value::Integer(Integer::from(1));
+    // Flatten nested Times and collect all factors
+    let mut factors: Vec<Value> = Vec::new();
+    let mut push_factor = |v: Value| {
+        if let Value::Call { head, args: inner_args } = &v {
+            if head == "Times" {
+                for f in inner_args {
+                    factors.push(f.clone());
+                }
+                return;
+            }
+        }
+        factors.push(v);
+    };
     for arg in args {
-        result = mul_values(&result, arg)?;
+        push_factor(arg.clone());
     }
-    Ok(result)
+
+    // Repeatedly combine like terms: a * a → a^2, a^n * a → a^(n+1), a^n * a^m → a^(n+m)
+    // Also merge Power factors with same base
+    loop {
+        let len = factors.len();
+        let mut i = 0;
+        while i < factors.len() {
+            let mut j = i + 1;
+            while j < factors.len() {
+                let a = factors[i].clone();
+                let b = factors[j].clone();
+                let combined = try_combine_factors(&a, &b);
+                if let Some(combined) = combined {
+                    factors[i] = combined;
+                    factors.swap_remove(j);
+                    break; // restart scanning from i
+                }
+                j += 1;
+            }
+            if j < factors.len() {
+                // break happened, restart outer loop
+                break;
+            }
+            i += 1;
+        }
+        if factors.len() == len {
+            break;
+        }
+    }
+
+    if factors.is_empty() {
+        return Ok(Value::Integer(Integer::from(1)));
+    }
+    if factors.len() == 1 {
+        return Ok(factors.swap_remove(0));
+    }
+    Ok(Value::Call {
+        head: "Times".to_string(),
+        args: factors,
+    })
+}
+
+/// Try to combine two factors into one (e.g., x * x → x^2, x^n * x → x^(n+1)).
+/// Returns Some(combined) if combinable, None if not.
+fn try_combine_factors(a: &Value, b: &Value) -> Option<Value> {
+    match (a, b) {
+        // a^n * a^m → a^(n+m) when same base
+        (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 })
+            if h1 == "Power" && a1.len() == 2 && h2 == "Power" && a2.len() == 2 && a1[0] == a2[0] =>
+        {
+            let new_exp = add_power_exponents(&a1[1], &a2[1])?;
+            Some(power_val(a1[0].clone(), new_exp))
+        }
+        // a^n * a → a^(n+1)
+        (Value::Call { head, args: pargs }, _)
+            if head == "Power" && pargs.len() == 2 && pargs[0] == *b =>
+        {
+            let e = increment_exponent(&pargs[1])?;
+            Some(power_val(pargs[0].clone(), e))
+        }
+        // a * a^n → a^(n+1)
+        (_, Value::Call { head, args: pargs })
+            if head == "Power" && pargs.len() == 2 && pargs[0] == *a =>
+        {
+            let e = increment_exponent(&pargs[1])?;
+            Some(power_val(pargs[0].clone(), e))
+        }
+        // a * a → a^2
+        _ if a == b => Some(power_val(a.clone(), Value::Integer(Integer::from(2)))),
+        // Can't combine
+        _ => None,
+    }
+}
+
+fn add_power_exponents(e1: &Value, e2: &Value) -> Option<Value> {
+    match (e1, e2) {
+        (Value::Integer(n), Value::Integer(m)) => Some(Value::Integer(n.clone() + m)),
+        (Value::Integer(n), Value::Rational(r)) | (Value::Rational(r), Value::Integer(n)) => {
+            let sum: Rational = Rational::from(n.clone()) + r.as_ref();
+            let (num, den) = sum.into_numer_denom();
+            Some(rational_value(num, den))
+        }
+        (Value::Rational(r1), Value::Rational(r2)) => {
+            let sum: Rational = (r1.as_ref() + r2.as_ref()).into();
+            let (num, den) = sum.into_numer_denom();
+            Some(rational_value(num, den))
+        }
+        _ => None,
+    }
+}
+
+fn increment_exponent(e: &Value) -> Option<Value> {
+    match e {
+        Value::Integer(n) => Some(Value::Integer(n.clone() + 1)),
+        Value::Rational(r) => {
+            let sum: Rational = r.as_ref() + Rational::from(1);
+            let (num, den) = sum.into_numer_denom();
+            Some(rational_value(num, den))
+        }
+        _ => None,
+    }
 }
 
 pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
