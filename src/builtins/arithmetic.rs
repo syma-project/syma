@@ -299,8 +299,10 @@ fn try_combine_factors(a: &Value, b: &Value) -> Option<Value> {
             let e = increment_exponent(&pargs[1])?;
             Some(power_val(pargs[0].clone(), e))
         }
-        // a * a → a^2
-        _ if a == b => Some(power_val(a.clone(), Value::Integer(Integer::from(2)))),
+        // a * a → a^2 (symbolic terms only; numeric literals handled by mul_values)
+        _ if a == b && !matches!(a, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) => {
+            Some(power_val(a.clone(), Value::Integer(Integer::from(2))))
+        }
         // Can't combine
         _ => None,
     }

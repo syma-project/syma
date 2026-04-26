@@ -62,6 +62,9 @@ class SavingsAccount extends Account {
         this.minBal = m; this.wdLimit = w
     }
 
+    method deposit[a_] := SavingsAccount[number, owner, balance + a, rate,
+        Append[txns, Transaction["deposit", a, balance + a, "Savings"]], minBal, wdLimit]
+
     method withdraw[a_] {
         If[balance - a < minBal, Print["ERROR: below minimum balance"]]
         If[balance - a < minBal, this,
@@ -87,6 +90,9 @@ class CheckingAccount extends Account {
         this.number = n; this.owner = o; this.balance = b; this.rate = r; this.txns = t
         this.odLimit = l; this.odFee = f
     }
+
+    method deposit[a_] := CheckingAccount[number, owner, balance + a, rate,
+        Append[txns, Transaction["deposit", a, balance + a, "Checking"]], odLimit, odFee]
 
     method withdraw[a_] {
         If[a > balance + odLimit, Print["ERROR: overdraft limit $", ToString[odLimit]]]

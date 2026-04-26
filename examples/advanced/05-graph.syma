@@ -112,8 +112,7 @@ class Graph {
                   edges = Lookup[adj, cur.id];
                   For[i = Length[edges], i >= 1, i--,
                       (nbr = Lookup[vertices, Part[edges, i].target];
-                       If[!nbr.visited, stack = Append[stack, nbr])])])
-        ];
+                       If[!nbr.visited, stack = Append[stack, nbr]])])])];
         result
     }
 
@@ -138,8 +137,8 @@ class Graph {
                   nbr = Lookup[vertices, e.target];
                   nd = cur.distance + e.weight;
                   If[MemberQ[unvisited, e.target] && nd < nbr.distance,
-                      (nbr.distance = nd; nbr.predecessor = cur)]))]
-        ];
+                      (nbr.distance = nd; nbr.predecessor = cur)])]
+        )];
 
         noPath = Lookup[vertices, endId].distance == Infinity;
         If[noPath, Print["No path from ", startId, " to ", endId]];
@@ -186,7 +185,7 @@ class Graph {
         queue = {};
         For[i = 1, i <= Length[keys], i++,
             (id = Part[keys, i];
-             If[Lookup[inDegree, id] == 0, queue = Append[queue, id])];
+             If[Lookup[inDegree, id] == 0, queue = Append[queue, id]])];
         order = {};
         While[Length[queue] > 0,
             (id = Part[queue, 1];
@@ -196,7 +195,7 @@ class Graph {
              For[j = 1, j <= Length[edges], j++,
                  (t = Part[edges, j].target;
                   inDegree = AssociateTo[inDegree, t -> Lookup[inDegree, t] - 1];
-                  If[Lookup[inDegree, t] == 0, queue = Append[queue, t])])];
+                  If[Lookup[inDegree, t] == 0, queue = Append[queue, t]])])];
         order
     }
 
@@ -207,8 +206,7 @@ class Graph {
             (id = Part[keys, i];
              edges = Lookup[adj, id];
              es = Table[
-                 e = Part[edges, j];
-                 Lookup[vertices, e.target].label <> " (" <> ToString[e.weight] <> ")"
+                 Lookup[vertices, Part[edges, j].target].label <> " (" <> ToString[Part[edges, j].weight] <> ")"
              , {j, Length[edges]}];
              Print["  ", Lookup[vertices, id].label, " -> ", es])
         ]

@@ -1272,6 +1272,253 @@ fn eval_args_with_attributes(
     args.iter().map(|a| eval(a, env)).collect()
 }
 
+/// Parse a local variable specification list from a Module/With/Block call.
+///
+/// The first argument should be `Expr::List([...])` where each item is either:
+/// - `Expr::Symbol(name)` — variable with no initial value
+/// - `Expr::Assign { lhs: Symbol(name), rhs }` — variable with initial value
+/// - `Expr::Call { head: Symbol("Set"), args: [Symbol(name), rhs] }` — same via Set
+///
+/// Returns `Vec<(String, Option<Expr>)>` — variable name and optional initializer expr.
+fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)>, EvalError> {
+    let items = match arg {
+        Expr::List(items) => items,
+        other => {
+            return Err(EvalError::Error(format!(
+                "First argument must be a list of local variable specifications, got: {}",
+                other
+            )));
+        }
+    };
+
+    let mut specs = Vec::new();
+    for item in items {
+        match item {
+            Expr::Symbol(name) => {
+                specs.push((name.clone(), None));
+            }
+            Expr::Assign { lhs, rhs } => {
+                if let Expr::Symbol(name) = lhs.as_ref() {
+                    specs.push((name.clone(), Some(*rhs.clone())));
+                } else {
+                    return Err(EvalError::Error(format!(
+                        "Invalid left-hand side in local specification: {}",
+                        lhs
+                    )));
+                }
+            }
+            Expr::Call {
+                head,
+                args: call_args,
+            } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Set")
+                && call_args.len() == 2 =>
+            {
+                if let Expr::Symbol(name) = &call_args[0] {
+                    specs.push((name.clone(), Some(call_args[1].clone())));
+                } else {
+                    return Err(EvalError::Error(format!(
+                        "Invalid left-hand side in local specification: {}",
+                        call_args[0]
+                    )));
+                }
+            }
+            other => {
+                return Err(EvalError::Error(format!(
+                    "Invalid local specification: {}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(specs)
+}
+
+/// Recursively substitute symbols in an expression using a substitution map.
+///
+/// Walks the AST and replaces any `Expr::Symbol` matching a key in `subs`
+/// with the corresponding replacement expression.
+fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
+    match expr {
+        Expr::Symbol(name) => subs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, replacement)| replacement.clone())
+            .unwrap_or_else(|| expr.clone()),
+        Expr::Call { head, args } => Expr::Call {
+            head: Box::new(substitute_in_expr(head, subs)),
+            args: args.iter().map(|a| substitute_in_expr(a, subs)).collect(),
+        },
+        Expr::List(items) => Expr::List(items.iter().map(|i| substitute_in_expr(i, subs)).collect()),
+        Expr::Assoc(pairs) => Expr::Assoc(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_in_expr(v, subs)))
+                .collect(),
+        ),
+        Expr::Sequence(items) => {
+            Expr::Sequence(items.iter().map(|i| substitute_in_expr(i, subs)).collect())
+        }
+        Expr::Rule { lhs, rhs } => Expr::Rule {
+            lhs: Box::new(substitute_in_expr(lhs, subs)),
+            rhs: Box::new(substitute_in_expr(rhs, subs)),
+        },
+        Expr::RuleDelayed { lhs, rhs } => Expr::RuleDelayed {
+            lhs: Box::new(substitute_in_expr(lhs, subs)),
+            rhs: Box::new(substitute_in_expr(rhs, subs)),
+        },
+        Expr::Slot(_) => expr.clone(),
+        Expr::Function { params, body } => Expr::Function {
+            params: params.clone(),
+            body: Box::new(substitute_in_expr(body, subs)),
+        },
+        Expr::Pure { body } => Expr::Pure {
+            body: Box::new(substitute_in_expr(body, subs)),
+        },
+        Expr::ReplaceAll { expr: inner, rules } => Expr::ReplaceAll {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+            rules: Box::new(substitute_in_expr(rules, subs)),
+        },
+        Expr::ReplaceRepeated { expr: inner, rules } => Expr::ReplaceRepeated {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+            rules: Box::new(substitute_in_expr(rules, subs)),
+        },
+        Expr::Map { func, list } => Expr::Map {
+            func: Box::new(substitute_in_expr(func, subs)),
+            list: Box::new(substitute_in_expr(list, subs)),
+        },
+        Expr::Apply { func, expr: inner } => Expr::Apply {
+            func: Box::new(substitute_in_expr(func, subs)),
+            expr: Box::new(substitute_in_expr(inner, subs)),
+        },
+        Expr::Pipe { expr: inner, func } => Expr::Pipe {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+            func: Box::new(substitute_in_expr(func, subs)),
+        },
+        Expr::Prefix { func, arg } => Expr::Prefix {
+            func: Box::new(substitute_in_expr(func, subs)),
+            arg: Box::new(substitute_in_expr(arg, subs)),
+        },
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            condition: Box::new(substitute_in_expr(condition, subs)),
+            then_branch: Box::new(substitute_in_expr(then_branch, subs)),
+            else_branch: else_branch
+                .as_ref()
+                .map(|e| Box::new(substitute_in_expr(e, subs))),
+        },
+        Expr::Which { pairs } => Expr::Which {
+            pairs: pairs
+                .iter()
+                .map(|(c, v)| (substitute_in_expr(c, subs), substitute_in_expr(v, subs)))
+                .collect(),
+        },
+        Expr::Switch { expr: inner, cases } => Expr::Switch {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+            cases: cases
+                .iter()
+                .map(|(p, b)| (substitute_in_expr(p, subs), substitute_in_expr(b, subs)))
+                .collect(),
+        },
+        Expr::Match {
+            expr: inner,
+            branches,
+        } => Expr::Match {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+            branches: branches
+                .iter()
+                .map(|b| crate::ast::MatchBranch {
+                    pattern: substitute_in_expr(&b.pattern, subs),
+                    result: substitute_in_expr(&b.result, subs),
+                })
+                .collect(),
+        },
+        Expr::For {
+            init,
+            condition,
+            step,
+            body,
+        } => Expr::For {
+            init: Box::new(substitute_in_expr(init, subs)),
+            condition: Box::new(substitute_in_expr(condition, subs)),
+            step: Box::new(substitute_in_expr(step, subs)),
+            body: Box::new(substitute_in_expr(body, subs)),
+        },
+        Expr::While { condition, body } => Expr::While {
+            condition: Box::new(substitute_in_expr(condition, subs)),
+            body: Box::new(substitute_in_expr(body, subs)),
+        },
+        Expr::Do { body, iterator } => Expr::Do {
+            body: Box::new(substitute_in_expr(body, subs)),
+            iterator: iterator.clone(),
+        },
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            delayed,
+        } => Expr::FuncDef {
+            name: name.clone(),
+            params: params.clone(),
+            body: Box::new(substitute_in_expr(body, subs)),
+            delayed: *delayed,
+        },
+        Expr::Assign { lhs, rhs } => Expr::Assign {
+            lhs: Box::new(substitute_in_expr(lhs, subs)),
+            rhs: Box::new(substitute_in_expr(rhs, subs)),
+        },
+        Expr::DestructAssign { patterns, rhs } => Expr::DestructAssign {
+            patterns: patterns.iter().map(|p| substitute_in_expr(p, subs)).collect(),
+            rhs: Box::new(substitute_in_expr(rhs, subs)),
+        },
+        Expr::PostIncrement { expr: inner } => Expr::PostIncrement {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+        },
+        Expr::PostDecrement { expr: inner } => Expr::PostDecrement {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+        },
+        Expr::Unset { expr: inner } => Expr::Unset {
+            expr: Box::new(substitute_in_expr(inner, subs)),
+        },
+        Expr::ModuleDef {
+            name,
+            exports,
+            body,
+        } => Expr::ModuleDef {
+            name: name.clone(),
+            exports: exports.clone(),
+            body: body.iter().map(|b| substitute_in_expr(b, subs)).collect(),
+        },
+        Expr::Import { module, selective, alias } => Expr::Import {
+            module: module.clone(),
+            selective: selective.clone(),
+            alias: alias.clone(),
+        },
+        Expr::Export(exports) => Expr::Export(exports.clone()),
+        Expr::ClassDef {
+            name,
+            parent,
+            mixins,
+            members,
+        } => Expr::ClassDef {
+            name: name.clone(),
+            parent: parent.clone(),
+            mixins: mixins.clone(),
+            members: members.clone(),
+        },
+        Expr::Hold(inner) => Expr::Hold(Box::new(substitute_in_expr(inner, subs))),
+        Expr::HoldComplete(inner) => {
+            Expr::HoldComplete(Box::new(substitute_in_expr(inner, subs)))
+        }
+        Expr::ReleaseHold(inner) => Expr::ReleaseHold(Box::new(substitute_in_expr(inner, subs))),
+        Expr::Information(inner) => Expr::Information(Box::new(substitute_in_expr(inner, subs))),
+        // Atoms and non-recursive variants pass through unchanged
+        other => other.clone(),
+    }
+}
+
 /// Evaluate a function call.
 fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     // Special forms that don't evaluate all arguments
@@ -1573,6 +1820,94 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     DEFAULT_PRECISION
                 };
                 numeric::numeric_eval_expr(&args[0], prec_bits, env)
+            }
+            "Module" => {
+                if args.len() < 2 {
+                    return Err(EvalError::Error(
+                        "Module requires at least 2 arguments".to_string(),
+                    ));
+                }
+                let specs = parse_local_specs(&args[0])?;
+                let child = env.child();
+                for (name, init) in &specs {
+                    let val = match init {
+                        Some(expr) => eval(expr, env)?,
+                        None => Value::Null,
+                    };
+                    child.set(name.clone(), val);
+                }
+                let mut result = Value::Null;
+                for expr in &args[1..] {
+                    result = eval(expr, &child)?;
+                }
+                Ok(result)
+            }
+            "With" => {
+                if args.len() < 2 {
+                    return Err(EvalError::Error(
+                        "With requires at least 2 arguments".to_string(),
+                    ));
+                }
+                let specs = parse_local_specs(&args[0])?;
+                let child = env.child();
+                // Evaluate RHS values and build substitution map
+                let mut subs = Vec::new();
+                for (name, init) in &specs {
+                    match init {
+                        Some(rhs_expr) => {
+                            let val = eval(rhs_expr, env)?;
+                            subs.push((name.clone(), table::value_to_expr(&val)));
+                        }
+                        None => {
+                            return Err(EvalError::Error(
+                                "With requires initial values for all local variables".to_string(),
+                            ));
+                        }
+                    }
+                }
+                let mut result = Value::Null;
+                for expr in &args[1..] {
+                    let substituted = substitute_in_expr(expr, &subs);
+                    result = eval(&substituted, &child)?;
+                }
+                Ok(result)
+            }
+            "Block" => {
+                if args.len() < 2 {
+                    return Err(EvalError::Error(
+                        "Block requires at least 2 arguments".to_string(),
+                    ));
+                }
+                let specs = parse_local_specs(&args[0])?;
+                // Save old values and propagate new ones up the scope chain.
+                // Block uses dynamic scoping: the new values are visible everywhere,
+                // including in functions called within the body, by updating the
+                // defining scope (rather than shadowing in a child scope).
+                let mut saved: Vec<(String, Option<Value>)> = Vec::new();
+                for (name, init) in &specs {
+                    let old_val = env.get(name);
+                    let new_val = match init {
+                        Some(expr) => eval(expr, env)?,
+                        None => Value::Null,
+                    };
+                    env.set_propagate(name.clone(), new_val);
+                    saved.push((name.clone(), old_val));
+                }
+                // Evaluate body
+                let mut result = Value::Null;
+                for expr in &args[1..] {
+                    result = eval(expr, env)?;
+                }
+                // Restore old values (reverse order)
+                for (name, old_val) in saved.into_iter().rev() {
+                    match old_val {
+                        Some(v) => env.set_propagate(name, v),
+                        None => {
+                            env.remove(&name);
+                        }
+                    }
+                }
+                Ok(result)
             }
             _ => {
                 // Check if this is a custom operator symbol registered in the operator table.
@@ -4658,5 +4993,168 @@ mod tests {
             eval_str("x = y = 5; x + y"),
             Value::Integer(Integer::from(10))
         );
+    }
+
+    // ── Scoping constructs: Module, With, Block ──
+
+    #[test]
+    fn test_module_scoping_basic() {
+        // Module with simple local variable
+        assert_eq!(
+            eval_str("Module[{x = 5}, x + 1]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_module_multiple_locals() {
+        // Module with multiple local variables
+        assert_eq!(
+            eval_str("Module[{x = 3, y = 4}, x^2 + y^2]"),
+            Value::Integer(Integer::from(25))
+        );
+    }
+
+    #[test]
+    fn test_module_no_init() {
+        // Module with uninitialized variable binds to Null
+        assert_eq!(eval_str("Module[{x}, x]"), Value::Null);
+    }
+
+    #[test]
+    fn test_module_shadows_global() {
+        // Module local x should not affect global x (checked in same eval)
+        let result = eval_str("x = 100; Module[{x = 5}, x]");
+        assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    #[test]
+    fn test_module_global_unchanged() {
+        // After Module, global x keeps its value (single eval_str)
+        let result = eval_str("x = 100; Module[{x = 5}, x]; x");
+        assert_eq!(result, Value::Integer(Integer::from(100)));
+    }
+
+    #[test]
+    fn test_module_empty_specs() {
+        // Module with empty local list
+        assert_eq!(eval_str("Module[{}, 42]"), Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_module_with_function_def() {
+        // Module inside a function definition
+        let result = eval_str("f[x_] := Module[{y = x^2}, y + 1]; f[5]");
+        assert_eq!(result, Value::Integer(Integer::from(26)));
+    }
+
+    #[test]
+    fn test_module_sequential_body() {
+        // Module args[1..] evaluated sequentially
+        // Set[x, x + 2] => x=3, then Set[x, Times[x, 3]] = 9
+        let result = eval_str(
+            "Module[{x = 1}, Set[x, x + 2], Set[x, x * 3], x]"
+        );
+        assert_eq!(result, Value::Integer(Integer::from(9)));
+    }
+
+    // ── With tests ──
+
+    #[test]
+    fn test_with_basic() {
+        // With with simple substitution
+        assert_eq!(
+            eval_str("With[{x = 5}, x + 1]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_with_multiple_vars() {
+        // With with multiple variables
+        assert_eq!(
+            eval_str("With[{x = 3, y = 4}, x^2 + y^2]"),
+            Value::Integer(Integer::from(25))
+        );
+    }
+
+    #[test]
+    fn test_with_substitution_in_call() {
+        // With substitutes x with 5 inside Sin[...]
+        let result = eval_str("With[{x = 5}, Sin[x]]");
+        assert_eq!(result, Value::Call {
+            head: "Sin".to_string(),
+            args: vec![Value::Integer(Integer::from(5))],
+        });
+    }
+
+    #[test]
+    fn test_with_empty_specs() {
+        // With with empty local list
+        assert_eq!(eval_str("With[{}, 42]"), Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_with_rhs_evaluation() {
+        // With evaluates RHS before substitution: 1+2=3, x*3 = 9
+        let result = eval_str("With[{x = 1 + 2}, x * 3]");
+        assert_eq!(result, Value::Integer(Integer::from(9)));
+    }
+
+    #[test]
+    fn test_with_no_global_leak() {
+        // With should not create bindings visible outside
+        // (checked in single eval_str since each eval_str has fresh env)
+        let result = eval_str("a = 10; With[{a = 5}, a + 1]; a");
+        assert_eq!(result, Value::Integer(Integer::from(10)));
+    }
+
+    // ── Block tests ──
+
+    #[test]
+    fn test_block_basic() {
+        // Block with simple local rebinding
+        assert_eq!(
+            eval_str("Block[{x = 5}, x + 1]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_block_multiple_vars() {
+        // Block with multiple variables
+        assert_eq!(
+            eval_str("Block[{x = 3, y = 4}, x + y]"),
+            Value::Integer(Integer::from(7))
+        );
+    }
+
+    #[test]
+    fn test_block_restores_global() {
+        // Block should not affect value after exit (checked in same eval)
+        let result = eval_str("x = 10; Block[{x = 5}, x + 1]; x");
+        assert_eq!(result, Value::Integer(Integer::from(10)));
+    }
+
+    #[test]
+    fn test_block_empty_specs() {
+        // Block with empty local list
+        assert_eq!(eval_str("Block[{}, 42]"), Value::Integer(Integer::from(42)));
+    }
+
+    #[test]
+    fn test_block_side_effect_in_body() {
+        // Block sets x=10, modifies it to 15 inside, then restores
+        let result = eval_str("x = 1; Block[{x = 10}, Set[x, x + 5]]; x");
+        assert_eq!(result, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_block_affects_function_due_to_dynamic_scoping() {
+        // Block uses dynamic scoping: f sees Block's x=5, not the original x=100
+        let result = eval_str(
+            "x = 100; f = Function[{a}, x]; Block[{x = 5}, f[0]]"
+        );
+        assert_eq!(result, Value::Integer(Integer::from(5)));
     }
 }

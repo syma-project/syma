@@ -35,7 +35,7 @@ class Variable extends Expr {
 
     constructor[name_] { this.name = name }
 
-    method evaluate[env_] := If[KeyExistsQ[env, name], env[name], ToExpression[name]]
+    method evaluate[env_] := If[KeyExistsQ[env, name], Lookup[env, name], ToExpression[name]]
     method derivative[var_] := If[name == var, Constant[1], Constant[0]]
     method toString[] := name
     method degree[] := If[name == "x", 1, 0]
@@ -72,7 +72,7 @@ class Multiply extends Expr {
     method degree[] := left.degree[] + right.degree[]
 }
 
-class Power extends Expr {
+class PowerExpr extends Expr {
     field base
     field exp
 
@@ -81,7 +81,7 @@ class Power extends Expr {
     method evaluate[env_] := base.evaluate[env] ^ exp.evaluate[env]
     method derivative[var_] :=
         If[exp.isConstant[],
-            Multiply[exp, Multiply[Power[base, Add[exp, Constant[-1]]], base.derivative[var]]],
+            Multiply[exp, Multiply[PowerExpr[base, Add[exp, Constant[-1]]], base.derivative[var]]],
             Constant[0]
         ]
     method toString[] := base.toString[] <> "^" <> exp.toString[]
@@ -95,23 +95,23 @@ class Power extends Expr {
 
 (* ── Unary Functions ── *)
 
-class Sin extends Expr {
+class SinExpr extends Expr {
     field arg
 
     constructor[a_] { this.arg = a }
 
     method evaluate[env_] := Sin[arg.evaluate[env]]
-    method derivative[var_] := Multiply[Cos[arg], arg.derivative[var]]
+    method derivative[var_] := Multiply[CosExpr[arg], arg.derivative[var]]
     method toString[] := "Sin[" <> arg.toString[] <> "]"
 }
 
-class Cos extends Expr {
+class CosExpr extends Expr {
     field arg
 
     constructor[a_] { this.arg = a }
 
     method evaluate[env_] := Cos[arg.evaluate[env]]
-    method derivative[var_] := Multiply[Constant[-1], Multiply[Sin[arg], arg.derivative[var]]]
+    method derivative[var_] := Multiply[Constant[-1], Multiply[SinExpr[arg], arg.derivative[var]]]
     method toString[] := "Cos[" <> arg.toString[] <> "]"
 }
 
@@ -119,7 +119,7 @@ class Cos extends Expr {
 (* ── Build Polynomial Helper ── *)
 
 buildPolynomial[coeffs_] := Fold[Add, Table[
-    Multiply[Constant[Part[coeffs, i]], Power[Variable["x"], Constant[i - 1]]],
+    Multiply[Constant[Part[coeffs, i]], PowerExpr[Variable["x"], Constant[i - 1]]],
     {i, Length[coeffs]}
 ]]
 
@@ -137,7 +137,7 @@ Print[""]
 Print["── 1. Build Expression ──"]
 
 a = Add[
-    Multiply[Constant[3], Power[Variable["x"], Constant[2]]],
+    Multiply[Constant[3], PowerExpr[Variable["x"], Constant[2]]],
     Add[Multiply[Constant[2], Variable["x"]], Constant[1]]
 ]
 
@@ -166,7 +166,7 @@ Print[""]
 (* ── 4. Product Rule ── *)
 Print["── 4. Product Rule ──"]
 
-f = Multiply[Variable["x"], Sin[Variable["x"]]]
+f = Multiply[Variable["x"], SinExpr[Variable["x"]]]
 Print["f(x) = ", f.toString[]]
 Print["f'(x) = ", f.derivative["x"].toString[]]
 Print[""]
@@ -174,7 +174,7 @@ Print[""]
 (* ── 5. Chain Rule ── *)
 Print["── 5. Chain Rule ──"]
 
-g = Sin[Power[Variable["x"], Constant[2]]]
+g = SinExpr[PowerExpr[Variable["x"], Constant[2]]]
 Print["g(x) = ", g.toString[]]
 Print["g'(x) = ", g.derivative["x"].toString[]]
 Print[""]
@@ -182,7 +182,7 @@ Print[""]
 (* ── 6. Evaluate derivative numerically ── *)
 Print["── 6. Numeric Derivative ──"]
 
-sinExpr = Sin[Variable["x"]]
+sinExpr = SinExpr[Variable["x"]]
 deriv = sinExpr.derivative["x"]
 Print["d/dx Sin[x] = ", deriv.toString[]]
 Print["d/dx Sin[x] at x=1: ", ToString[deriv.evaluate[<|"x" -> 1|>]]]

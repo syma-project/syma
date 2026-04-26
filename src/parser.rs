@@ -1169,7 +1169,7 @@ impl Parser {
                     let args = if self.at(&Token::RBracket) {
                         vec![]
                     } else {
-                        self.parse_pattern_list()?
+                        self.parse_call_args()?
                     };
                     self.expect(&Token::RBracket)?;
                     expr = Expr::Call {
@@ -1921,7 +1921,7 @@ impl Parser {
                         let args = if self.at(&Token::RBracket) {
                             vec![]
                         } else {
-                            self.parse_pattern_list()?
+                            self.parse_call_args()?
                         };
                         self.expect(&Token::RBracket)?;
                         let mut call_args = vec![expr];
@@ -1942,7 +1942,7 @@ impl Parser {
                     let args = if self.at(&Token::RBracket) {
                         vec![]
                     } else {
-                        self.parse_pattern_list()?
+                        self.parse_call_args()?
                     };
                     self.expect(&Token::RBracket)?;
                     expr = Expr::Call {
@@ -2392,6 +2392,44 @@ impl Parser {
             items.push(self.parse_pattern()?);
         }
         Ok(items)
+    }
+
+    /// Parse function call arguments with semicolon support.
+    ///
+    /// Unlike `parse_pattern_list`, this handles `;` within individual arguments:
+    /// `f[a, b; c]` → 2 args: `a` and `Sequence[b, c]`.
+    /// Each comma-separated argument is parsed via `parse_pattern`, but if `;`
+    /// follows, the subsequent expressions are grouped into an `Expr::Sequence`.
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        // Parse first argument
+        let first = self.parse_pattern()?;
+        args.push(self.wrap_seq_or_single(first)?);
+        // Handle remaining comma-separated arguments
+        while self.at(&Token::Comma) {
+            self.advance();
+            let next = self.parse_pattern()?;
+            args.push(self.wrap_seq_or_single(next)?);
+        }
+        Ok(args)
+    }
+
+    /// If current token is `;`, collect following `;`-separated expressions
+    /// into a Sequence. Otherwise return the expression as-is.
+    fn wrap_seq_or_single(&mut self, expr: Expr) -> Result<Expr, ParseError> {
+        if self.at(&Token::Semicolon) {
+            let mut exprs = vec![expr];
+            while self.at(&Token::Semicolon) {
+                self.advance();
+                if self.at(&Token::RBracket) || self.at(&Token::Comma) {
+                    break;
+                }
+                exprs.push(self.parse_expression()?);
+            }
+            Ok(Expr::Sequence(exprs))
+        } else {
+            Ok(expr)
+        }
     }
 
     /// Convert a symbol that looks like a pattern (e.g. `x_`, `x_Integer`, `_`)

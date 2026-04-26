@@ -125,6 +125,54 @@ pub fn match_pattern(
             }
         }
 
+        // ── Sequence patterns: __ (BlankSequence) and ___ (BlankNullSequence) ──
+        // As top-level patterns, they match any single value (sequence of length 1).
+        Expr::BlankSequence {
+            name,
+            type_constraint,
+        } => {
+            if let Some(tc) = type_constraint {
+                if value.matches_type(tc) {
+                    let mut bindings = HashMap::new();
+                    if let Some(n) = name {
+                        bindings.insert(n.clone(), value.clone());
+                    }
+                    MatchResult::Match(bindings)
+                } else {
+                    MatchResult::NoMatch
+                }
+            } else {
+                let mut bindings = HashMap::new();
+                if let Some(n) = name {
+                    bindings.insert(n.clone(), value.clone());
+                }
+                MatchResult::Match(bindings)
+            }
+        }
+
+        Expr::BlankNullSequence {
+            name,
+            type_constraint,
+        } => {
+            if let Some(tc) = type_constraint {
+                if value.matches_type(tc) {
+                    let mut bindings = HashMap::new();
+                    if let Some(n) = name {
+                        bindings.insert(n.clone(), value.clone());
+                    }
+                    MatchResult::Match(bindings)
+                } else {
+                    MatchResult::NoMatch
+                }
+            } else {
+                let mut bindings = HashMap::new();
+                if let Some(n) = name {
+                    bindings.insert(n.clone(), value.clone());
+                }
+                MatchResult::Match(bindings)
+            }
+        }
+
         // ── Optional patterns: _. and x_. ──
         // Try normal match first; if it fails, treat the pattern as matched
         // with Null as the default value.
@@ -797,6 +845,20 @@ fn match_call_pattern(
             } else {
                 vargs.clone()
             };
+
+            // Check if any pattern args contain sequences (__, ___)
+            let has_sequences = pat_args.iter().any(|p| matches!(
+                p,
+                Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
+            ));
+
+            if has_sequences {
+                // Use recursive backtracking sequence matcher for __ and ___
+                let mut bindings = Bindings::new();
+                return match_sequence_pattern(
+                    &pat_args, &val_args, 0, 0, &mut bindings, attr_checker,
+                );
+            }
 
             // 1. Try direct ordered match
             if let MatchResult::Match(b) = try_ordered_match(&pat_args, &val_args, attr_checker) {

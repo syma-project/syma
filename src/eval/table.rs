@@ -6,7 +6,7 @@ use crate::env::Env;
 use crate::value::*;
 
 /// Convert a Value back to an Expr for re-processing by special forms.
-fn value_to_expr(v: &Value) -> Expr {
+pub(super) fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::Integer(n.clone()),
         Value::Real(r) => Expr::Real(r.clone()),
