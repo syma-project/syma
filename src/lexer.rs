@@ -45,6 +45,9 @@ pub enum Token {
     LDoubleBracket, // [[
     RDoubleBracket, // ]]
 
+    // ── Whitespace ──
+    Newline,         // \n  (statement separator, distinct from Semicolon)
+
     // ── Operators ──
     Plus,       // +
     Minus,      // -
@@ -156,6 +159,7 @@ impl fmt::Display for Token {
             Token::RAssoc => write!(f, "|>"),
             Token::LDoubleBracket => write!(f, "[["),
             Token::RDoubleBracket => write!(f, "]]"),
+            Token::Newline => write!(f, "\\n"),
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
@@ -297,7 +301,7 @@ impl Lexer {
 
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.peek() {
-            if ch.is_whitespace() {
+            if ch == ' ' || ch == '\t' || ch == '\r' {
                 self.advance();
             } else {
                 break;
@@ -486,6 +490,20 @@ impl Lexer {
     pub fn tokenize(&mut self) -> Result<Vec<SpannedToken>, LexError> {
         loop {
             self.skip_whitespace();
+
+            // Handle newlines as statement separators
+            if self.peek() == Some('\n') {
+                let span = Span {
+                    line: self.line,
+                    col: self.col,
+                };
+                self.advance(); // consume \n
+                self.tokens.push(SpannedToken {
+                    token: Token::Newline,
+                    span,
+                });
+                continue;
+            }
 
             let ch = match self.peek() {
                 Some(c) => c,
@@ -1281,7 +1299,7 @@ mod tests {
     #[test]
     fn test_whitespace_only() {
         let toks = tokens("   \t\n  ");
-        assert_eq!(toks, vec![Token::Eof]);
+        assert_eq!(toks, vec![Token::Newline, Token::Eof]);
     }
 
     #[test]

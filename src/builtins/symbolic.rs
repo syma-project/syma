@@ -1545,8 +1545,9 @@ fn expand_times_over_plus(val: Value) -> Vec<Value> {
     match &val {
         Value::Call { head, args } if head == "Times" => {
             for (i, arg) in args.iter().enumerate() {
-                if let Value::Call { head: h, args: plus_args } = arg {
-                    if h == "Plus" {
+                if let Value::Call { head: h, args: plus_args } = arg
+                    && h == "Plus"
+                {
                         let factor_args: Vec<Value> = args
                             .iter()
                             .enumerate()
@@ -1567,8 +1568,7 @@ fn expand_times_over_plus(val: Value) -> Vec<Value> {
                             .collect();
                     }
                 }
-            }
-            vec![val]
+                vec![val]
         }
         _ => vec![val],
     }

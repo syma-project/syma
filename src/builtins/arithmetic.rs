@@ -140,10 +140,47 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 ))
             }
         }
+        // a + a → 2*a
+        _ if a == b => Ok(Value::Call {
+            head: "Times".to_string(),
+            args: vec![Value::Integer(Integer::from(2)), a.clone()],
+        }),
+        // a + (-a) → 0  (where -a is Times[-1, a])
+        (Value::Call { head, args: targs }, _)
+            if head == "Times"
+                && targs.len() == 2
+                && matches!(&targs[0], Value::Integer(n) if *n == -1)
+                && targs[1] == *b =>
+        {
+            Ok(Value::Integer(Integer::from(0)))
+        }
+        // (-a) + a → 0
+        (_, Value::Call { head, args: targs })
+            if head == "Times"
+                && targs.len() == 2
+                && matches!(&targs[0], Value::Integer(n) if *n == -1)
+                && targs[1] == *a =>
+        {
+            Ok(Value::Integer(Integer::from(0)))
+        }
         _ => Ok(Value::Call {
             head: "Plus".to_string(),
             args: vec![a.clone(), b.clone()],
         }),
+    }
+}
+
+/// Construct a Power value, normalizing `base^1` to just `base`.
+fn power_val(base: Value, exp: Value) -> Value {
+    if matches!(&exp, Value::Integer(n) if *n == 1)
+        || matches!(&exp, Value::Rational(n) if *n.numer() == 1 && *n.denom() == 1)
+    {
+        base
+    } else {
+        Value::Call {
+            head: "Power".to_string(),
+            args: vec![base, exp],
+        }
     }
 }
 
@@ -216,6 +253,47 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::List(result))
         }
+        // a^n * a^m → a^(n+m)
+        (
+            Value::Call {
+                head: h1,
+                args: a1,
+            },
+            Value::Call {
+                head: h2,
+                args: a2,
+            },
+        ) if h1 == "Power"
+            && a1.len() == 2
+            && h2 == "Power"
+            && a2.len() == 2
+            && a1[0] == a2[0] =>
+        {
+            match (&a1[1], &a2[1]) {
+                (Value::Integer(e1), Value::Integer(e2)) => {
+                    Ok(power_val(a1[0].clone(), Value::Integer(e1.clone() + e2)))
+                }
+                (Value::Integer(e1), Value::Rational(e2)) => {
+                    let sum: Rational = Rational::from(e1.clone()) + e2.as_ref();
+                    let (num, den) = sum.into_numer_denom();
+                    Ok(power_val(a1[0].clone(), rational_value(num, den)))
+                }
+                (Value::Rational(e1), Value::Integer(e2)) => {
+                    let sum: Rational = e1.as_ref() + Rational::from(e2.clone());
+                    let (num, den) = sum.into_numer_denom();
+                    Ok(power_val(a1[0].clone(), rational_value(num, den)))
+                }
+                (Value::Rational(e1), Value::Rational(e2)) => {
+                    let sum: Rational = (e1.as_ref() + e2.as_ref()).into();
+                    let (num, den) = sum.into_numer_denom();
+                    Ok(power_val(a1[0].clone(), rational_value(num, den)))
+                }
+                _ => Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                }),
+            }
+        }
         // a * a → a^2
         _ if a == b => Ok(Value::Call {
             head: "Power".to_string(),
@@ -226,32 +304,36 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
             if head == "Power" && pargs.len() == 2 && pargs[0] == *b =>
         {
             let exp = match &pargs[1] {
-                Value::Integer(n) => n.clone() + 1,
+                Value::Integer(n) => Value::Integer(n.clone() + 1),
+                Value::Rational(n) => {
+                    let sum: Rational = n.as_ref() + Rational::from(1);
+                    let (num, den) = sum.into_numer_denom();
+                    rational_value(num, den)
+                }
                 _ => return Ok(Value::Call {
                     head: "Times".to_string(),
                     args: vec![a.clone(), b.clone()],
                 }),
             };
-            Ok(Value::Call {
-                head: "Power".to_string(),
-                args: vec![pargs[0].clone(), Value::Integer(exp)],
-            })
+            Ok(power_val(pargs[0].clone(), exp))
         }
         // a * a^n → a^(n+1)
         (_, Value::Call { head, args: pargs })
             if head == "Power" && pargs.len() == 2 && pargs[0] == *a =>
         {
             let exp = match &pargs[1] {
-                Value::Integer(n) => n.clone() + 1,
+                Value::Integer(n) => Value::Integer(n.clone() + 1),
+                Value::Rational(n) => {
+                    let sum: Rational = n.as_ref() + Rational::from(1);
+                    let (num, den) = sum.into_numer_denom();
+                    rational_value(num, den)
+                }
                 _ => return Ok(Value::Call {
                     head: "Times".to_string(),
                     args: vec![a.clone(), b.clone()],
                 }),
             };
-            Ok(Value::Call {
-                head: "Power".to_string(),
-                args: vec![pargs[0].clone(), Value::Integer(exp)],
-            })
+            Ok(power_val(pargs[0].clone(), exp))
         }
         _ => Ok(Value::Call {
             head: "Times".to_string(),
@@ -280,6 +362,12 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
         || matches!(&args[0], Value::Rational(n) if n.is_zero())
     {
         return Ok(Value::Integer(Integer::from(0)));
+    }
+    // 1^anything = 1
+    if matches!(&args[0], Value::Integer(n) if *n == 1)
+        || matches!(&args[0], Value::Rational(n) if *n.numer() == 1 && *n.denom() == 1)
+    {
+        return Ok(Value::Integer(Integer::from(1)));
     }
     match (&args[0], &args[1]) {
         (Value::Integer(base), Value::Integer(exp)) => {
@@ -318,10 +406,51 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
             let e = Float::with_val(DEFAULT_PRECISION, exp);
             Ok(Value::Real(base.clone().pow(e)))
         }
-        _ => Ok(Value::Call {
-            head: "Power".to_string(),
-            args: args.to_vec(),
-        }),
+        // (a^n)^m → a^(n*m) when exponents are numeric
+        (
+            Value::Call {
+                head,
+                args: inner,
+            },
+            Value::Integer(outer_exp),
+        ) if head == "Power" && inner.len() == 2 => match &inner[1] {
+            Value::Integer(inner_exp) => {
+                Ok(power_val(inner[0].clone(), Value::Integer(inner_exp.clone() * outer_exp)))
+            }
+            Value::Rational(inner_exp) => {
+                let prod: Rational = inner_exp.as_ref() * Rational::from(outer_exp.clone());
+                let (num, den) = prod.into_numer_denom();
+                Ok(power_val(inner[0].clone(), rational_value(num, den)))
+            }
+            _ => Ok(Value::Call {
+                head: "Power".to_string(),
+                args: args.to_vec(),
+            }),
+        },
+        // (a^n)^m → a^(n*m) with rational outer exponent
+        (
+            Value::Call {
+                head,
+                args: inner,
+            },
+            Value::Rational(outer_exp),
+        ) if head == "Power" && inner.len() == 2 => match &inner[1] {
+            Value::Integer(inner_exp) => {
+                let prod: Rational = Rational::from(inner_exp.clone()) * outer_exp.as_ref();
+                let (num, den) = prod.into_numer_denom();
+                Ok(power_val(inner[0].clone(), rational_value(num, den)))
+            }
+            Value::Rational(inner_exp) => {
+                let prod: Rational = (inner_exp.as_ref() * outer_exp.as_ref()).into();
+                let (num, den) = prod.into_numer_denom();
+                Ok(power_val(inner[0].clone(), rational_value(num, den)))
+            }
+            _ => Ok(Value::Call {
+                head: "Power".to_string(),
+                args: args.to_vec(),
+            }),
+        },
+        _ => Ok(power_val(args[0].clone(), args[1].clone())),
     }
 }
 
@@ -401,6 +530,8 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
                 / Float::with_val(DEFAULT_PRECISION, b.denom());
             Ok(Value::Real(a / b_f))
         }
+        // a / a → 1 (for same non-zero values) — checked after zero checks
+        _ if args[0] == args[1] => Ok(Value::Integer(Integer::from(1))),
         _ => Ok(Value::Call {
             head: "Divide".to_string(),
             args: args.to_vec(),

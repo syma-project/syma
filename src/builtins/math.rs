@@ -1123,28 +1123,83 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Integer(n) => {
             if n.is_negative() {
-                Err(EvalError::Error("Sqrt of negative number".to_string()))
-            } else {
-                let f = Float::with_val(DEFAULT_PRECISION, n);
-                let r = f.sqrt();
-                // Check if result is an exact integer
-                if r.is_integer() {
-                    let i = r.to_f64() as i64;
-                    return Ok(Value::Integer(Integer::from(i)));
+                if *n == -1 {
+                    return Ok(Value::Complex {
+                        re: 0.0,
+                        im: 1.0,
+                    });
                 }
-                // Keep symbolic: Sqrt[n]
-                Ok(Value::Call {
-                    head: "Sqrt".to_string(),
-                    args: vec![args[0].clone()],
-                })
+                // Sqrt[-n] = I * Sqrt[n]
+                let abs_n = n.clone().abs();
+                let sqrt_n = builtin_sqrt(&[Value::Integer(abs_n)])?;
+                return Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Complex {
+                            re: 0.0,
+                            im: 1.0,
+                        },
+                        sqrt_n,
+                    ],
+                });
             }
+            let f = Float::with_val(DEFAULT_PRECISION, n);
+            let r = f.sqrt();
+            // Check if result is an exact integer
+            if r.is_integer() {
+                let i = r.to_f64() as i64;
+                return Ok(Value::Integer(Integer::from(i)));
+            }
+            // Keep symbolic: Sqrt[n]
+            Ok(Value::Call {
+                head: "Sqrt".to_string(),
+                args: vec![args[0].clone()],
+            })
+        }
+        Value::Rational(n) => {
+            if n.is_negative() {
+                // Sqrt[-a/b] = I * Sqrt[a/b]
+                let numer = n.numer().clone().abs();
+                let denom = n.denom().clone();
+                let abs_rational = Value::Rational(Box::new(rug::Rational::from((numer, denom))));
+                let sqrt_part = builtin_sqrt(&[abs_rational])?;
+                return Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Complex {
+                            re: 0.0,
+                            im: 1.0,
+                        },
+                        sqrt_part,
+                    ],
+                });
+            }
+            // Check if numerator and denominator are perfect squares
+            let numer_f = Float::with_val(DEFAULT_PRECISION, n.numer());
+            let denom_f = Float::with_val(DEFAULT_PRECISION, n.denom());
+            let numer_sqrt = numer_f.sqrt();
+            let denom_sqrt = denom_f.sqrt();
+            if numer_sqrt.is_integer() && denom_sqrt.is_integer() {
+                let num = Integer::from(numer_sqrt.to_f64() as i64);
+                let den = Integer::from(denom_sqrt.to_f64() as i64);
+                return Ok(Value::Rational(Box::new(rug::Rational::from((num, den)))));
+            }
+            Ok(Value::Call {
+                head: "Sqrt".to_string(),
+                args: vec![args[0].clone()],
+            })
         }
         Value::Real(r) => {
             if r.is_sign_negative() {
-                Err(EvalError::Error("Sqrt of negative number".to_string()))
-            } else {
-                Ok(Value::Real(r.clone().sqrt()))
+                let abs_r = Float::with_val(DEFAULT_PRECISION, -r.clone());
+                let sqrt_r = abs_r.sqrt();
+                // Sqrt[-r] = I * sqrt(|r|)
+                return Ok(Value::Complex {
+                    re: 0.0,
+                    im: sqrt_r.to_f64(),
+                });
             }
+            Ok(Value::Real(r.clone().sqrt()))
         }
         _ => Ok(Value::Call {
             head: "Sqrt".to_string(),
@@ -2384,7 +2439,60 @@ mod tests {
 
     #[test]
     fn test_sqrt_negative() {
-        assert!(builtin_sqrt(&[int(-1)]).is_err());
+        let result = builtin_sqrt(&[int(-1)]).unwrap();
+        assert_eq!(
+            result,
+            Value::Complex {
+                re: 0.0,
+                im: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn test_sqrt_negative_rational() {
+        // Sqrt[-1/2] -> I * Sqrt[1/2]
+        let arg = Value::Rational(Box::new(rug::Rational::from((
+            Integer::from(-1),
+            Integer::from(2),
+        ))));
+        let result = builtin_sqrt(&[arg]).unwrap();
+        // Expect Times[I, Sqrt[Rational(1,2)]]
+        match &result {
+            Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+                assert_eq!(args[0], Value::Complex { re: 0.0, im: 1.0 });
+                match &args[1] {
+                    Value::Call { head, args: inner } if head == "Sqrt" && inner.len() == 1 => {
+                        match &inner[0] {
+                            Value::Rational(r) => {
+                                assert_eq!(*r.numer(), 1);
+                                assert_eq!(*r.denom(), 2);
+                            }
+                            _ => panic!("Expected Rational inside Sqrt"),
+                        }
+                    }
+                    _ => panic!("Expected Sqrt inside Times"),
+                }
+            }
+            _ => panic!("Expected Times[I, Sqrt[1/2]], got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sqrt_positive_rational_perfect_square() {
+        // Sqrt[9/4] -> 3/2
+        let arg = Value::Rational(Box::new(rug::Rational::from((
+            Integer::from(9),
+            Integer::from(4),
+        ))));
+        let result = builtin_sqrt(&[arg]).unwrap();
+        match &result {
+            Value::Rational(r) => {
+                assert_eq!(*r.numer(), 3);
+                assert_eq!(*r.denom(), 2);
+            }
+            _ => panic!("Expected Rational(3/2), got {:?}", result),
+        }
     }
 
     #[test]

@@ -2206,8 +2206,12 @@ mod tests {
         let env = Env::new();
         builtins::register_builtins(&env);
         let tokens = lexer::tokenize(input).unwrap();
-        let ast = parser::parse(tokens).unwrap();
-        eval_program(&ast, &env).unwrap()
+        let ast = parser::parse(tokens).unwrap_or_else(|e| {
+            panic!("Parse error for input {:?}: {:?}", input, e);
+        });
+        eval_program(&ast, &env).unwrap_or_else(|e| {
+            panic!("Eval error for input {:?} with AST {:?}: {:?}", input, ast, e);
+        })
     }
 
     // ── Atoms ──

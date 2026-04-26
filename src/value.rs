@@ -977,7 +977,8 @@ mod tests {
 
     #[test]
     fn test_display_complex() {
-        assert_eq!(format!("{}", Value::Complex { re: 0.0, im: 1.0 }), "1I");
+        assert_eq!(format!("{}", Value::Complex { re: 0.0, im: 1.0 }), "I");
+        assert_eq!(format!("{}", Value::Complex { re: 0.0, im: -1.0 }), "-I");
         assert_eq!(format!("{}", Value::Complex { re: 1.0, im: 2.0 }), "1+2I");
         assert_eq!(format!("{}", Value::Complex { re: 1.0, im: -2.0 }), "1-2I");
     }
@@ -999,7 +1000,13 @@ impl fmt::Display for Value {
             }
             Value::Complex { re, im } => {
                 if *re == 0.0 {
-                    write!(f, "{}I", im)
+                    if *im == 1.0 {
+                        write!(f, "I")
+                    } else if *im == -1.0 {
+                        write!(f, "-I")
+                    } else {
+                        write!(f, "{}I", im)
+                    }
                 } else if *im >= 0.0 {
                     write!(f, "{}+{}I", re, im)
                 } else {

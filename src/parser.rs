@@ -57,7 +57,15 @@ impl Parser {
         tok
     }
 
+    /// Skip all trailing newline tokens.
+    fn skip_newlines(&mut self) {
+        while self.at(&Token::Newline) {
+            self.advance();
+        }
+    }
+
     fn expect(&mut self, expected: &Token) -> Result<(), ParseError> {
+        self.skip_newlines();
         let span = self.peek_span();
         let tok = self.advance();
         if &tok == expected {
@@ -80,10 +88,14 @@ impl Parser {
     pub fn parse_program(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut stmts = Vec::new();
         while self.peek() != &Token::Eof {
+            self.skip_newlines();
+            if self.at(&Token::Eof) {
+                break;
+            }
             let stmt = self.parse_statement()?;
             stmts.push(stmt);
-            // Optional semicolon
-            if self.at(&Token::Semicolon) {
+            // Optional statement separators (; and newlines)
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
         }
@@ -91,6 +103,7 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Expr, ParseError> {
+        self.skip_newlines();
         match self.peek().clone() {
             Token::Import => self.parse_import(),
             Token::Export => self.parse_export(),
@@ -229,6 +242,8 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut members = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
             members.push(self.parse_member_def()?);
         }
         self.expect(&Token::RBrace)?;
@@ -242,6 +257,7 @@ impl Parser {
     }
 
     fn parse_member_def(&mut self) -> Result<MemberDef, ParseError> {
+        self.skip_newlines();
         match self.peek().clone() {
             Token::Field => self.parse_field_def(),
             Token::Method => self.parse_method_def(),
@@ -310,8 +326,10 @@ impl Parser {
             self.expect(&Token::LBrace)?;
             let mut stmts = Vec::new();
             while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
                 stmts.push(self.parse_statement()?);
-                if self.at(&Token::Semicolon) {
+                while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                     self.advance();
                 }
             }
@@ -341,8 +359,10 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
             body.push(self.parse_statement()?);
-            if self.at(&Token::Semicolon) {
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
         }
@@ -357,6 +377,8 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
             let pattern = self.parse_pattern_no_rule()?;
             #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
@@ -384,6 +406,7 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
 
+        self.skip_newlines();
         let exports = if self.at(&Token::Export) {
             self.advance();
             let mut names = vec![self.expect_ident()?];
@@ -401,8 +424,10 @@ impl Parser {
 
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
             body.push(self.parse_statement()?);
-            if self.at(&Token::Semicolon) {
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
         }
@@ -422,6 +447,8 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut members = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            self.skip_newlines();
+            if self.at(&Token::RBrace) { break; }
             members.push(self.parse_member_def()?);
         }
         self.expect(&Token::RBrace)?;
@@ -442,6 +469,8 @@ impl Parser {
 
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            self.skip_newlines();
+            if self.at(&Token::RBrace) { break; }
             let lhs = self.parse_pattern_no_rule()?;
             #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
@@ -471,10 +500,12 @@ impl Parser {
 
         let mut branches = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            self.skip_newlines();
+            if self.at(&Token::RBrace) { break; }
             let pattern = self.parse_pattern()?;
             self.expect(&Token::FatArrow)?;
             let result = self.parse_expression()?;
-            if self.at(&Token::Semicolon) {
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
             branches.push(MatchBranch { pattern, result });
@@ -493,7 +524,7 @@ impl Parser {
         let mut try_body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             try_body.push(self.parse_statement()?);
-            if self.at(&Token::Semicolon) {
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
         }
@@ -505,7 +536,7 @@ impl Parser {
         let mut catch_body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             catch_body.push(self.parse_statement()?);
-            if self.at(&Token::Semicolon) {
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
             }
         }
@@ -517,8 +548,10 @@ impl Parser {
             self.expect(&Token::LBrace)?;
             let mut body = Vec::new();
             while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                self.skip_newlines();
+                if self.at(&Token::RBrace) { break; }
                 body.push(self.parse_statement()?);
-                if self.at(&Token::Semicolon) {
+                while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                     self.advance();
                 }
             }
@@ -556,6 +589,7 @@ impl Parser {
     // ── Expressions (precedence climbing) ──
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
+        self.skip_newlines();
         let lhs = self.parse_pipe_expr()?;
         // Check for assignment-like operators at the lowest precedence level.
         let token = self.peek().clone();
@@ -840,15 +874,16 @@ impl Parser {
                         list: Box::new(right),
                     };
                 }
+                // Don't multiply across newlines
+                Token::Newline => break,
                 // Implicit multiplication (juxtaposition): x y → Times[x, y]
                 // Only trigger for tokens that unambiguously start an expression:
                 // literals, identifiers, slots, parens/braces/assoc, not, and keywords.
                 // Exclude +, - so `x - y` remains subtraction not Times[x, -y].
-                tok if matches!(tok,
-                    Token::Integer(_) | Token::Real(_) | Token::Str(_)
+                Token::Integer(_) | Token::Real(_) | Token::Str(_)
                     | Token::True | Token::False | Token::Null
                     | Token::Ident(_) | Token::Slot | Token::SlotN(_)
-                    | Token::LParen | Token::LBrace | Token::LAssoc
+                    | Token::LParen | Token::LAssoc
                     | Token::Not
                     | Token::If | Token::Which | Token::Switch | Token::Match
                     | Token::For | Token::While | Token::Do
@@ -857,8 +892,7 @@ impl Parser {
                     | Token::With | Token::Method | Token::Field | Token::Constructor
                     | Token::Module | Token::Import | Token::Export | Token::As
                     | Token::RuleKw | Token::Hold | Token::HoldComplete | Token::ReleaseHold
-                    | Token::Mixin
-                ) => {
+                    | Token::Mixin => {
                     let right = self.parse_pow_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),
@@ -1422,6 +1456,7 @@ impl Parser {
     // ── Pattern parsing ──
 
     fn parse_pattern(&mut self) -> Result<Expr, ParseError> {
+        self.skip_newlines();
         let pattern = self.parse_pattern_pipe()?;
 
         // Check for guard: pattern /; condition
@@ -1823,6 +1858,7 @@ impl Parser {
     }
 
     fn parse_pattern_primary(&mut self) -> Result<Expr, ParseError> {
+        self.skip_newlines();
         match self.peek().clone() {
             // Blank: _ or _.
             Token::Ident(s) if s == "_" => {
@@ -2294,10 +2330,17 @@ pub fn parse_with_suppress(tokens: Vec<SpannedToken>) -> Result<Vec<(Expr, bool)
     let mut p = Parser::new(tokens);
     let mut stmts = Vec::new();
     while p.peek() != &Token::Eof {
+        p.skip_newlines();
+        if p.at(&Token::Eof) {
+            break;
+        }
         let stmt = p.parse_statement()?;
         let had_semicolon = if p.at(&Token::Semicolon) {
             p.advance();
             true
+        } else if p.at(&Token::Newline) {
+            p.advance();
+            false
         } else {
             false
         };
