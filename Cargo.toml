@@ -13,6 +13,7 @@ jit = ["cranelift", "cranelift-module", "target-lexicon", "libc"]
 
 [dependencies]
 fastrand = "2"
+unicode_categories = "0.1"
 rug = "1.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rustyline = "18.0.0"

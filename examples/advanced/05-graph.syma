@@ -1,0 +1,388 @@
+(* ============================================= *)
+(* Syma Advanced — 05: Graph Algorithms      *)
+(*                                               *)
+(* Graphs, BFS, DFS, shortest path, topological  *)
+(* sort, MST using OOP.                          *)
+(* ============================================= *)
+
+
+(* ── Vertex ── *)
+
+class Vertex {
+    field id
+    field label
+    field visited
+    field distance
+    field predecessor
+
+    constructor[id_, label_] {
+        this.id = id_
+        this.label = label_
+        this.visited = False
+        this.distance = Infinity
+        this.predecessor = Null
+    }
+
+    method toString[] := label
+}
+
+
+(* ── Edge ── *)
+
+class Edge {
+    field source
+    field target
+    field weight
+
+    constructor[source_, target_, weight_] {
+        this.source = source_
+        this.target = target_
+        this.weight = weight_
+    }
+}
+
+
+(* ── Graph ── *)
+
+class Graph {
+    field vertices = <||>
+    field adj = <||>
+
+    method addVertex[id_, label_] {
+        If[!KeyExistsQ[vertices, id_],
+            this.vertices[id_] = Vertex[id_, label_];
+            this.adj[id_] = {},
+            Print["Duplicate vertex: ", ToString[id_]]
+        ]
+    }
+
+    method addEdge[from_, to_, weight_] :=
+        If[!KeyExistsQ[vertices, from_],
+            Print["Missing source: ", ToString[from_]]; this,
+            If[!KeyExistsQ[vertices, to_],
+                Print["Missing target: ", ToString[to_]]; this,
+                this.adj[from_] = Append[adj[from_], Edge[from_, to_, weight_]]
+            ]
+        ]
+
+    method addUndirectedEdge[a_, b_, w_] {
+        this.addEdge[a_, b_, w_]
+        this.addEdge[b_, a_, w_]
+    }
+
+    method reset[] {
+        keys = Keys[vertices];
+        For[i = 1, i <= Length[keys], i++,
+            v = vertices[Part[keys, i]];
+            v.visited = False;
+            v.distance = Infinity;
+            v.predecessor = Null
+        ]
+    }
+
+    (* ── BFS ── *)
+    method bfs[startId_] {
+        reset[]
+        start = vertices[startId_];
+        start.visited = True;
+        start.distance = 0;
+        queue = {start};
+        result = {}
+
+        While[Length[queue] > 0,
+            cur = Part[queue, 1];
+            queue = Rest[queue];
+            result = Append[result, cur];
+
+            edges = adj[cur.id];
+            For[i = 1, i <= Length[edges], i++,
+                nbr = vertices[Part[edges, i].target];
+                If[!nbr.visited,
+                    nbr.visited = True;
+                    nbr.distance = cur.distance + 1;
+                    nbr.predecessor = cur;
+                    queue = Append[queue, nbr]
+                ]
+            ]
+        ]
+        result
+    }
+
+    (* ── DFS ── *)
+    method dfs[startId_] {
+        reset[]
+        stack = {vertices[startId_]};
+        result = {}
+
+        While[Length[stack] > 0,
+            cur = Last[stack];
+            stack = Drop[stack, -1];
+            If[!cur.visited,
+                cur.visited = True;
+                result = Append[result, cur];
+                edges = adj[cur.id];
+                For[i = Length[edges], i >= 1, i--,
+                    nbr = vertices[Part[edges, i].target];
+                    If[!nbr.visited, stack = Append[stack, nbr]]
+                ]
+            ]
+        ]
+        result
+    }
+
+    (* ── Dijkstra ── *)
+    method shortestPath[startId_, endId_] {
+        reset[]
+        vertices[startId_].distance = 0;
+        unvisited = Keys[vertices]
+
+        While[Length[unvisited] > 0,
+            bestId = Null;
+            bestDist = Infinity;
+            For[i = 1, i <= Length[unvisited], i++,
+                v = vertices[Part[unvisited, i]];
+                If[v.distance < bestDist, bestDist = v.distance; bestId = v.id]
+            ];
+            If[bestId == Null || bestId == endId_, Break[]];
+            unvisited = Select[unvisited, Function[{id}, id != bestId]];
+            cur = vertices[bestId];
+            edges = adj[bestId];
+            For[i = 1, i <= Length[edges], i++,
+                e = Part[edges, i];
+                nbr = vertices[e.target];
+                nd = cur.distance + e.weight;
+                If[MemberQ[unvisited, e.target] && nd < nbr.distance,
+                    nbr.distance = nd;
+                    nbr.predecessor = cur
+                ]
+            ]
+        ]
+
+        If[vertices[endId_].distance == Infinity,
+            Print["No path from ", startId_, " to ", endId_]; Return[{}]
+        ]
+
+        path = {};
+        cur = vertices[endId_];
+        While[Head[cur] =!= Symbol && cur =!= Null,
+            path = Prepend[path, cur];
+            cur = cur.predecessor
+        ];
+        path
+    }
+
+    method hasPath[a_, b_] := {
+        order = bfs[a_];
+        found = Select[order, Function[{v}, v.id == b_]];
+        Length[found] > 0
+    }
+
+    method connectedComponents[] {
+        reset[]
+        count = 0;
+        keys = Keys[vertices];
+        For[i = 1, i <= Length[keys], i++,
+            v = vertices[Part[keys, i]];
+            If[!v.visited, count = count + 1; bfs[v.id]]
+        ];
+        count
+    }
+
+    (* ── Topological Sort ── *)
+    method topologicalSort[] {
+        reset[];
+        order = {};
+
+        visit[v_] :=
+            If[!v.visited,
+                v.visited = True;
+                edges = adj[v.id];
+                For[i = 1, i <= Length[edges], i++,
+                    visit[vertices[Part[edges, i].target]]
+                ];
+                order = Prepend[order, v]
+            ];
+
+        keys = Keys[vertices];
+        For[i = 1, i <= Length[keys], i++,
+            visit[vertices[Part[keys, i]]]
+        ];
+        order
+    }
+
+    method printGraph[] {
+        keys = Keys[vertices];
+        Print["Graph:"];
+        For[i = 1, i <= Length[keys], i++,
+            id = Part[keys, i];
+            edges = adj[id];
+            es = Table[
+                e = Part[edges, j];
+                vertices[e.target].label <> " (" <> ToString[e.weight] <> ")"
+            , {j, Length[edges]}];
+            Print["  ", vertices[id].label, " -> ", es]
+        ]
+    }
+
+    method printPath[path_] :=
+        If[Length[path_] > 0,
+            labels = Table[
+                If[i < Length[path_], Part[path_, i].label <> " -> ", Part[path_, i].label],
+                {i, Length[path_]}
+            ];
+            Print[StringJoin[labels]];
+            Print["  Total: ", ToString[Part[path_, Length[path_]].distance]]
+        ]
+
+    method vertexLabels[list_] := Table[v.label, {v, list}]
+}
+
+
+(* ── Minimum Spanning Tree (Prim's) ── *)
+
+class WeightedGraph extends Graph {
+    method primMST[startId_] {
+        reset[];
+        mset = {vertices[startId_]};
+        medges = {};
+        keys = Keys[vertices];
+        rem = Select[keys, Function[{id}, id != startId_]];
+
+        While[Length[rem] > 0,
+            best = Null;
+            bestW = Infinity;
+            For[i = 1, i <= Length[mset], i++,
+                mv = Part[mset, i];
+                edges = adj[mv.id];
+                For[j = 1, j <= Length[edges], j++,
+                    e = Part[edges, j];
+                    If[MemberQ[rem, e.target] && e.weight < bestW,
+                        bestW = e.weight; best = e
+                    ]
+                ]
+            ];
+            If[best == Null, Break[]];
+            medges = Append[medges, best];
+            nv = vertices[best.target];
+            mset = Append[mset, nv];
+            rem = Select[rem, Function[{id}, id != best.target]]
+        ];
+
+        Print["MST edges:"];
+        For[i = 1, i <= Length[medges], i++,
+            e = Part[medges, i];
+            Print["  ", vertices[e.source].label, " -- ", vertices[e.target].label, " (", ToString[e.weight], ")"]
+        ];
+        medges
+    }
+}
+
+
+(* ═══════════════════════════════════════════ *)
+(*              EXAMPLE USAGE                  *)
+(* ═══════════════════════════════════════════ *)
+
+Print["──────────────────────────────────────────"]
+Print["         GRAPH ALGORITHMS                 "]
+Print["──────────────────────────────────────────"]
+Print[""]
+
+(* ── Build graph ── *)
+g = Graph[]
+g.addVertex["A", "A"]
+g.addVertex["B", "B"]
+g.addVertex["C", "C"]
+g.addVertex["D", "D"]
+g.addVertex["E", "E"]
+g.addVertex["F", "F"]
+
+g.addUndirectedEdge["A", "B", 4]
+g.addUndirectedEdge["A", "C", 2]
+g.addUndirectedEdge["B", "C", 1]
+g.addUndirectedEdge["B", "D", 5]
+g.addUndirectedEdge["C", "D", 8]
+g.addUndirectedEdge["C", "E", 10]
+g.addUndirectedEdge["D", "E", 2]
+g.addUndirectedEdge["D", "F", 6]
+
+g.printGraph[]
+Print[""]
+
+(* ── BFS ── *)
+Print["── BFS from A ──"]
+Print[g.vertexLabels[g.bfs["A"]]]
+Print[""]
+
+(* ── DFS ── *)
+Print["── DFS from A ──"]
+Print[g.vertexLabels[g.dfs["A"]]]
+Print[""]
+
+(* ── Shortest Path ── *)
+Print["── Shortest Path A -> F ──"]
+g.printPath[g.shortestPath["A", "F"]]
+Print[""]
+Print["── Shortest Path A -> E ──"]
+g.printPath[g.shortestPath["A", "E"]]
+Print[""]
+
+(* ── Connectivity ── *)
+Print["── Connectivity ──"]
+Print["A -> D reachable? ", ToString[g.hasPath["A", "D"]]]
+Print["A -> F reachable? ", ToString[g.hasPath["A", "F"]]]
+Print["Components: ", ToString[g.connectedComponents[]]]
+Print[""]
+
+(* ── Disconnected Graph ── *)
+Print["── Disconnected Graph ──"]
+g2 = Graph[]
+g2.addVertex["1", "X"]
+g2.addVertex["2", "Y"]
+g2.addVertex["3", "Z"]
+g2.addUndirectedEdge["1", "2", 1]
+Print["Components: ", ToString[g2.connectedComponents[]]]
+Print[""]
+
+(* ── Topological Sort ── *)
+Print["── Dressing Order ──"]
+
+dag = Graph[]
+dag.addVertex["a", "Undershirt"]
+dag.addVertex["b", "Pants"]
+dag.addVertex["c", "Belt"]
+dag.addVertex["d", "Shirt"]
+dag.addVertex["e", "Tie"]
+dag.addVertex["f", "Jacket"]
+dag.addVertex["g", "Socks"]
+dag.addVertex["h", "Shoes"]
+
+dag.addEdge["a", "b", 1]    (* undershirt before pants *)
+dag.addEdge["a", "h", 1]    (* undershirt before shoes *)
+dag.addEdge["b", "c", 1]    (* pants before belt *)
+dag.addEdge["b", "h", 1]    (* pants before shoes *)
+dag.addEdge["d", "e", 1]    (* shirt before tie *)
+dag.addEdge["d", "c", 1]    (* shirt before belt *)
+dag.addEdge["e", "f", 1]    (* tie before jacket *)
+dag.addEdge["c", "f", 1]    (* belt before jacket *)
+dag.addEdge["g", "h", 1]    (* socks before shoes *)
+
+Print[dag.vertexLabels[dag.topologicalSort[]]]
+Print[""]
+
+(* ── MST ── *)
+Print["── Minimum Spanning Tree (Prim) ──"]
+wg = WeightedGraph[]
+For[i = 1, i <= 6, i++,
+    wg.addVertex[Part[{"A", "B", "C", "D", "E", "F"}, i],
+                 Part[{"A", "B", "C", "D", "E", "F"}, i]]
+]
+wg.addUndirectedEdge["A", "B", 4]
+wg.addUndirectedEdge["A", "C", 2]
+wg.addUndirectedEdge["B", "C", 1]
+wg.addUndirectedEdge["B", "D", 5]
+wg.addUndirectedEdge["C", "D", 8]
+wg.addUndirectedEdge["C", "E", 10]
+wg.addUndirectedEdge["D", "E", 2]
+wg.addUndirectedEdge["D", "F", 6]
+
+wg.primMST["A"]

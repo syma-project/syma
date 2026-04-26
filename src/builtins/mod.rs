@@ -19,6 +19,7 @@ pub mod localsymbol;
 pub mod logical;
 pub mod math;
 pub mod names;
+pub mod noncommutative;
 pub mod number_theory;
 pub mod parallel;
 pub mod pattern;
@@ -27,7 +28,7 @@ pub mod statistics;
 pub mod string;
 pub mod symbolic;
 
-use crate::env::{Env, LazyProvider};
+use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
 use crate::value::{BuiltinFn, EvalError, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +42,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Divide", arithmetic::builtin_divide);
     register_builtin(env, "Minus", arithmetic::builtin_minus);
     register_builtin(env, "Abs", arithmetic::builtin_abs);
+
+    // ── Noncommutative Algebra ──
+    register_builtin(env, "NonCommutativeMultiply", noncommutative::builtin_nc_multiply);
+    register_builtin(env, "Commutator", noncommutative::builtin_commutator);
+    register_builtin(env, "Anticommutator", noncommutative::builtin_anticommutator);
 
     // ── Comparison ──
     register_builtin(env, "Equal", comparison::builtin_equal);
@@ -573,6 +579,11 @@ pub fn register_builtins(env: &Env) {
     // -- Developer context --
     developer::register(env);
 
+    // -- Custom Notation --
+    register_builtin_env(env, "Infix", builtin_infix);
+    register_builtin_env(env, "Prefix", builtin_prefix);
+    register_builtin_env(env, "Postfix", builtin_postfix);
+
     // ── Add SYMA_HOME/Packages to module search path ───────────────
     // This enables `Needs["PackageName"]` to find pure-Syma packages.
     if let Some(syma_home) = std::env::var_os("SYMA_HOME") {
@@ -589,6 +600,100 @@ pub fn register_builtins(env: &Env) {
             }
         }
     }
+}
+
+// ── Custom Notation builtins ──
+
+/// Infix[op_String, head_Symbol, precedence_Integer]
+/// Register a custom infix operator.
+/// e.g. Infix["\u2295", CirclePlus, 180]
+fn builtin_infix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error(
+            "Infix requires 2 or 3 arguments: Infix[op, head, precedence?]".to_string(),
+        ));
+    }
+    let op_str = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(EvalError::Error("First argument to Infix must be a string".to_string())),
+    };
+    let head = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err(EvalError::Error("Second argument to Infix must be a symbol".to_string())),
+    };
+    let precedence = if args.len() == 3 {
+        match &args[2] {
+            Value::Integer(n) => u32::try_from(n).unwrap_or(180),
+            _ => return Err(EvalError::Error("Third argument to Infix must be an integer".to_string())),
+        }
+    } else {
+        180
+    };
+    env.register_operator(
+        &op_str,
+        OperatorInfo {
+            head,
+            precedence,
+            fixity: Fixity::Infix,
+        },
+    );
+    Ok(Value::Null)
+}
+
+/// Prefix[op_String, head_Symbol]
+/// Register a custom prefix operator.
+/// e.g. Prefix["\u00ac", Not]
+fn builtin_prefix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Prefix requires 2 arguments: Prefix[op, head]".to_string(),
+        ));
+    }
+    let op_str = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(EvalError::Error("First argument to Prefix must be a string".to_string())),
+    };
+    let head = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err(EvalError::Error("Second argument to Prefix must be a symbol".to_string())),
+    };
+    env.register_operator(
+        &op_str,
+        OperatorInfo {
+            head,
+            precedence: 250,
+            fixity: Fixity::Prefix,
+        },
+    );
+    Ok(Value::Null)
+}
+
+/// Postfix[op_String, head_Symbol]
+/// Register a custom postfix operator.
+/// e.g. Postfix["!", Factorial]
+fn builtin_postfix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Postfix requires 2 arguments: Postfix[op, head]".to_string(),
+        ));
+    }
+    let op_str = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(EvalError::Error("First argument to Postfix must be a string".to_string())),
+    };
+    let head = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err(EvalError::Error("Second argument to Postfix must be a symbol".to_string())),
+    };
+    env.register_operator(
+        &op_str,
+        OperatorInfo {
+            head,
+            precedence: 300,
+            fixity: Fixity::Postfix,
+        },
+    );
+    Ok(Value::Null)
 }
 
 fn register_builtin(env: &Env, name: &str, func: fn(&[Value]) -> Result<Value, EvalError>) {
@@ -1705,6 +1810,13 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         ],
         "Power" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
         "Divide" | "Minus" | "Abs" => lnlr(),
+        "NonCommutativeMultiply" => vec![
+            "Flat",
+            "Locked",
+            "OneIdentity",
+            "ReadProtected",
+        ],
+        "Commutator" | "Anticommutator" => vec!["Locked", "ReadProtected"],
         "Sin" | "Cos" | "Tan" | "Log" | "Exp" | "Sqrt" | "Floor" | "Ceiling" | "Round" => lnlr(),
         "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => lnlr(),
         "Csc" | "Sec" | "Cot" | "ArcCsc" | "ArcSec" | "ArcCot" => lnlr(),

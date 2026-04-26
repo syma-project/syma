@@ -1,0 +1,218 @@
+(* ============================================= *)
+(* Syma Advanced — 04: Symbolic Expression   *)
+(*                                               *)
+(* OOP expression tree with evaluation,          *)
+(* differentiation, and formatting.              *)
+(* ============================================= *)
+
+
+(* ── Base Expression ── *)
+
+class Expr {
+    method evaluate[env_] := 0
+    method derivative[var_] := 0
+    method toString[] := "?"
+    method isConstant[] := False
+    method degree[] := 0
+}
+
+
+(* ── Constants and Variables ── *)
+
+class Constant extends Expr {
+    field value
+
+    constructor[val_] { this.value = val_ }
+
+    method evaluate[env_] := value
+    method derivative[var_] := Constant[0]
+    method toString[] := ToString[value]
+    method isConstant[] := True
+    method degree[] := 0
+}
+
+class Variable extends Expr {
+    field name
+
+    constructor[name_] { this.name = name_ }
+
+    method evaluate[env_] := If[KeyExistsQ[env_, name], env_[name_], ToExpression[name]]
+    method derivative[var_] := If[name == var_, Constant[1], Constant[0]]
+    method toString[] := name
+    method degree[] := If[name == "x", 1, 0]
+}
+
+
+(* ── Binary Operations ── *)
+
+class Add extends Expr {
+    field left
+    field right
+
+    constructor[l_, r_] { this.left = l_; this.right = r_ }
+
+    method evaluate[env_] := left.evaluate[env_] + right.evaluate[env_]
+    method derivative[var_] := Add[left.derivative[var_], right.derivative[var_]]
+    method toString[] := "(" <> left.toString[] <> " + " <> right.toString[] <> ")"
+    method isConstant[] := left.isConstant[] && right.isConstant[]
+    method degree[] := Max[left.degree[], right.degree[]]
+}
+
+class Multiply extends Expr {
+    field left
+    field right
+
+    constructor[l_, r_] { this.left = l_; this.right = r_ }
+
+    method evaluate[env_] := left.evaluate[env_] * right.evaluate[env_]
+    method derivative[var_] :=
+        Add[Multiply[left.derivative[var_], right],
+            Multiply[left, right.derivative[var_]]]
+    method toString[] := left.toString[] <> " * " <> right.toString[]
+    method isConstant[] := left.isConstant[] && right.isConstant[]
+    method degree[] := left.degree[] + right.degree[]
+}
+
+class Power extends Expr {
+    field base
+    field exp
+
+    constructor[b_, e_] { this.base = b_; this.exp = e_ }
+
+    method evaluate[env_] := base.evaluate[env_] ^ exp.evaluate[env_]
+    method derivative[var_] :=
+        If[exp.isConstant[],
+            Multiply[exp, Multiply[Power[base, Add[exp, Constant[-1]]], base.derivative[var_]]],
+            Constant[0]
+        ]
+    method toString[] := base.toString[] <> "^" <> exp.toString[]
+    method degree[] :=
+        If[exp.isConstant[],
+            base.degree[] * exp.evaluate[<||>],
+            0
+        ]
+}
+
+
+(* ── Unary Functions ── *)
+
+class Sin extends Expr {
+    field arg
+
+    constructor[a_] { this.arg = a_ }
+
+    method evaluate[env_] := Sin[arg.evaluate[env_]]
+    method derivative[var_] := Multiply[Cos[arg], arg.derivative[var_]]
+    method toString[] := "Sin[" <> arg.toString[] <> "]"
+}
+
+class Cos extends Expr {
+    field arg
+
+    constructor[a_] { this.arg = a_ }
+
+    method evaluate[env_] := Cos[arg.evaluate[env_]]
+    method derivative[var_] := Multiply[Constant[-1], Multiply[Sin[arg], arg.derivative[var_]]]
+    method toString[] := "Cos[" <> arg.toString[] <> "]"
+}
+
+
+(* ── Build Polynomial Helper ── *)
+
+buildPolynomial[coeffs_] := {
+    x = Variable["x"]
+    terms = Table[
+        Multiply[Constant[Part[coeffs, i]], Power[x, Constant[i - 1]]],
+        {i, Length[coeffs]}
+    ];
+    Fold[Add, terms]
+}
+
+
+(* ═══════════════════════════════════════════ *)
+(*              EXAMPLE USAGE                  *)
+(* ═══════════════════════════════════════════ *)
+
+Print["──────────────────────────────────────────"]
+Print["     SYMBOLIC EXPRESSION SYSTEM           "]
+Print["──────────────────────────────────────────"]
+Print[""]
+
+(* ── 1. Build expression manually ── *)
+Print["── 1. Build Expression ──"]
+
+a = Add[
+    Multiply[Constant[3], Power[Variable["x"], Constant[2]]],
+    Add[Multiply[Constant[2], Variable["x"]], Constant[1]]
+]
+
+Print["a(x) = ", a.toString[]]
+Print["Degree: ", ToString[a.degree[]]]
+Print["Constant?: ", ToString[a.isConstant[]]]
+Print[""]
+
+(* ── 2. Evaluate at a point ── *)
+Print["── 2. Evaluation ──"]
+
+env = <|"x" -> 5|>
+Print["a(5) = ", ToString[a.evaluate[env]]]
+Print["Expected: 3*25 + 10 + 1 = 86"]
+Print[""]
+
+(* ── 3. Differentiate ── *)
+Print["── 3. Differentiation ──"]
+
+da = a.derivative["x"]
+Print["a'(x) = ", da.toString[]]
+Print["a'(5) = ", ToString[da.evaluate[env]]]
+Print["Expected: 6*5 + 2 = 32"]
+Print[""]
+
+(* ── 4. Product Rule ── *)
+Print["── 4. Product Rule ──"]
+
+f = Multiply[Variable["x"], Sin[Variable["x"]]]
+Print["f(x) = ", f.toString[]]
+Print["f'(x) = ", f.derivative["x"].toString[]]
+Print[""]
+
+(* ── 5. Chain Rule ── *)
+Print["── 5. Chain Rule ──"]
+
+g = Sin[Power[Variable["x"], Constant[2]]]
+Print["g(x) = ", g.toString[]]
+Print["g'(x) = ", g.derivative["x"].toString[]]
+Print[""]
+
+(* ── 6. Evaluate derivative numerically ── *)
+Print["── 6. Numeric Derivative ──"]
+
+sinExpr = Sin[Variable["x"]]
+deriv = sinExpr.derivative["x"]
+Print["d/dx Sin[x] = ", deriv.toString[]]
+Print["d/dx Sin[x] at x=1: ", ToString[deriv.evaluate[<|"x" -> 1|>]]]
+Print["Cos[1] ≈ 0.5403"]
+Print[""]
+
+(* ── 7. Polynomial from coefficients ── *)
+Print["── 7. Polynomial Builder ──"]
+
+p = buildPolynomial[{1, 2, 3}]
+Print["p(x) = 1 + 2x + 3x^2 = ", p.toString[]]
+Print["p(2) = ", ToString[p.evaluate[<|"x" -> 2|>]]]
+Print["Expected: 1 + 4 + 12 = 17"]
+Print[""]
+
+p2 = buildPolynomial[{5, 0, -2, 1}]
+Print["p2(x) = 5 - 2x^2 + x^3 = ", p2.toString[]]
+Print["p2(3) = ", ToString[p2.evaluate[<|"x" -> 3|>]]]
+Print["Expected: 5 - 18 + 27 = 14"]
+Print[""]
+
+(* ── 8. Derivative of Polynomial ── *)
+Print["── 8. Derivative via Rule ──"]
+
+dp = p.derivative["x"]
+Print["p'(x) = ", dp.toString[]]
+Print["p'(2) = ", ToString[dp.evaluate[<|"x" -> 2|>]]]
+Print["Expected: 2 + 12 = 14"]

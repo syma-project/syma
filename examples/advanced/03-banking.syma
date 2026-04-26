@@ -1,0 +1,152 @@
+(* ============================================= *)
+(* Syma Advanced — 03: Banking System      *)
+(* Immutable OOP: methods return new Account.    *)
+(* ============================================= *)
+
+class Transaction {
+    field kind
+    field amount
+    field balanceAfter
+    field note
+
+    constructor[k_, a_, b_, n_] {
+        this.kind = k
+        this.amount = a
+        this.balanceAfter = b
+        this.note = n
+    }
+}
+
+class Account {
+    field number
+    field owner
+    field balance
+    field rate
+    field txns
+
+    constructor[n_, o_, b_, r_, t_] {
+        this.number = n
+        this.owner = o
+        this.balance = b
+        this.rate = r
+        this.txns = t
+    }
+
+    method deposit[a_] := Account[number, owner, balance + a_, rate,
+        Append[txns, Transaction["deposit", a_, balance + a_, ""]]]
+
+    method withdraw[a_] := Account[number, owner, balance - a_, rate,
+        Append[txns, Transaction["withdraw", -a_, balance - a_, ""]]]
+
+    method applyInterest[] {
+        i = Round[balance * rate]
+        Account[number, owner, balance + i, rate,
+            Append[txns, Transaction["interest", i, balance + i, "Applied"]]]
+    }
+
+    method getBalance[] := balance
+    method recentTxns[n_] := If[n >= Length[txns], txns, Take[txns, -n]]
+
+    method summary[] {
+        Print["Account #", ToString[number], " (", owner, "): $", ToString[balance]]
+        Print["  Rate: ", ToString[rate * 100], "% | Txns: ", ToString[Length[txns]]]
+    }
+}
+
+class SavingsAccount extends Account {
+    field minBal
+    field wdLimit
+
+    constructor[n_, o_, b_, r_, t_, m_, w_] {
+        this.number = n; this.owner = o; this.balance = b; this.rate = r; this.txns = t
+        this.minBal = m_; this.wdLimit = w_
+    }
+
+    method withdraw[a_] {
+        If[balance - a_ < minBal, Print["ERROR: below minimum balance"]]
+        If[balance - a_ < minBal, this,
+            SavingsAccount[number, owner, balance - a_, rate,
+                Append[txns, Transaction["withdraw", -a_, balance - a_, "Savings"]],
+                minBal, wdLimit]]
+    }
+
+    method applyInterest[] {
+        r2 = If[balance > 10000, rate + 0.005, rate]
+        i = Round[balance * r2]
+        SavingsAccount[number, owner, balance + i, r2,
+            Append[txns, Transaction["interest", i, balance + i, "Applied"]],
+            minBal, wdLimit]
+    }
+}
+
+class CheckingAccount extends Account {
+    field odLimit
+    field odFee
+
+    constructor[n_, o_, b_, r_, t_, l_, f_] {
+        this.number = n; this.owner = o; this.balance = b; this.rate = r; this.txns = t
+        this.odLimit = l_; this.odFee = f_
+    }
+
+    method withdraw[a_] {
+        If[a_ > balance + odLimit, Print["ERROR: overdraft limit $", ToString[odLimit]]]
+        If[a_ > balance + odLimit, this,
+            If[balance - a_ < 0,
+                CheckingAccount[number, owner, balance - a_ - odFee, rate,
+                    Append[Append[txns,
+                        Transaction["withdraw", -a_, balance - a_, "Overdraft"]],
+                        Transaction["fee", -odFee, balance - a_ - odFee, "Overdraft fee"]],
+                    odLimit, odFee],
+                CheckingAccount[number, owner, balance - a_, rate,
+                    Append[txns, Transaction["withdraw", -a_, balance - a_, ""]],
+                    odLimit, odFee]]]
+    }
+
+    method summary[] {
+        Print["=== Checking #", ToString[number], " (", owner, "): $", ToString[balance]]
+        Print["  Overdraft: $", ToString[odLimit], " (fee: $", ToString[odFee], ") | Txns: ", ToString[Length[txns]]]
+    }
+}
+
+openSavings[n_, o_, d_] := SavingsAccount[n, o, d, 0.025, {}, 50, 6]
+openChecking[n_, o_, d_] := CheckingAccount[n, o, d, 0.005, {}, 500, 35]
+totalBalance[accts_] := Fold[Function[{s, a}, s + a.getBalance[]], 0, accts]
+
+printTxns[txns_, lim_] {
+    start = If[lim >= Length[txns], 1, Length[txns] - lim + 1]
+    For[i = start, i <= Length[txns], i++,
+        Print["  ", Part[txns, i].kind, " $", ToString[Part[txns, i].amount], " -> $", ToString[Part[txns, i].balanceAfter]]]
+}
+
+(* ═══════════════ EXAMPLE USAGE ═══════════════ *)
+
+Print["───── BANKING EXAMPLE ─────\n"]
+
+a = openSavings[1001, "Alice", 1000]
+a = a.deposit[500]
+Print["Alice savings after +$500:  $", ToString[a.getBalance[]]]
+a = a.withdraw[200]
+Print["After -$200:              $", ToString[a.getBalance[]]]
+Print["Attempt -$1500 (blocked): "]
+a = a.withdraw[1500]
+Print["  balance unchanged:      $", ToString[a.getBalance[]]]
+a = a.applyInterest[]
+Print["After interest:            $", ToString[a.getBalance[]]]
+a.summary[]
+Print[""]
+
+c = openChecking[1002, "Alice", 500]
+c = c.deposit[200]
+c = c.withdraw[750]
+c.summary[]
+Print[""]
+
+b = openSavings[2001, "Bob", 2500]
+b = b.deposit[1000]; b = b.withdraw[300]; b = b.applyInterest[]
+b.summary[]
+Print[""]
+
+Print["Total bank balance:       $", ToString[totalBalance[{a, c, b}]]]
+Print[""]
+Print["Bob's last 3 transactions:"]
+printTxns[b.txns, 3]

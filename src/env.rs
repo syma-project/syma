@@ -54,6 +54,22 @@ impl Clone for LazyProvider {
     }
 }
 
+/// Fixity of a custom operator.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fixity {
+    Infix,
+    Prefix,
+    Postfix,
+}
+
+/// Metadata for a registered custom operator.
+#[derive(Debug, Clone)]
+pub struct OperatorInfo {
+    pub head: String,
+    pub precedence: u32,
+    pub fixity: Fixity,
+}
+
 /// The evaluation environment, managing scopes.
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -73,6 +89,9 @@ pub struct Env {
     /// Lazy-loading providers — registered per symbol, fired once on first use.
     /// Shared across all child envs in a session.
     pub lazy_providers: Arc<Mutex<HashMap<String, LazyProvider>>>,
+    /// Custom operator table: maps operator strings (e.g. "⊕") to their metadata.
+    /// Shared across all child envs in a session.
+    pub operator_table: Arc<Mutex<HashMap<String, OperatorInfo>>>,
 }
 
 impl Scope {
@@ -155,6 +174,7 @@ impl Env {
             native_libs: Arc::new(Mutex::new(HashMap::new())),
             attributes: Arc::new(Mutex::new(HashMap::new())),
             lazy_providers: Arc::new(Mutex::new(HashMap::new())),
+            operator_table: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -168,6 +188,7 @@ impl Env {
             native_libs: self.native_libs.clone(),
             attributes: self.attributes.clone(),
             lazy_providers: self.lazy_providers.clone(),
+            operator_table: self.operator_table.clone(),
         }
     }
 
@@ -219,6 +240,7 @@ impl Env {
             native_libs: self.native_libs.clone(),
             attributes: self.attributes.clone(),
             lazy_providers: self.lazy_providers.clone(),
+            operator_table: self.operator_table.clone(),
         }
     }
 
@@ -314,6 +336,25 @@ impl Env {
             .lock()
             .unwrap()
             .insert(name.to_string(), vec![]);
+    }
+
+    // ── Custom operator table ──
+
+    /// Register a custom operator with its metadata.
+    pub fn register_operator(&self, op_name: &str, info: OperatorInfo) {
+        self.operator_table
+            .lock()
+            .unwrap()
+            .insert(op_name.to_string(), info);
+    }
+
+    /// Look up a registered custom operator.
+    pub fn get_operator(&self, op_name: &str) -> Option<OperatorInfo> {
+        self.operator_table
+            .lock()
+            .unwrap()
+            .get(op_name)
+            .cloned()
     }
 }
 

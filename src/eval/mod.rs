@@ -524,6 +524,33 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         )),
                     }
                 }
+                // Attributes[sym] = {attr1, attr2}  — set attributes
+                Expr::Call {
+                    head,
+                    args: call_args,
+                } if call_args.len() == 1
+                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+                {
+                    let sym_name = match &call_args[0] {
+                        Expr::Symbol(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::Error(
+                                "Attributes assignment requires a symbol name".to_string(),
+                            ));
+                        }
+                    };
+                    if env.has_attribute(&sym_name, "Locked") {
+                        return Ok(Value::Null);
+                    }
+                    let attrs = match &val {
+                        Value::List(items) => {
+                            items.iter().map(|v| v.to_string()).collect()
+                        }
+                        other => vec![other.to_string()],
+                    };
+                    env.set_attributes(&sym_name, attrs);
+                    Ok(val)
+                }
                 // this.field = value  (desugared to Assign(field[this], value))
                 Expr::Call {
                     head,
@@ -1263,6 +1290,33 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                         env.set_propagate(name.clone(), val.clone());
                         Ok(val)
                     }
+                    // Attributes[sym] = value  via Set[Attributes[sym], value]
+                    Expr::Call {
+                        head,
+                        args: call_args,
+                    } if call_args.len() == 1
+                        && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+                    {
+                        let sym_name = match &call_args[0] {
+                            Expr::Symbol(s) => s.clone(),
+                            _ => {
+                                return Err(EvalError::Error(
+                                    "Attributes assignment requires a symbol name".to_string(),
+                                ));
+                            }
+                        };
+                        if env.has_attribute(&sym_name, "Locked") {
+                            return Ok(Value::Null);
+                        }
+                        let attrs = match &val {
+                            Value::List(items) => {
+                                items.iter().map(|v| v.to_string()).collect()
+                            }
+                            other => vec![other.to_string()],
+                        };
+                        env.set_attributes(&sym_name, attrs);
+                        Ok(val)
+                    }
                     // this.field = value  (desugared to Set[field[this], value])
                     Expr::Call {
                         head,
@@ -1291,34 +1345,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                             Err(EvalError::Error("Invalid assignment target".to_string()))
                         }
                     }
-                    // Attributes[sym] = value  via Set[Attributes[sym], value]
-                Expr::Call {
-                    head,
-                    args: call_args,
-                } if call_args.len() == 1
-                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
-                {
-                    let sym_name = match &call_args[0] {
-                        Expr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Error(
-                                "Attributes assignment requires a symbol name".to_string(),
-                            ));
-                        }
-                    };
-                    if env.has_attribute(&sym_name, "Locked") {
-                        return Ok(Value::Null);
-                    }
-                    let attrs = match &val {
-                        Value::List(items) => {
-                            items.iter().map(|v| v.to_string()).collect()
-                        }
-                        other => vec![other.to_string()],
-                    };
-                    env.set_attributes(&sym_name, attrs);
-                    Ok(val)
-                }
-                _ => Err(EvalError::Error("Invalid assignment target".to_string())),
+                    _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                 }
             }
             "Hold" => {
@@ -1504,6 +1531,27 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 numeric::numeric_eval_expr(&args[0], prec_bits, env)
             }
             _ => {
+                // Check if this is a custom operator symbol registered in the operator table.
+                // If so, resolve it to the actual head name and dispatch.
+                if let Some(op_info) = env.get_operator(s) {
+                    let head_val = eval(&Expr::Symbol(op_info.head.clone()), env)?;
+                    // Evaluate args with the resolved head's attributes
+                    // (the operator string itself has no attributes, but the resolved head might)
+                    let arg_vals = eval_args_with_attributes(
+                        &Expr::Symbol(op_info.head.clone()),
+                        args,
+                        &head_val,
+                        env,
+                    )?;
+                    let skip_seq = env.has_attribute(&op_info.head, "SequenceHold")
+                        || env.has_attribute(&op_info.head, "HoldAllComplete");
+                    return apply_function(
+                        &head_val,
+                        &flatten_sequences(arg_vals, skip_seq),
+                        env,
+                    );
+                }
+
                 let head_val = eval(head, env)?;
                 let arg_vals = eval_args_with_attributes(head, args, &head_val, env)?;
 
@@ -1538,6 +1586,7 @@ fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
 
 /// Apply a function value to arguments.
 pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    eprintln!("apply: {:?} | args: {:?}", func, args);
     // ── Flat attribute: flatten nested calls with same head ──
     let func_name = match func {
         Value::Builtin(name, _) => Some(name.as_str()),

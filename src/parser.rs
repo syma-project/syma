@@ -834,7 +834,7 @@ impl Parser {
     }
 
     fn parse_add_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_mul_expr()?;
+        let mut left = self.parse_custom_infix_expr()?;
         loop {
             let op = match self.peek() {
                 Token::Plus => "Plus",
@@ -843,7 +843,7 @@ impl Parser {
             };
             let is_minus = self.peek() == &Token::Minus;
             self.advance();
-            let right = self.parse_mul_expr()?;
+            let right = self.parse_custom_infix_expr()?;
             if is_minus {
                 // a - b = Plus[a, Times[-1, b]]
                 let neg = Expr::Call {
@@ -864,13 +864,55 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
+    /// Parse custom user-defined infix operators (Unicode math symbols like ⊕, ⊗).
+    /// These bind tighter than addition but looser than multiplication.
+    /// Registered operators are desugared into `Call` nodes with the operator
+    /// string as the head (e.g. `a ⊕ b` → `Call["⊕", a, b]`), which the
+    /// evaluator resolves via the operator table at runtime.
+    fn parse_custom_infix_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_mul_expr()?;
+        loop {
+            match self.peek() {
+                Token::Operator(op) => {
+                    let op = op.clone();
+                    self.advance();
+                    let right = self.parse_mul_expr()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol(op)),
+                        args: vec![left, right],
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pow_expr()?;
+        loop {
+            match self.peek() {
+                Token::StarStar => {
+                    self.advance();
+                    let right = self.parse_pow_expr()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                        args: vec![left, right],
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_ncmul_expr()?;
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_pow_expr()?;
+                    let right = self.parse_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),
                         args: vec![left, right],
@@ -878,7 +920,7 @@ impl Parser {
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_pow_expr()?;
+                    let right = self.parse_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Divide".to_string())),
                         args: vec![left, right],
@@ -886,7 +928,7 @@ impl Parser {
                 }
                 Token::MapOp => {
                     self.advance();
-                    let right = self.parse_pow_expr()?;
+                    let right = self.parse_ncmul_expr()?;
                     left = Expr::Map {
                         func: Box::new(left),
                         list: Box::new(right),
@@ -937,7 +979,7 @@ impl Parser {
                 | Token::HoldComplete
                 | Token::ReleaseHold
                 | Token::Mixin => {
-                    let right = self.parse_pow_expr()?;
+                    let right = self.parse_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),
                         args: vec![left, right],
@@ -1489,6 +1531,16 @@ impl Parser {
             // Throw expression
             Token::Throw => self.parse_throw(),
 
+            // Custom prefix operator: op expr  (e.g. ¬x)
+            Token::Operator(op) => {
+                self.advance();
+                let rhs = self.parse_primary_expr()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol(op)),
+                    args: vec![rhs],
+                })
+            }
+
             tok => Err(ParseError {
                 message: format!("Unexpected token in expression: {:?}", tok),
                 token: Some(tok),
@@ -1680,7 +1732,7 @@ impl Parser {
     }
 
     fn parse_pattern_add(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_pattern_mul()?;
+        let mut left = self.parse_pattern_custom_infix()?;
         loop {
             let op = match self.peek() {
                 Token::Plus => "Plus",
@@ -1689,7 +1741,7 @@ impl Parser {
             };
             let is_minus = self.peek() == &Token::Minus;
             self.advance();
-            let right = self.parse_pattern_mul()?;
+            let right = self.parse_pattern_custom_infix()?;
             if is_minus {
                 let neg = Expr::Call {
                     head: Box::new(Expr::Symbol("Times".to_string())),
@@ -1709,13 +1761,52 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_pattern_mul(&mut self) -> Result<Expr, ParseError> {
+    /// Parse custom infix operators in pattern context.
+    /// Same logic as parse_custom_infix_expr but for patterns.
+    fn parse_pattern_custom_infix(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_pattern_mul()?;
+        loop {
+            match self.peek() {
+                Token::Operator(op) => {
+                    let op = op.clone();
+                    self.advance();
+                    let right = self.parse_pattern_mul()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol(op)),
+                        args: vec![left, right],
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_pattern_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_pow()?;
+        loop {
+            match self.peek() {
+                Token::StarStar => {
+                    self.advance();
+                    let right = self.parse_pattern_pow()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                        args: vec![left, right],
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_pattern_mul(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_pattern_ncmul_expr()?;
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_pattern_pow()?;
+                    let right = self.parse_pattern_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),
                         args: vec![left, right],
@@ -1723,7 +1814,7 @@ impl Parser {
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_pattern_pow()?;
+                    let right = self.parse_pattern_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Divide".to_string())),
                         args: vec![left, right],
@@ -1731,7 +1822,7 @@ impl Parser {
                 }
                 Token::MapOp => {
                     self.advance();
-                    let right = self.parse_pattern_pow()?;
+                    let right = self.parse_pattern_ncmul_expr()?;
                     left = Expr::Map {
                         func: Box::new(left),
                         list: Box::new(right),
@@ -1777,7 +1868,7 @@ impl Parser {
                 | Token::HoldComplete
                 | Token::ReleaseHold
                 | Token::Mixin => {
-                    let right = self.parse_pattern_pow()?;
+                    let right = self.parse_pattern_ncmul_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),
                         args: vec![left, right],
@@ -2255,7 +2346,18 @@ impl Parser {
             }
 
             // ── Try/Catch expression — also valid in pattern context (e.g. in Call args) ──
+            // Try/Catch expression
             Token::Try => self.parse_try(),
+
+            // Custom prefix operator in pattern context: op expr
+            Token::Operator(op) => {
+                self.advance();
+                let rhs = self.parse_pattern_primary()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol(op)),
+                    args: vec![rhs],
+                })
+            }
 
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),

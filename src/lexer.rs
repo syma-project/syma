@@ -8,6 +8,8 @@
 /// - Symbols and keywords
 use std::fmt;
 
+use unicode_categories::UnicodeCategories;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     pub line: usize,
@@ -85,9 +87,13 @@ pub enum Token {
     PipeAlt,         // | (pattern alternatives)
     FuncRef,         // & (function reference / pure function)
 
+    // ── Unicode custom operators ──
+    Operator(String), // Unicode math operator sequence (⊕, ⊗, →, etc.)
+
     // ── Compound assignment ──
     PlusAssign,  // +=
     MinusAssign, // -=
+    StarStar,    // **
     StarAssign,  // *=
     SlashAssign, // /=
     CaretAssign, // ^=
@@ -227,6 +233,7 @@ impl fmt::Display for Token {
             Token::Mixin => write!(f, "mixin"),
             Token::PlusAssign => write!(f, "+="),
             Token::MinusAssign => write!(f, "-="),
+            Token::StarStar => write!(f, "**"),
             Token::StarAssign => write!(f, "*="),
             Token::SlashAssign => write!(f, "/="),
             Token::CaretAssign => write!(f, "^="),
@@ -235,9 +242,29 @@ impl fmt::Display for Token {
             Token::Unset => write!(f, "=."),
             Token::ColonSlashSemicolon => write!(f, "/;"),
             Token::AtTransform => write!(f, "@transform"),
+            Token::Operator(s) => write!(f, "{}", s),
             Token::Eof => write!(f, "EOF"),
         }
     }
+}
+
+/// Check if a character is a Unicode math operator or arrow.
+/// These can form custom operator tokens via maximal munch.
+/// Excludes ASCII (< U+0080) to avoid conflicts with existing operators like `=`, `+`, `-`.
+fn is_unicode_operator_char(c: char) -> bool {
+    if c < '\u{0080}' {
+        return false;
+    }
+    // Unicode Sm (Symbol, Math) category
+    if c.is_symbol_math() {
+        return true;
+    }
+    // Arrows (U+2190-U+21FF) are So (Symbol, Other) in Unicode but
+    // are commonly used as operators (following Julia convention).
+    if ('\u{2190}'..='\u{21FF}').contains(&c) {
+        return true;
+    }
+    false
 }
 
 pub struct Lexer {
@@ -532,6 +559,22 @@ impl Lexer {
                         },
                     })
                 };
+            }
+
+            // Unicode custom operator: greedily consume consecutive operator chars
+            if is_unicode_operator_char(ch) {
+                self.advance();
+                let mut op_str = String::from(ch);
+                while let Some(next) = self.peek() {
+                    if is_unicode_operator_char(next) {
+                        op_str.push(next);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                push!(Token::Operator(op_str));
+                continue;
             }
 
             match ch {
@@ -871,10 +914,13 @@ impl Lexer {
                     }
                 }
 
-                // * operator: *=, *
+                // * operator: **, *=, *
                 '*' => {
                     self.advance();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('*') {
+                        self.advance();
+                        push!(Token::StarStar);
+                    } else if self.peek() == Some('=') {
                         self.advance();
                         push!(Token::StarAssign);
                     } else {
