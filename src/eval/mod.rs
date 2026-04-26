@@ -1424,6 +1424,18 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     other => Ok(other),
                 }
             }
+            "Assuming" => {
+                // Assuming[assum, expr] — evaluate expr with $Assumptions set
+                if args.len() != 2 {
+                    return Err(EvalError::Error(
+                        "Assuming requires exactly 2 arguments".to_string(),
+                    ));
+                }
+                let assum = eval(&args[0], env)?;
+                let child_env = env.child();
+                child_env.set("$Assumptions".to_string(), assum);
+                eval(&args[1], &child_env)
+            }
             "N" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(EvalError::Error("N requires 1 or 2 arguments".to_string()));

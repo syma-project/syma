@@ -4,6 +4,7 @@ pub mod association;
 pub mod comparison;
 pub mod dataset;
 pub mod developer;
+pub mod domains;
 pub mod discrete;
 pub mod error;
 pub mod ffi;
@@ -467,6 +468,9 @@ pub fn register_builtins(env: &Env) {
 
     // ── Symbol Names ──
     register_builtin_env(env, "Names", names::builtin_names);
+
+    // ── Assumptions & Domains ──
+    domains::register(env);
 
     // ── Symbol Clearing ──
     register_builtin_env(env, "Clear", clearing::builtin_clear);

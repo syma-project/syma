@@ -49,10 +49,12 @@ pub fn builtin_less(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a < b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
-        _ => Err(EvalError::TypeError {
-            expected: "Number or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            Ok(Value::Call {
+                head: "Less".to_string(),
+                args: args.to_vec(),
+            })
+        }
     }
 }
 
@@ -85,10 +87,13 @@ pub fn builtin_greater(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a > b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
-        _ => Err(EvalError::TypeError {
-            expected: "Number or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            // Symbolic args: return unevaluated Greater[args...]
+            Ok(Value::Call {
+                head: "Greater".to_string(),
+                args: args.to_vec(),
+            })
+        }
     }
 }
 
@@ -125,10 +130,12 @@ pub fn builtin_less_equal(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a <= b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
-        _ => Err(EvalError::TypeError {
-            expected: "Number or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            Ok(Value::Call {
+                head: "LessEqual".to_string(),
+                args: args.to_vec(),
+            })
+        }
     }
 }
 
@@ -165,10 +172,12 @@ pub fn builtin_greater_equal(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a >= b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
-        _ => Err(EvalError::TypeError {
-            expected: "Number or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            Ok(Value::Call {
+                head: "GreaterEqual".to_string(),
+                args: args.to_vec(),
+            })
+        }
     }
 }
 

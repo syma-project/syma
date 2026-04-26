@@ -388,7 +388,7 @@ impl Lexer {
         }
 
         // Check for real (decimal point)
-        if self.peek() == Some('.') && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) {
+        if self.peek() == Some('.') {
             num_str.push('.');
             self.advance(); // consume '.'
             while let Some(ch) = self.peek() {
@@ -1191,6 +1191,12 @@ mod tests {
     fn test_real_number() {
         let tokens = tokens("3.14");
         assert_eq!(tokens, vec![Token::Real("3.14".to_string()), Token::Eof,]);
+    }
+
+    #[test]
+    fn test_trailing_dot_real() {
+        let tokens = tokens("2.");
+        assert_eq!(tokens, vec![Token::Real("2.".to_string()), Token::Eof,]);
     }
 
     #[test]
