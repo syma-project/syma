@@ -267,6 +267,7 @@ fn is_unicode_operator_char(c: char) -> bool {
     false
 }
 
+
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
@@ -462,20 +463,66 @@ impl Lexer {
         }
     }
 
-    fn read_ident(&mut self, first: char) -> String {
+    /// Read the name portion of a `\[Name]` character reference.
+    /// Assumes `[` has already been consumed. Reads until `]`.
+    fn read_named_character_name(&mut self) -> Result<String, LexError> {
+        let mut name = String::new();
+        loop {
+            match self.advance() {
+                Some(']') => return Ok(name),
+                Some(c) if c.is_alphanumeric() => name.push(c),
+                Some(c) => {
+                    return Err(LexError {
+                        message: format!(
+                            "Invalid character '{}' in named character reference",
+                            c
+                        ),
+                        pos: self.pos,
+                        line: self.line,
+                        col: self.col,
+                    });
+                }
+                None => {
+                    return Err(LexError {
+                        message: "Unterminated named character reference".to_string(),
+                        pos: self.pos,
+                        line: self.line,
+                        col: self.col,
+                    });
+                }
+            }
+        }
+    }
+
+    fn read_ident(&mut self, first: char) -> Result<String, LexError> {
         let mut ident = String::new();
         ident.push(first);
+        self.extend_ident(&mut ident)?;
+        Ok(ident)
+    }
 
-        while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '`' {
-                ident.push(ch);
-                self.advance();
+    /// Continue reading identifier characters after initial prefix.
+    /// Handles regular ident chars and embedded `\[Name]` references.
+    fn extend_ident(&mut self, ident: &mut String) -> Result<(), LexError> {
+        loop {
+            if self.peek() == Some('\\') && self.peek_ahead(1) == Some('[') {
+                // \[Name] embedded in identifier — append name as literal string
+                self.advance(); // consume \
+                self.advance(); // consume [
+                let name = self.read_named_character_name()?;
+                ident.push_str(&name);
+            } else if let Some(ch) = self.peek() {
+                if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '`' {
+                    ident.push(ch);
+                    self.advance();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
         }
-
-        ident
+        Ok(())
     }
 
     fn keyword_or_ident(ident: &str) -> Token {
@@ -595,9 +642,39 @@ impl Lexer {
                 // Identifiers and keywords
                 'a'..='z' | 'A'..='Z' | '$' | '_' => {
                     self.advance();
-                    let ident = self.read_ident(ch);
+                    let ident = self.read_ident(ch)?;
                     let token = Self::keyword_or_ident(&ident);
                     push!(token);
+                }
+
+                // Named character references: \[Alpha], \[Beta], \[Pi], etc.
+                // In Wolfram Language, \[Name] is the canonical input form and
+                // produces the symbol with that name (e.g. \[Pi] → Pi, not π).
+                '\\' => {
+                    self.advance(); // consume \
+                    if self.peek() == Some('[') {
+                        self.advance(); // consume [
+                        let name = self.read_named_character_name()?;
+                        if name.is_empty() {
+                            return Err(LexError {
+                                message: "Empty named character reference".to_string(),
+                                pos: self.pos,
+                                line: self.line,
+                                col: self.col,
+                            });
+                        }
+                        let mut ident = name;
+                        // Read remaining ident chars (e.g. \[Alpha]Beta → AlphaBeta)
+                        self.extend_ident(&mut ident)?;
+                        push!(Self::keyword_or_ident(&ident));
+                    } else {
+                        return Err(LexError {
+                            message: "Unexpected backslash".to_string(),
+                            pos: self.pos,
+                            line: self.line,
+                            col: self.col,
+                        });
+                    }
                 }
 
                 // Strings
@@ -1448,5 +1525,213 @@ mod tests {
             toks,
             vec![Token::Ident("x".to_string()), Token::Unset, Token::Eof,]
         );
+    }
+
+    // ── Named character tests ──
+
+    #[test]
+    fn test_named_character_greek() {
+        let toks = tokens(r"\[Alpha]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("Alpha".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_in_identifier() {
+        // \[Alpha]Beta → AlphaBeta
+        let toks = tokens(r"\[Alpha]Beta");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("AlphaBeta".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_prefix_to_ident() {
+        // x\[Alpha] → xAlpha (named char in middle of identifier)
+        let toks = tokens(r"x\[Alpha]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("xAlpha".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_multiple_greek() {
+        // \[Alpha]\[Beta] → AlphaBeta
+        let toks = tokens(r"\[Alpha]\[Beta]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("AlphaBeta".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_expression() {
+        let toks = tokens(r"\[Alpha] + \[Beta]");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("Alpha".to_string()),
+                Token::Plus,
+                Token::Ident("Beta".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_in_function_call() {
+        let toks = tokens(r"f[\[Alpha], \[Beta]]");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("f".to_string()),
+                Token::LBracket,
+                Token::Ident("Alpha".to_string()),
+                Token::Comma,
+                Token::Ident("Beta".to_string()),
+                Token::RBracket,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_capital_greek() {
+        let toks = tokens(r"\[CapitalGamma]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("CapitalGamma".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_pi() {
+        // \[Pi] → Pi (the symbol, not π character)
+        let toks = tokens(r"\[Pi]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("Pi".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_infinity() {
+        // \[Infinity] → Infinity (the symbol, not ∞)
+        let toks = tokens(r"Limit[f, x -> \[Infinity]]");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("Limit".to_string()),
+                Token::LBracket,
+                Token::Ident("f".to_string()),
+                Token::Comma,
+                Token::Ident("x".to_string()),
+                Token::Rule,
+                Token::Ident("Infinity".to_string()),
+                Token::RBracket,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_times() {
+        // \[Times] → Times (identifier, not × operator)
+        let toks = tokens(r"a \[Times] b");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Ident("Times".to_string()),
+                Token::Ident("b".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_unterminated() {
+        let result = tokenize(r"\[Alpha");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lone_backslash_error() {
+        let result = tokenize(r"\foo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_named_character_all_greek_lowercase() {
+        // Spot-check every lowercase Greek letter works
+        for name in [
+            "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
+            "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
+            "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega",
+        ] {
+            let input = format!("\\[{}]", name);
+            let toks = tokens(&input);
+            assert_eq!(
+                toks,
+                vec![Token::Ident(name.to_string()), Token::Eof],
+                "Failed for {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_named_character_pi_in_expression() {
+        // \[Pi] behaves as identifier Pi
+        let toks = tokens(r"Sin[\[Pi] / 2]");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("Sin".to_string()),
+                Token::LBracket,
+                Token::Ident("Pi".to_string()),
+                Token::Slash,
+                Token::Integer("2".to_string()),
+                Token::RBracket,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_symbolic_expression() {
+        // N[\[Pi]] → N[Pi]
+        let toks = tokens(r"N[\[Pi]]");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("N".to_string()),
+                Token::LBracket,
+                Token::Ident("Pi".to_string()),
+                Token::RBracket,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_named_character_rule() {
+        // \[Rule] → Rule (identifier, not -> operator)
+        let toks = tokens(r"\[Rule]");
+        assert_eq!(
+            toks,
+            vec![Token::Ident("Rule".to_string()), Token::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_named_character_empty_error() {
+        // Empty name \[]
+        let result = tokenize(r"\[]");
+        assert!(result.is_err());
     }
 }

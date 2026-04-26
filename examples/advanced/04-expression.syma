@@ -1,10 +1,9 @@
 (* ============================================= *)
-(* Syma Advanced — 04: Symbolic Expression   *)
+(* Syma Advanced — 04: Symbolic Expression       *)
 (*                                               *)
 (* OOP expression tree with evaluation,          *)
 (* differentiation, and formatting.              *)
 (* ============================================= *)
-
 
 (* ── Base Expression ── *)
 
@@ -22,7 +21,7 @@ class Expr {
 class Constant extends Expr {
     field value
 
-    constructor[val_] { this.value = val_ }
+    constructor[val_] { this.value = val }
 
     method evaluate[env_] := value
     method derivative[var_] := Constant[0]
@@ -34,10 +33,10 @@ class Constant extends Expr {
 class Variable extends Expr {
     field name
 
-    constructor[name_] { this.name = name_ }
+    constructor[name_] { this.name = name }
 
-    method evaluate[env_] := If[KeyExistsQ[env_, name], env_[name_], ToExpression[name]]
-    method derivative[var_] := If[name == var_, Constant[1], Constant[0]]
+    method evaluate[env_] := If[KeyExistsQ[env, name], env[name], ToExpression[name]]
+    method derivative[var_] := If[name == var, Constant[1], Constant[0]]
     method toString[] := name
     method degree[] := If[name == "x", 1, 0]
 }
@@ -49,10 +48,10 @@ class Add extends Expr {
     field left
     field right
 
-    constructor[l_, r_] { this.left = l_; this.right = r_ }
+    constructor[l_, r_] { this.left = l; this.right = r }
 
-    method evaluate[env_] := left.evaluate[env_] + right.evaluate[env_]
-    method derivative[var_] := Add[left.derivative[var_], right.derivative[var_]]
+    method evaluate[env_] := left.evaluate[env] + right.evaluate[env]
+    method derivative[var_] := Add[left.derivative[var], right.derivative[var]]
     method toString[] := "(" <> left.toString[] <> " + " <> right.toString[] <> ")"
     method isConstant[] := left.isConstant[] && right.isConstant[]
     method degree[] := Max[left.degree[], right.degree[]]
@@ -62,12 +61,12 @@ class Multiply extends Expr {
     field left
     field right
 
-    constructor[l_, r_] { this.left = l_; this.right = r_ }
+    constructor[l_, r_] { this.left = l; this.right = r }
 
-    method evaluate[env_] := left.evaluate[env_] * right.evaluate[env_]
+    method evaluate[env_] := left.evaluate[env] * right.evaluate[env]
     method derivative[var_] :=
-        Add[Multiply[left.derivative[var_], right],
-            Multiply[left, right.derivative[var_]]]
+        Add[Multiply[left.derivative[var], right],
+            Multiply[left, right.derivative[var]]]
     method toString[] := left.toString[] <> " * " <> right.toString[]
     method isConstant[] := left.isConstant[] && right.isConstant[]
     method degree[] := left.degree[] + right.degree[]
@@ -77,12 +76,12 @@ class Power extends Expr {
     field base
     field exp
 
-    constructor[b_, e_] { this.base = b_; this.exp = e_ }
+    constructor[b_, e_] { this.base = b; this.exp = e }
 
-    method evaluate[env_] := base.evaluate[env_] ^ exp.evaluate[env_]
+    method evaluate[env_] := base.evaluate[env] ^ exp.evaluate[env]
     method derivative[var_] :=
         If[exp.isConstant[],
-            Multiply[exp, Multiply[Power[base, Add[exp, Constant[-1]]], base.derivative[var_]]],
+            Multiply[exp, Multiply[Power[base, Add[exp, Constant[-1]]], base.derivative[var]]],
             Constant[0]
         ]
     method toString[] := base.toString[] <> "^" <> exp.toString[]
@@ -99,34 +98,30 @@ class Power extends Expr {
 class Sin extends Expr {
     field arg
 
-    constructor[a_] { this.arg = a_ }
+    constructor[a_] { this.arg = a }
 
-    method evaluate[env_] := Sin[arg.evaluate[env_]]
-    method derivative[var_] := Multiply[Cos[arg], arg.derivative[var_]]
+    method evaluate[env_] := Sin[arg.evaluate[env]]
+    method derivative[var_] := Multiply[Cos[arg], arg.derivative[var]]
     method toString[] := "Sin[" <> arg.toString[] <> "]"
 }
 
 class Cos extends Expr {
     field arg
 
-    constructor[a_] { this.arg = a_ }
+    constructor[a_] { this.arg = a }
 
-    method evaluate[env_] := Cos[arg.evaluate[env_]]
-    method derivative[var_] := Multiply[Constant[-1], Multiply[Sin[arg], arg.derivative[var_]]]
+    method evaluate[env_] := Cos[arg.evaluate[env]]
+    method derivative[var_] := Multiply[Constant[-1], Multiply[Sin[arg], arg.derivative[var]]]
     method toString[] := "Cos[" <> arg.toString[] <> "]"
 }
 
 
 (* ── Build Polynomial Helper ── *)
 
-buildPolynomial[coeffs_] := {
-    x = Variable["x"]
-    terms = Table[
-        Multiply[Constant[Part[coeffs, i]], Power[x, Constant[i - 1]]],
-        {i, Length[coeffs]}
-    ];
-    Fold[Add, terms]
-}
+buildPolynomial[coeffs_] := Fold[Add, Table[
+    Multiply[Constant[Part[coeffs, i]], Power[Variable["x"], Constant[i - 1]]],
+    {i, Length[coeffs]}
+]]
 
 
 (* ═══════════════════════════════════════════ *)

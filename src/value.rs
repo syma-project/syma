@@ -403,7 +403,7 @@ pub struct FunctionDef {
 }
 
 /// A single function definition (one pattern-match case).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDefinition {
     pub params: Vec<Expr>,
     pub body: Expr,
@@ -411,7 +411,7 @@ pub struct FunctionDefinition {
 }
 
 /// A class definition with fields, methods, constructor, and inheritance info.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDef {
     pub name: String,
     pub parent: Option<String>,
@@ -422,7 +422,7 @@ pub struct ClassDef {
 }
 
 /// A class field with optional type hint and default value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassField {
     pub name: String,
     pub type_hint: Option<String>,
@@ -430,7 +430,7 @@ pub struct ClassField {
 }
 
 /// A class method.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassMethod {
     pub name: String,
     pub params: Vec<Expr>,
@@ -438,7 +438,7 @@ pub struct ClassMethod {
 }
 
 /// A class constructor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassConstructor {
     pub params: Vec<Expr>,
     pub body: Expr,
@@ -589,6 +589,23 @@ impl PartialEq for Value {
             (Value::BytecodeFunction(_), Value::BytecodeFunction(_)) => false,
             // PackedArray: compare element-by-element
             (Value::PackedArray(a), Value::PackedArray(b)) => a == b,
+            // Pattern: compare inner expression
+            (Value::Pattern(a), Value::Pattern(b)) => a == b,
+            // Function: compare by name only (structural comparison not needed)
+            (Value::Function(a), Value::Function(b)) => a.name == b.name,
+            // Builtin: compare by name only (function pointer comparison is unreliable)
+            (Value::Builtin(a, _), Value::Builtin(b, _)) => a == b,
+            // PureFunction: compare by body expression
+            (Value::PureFunction { body: a, .. }, Value::PureFunction { body: b, .. }) => a == b,
+            // Method: compare by name and object
+            (Value::Method { name: a, object: b }, Value::Method { name: c, object: d }) => a == c && b == d,
+            // Object: compare by class name and fields
+            (Value::Object { class_name: a, fields: b }, Value::Object { class_name: c, fields: d }) => a == c && b == d,
+            // Class: compare by name only (definition structural comparison is not implemented)
+            (Value::Class(a), Value::Class(b)) => a.name == b.name,
+            // Hold: compare inner values
+            (Value::Hold(a), Value::Hold(b)) => a == b,
+            (Value::HoldComplete(a), Value::HoldComplete(b)) => a == b,
             _ => false,
         }
     }

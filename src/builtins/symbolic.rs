@@ -307,7 +307,7 @@ fn expand_times(args: &[Value]) -> Value {
     {
         let terms: Vec<Value> = plus_args
             .iter()
-            .map(|term| simplify_call("Times", &[left.clone(), term.clone()]))
+            .map(|term| expand_value(&simplify_call("Times", &[left.clone(), term.clone()])))
             .collect();
         return simplify_call("Plus", &terms);
     }
@@ -319,7 +319,7 @@ fn expand_times(args: &[Value]) -> Value {
     {
         let terms: Vec<Value> = plus_args
             .iter()
-            .map(|term| simplify_call("Times", &[term.clone(), right.clone()]))
+            .map(|term| expand_value(&simplify_call("Times", &[term.clone(), right.clone()])))
             .collect();
         return simplify_call("Plus", &terms);
     }

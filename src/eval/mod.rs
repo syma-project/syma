@@ -1488,6 +1488,50 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 }
                 Err(EvalError::Continue)
             }
+            "While" => {
+                // While[cond, body] — evaluate body while cond is True
+                if args.len() != 2 {
+                    return Err(EvalError::Error(
+                        "While requires exactly 2 arguments".to_string(),
+                    ));
+                }
+                let mut result = Value::Null;
+                loop {
+                    let cond = eval(&args[0], env)?;
+                    if !cond.to_bool() {
+                        break;
+                    }
+                    result = eval(&args[1], env).or_else(|e| match e {
+                        EvalError::Break => Ok(Value::Null),
+                        EvalError::Continue => Ok(Value::Null),
+                        other => Err(other),
+                    })?;
+                }
+                Ok(result)
+            }
+            "For" => {
+                // For[start, test, step, body] — C-style for loop
+                if args.len() != 4 {
+                    return Err(EvalError::Error(
+                        "For requires exactly 4 arguments".to_string(),
+                    ));
+                }
+                eval(&args[0], env)?;
+                let mut result = Value::Null;
+                loop {
+                    let test = eval(&args[1], env)?;
+                    if !test.to_bool() {
+                        break;
+                    }
+                    result = eval(&args[3], env).or_else(|e| match e {
+                        EvalError::Break => Ok(Value::Null),
+                        EvalError::Continue => Ok(Value::Null),
+                        other => Err(other),
+                    })?;
+                    eval(&args[2], env)?;
+                }
+                Ok(result)
+            }
             "ReleaseHold" => {
                 if args.len() != 1 {
                     return Err(EvalError::Error(
@@ -1586,7 +1630,6 @@ fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
 
 /// Apply a function value to arguments.
 pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    eprintln!("apply: {:?} | args: {:?}", func, args);
     // ── Flat attribute: flatten nested calls with same head ──
     let func_name = match func {
         Value::Builtin(name, _) => Some(name.as_str()),

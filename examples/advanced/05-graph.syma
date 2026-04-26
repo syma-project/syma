@@ -1,10 +1,9 @@
 (* ============================================= *)
-(* Syma Advanced — 05: Graph Algorithms      *)
+(* Syma Advanced — 05: Graph Algorithms          *)
 (*                                               *)
 (* Graphs, BFS, DFS, shortest path, topological  *)
 (* sort, MST using OOP.                          *)
 (* ============================================= *)
-
 
 (* ── Vertex ── *)
 
@@ -16,8 +15,8 @@ class Vertex {
     field predecessor
 
     constructor[id_, label_] {
-        this.id = id_
-        this.label = label_
+        this.id = id
+        this.label = label
         this.visited = False
         this.distance = Infinity
         this.predecessor = Null
@@ -35,9 +34,9 @@ class Edge {
     field weight
 
     constructor[source_, target_, weight_] {
-        this.source = source_
-        this.target = target_
-        this.weight = weight_
+        this.source = source
+        this.target = target
+        this.weight = weight
     }
 }
 
@@ -49,164 +48,155 @@ class Graph {
     field adj = <||>
 
     method addVertex[id_, label_] {
-        If[!KeyExistsQ[vertices, id_],
-            this.vertices[id_] = Vertex[id_, label_];
-            this.adj[id_] = {},
-            Print["Duplicate vertex: ", ToString[id_]]
+        If[!KeyExistsQ[vertices, id],
+            (this.vertices = AssociateTo[vertices, id -> Vertex[id, label]];
+             this.adj = AssociateTo[adj, id -> {}]),
+            Print["Duplicate vertex: ", ToString[id]]
         ]
     }
 
-    method addEdge[from_, to_, weight_] :=
-        If[!KeyExistsQ[vertices, from_],
-            Print["Missing source: ", ToString[from_]]; this,
-            If[!KeyExistsQ[vertices, to_],
-                Print["Missing target: ", ToString[to_]]; this,
-                this.adj[from_] = Append[adj[from_], Edge[from_, to_, weight_]]
-            ]
-        ]
+    method addEdge[from_, to_, weight_] {
+        this.adj = AssociateTo[adj, from -> Append[Lookup[adj, from], Edge[from, to, weight]]]
+    }
 
     method addUndirectedEdge[a_, b_, w_] {
-        this.addEdge[a_, b_, w_]
-        this.addEdge[b_, a_, w_]
+        this.addEdge[a, b, w];
+        this.addEdge[b, a, w]
     }
 
     method reset[] {
         keys = Keys[vertices];
         For[i = 1, i <= Length[keys], i++,
-            v = vertices[Part[keys, i]];
-            v.visited = False;
-            v.distance = Infinity;
-            v.predecessor = Null
+            (v = Lookup[vertices, Part[keys, i]];
+             v.visited = False;
+             v.distance = Infinity;
+             v.predecessor = Null)
         ]
     }
 
-    (* ── BFS ── *)
     method bfs[startId_] {
-        reset[]
-        start = vertices[startId_];
+        this.reset[];
+        start = Lookup[vertices, startId];
         start.visited = True;
         start.distance = 0;
         queue = {start};
-        result = {}
+        result = {};
 
         While[Length[queue] > 0,
-            cur = Part[queue, 1];
-            queue = Rest[queue];
-            result = Append[result, cur];
-
-            edges = adj[cur.id];
-            For[i = 1, i <= Length[edges], i++,
-                nbr = vertices[Part[edges, i].target];
-                If[!nbr.visited,
-                    nbr.visited = True;
-                    nbr.distance = cur.distance + 1;
-                    nbr.predecessor = cur;
-                    queue = Append[queue, nbr]
-                ]
-            ]
-        ]
+            (cur = Part[queue, 1];
+             queue = Rest[queue];
+             result = Append[result, cur];
+             edges = Lookup[adj, cur.id];
+             For[i = 1, i <= Length[edges], i++,
+                 (nbr = Lookup[vertices, Part[edges, i].target];
+                  If[!nbr.visited,
+                      (nbr.visited = True;
+                       nbr.distance = cur.distance + 1;
+                       nbr.predecessor = cur;
+                       queue = Append[queue, nbr])])])
+        ];
         result
     }
 
-    (* ── DFS ── *)
     method dfs[startId_] {
-        reset[]
-        stack = {vertices[startId_]};
-        result = {}
+        this.reset[];
+        stack = {Lookup[vertices, startId]};
+        result = {};
 
         While[Length[stack] > 0,
-            cur = Last[stack];
-            stack = Drop[stack, -1];
-            If[!cur.visited,
-                cur.visited = True;
-                result = Append[result, cur];
-                edges = adj[cur.id];
-                For[i = Length[edges], i >= 1, i--,
-                    nbr = vertices[Part[edges, i].target];
-                    If[!nbr.visited, stack = Append[stack, nbr]]
-                ]
-            ]
-        ]
+            (cur = Last[stack];
+             stack = Drop[stack, -1];
+             If[!cur.visited,
+                 (cur.visited = True;
+                  result = Append[result, cur];
+                  edges = Lookup[adj, cur.id];
+                  For[i = Length[edges], i >= 1, i--,
+                      (nbr = Lookup[vertices, Part[edges, i].target];
+                       If[!nbr.visited, stack = Append[stack, nbr])])])
+        ];
         result
     }
 
     (* ── Dijkstra ── *)
     method shortestPath[startId_, endId_] {
-        reset[]
-        vertices[startId_].distance = 0;
-        unvisited = Keys[vertices]
+        this.reset[];
+        Lookup[vertices, startId].distance = 0;
+        unvisited = Keys[vertices];
 
         While[Length[unvisited] > 0,
-            bestId = Null;
-            bestDist = Infinity;
-            For[i = 1, i <= Length[unvisited], i++,
-                v = vertices[Part[unvisited, i]];
-                If[v.distance < bestDist, bestDist = v.distance; bestId = v.id]
-            ];
-            If[bestId == Null || bestId == endId_, Break[]];
-            unvisited = Select[unvisited, Function[{id}, id != bestId]];
-            cur = vertices[bestId];
-            edges = adj[bestId];
-            For[i = 1, i <= Length[edges], i++,
-                e = Part[edges, i];
-                nbr = vertices[e.target];
-                nd = cur.distance + e.weight;
-                If[MemberQ[unvisited, e.target] && nd < nbr.distance,
-                    nbr.distance = nd;
-                    nbr.predecessor = cur
-                ]
-            ]
-        ]
+            (bestId = Null;
+             bestDist = Infinity;
+             For[i = 1, i <= Length[unvisited], i++,
+                 (v = Lookup[vertices, Part[unvisited, i]];
+                  If[v.distance < bestDist, (bestDist = v.distance; bestId = v.id)])];
+             If[bestId == Null || bestId == endId, Break[]];
+             unvisited = Select[unvisited, Function[{id}, id != bestId]];
+             cur = Lookup[vertices, bestId];
+             edges = Lookup[adj, bestId];
+             For[i = 1, i <= Length[edges], i++,
+                 (e = Part[edges, i];
+                  nbr = Lookup[vertices, e.target];
+                  nd = cur.distance + e.weight;
+                  If[MemberQ[unvisited, e.target] && nd < nbr.distance,
+                      (nbr.distance = nd; nbr.predecessor = cur)]))]
+        ];
 
-        If[vertices[endId_].distance == Infinity,
-            Print["No path from ", startId_, " to ", endId_]; Return[{}]
-        ]
+        noPath = Lookup[vertices, endId].distance == Infinity;
+        If[noPath, Print["No path from ", startId, " to ", endId]];
 
         path = {};
-        cur = vertices[endId_];
-        While[Head[cur] =!= Symbol && cur =!= Null,
-            path = Prepend[path, cur];
-            cur = cur.predecessor
-        ];
+        If[!noPath,
+            (cur = Lookup[vertices, endId];
+             While[cur != Null,
+                 (path = Prepend[path, cur]; cur = cur.predecessor)])];
         path
     }
 
-    method hasPath[a_, b_] := {
-        order = bfs[a_];
-        found = Select[order, Function[{v}, v.id == b_]];
+    method hasPath[a_, b_] {
+        order = this.bfs[a];
+        found = Select[order, Function[{v}, v.id == b]];
         Length[found] > 0
     }
 
     method connectedComponents[] {
-        reset[]
+        this.reset[];
         count = 0;
         keys = Keys[vertices];
         For[i = 1, i <= Length[keys], i++,
-            v = vertices[Part[keys, i]];
-            If[!v.visited, count = count + 1; bfs[v.id]]
-        ];
+            (v = Lookup[vertices, Part[keys, i]];
+             If[!v.visited, (count = count + 1; this.bfs[v.id])])];
         count
     }
 
-    (* ── Topological Sort ── *)
+    (* ── Topological Sort (Kahn's algorithm) ── *)
     method topologicalSort[] {
-        reset[];
-        order = {};
-
-        visit[v_] :=
-            If[!v.visited,
-                v.visited = True;
-                edges = adj[v.id];
-                For[i = 1, i <= Length[edges], i++,
-                    visit[vertices[Part[edges, i].target]]
-                ];
-                order = Prepend[order, v]
-            ];
-
+        this.reset[];
+        inDegree = <||>;
         keys = Keys[vertices];
         For[i = 1, i <= Length[keys], i++,
-            visit[vertices[Part[keys, i]]]
+            inDegree = AssociateTo[inDegree, Part[keys, i] -> 0]
         ];
+        For[i = 1, i <= Length[keys], i++,
+            (id = Part[keys, i];
+             edges = Lookup[adj, id];
+             For[j = 1, j <= Length[edges], j++,
+                 (t = Part[edges, j].target;
+                  inDegree = AssociateTo[inDegree, t -> Lookup[inDegree, t] + 1])])
+        ];
+        queue = {};
+        For[i = 1, i <= Length[keys], i++,
+            (id = Part[keys, i];
+             If[Lookup[inDegree, id] == 0, queue = Append[queue, id])];
+        order = {};
+        While[Length[queue] > 0,
+            (id = Part[queue, 1];
+             queue = Rest[queue];
+             order = Append[order, Lookup[vertices, id]];
+             edges = Lookup[adj, id];
+             For[j = 1, j <= Length[edges], j++,
+                 (t = Part[edges, j].target;
+                  inDegree = AssociateTo[inDegree, t -> Lookup[inDegree, t] - 1];
+                  If[Lookup[inDegree, t] == 0, queue = Append[queue, t])])];
         order
     }
 
@@ -214,24 +204,24 @@ class Graph {
         keys = Keys[vertices];
         Print["Graph:"];
         For[i = 1, i <= Length[keys], i++,
-            id = Part[keys, i];
-            edges = adj[id];
-            es = Table[
-                e = Part[edges, j];
-                vertices[e.target].label <> " (" <> ToString[e.weight] <> ")"
-            , {j, Length[edges]}];
-            Print["  ", vertices[id].label, " -> ", es]
+            (id = Part[keys, i];
+             edges = Lookup[adj, id];
+             es = Table[
+                 e = Part[edges, j];
+                 Lookup[vertices, e.target].label <> " (" <> ToString[e.weight] <> ")"
+             , {j, Length[edges]}];
+             Print["  ", Lookup[vertices, id].label, " -> ", es])
         ]
     }
 
     method printPath[path_] :=
-        If[Length[path_] > 0,
-            labels = Table[
-                If[i < Length[path_], Part[path_, i].label <> " -> ", Part[path_, i].label],
-                {i, Length[path_]}
-            ];
-            Print[StringJoin[labels]];
-            Print["  Total: ", ToString[Part[path_, Length[path_]].distance]]
+        If[Length[path] > 0,
+            (labels = Table[
+                 If[i < Length[path], Part[path, i].label <> " -> ", Part[path, i].label],
+                 {i, Length[path]}
+             ];
+             Print[StringJoin[labels]];
+             Print["  Total: ", ToString[Part[path, Length[path]].distance]])
         ]
 
     method vertexLabels[list_] := Table[v.label, {v, list}]
@@ -242,36 +232,33 @@ class Graph {
 
 class WeightedGraph extends Graph {
     method primMST[startId_] {
-        reset[];
-        mset = {vertices[startId_]};
+        this.reset[];
+        mset = {Lookup[vertices, startId]};
         medges = {};
         keys = Keys[vertices];
-        rem = Select[keys, Function[{id}, id != startId_]];
+        rem = Select[keys, Function[{id}, id != startId]];
 
         While[Length[rem] > 0,
-            best = Null;
-            bestW = Infinity;
-            For[i = 1, i <= Length[mset], i++,
-                mv = Part[mset, i];
-                edges = adj[mv.id];
-                For[j = 1, j <= Length[edges], j++,
-                    e = Part[edges, j];
-                    If[MemberQ[rem, e.target] && e.weight < bestW,
-                        bestW = e.weight; best = e
-                    ]
-                ]
-            ];
-            If[best == Null, Break[]];
-            medges = Append[medges, best];
-            nv = vertices[best.target];
-            mset = Append[mset, nv];
-            rem = Select[rem, Function[{id}, id != best.target]]
+            (best = Null;
+             bestW = Infinity;
+             For[i = 1, i <= Length[mset], i++,
+                 (mv = Part[mset, i];
+                  edges = Lookup[adj, mv.id];
+                  For[j = 1, j <= Length[edges], j++,
+                      (e = Part[edges, j];
+                       If[MemberQ[rem, e.target] && e.weight < bestW,
+                           (bestW = e.weight; best = e)]))];
+             If[best == Null, Break[]];
+             medges = Append[medges, best];
+             nv = Lookup[vertices, best.target];
+             mset = Append[mset, nv];
+             rem = Select[rem, Function[{id}, id != best.target]])
         ];
 
         Print["MST edges:"];
         For[i = 1, i <= Length[medges], i++,
-            e = Part[medges, i];
-            Print["  ", vertices[e.source].label, " -- ", vertices[e.target].label, " (", ToString[e.weight], ")"]
+            (e = Part[medges, i];
+             Print["  ", Lookup[vertices, e.source].label, " -- ", Lookup[vertices, e.target].label, " (", ToString[e.weight], ")"])
         ];
         medges
     }
@@ -374,8 +361,7 @@ Print["── Minimum Spanning Tree (Prim) ──"]
 wg = WeightedGraph[]
 For[i = 1, i <= 6, i++,
     wg.addVertex[Part[{"A", "B", "C", "D", "E", "F"}, i],
-                 Part[{"A", "B", "C", "D", "E", "F"}, i]]
-]
+                 Part[{"A", "B", "C", "D", "E", "F"}, i]]]
 wg.addUndirectedEdge["A", "B", 4]
 wg.addUndirectedEdge["A", "C", 2]
 wg.addUndirectedEdge["B", "C", 1]
