@@ -37,7 +37,7 @@ pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
         match eval(stmt, env) {
             Ok(v) => result = v,
             // Return at top-level just yields the value
-            Err(EvalError::Return(v)) => result = v,
+            Err(EvalError::Return(v)) => result = *v,
             Err(e) => return Err(e),
         }
     }
@@ -65,7 +65,7 @@ pub fn eval_program_with_results(
                 if *suppressed {
                     results.push(None);
                 } else {
-                    results.push(Some(v));
+                    results.push(Some(*v));
                 }
             }
             Err(e) => return Err(e),
@@ -351,7 +351,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             }
             Err(EvalError::NoMatch {
                 head: "match".to_string(),
-                args: vec![val],
+                args: Box::new(vec![val]),
             })
         }
 
@@ -1359,7 +1359,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     Err(EvalError::Thrown(v)) => {
                         let child_env = env.child();
                         if let Expr::Symbol(name) = &args[1] {
-                            child_env.set(name.clone(), v);
+                            child_env.set(name.clone(), *v);
                         }
                         eval(&args[2], &child_env)
                     }
@@ -1380,7 +1380,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 }
                 match eval(&args[0], env) {
                     Ok(v) => Ok(v),
-                    Err(EvalError::Thrown(v)) => Ok(v),
+                    Err(EvalError::Thrown(v)) => Ok(*v),
                     Err(e) => Err(e),
                 }
             }
@@ -1396,7 +1396,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                         "Return requires 0 or 1 arguments".to_string(),
                     ));
                 };
-                Err(EvalError::Return(val))
+                Err(EvalError::Return(Box::new(val)))
             }
             "Break" => {
                 // Break[] — exit the enclosing loop
@@ -1633,14 +1633,14 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     // Catch Return[expr] and unwrap it as the function result
                     match eval(&def.body, &child_env) {
                         Ok(v) => return Ok(v),
-                        Err(EvalError::Return(v)) => return Ok(v),
+                        Err(EvalError::Return(v)) => return Ok(*v),
                         Err(e) => return Err(e),
                     }
                 }
             }
             Err(EvalError::NoMatch {
                 head: func_def.name.clone(),
-                args: args.to_vec(),
+                args: Box::new(args.to_vec()),
             })
         }
 
@@ -1670,7 +1670,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             }
             // Catch Return[expr] and unwrap it as the pure function result
             eval(body, &child_env).or_else(|e| match e {
-                EvalError::Return(v) => Ok(v),
+                EvalError::Return(v) => Ok(*v),
                 other => Err(other),
             })
         }
@@ -1816,7 +1816,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             } else {
                 Err(EvalError::NoMatch {
                     head: class_name.clone(),
-                    args: args.to_vec(),
+                    args: Box::new(args.to_vec()),
                 })
             }
         }
@@ -1973,11 +1973,10 @@ fn apply_defaults(params: &[Expr], bindings: &mut Bindings, env: &Env) -> Result
             default_value: Some(default),
             ..
         } = inner
+            && let Some(Value::Null) = bindings.get(name)
         {
-            if let Some(Value::Null) = bindings.get(name) {
-                let val = eval(default, env)?;
-                bindings.insert(name.clone(), val);
-            }
+            let val = eval(default, env)?;
+            bindings.insert(name.clone(), val);
         }
     }
     Ok(())

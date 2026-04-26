@@ -1,0 +1,108 @@
+(* ================================================================
+   Computing Feigenbaum Constants via the Logistic Map
+   f(x; r) = r * x * (1 - x)
+
+   Strategy: locate superstable parameters r_n where the critical
+   point x=0.5 has exact period 2^n, then measure convergence.
+
+   Feigenbaum delta ~= 4.669201609102990...
+   Feigenbaum alpha ~= 2.502907875095892...
+   ================================================================ *)
+
+(* -- Simultaneous iteration of x and dx/dr (analytic derivative) --
+   Note: inlined below using Do to avoid an interpreter bug with
+   Nest/Fold/Function closures across multiple calls.          *)
+
+iterateF[r_, steps_] := (
+    p = {0.5, 0.0};
+    Do[p = {r * p[[1]] * (1.0 - p[[1]]), r * (1.0 - 2.0 * p[[1]]) * p[[2]] + p[[1]] * (1.0 - p[[1]])}, {i, 1, steps}];
+    p
+);
+iterate2n[r_, n_] := iterateF[r, 2^n];
+
+(* -- One Newton step: r' = r - (f^(2^n)(0.5) - 0.5) / df^(2^n)/dr -- *)
+
+newtonStep[r_, n_] := (
+    xs = iterate2n[r, n];
+    r - (xs[[1]] - 0.5) / xs[[2]]
+);
+
+(* -- Find r_n (superstable period-2^n parameter) by sequential
+      Newton steps.  We avoid Nest for the outer loop (it can corrupt
+      its internal state when the body contains another Nest) and
+      instead unroll a fixed number of steps manually.               *)
+
+findSuperstable[n_, r0_] := (
+    rCur = newtonStep[r0, n];
+    rCur = newtonStep[rCur, n];
+    rCur = newtonStep[rCur, n];
+    rCur = newtonStep[rCur, n];
+    rCur
+);
+
+(* -- Build r_1 .. r_maxN by appending to a list --
+   Part-assignment x[[i]] = v inside Do is not supported.           *)
+
+maxN = 6;
+
+r1 = findSuperstable[1, 3.2];
+r2 = findSuperstable[2, 3.5];
+rSeq = {r1, r2};
+
+r3 = findSuperstable[3, r2 + (r2 - r1) / 4.5];
+rSeq = Append[rSeq, r3];
+
+r4 = findSuperstable[4, r3 + (r3 - r2) / 4.5];
+rSeq = Append[rSeq, r4];
+
+r5 = findSuperstable[5, r4 + (r4 - r3) / 4.5];
+rSeq = Append[rSeq, r5];
+
+r6 = findSuperstable[6, r5 + (r5 - r4) / 4.5];
+rSeq = Append[rSeq, r6];
+
+(* ================================================================
+   Feigenbaum delta
+   delta_n = (r_n - r_{n-1}) / (r_{n+1} - r_n)  -->  4.6692...
+   ================================================================ *)
+
+Print["Superstable parameters and Feigenbaum delta:"];
+Print["--------------------------------------------------"];
+Print["  n    r_n                        delta_n"];
+Print["--------------------------------------------------"];
+Print["   1   " <> ToString[rSeq[[1]]]];
+Print["   2   " <> ToString[rSeq[[2]]]];
+Print["   3   " <> ToString[rSeq[[3]]] <> "   " <>
+    ToString[(rSeq[[3]] - rSeq[[2]]) / (rSeq[[4]] - rSeq[[3]])]];
+Print["   4   " <> ToString[rSeq[[4]]] <> "   " <>
+    ToString[(rSeq[[4]] - rSeq[[3]]) / (rSeq[[5]] - rSeq[[4]])]];
+Print["   5   " <> ToString[rSeq[[5]]] <> "   " <>
+    ToString[(rSeq[[5]] - rSeq[[4]]) / (rSeq[[6]] - rSeq[[5]])]];
+Print["   6   " <> ToString[rSeq[[6]]]];
+Print["--------------------------------------------------"];
+Print["Best delta estimate: " <>
+    ToString[(rSeq[[5]] - rSeq[[4]]) / (rSeq[[6]] - rSeq[[5]])]];
+Print["Known value:          4.669201609102990"];
+
+(* ================================================================
+   Feigenbaum alpha
+   d_n = f^(2^(n-1))(0.5; r_n) - 0.5   (half-period displacement)
+   alpha_n = |d_n / d_{n+1}|            -->  2.5029...
+   ================================================================ *)
+
+dDisp[n_] := iterateF[rSeq[[n]], 2^(n-1)][[1]] - 0.5;
+
+Print[""];
+Print["Half-period displacements and Feigenbaum alpha:"];
+Print["--------------------------------------------------"];
+Print["  n    d_n                        |d_n / d_{n+1}|"];
+Print["--------------------------------------------------"];
+Print["   1   " <> ToString[dDisp[1]] <> "   " <> ToString[Abs[dDisp[1] / dDisp[2]]]];
+Print["   2   " <> ToString[dDisp[2]] <> "   " <> ToString[Abs[dDisp[2] / dDisp[3]]]];
+Print["   3   " <> ToString[dDisp[3]] <> "   " <> ToString[Abs[dDisp[3] / dDisp[4]]]];
+Print["   4   " <> ToString[dDisp[4]] <> "   " <> ToString[Abs[dDisp[4] / dDisp[5]]]];
+Print["   5   " <> ToString[dDisp[5]] <> "   " <> ToString[Abs[dDisp[5] / dDisp[6]]]];
+Print["   6   " <> ToString[dDisp[6]]];
+Print["--------------------------------------------------"];
+Print["Best alpha estimate: " <> ToString[Abs[dDisp[5] / dDisp[6]]]];
+Print["Known value:          2.502907875095892"];

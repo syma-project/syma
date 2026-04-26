@@ -41,11 +41,7 @@ pub(super) fn numeric_eval_expr(
                     .iter()
                     .enumerate()
                     .map(|(i, a)| {
-                        if nhold_all {
-                            super::eval(a, env)
-                        } else if nhold_first && i == 0 {
-                            super::eval(a, env)
-                        } else if nhold_rest && i > 0 {
+                        if nhold_all || (nhold_first && i == 0) || (nhold_rest && i > 0) {
                             super::eval(a, env)
                         } else {
                             numeric_eval_expr(a, prec_bits, env)

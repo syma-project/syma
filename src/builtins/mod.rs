@@ -1,4 +1,5 @@
 pub mod arithmetic;
+pub mod clearing;
 pub mod association;
 pub mod comparison;
 pub mod dataset;
@@ -466,6 +467,12 @@ pub fn register_builtins(env: &Env) {
 
     // ── Symbol Names ──
     register_builtin_env(env, "Names", names::builtin_names);
+
+    // ── Symbol Clearing ──
+    register_builtin_env(env, "Clear", clearing::builtin_clear);
+    register_builtin_env(env, "ClearAll", clearing::builtin_clear_all);
+    register_builtin_env(env, "Unset", clearing::builtin_unset);
+    register_builtin_env(env, "Remove", clearing::builtin_remove);
 
     // ── Format/display ──
     register_builtin(env, "InputForm", format::builtin_input_form);
@@ -1527,6 +1534,20 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Names[] returns a sorted list of all known symbol names.\nNames[\"pattern\"] returns symbol names matching a string pattern, where * matches any sequence of characters and ? matches any single character."
         }
 
+        // ── Symbol Clearing ──
+        "Clear" => {
+            "Clear[sym1, sym2, ...] removes definitions, values, and attributes for each symbol. Protected symbols are not affected."
+        }
+        "ClearAll" => {
+            "ClearAll[sym1, sym2, ...] removes definitions, values, attributes, and lazy providers for each symbol. Protected symbols are not affected."
+        }
+        "Unset" => {
+            "Unset[sym] removes the value or definition for a symbol without clearing its attributes. Protected symbols are not affected."
+        }
+        "Remove" => {
+            "Remove[sym1, sym2, ...] completely removes symbols from the system, including bindings, attributes, and lazy providers. Removes even Protected symbols."
+        }
+
         // ── Image Processing ──
         "Image" => {
             "Image[data] creates an image from a 2D (grayscale) or 3D (RGB/RGBA) list of values in [0,1].\n\
@@ -1754,6 +1775,9 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         | "PolyLogSimplify" | "TrigToRadicals" => llr(),
         // -- Symbol Names --
         "Names" => vec!["Locked", "ReadProtected"],
+        // -- Symbol Clearing --
+        "Clear" | "ClearAll" | "Remove" => vec!["Locked", "ReadProtected"],
+        "Unset" => vec!["HoldFirst", "Locked", "ReadProtected"],
         _ => vec![],
     }
 }

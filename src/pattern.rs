@@ -67,10 +67,9 @@ fn try_unwrap_one_identity<'a>(
     value: &'a Value,
     attr_checker: Option<&AttributeChecker>,
 ) -> Option<&'a Value> {
-    if let Value::Call { head, args } = value {
-        if args.len() == 1 && attr_checker.map_or(false, |c| c.has_attr(head, "OneIdentity")) {
-            return Some(&args[0]);
-        }
+    if let Value::Call { head, args } = value
+        && args.len() == 1 && attr_checker.is_some_and(|c| c.has_attr(head, "OneIdentity")) {
+        return Some(&args[0]);
     }
     None
 }
@@ -643,13 +642,15 @@ fn match_repeated_pattern(
 fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     let mut result = Vec::new();
     for arg in args {
-        if let Expr::Call { head: h, args: a } = arg {
-            if let Expr::Symbol(s) = h.as_ref() {
-                if s == head {
-                    result.extend(flatten_expr_args(head, a));
-                    continue;
-                }
-            }
+        if let Expr::Call {
+            head: h,
+            args: a,
+        } = arg
+            && let Expr::Symbol(s) = h.as_ref()
+            && s == head
+        {
+            result.extend(flatten_expr_args(head, a));
+            continue;
         }
         result.push(arg.clone());
     }
@@ -660,11 +661,11 @@ fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
 fn flatten_value_args(head: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::new();
     for arg in args {
-        if let Value::Call { head: h, args: a } = arg {
-            if h == head {
-                result.extend(flatten_value_args(head, a));
-                continue;
-            }
+        if let Value::Call { head: h, args: a } = arg
+            && h == head
+        {
+            result.extend(flatten_value_args(head, a));
+            continue;
         }
         result.push(arg.clone());
     }
@@ -772,20 +773,19 @@ fn match_call_pattern(
                 // OneIdentity: if head has OneIdentity and 1 pattern arg,
                 // try matching the inner pattern directly against the value.
                 if args.len() == 1
-                    && attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"))
+                    && attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"))
+                    && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
                 {
-                    if let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker) {
-                        return MatchResult::Match(b);
-                    }
+                    return MatchResult::Match(b);
                 }
                 return MatchResult::NoMatch;
             }
 
             // Determine attributes
-            let is_flat = attr_checker.map_or(false, |c| c.has_attr(&head_name, "Flat"));
-            let is_orderless = attr_checker.map_or(false, |c| c.has_attr(&head_name, "Orderless"));
+            let is_flat = attr_checker.is_some_and(|c| c.has_attr(&head_name, "Flat"));
+            let is_orderless = attr_checker.is_some_and(|c| c.has_attr(&head_name, "Orderless"));
             let is_one_identity =
-                attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"));
+                attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"));
 
             // Flatten args for Flat
             let pat_args: Vec<Expr> = if is_flat {
@@ -809,19 +809,16 @@ fn match_call_pattern(
                 && pat_args.len() == val_args.len()
                 && val_args.len() <= 6
                 && val_args.len() >= 2
-            {
-                if let MatchResult::Match(b) =
+                && let MatchResult::Match(b) =
                     try_orderless_match(&pat_args, &val_args, attr_checker)
-                {
-                    return MatchResult::Match(b);
-                }
+            {
+                return MatchResult::Match(b);
             }
 
             // 3. OneIdentity: for single arg, try matching inner pattern directly
-            if is_one_identity && args.len() == 1 && vargs.len() == 1 {
-                if let MatchResult::Match(b) = match_pattern(&args[0], &vargs[0], attr_checker) {
-                    return MatchResult::Match(b);
-                }
+            if is_one_identity && args.len() == 1 && vargs.len() == 1
+                && let MatchResult::Match(b) = match_pattern(&args[0], &vargs[0], attr_checker) {
+                return MatchResult::Match(b);
             }
 
             MatchResult::NoMatch
@@ -829,11 +826,10 @@ fn match_call_pattern(
         _ => {
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
             if args.len() == 1
-                && attr_checker.map_or(false, |c| c.has_attr(&head_name, "OneIdentity"))
+                && attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"))
+                && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
             {
-                if let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker) {
-                    return MatchResult::Match(b);
-                }
+                return MatchResult::Match(b);
             }
             MatchResult::NoMatch
         }

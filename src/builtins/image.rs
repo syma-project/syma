@@ -345,9 +345,8 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
                         }
                         _ => {}
                     },
-                    "Interleaving" => match rhs.as_ref() {
-                        Value::Bool(b) => _interleaving = *b,
-                        _ => {}
+                    "Interleaving" => if let Value::Bool(b) = rhs.as_ref() {
+                        _interleaving = *b;
                     },
                     _ => {}
                 }

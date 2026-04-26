@@ -61,12 +61,6 @@ fn simplify_plus(args: &[Value]) -> Value {
     if terms.len() == 1 {
         return terms.into_iter().next().unwrap();
     }
-    if terms.len() == 2 && terms[0].struct_eq(&terms[1]) {
-        return simplify_call(
-            "Times",
-            &[Value::Integer(Integer::from(2)), terms[0].clone()],
-        );
-    }
     Value::Call {
         head: "Plus".to_string(),
         args: terms,
@@ -77,26 +71,92 @@ fn simplify_times(args: &[Value]) -> Value {
     if args.is_empty() {
         return Value::Integer(Integer::from(1));
     }
-    let mut factors: Vec<Value> = Vec::new();
+    // Flatten nested Times, filter zeros, skip ones
+    let mut flat: Vec<Value> = Vec::new();
     for arg in args {
         match arg {
             Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
             Value::Integer(n) if *n == 1 => {}
             Value::Call { head, args: a } if head == "Times" => {
-                factors.extend(a.iter().cloned());
+                flat.extend(a.iter().cloned());
             }
-            _ => factors.push(arg.clone()),
+            _ => flat.push(arg.clone()),
         }
     }
-    if factors.is_empty() {
+    if flat.is_empty() {
         return Value::Integer(Integer::from(1));
     }
-    if factors.len() == 1 {
-        return factors.into_iter().next().unwrap();
+
+    // Separate numeric factors from symbolic
+    let mut numeric = Integer::from(1);
+    let mut symbolic: Vec<Value> = Vec::new();
+    for factor in flat {
+        if let Value::Integer(n) = &factor {
+            numeric *= n;
+        } else {
+            symbolic.push(factor);
+        }
     }
-    Value::Call {
-        head: "Times".to_string(),
-        args: factors,
+    if numeric.is_zero() {
+        return Value::Integer(Integer::from(0));
+    }
+
+    // Convert symbolic factors to (base, exponent) pairs for merging
+    // n * n^2 → (n, 1) + (n, 2) → Power[n, 3]
+    let mut base_exp: Vec<(Value, Integer)> = Vec::new();
+    for factor in symbolic {
+        match &factor {
+            Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+                if let Value::Integer(exp) = &args[1] {
+                    if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == args[0]) {
+                        *acc += exp;
+                    } else {
+                        base_exp.push((args[0].clone(), exp.clone()));
+                    }
+                } else {
+                    // Non-integer exponent, can't merge — treat as base=itself
+                    if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == factor) {
+                        *acc += 1;
+                    } else {
+                        base_exp.push((factor, Integer::from(1)));
+                    }
+                }
+            }
+            _ => {
+                if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == factor) {
+                    *acc += 1;
+                } else {
+                    base_exp.push((factor, Integer::from(1)));
+                }
+            }
+        }
+    }
+
+    // Build result: multiply numeric product with each base^exp
+    let mut result: Vec<Value> = Vec::new();
+    if numeric != 1 {
+        result.push(Value::Integer(numeric));
+    }
+    for (base, exp) in base_exp {
+        if exp.is_zero() {
+            continue;
+        }
+        if exp == 1 {
+            result.push(base);
+        } else {
+            result.push(simplify_call("Power", &[base, Value::Integer(exp)]));
+        }
+    }
+
+    if result.is_empty() {
+        Value::Integer(Integer::from(1))
+    } else if result.len() == 1 {
+        result.into_iter().next().unwrap()
+    } else {
+        Value::Call {
+            head: "Times".to_string(),
+            args: result,
+        }
     }
 }
 
@@ -358,6 +418,7 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(differentiate(&args[0], &var, env))
 }
 
+#[allow(clippy::only_used_in_recursion)]
 pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
     match expr {
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
@@ -366,8 +427,6 @@ pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
         Value::Symbol(s) => {
             if s == var {
                 Value::Integer(Integer::from(1))
-            } else if env.has_attribute(s, "Constant") {
-                Value::Integer(Integer::from(0))
             } else {
                 Value::Integer(Integer::from(0))
             }
@@ -395,11 +454,13 @@ pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
                 } else if args.len() == 1 {
                     differentiate(&args[0], var, env)
                 } else {
-                    let mut result = args[0].clone();
-                    for item in args.iter().skip(1) {
-                        result = simplify_call("Times", &[result, item.clone()]);
+                    let mut terms = Vec::new();
+                    for i in 0..args.len() {
+                        let mut factors = args.to_vec();
+                        factors[i] = differentiate(&factors[i], var, env);
+                        terms.push(simplify_call("Times", &factors));
                     }
-                    differentiate(&result, var, env)
+                    simplify_call("Plus", &terms)
                 }
             }
             "Power" if args.len() == 2 => {
@@ -775,8 +836,8 @@ fn integrate(expr: &Value, var: &str) -> Value {
             // Linear substitution: ∫ f(a*x + b) dx = (1/a) * F(a*x + b)
             // where F is the antiderivative of f, and a, b are constants
             head @ ("Sin" | "Cos" | "Exp" | "Tan") if args.len() == 1 => {
-                if let Some((a, b)) = try_extract_linear(&args[0], var) {
-                    if a != Value::Integer(Integer::from(0)) {
+                if let Some((a, b)) = try_extract_linear(&args[0], var)
+                    && a != Value::Integer(Integer::from(0)) {
                         // Compute ∫ f(u) du where u = a*x + b
                         let inner = Value::Call {
                             head: head.to_string(),
@@ -799,7 +860,6 @@ fn integrate(expr: &Value, var: &str) -> Value {
                         let inv_a = simplify_call("Power", &[a, Value::Integer(Integer::from(-1))]);
                         result = simplify_call("Times", &[inv_a, result]);
                         return result;
-                    }
                 }
                 Value::Call {
                     head: "Integrate".to_string(),
@@ -1369,6 +1429,8 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 ],
             ),
         };
+        // Combine like terms within each coefficient before multiplying by x^n
+        let coeff = combine_plus_terms(coeff);
         if n == 0 {
             terms.push(coeff);
         } else {
@@ -1389,6 +1451,127 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         derivative = differentiate(&derivative, &var, env);
     }
     Ok(simplify_call("Plus", &terms))
+}
+
+/// Extract numeric coefficient and variable part from a term.
+/// Used by combine_plus_terms to group like terms.
+fn split_coeff_var(term: &Value) -> (Integer, Value) {
+    match term {
+        Value::Integer(n) => (n.clone(), Value::Integer(Integer::from(1))),
+        Value::Call { head, args } if head == "Times" => {
+            let mut coeff = Integer::from(1);
+            let mut vars: Vec<Value> = Vec::new();
+            for arg in args {
+                if let Value::Integer(n) = arg {
+                    coeff *= n;
+                } else {
+                    vars.push(arg.clone());
+                }
+            }
+            let var_part = if vars.is_empty() {
+                Value::Integer(Integer::from(1))
+            } else if vars.len() == 1 {
+                vars.into_iter().next().unwrap()
+            } else {
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vars,
+                }
+            };
+            (coeff, var_part)
+        }
+        _ => (Integer::from(1), term.clone()),
+    }
+}
+
+/// Recursively combine like terms in all Plus nodes.
+/// Expands Times-over-Plus (distribution) so like terms at same level collect.
+fn combine_plus_terms(val: Value) -> Value {
+    match val {
+        Value::Call { head, args } if head == "Plus" => {
+            let expanded: Vec<Value> = args
+                .into_iter()
+                .flat_map(expand_times_over_plus)
+                .collect();
+            let mut groups: Vec<(Value, Integer)> = Vec::new();
+            for term in expanded {
+                let term = combine_plus_terms(term);
+                let (coeff, var_part) = split_coeff_var(&term);
+                if let Some((_, sum)) = groups.iter_mut().find(|(v, _)| *v == var_part) {
+                    *sum += &coeff;
+                } else {
+                    groups.push((var_part, coeff));
+                }
+            }
+            let mut result: Vec<Value> = Vec::new();
+            for (var_part, coeff) in groups {
+                if coeff.is_zero() {
+                    continue;
+                }
+                let term = if var_part == Value::Integer(Integer::from(1)) {
+                    Value::Integer(coeff)
+                } else if coeff == 1 {
+                    var_part
+                } else {
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(coeff), var_part],
+                    }
+                };
+                result.push(term);
+            }
+            if result.is_empty() {
+                Value::Integer(Integer::from(0))
+            } else if result.len() == 1 {
+                result.into_iter().next().unwrap()
+            } else {
+                Value::Call {
+                    head: "Plus".to_string(),
+                    args: result,
+                }
+            }
+        }
+        Value::Call { head, args } => Value::Call {
+            head,
+            args: args.into_iter().map(combine_plus_terms).collect(),
+        },
+        _ => val,
+    }
+}
+
+/// Distribute Times over Plus: Times[c, Plus[a, b]] -> [c*a, c*b].
+/// Called during combine_plus_terms to expose like terms.
+fn expand_times_over_plus(val: Value) -> Vec<Value> {
+    match &val {
+        Value::Call { head, args } if head == "Times" => {
+            for (i, arg) in args.iter().enumerate() {
+                if let Value::Call { head: h, args: plus_args } = arg {
+                    if h == "Plus" {
+                        let factor_args: Vec<Value> = args
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, v)| v.clone())
+                            .collect();
+                        let factor = if factor_args.len() == 1 {
+                            factor_args.into_iter().next().unwrap()
+                        } else {
+                            Value::Call {
+                                head: "Times".to_string(),
+                                args: factor_args,
+                            }
+                        };
+                        return plus_args
+                            .iter()
+                            .map(|pa| simplify_call("Times", &[factor.clone(), pa.clone()]))
+                            .collect();
+                    }
+                }
+            }
+            vec![val]
+        }
+        _ => vec![val],
+    }
 }
 
 fn substitute_and_eval(expr: &Value, var: &str, val: &Value) -> Value {
@@ -1543,7 +1726,7 @@ pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalEr
 }
 
 pub fn builtin_clear_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "ClearAttributes requires at least 1 argument: symbol and optionally attributes to clear"
                 .to_string(),

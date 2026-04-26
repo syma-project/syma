@@ -631,7 +631,7 @@ pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
         x[i] = Rational::from(&sum / &aug[i][i]);
     }
 
-    let result: Vec<Value> = x.into_iter().map(|r| rational_to_value(r)).collect();
+    let result: Vec<Value> = x.into_iter().map(rational_to_value).collect();
     Ok(Value::List(result))
 }
 
@@ -1193,7 +1193,7 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         basis.push(Value::List(
-            v.into_iter().map(|r| rational_to_value(r)).collect(),
+            v.into_iter().map(rational_to_value).collect(),
         ));
     }
 
@@ -1317,7 +1317,7 @@ fn mat_mul_rational(a: &[Vec<Rational>], b: &[Vec<Rational>]) -> Vec<Vec<Rationa
     }
     let k = b.len();
     if k == 0 {
-        return vec![vec![Rational::from(0); 0]; m];
+        return (0..m).map(|_| Vec::new()).collect();
     }
     let n = b[0].len();
     let mut c = vec![vec![Rational::from(0); n]; m];

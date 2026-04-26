@@ -840,6 +840,31 @@ impl Parser {
                         list: Box::new(right),
                     };
                 }
+                // Implicit multiplication (juxtaposition): x y → Times[x, y]
+                // Only trigger for tokens that unambiguously start an expression:
+                // literals, identifiers, slots, parens/braces/assoc, not, and keywords.
+                // Exclude +, - so `x - y` remains subtraction not Times[x, -y].
+                tok if matches!(tok,
+                    Token::Integer(_) | Token::Real(_) | Token::Str(_)
+                    | Token::True | Token::False | Token::Null
+                    | Token::Ident(_) | Token::Slot | Token::SlotN(_)
+                    | Token::LParen | Token::LBrace | Token::LAssoc
+                    | Token::Not
+                    | Token::If | Token::Which | Token::Switch | Token::Match
+                    | Token::For | Token::While | Token::Do
+                    | Token::Try | Token::Catch | Token::Finally | Token::Throw
+                    | Token::Function | Token::Class | Token::Extends
+                    | Token::With | Token::Method | Token::Field | Token::Constructor
+                    | Token::Module | Token::Import | Token::Export | Token::As
+                    | Token::RuleKw | Token::Hold | Token::HoldComplete | Token::ReleaseHold
+                    | Token::Mixin
+                ) => {
+                    let right = self.parse_pow_expr()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol("Times".to_string())),
+                        args: vec![left, right],
+                    };
+                }
                 _ => break,
             }
         }

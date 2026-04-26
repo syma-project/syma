@@ -34,7 +34,7 @@ pub(super) fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if args.len() == 1 {
         let evaluated = super::eval(&args[0], env)?;
         if let Value::Sequence(seq) = evaluated {
-            let expanded: Vec<Expr> = seq.iter().map(|v| value_to_expr(v)).collect();
+            let expanded: Vec<Expr> = seq.iter().map(value_to_expr).collect();
             return eval_table(&expanded, env);
         }
     }
@@ -484,8 +484,8 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
     ) -> Expr {
         match expr {
             Expr::Call { head, args } if args.len() == 1 => {
-                if let Expr::Symbol(s) = head.as_ref() {
-                    if s == func_name {
+                if let Expr::Symbol(s) = head.as_ref()
+                    && s == func_name {
                         // Determine the index: integer literal, or the var_name symbol → use current_i
                         let idx = match &args[0] {
                             Expr::Integer(k) => k.to_i64().unwrap_or(0),
@@ -510,7 +510,6 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
                             };
                         }
                     }
-                }
                 // Not a func_name call — recurse into head and args
                 let new_head = Box::new(substitute_fn_refs(
                     head, func_name, var_name, current_i, computed,

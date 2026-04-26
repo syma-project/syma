@@ -180,7 +180,7 @@ fn bessel_simplify_value(val: &Value) -> Value {
             match &args[0] {
                 // BesselJ[1/2, z] = Sqrt[2/(Pi*z)] * Sin[z]
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                    if *r.numer() == 1 && *r.denom() == 2 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Times",
@@ -213,7 +213,7 @@ fn bessel_simplify_value(val: &Value) -> Value {
                 }
                 // BesselJ[-1/2, z] = Sqrt[2/(Pi*z)] * Cos[z]
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(-1) && *r.denom() == Integer::from(2) =>
+                    if *r.numer() == -1 && *r.denom() == 2 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Times",
@@ -276,7 +276,7 @@ fn gamma_simplify_value(val: &Value) -> Value {
             match &inner {
                 // Gamma[1/2] = Sqrt[Pi]
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                    if *r.numer() == 1 && *r.denom() == 2 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Sqrt",
@@ -299,13 +299,12 @@ fn gamma_simplify_value(val: &Value) -> Value {
                     && plus_args.len() == 2
                     && plus_args[1] == Value::Integer(Integer::from(1)) =>
                 {
-                    if let Some(n) = plus_args[0].to_integer() {
-                        if n >= 0 {
-                            return crate::builtins::symbolic::simplify_call(
-                                "Factorial",
-                                &[Value::Integer(Integer::from(n))],
-                            );
-                        }
+                    if let Some(n) = plus_args[0].to_integer()
+                        && n >= 0 {
+                        return crate::builtins::symbolic::simplify_call(
+                            "Factorial",
+                            &[Value::Integer(Integer::from(n))],
+                        );
                     }
                     Value::Call {
                         head: "Gamma".to_string(),
@@ -355,7 +354,7 @@ fn poly_gamma_simplify_value(val: &Value) -> Value {
                 ),
                 // PolyGamma[1/2] = -EulerGamma - 2*Log[2]
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(2) =>
+                    if *r.numer() == 1 && *r.denom() == 2 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Plus",
@@ -586,7 +585,7 @@ fn simplify_trig_sin(arg: &Value) -> Value {
         {
             match &args[1] {
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) =>
+                    if *r.numer() == 1 && *r.denom() == 4 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Power",
@@ -623,7 +622,7 @@ fn simplify_trig_cos(arg: &Value) -> Value {
         {
             match &args[1] {
                 Value::Rational(r)
-                    if *r.numer() == Integer::from(1) && *r.denom() == Integer::from(4) =>
+                    if *r.numer() == 1 && *r.denom() == 4 =>
                 {
                     crate::builtins::symbolic::simplify_call(
                         "Power",

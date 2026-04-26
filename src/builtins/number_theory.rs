@@ -30,12 +30,12 @@ fn miller_rabin(n: u64, a: u64) -> bool {
     if n == a {
         return true;
     }
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         return false;
     }
     let mut d = n - 1;
     let mut r = 0u32;
-    while d % 2 == 0 {
+    while d.is_multiple_of(2) {
         d /= 2;
         r += 1;
     }
@@ -59,9 +59,9 @@ pub fn is_prime_u64(n: u64) -> bool {
     if n == 2 || n == 3 || n == 5 || n == 7 {
         return true;
     }
-    if n % 2 == 0
-        || (n.clone() % Integer::from(3)).is_zero()
-        || (n.clone() % Integer::from(5)).is_zero()
+    if n.is_multiple_of(2)
+        || (n % Integer::from(3)).is_zero()
+        || (n % Integer::from(5)).is_zero()
     {
         return false;
     }
@@ -421,7 +421,7 @@ pub fn builtin_moebius_mu(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
             // Otherwise μ(n) = (-1)^(number of distinct prime factors)
-            let sign = if factors.len() % 2 == 0 { 1 } else { -1 };
+            let sign = if factors.len().is_multiple_of(2) { 1 } else { -1 };
             Ok(Value::Integer(Integer::from(sign)))
         }
         _ => Err(EvalError::TypeError {
@@ -689,7 +689,7 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
     }
     let base: u32 = if args.len() >= 2 {
         match &args[1] {
-            Value::Integer(b) if *b >= Integer::from(2) => b.to_u32().unwrap_or(10),
+            Value::Integer(b) if *b >= 2 => b.to_u32().unwrap_or(10),
             _ => {
                 return Err(EvalError::Error(
                     "DigitCount: base must be an integer >= 2".to_string(),
@@ -701,7 +701,7 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
     };
     let specific_digit = if args.len() == 3 {
         match &args[2] {
-            Value::Integer(d) if *d >= Integer::from(0) && *d < Integer::from(base) => {
+            Value::Integer(d) if *d >= 0 && *d < base => {
                 d.to_u32().unwrap()
             }
             _ => {
@@ -803,22 +803,22 @@ fn jacobi_symbol(a: &Integer, n: &Integer) -> i32 {
             e += 1;
         }
         if e % 2 == 1 {
-            let n_mod_8 = (&n).clone() % Integer::from(8);
-            if n_mod_8 == Integer::from(3) || n_mod_8 == Integer::from(5) {
+            let n_mod_8 = n.clone() % 8;
+            if n_mod_8 == 3 || n_mod_8 == 5 {
                 t = -t;
             }
         }
         // Quadratic reciprocity
-        let a_mod_4 = (&a).clone() % Integer::from(4);
-        let n_mod_4 = (&n).clone() % Integer::from(4);
-        if a_mod_4 == Integer::from(3) && n_mod_4 == Integer::from(3) {
+        let a_mod_4 = a.clone() % Integer::from(4);
+        let n_mod_4 = n.clone() % Integer::from(4);
+        if a_mod_4 == 3 && n_mod_4 == 3 {
             t = -t;
         }
         let tmp = a.clone();
         a = n % tmp.clone();
         n = tmp;
     }
-    if n == Integer::from(1) { t } else { 0 }
+    if n == 1 { t } else { 0 }
 }
 
 // ── ChineseRemainder ──────────────────────────────────────────────────
@@ -868,7 +868,7 @@ pub fn builtin_chinese_remainder(args: &[Value]) -> Result<Value, EvalError> {
             for i in 0..n_eqns {
                 for j in (i + 1)..n_eqns {
                     let g = gcd_int(mod_int[i].clone(), mod_int[j].clone());
-                    if g != Integer::from(1) {
+                    if g != 1 {
                         return Ok(Value::Call {
                             head: "ChineseRemainder".to_string(),
                             args: args.to_vec(),
@@ -921,7 +921,7 @@ pub fn builtin_multiplicative_order(args: &[Value]) -> Result<Value, EvalError> 
             // Normalize a to [0, n-1]
             let a_norm = ((a.clone() % n.clone()) + n.clone()) % n.clone();
             let g = gcd_int(a_norm.clone(), n.clone());
-            if g != Integer::from(1) {
+            if g != 1 {
                 return Ok(Value::Call {
                     head: "MultiplicativeOrder".to_string(),
                     args: args.to_vec(),
@@ -943,7 +943,7 @@ pub fn builtin_multiplicative_order(args: &[Value]) -> Result<Value, EvalError> 
                 while (order.clone() % p.clone()).is_zero() {
                     let candidate = order.clone() / p.clone();
                     let pow_val = compute_power_mod_int(&a_norm, &candidate, n);
-                    if pow_val == Integer::from(1) {
+                    if pow_val == 1 {
                         order = candidate;
                     } else {
                         break;
@@ -990,7 +990,7 @@ pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
             // Search for smallest primitive root
             let mut g = Integer::from(2);
             while g < *n {
-                if gcd_int(g.clone(), n.clone()) != Integer::from(1) {
+                if gcd_int(g.clone(), n.clone()) != 1 {
                     g += Integer::from(1);
                     continue;
                 }
@@ -998,7 +998,7 @@ pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
                 for p in &distinct {
                     let exp = phi.clone() / p.clone();
                     let pow_val = compute_power_mod_int(&g, &exp, n);
-                    if pow_val == Integer::from(1) {
+                    if pow_val == 1 {
                         is_primitive = false;
                         break;
                     }
@@ -1103,7 +1103,7 @@ pub fn builtin_liouville_lambda(args: &[Value]) -> Result<Value, EvalError> {
             }
             let factors = factor_integer(n);
             let omega: u32 = factors.iter().map(|(_, e)| e).sum();
-            let val = if omega % 2 == 0 { 1 } else { -1 };
+            let val = if omega.is_multiple_of(2) { 1 } else { -1 };
             Ok(Value::Integer(Integer::from(val)))
         }
         _ => Err(EvalError::TypeError {

@@ -40,12 +40,12 @@ fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
             Ok(rational_value(num, den))
         }
         (Value::Rational(x), Value::Integer(y)) => {
-            let diff: Rational = (x.as_ref() - Rational::from(y)).into();
+            let diff: Rational = x.as_ref() - Rational::from(y);
             let (num, den) = diff.into_numer_denom();
             Ok(rational_value(num, den))
         }
         (Value::Integer(x), Value::Rational(y)) => {
-            let diff: Rational = (Rational::from(x) - y.as_ref()).into();
+            let diff: Rational = Rational::from(x) - y.as_ref();
             let (num, den) = diff.into_numer_denom();
             Ok(rational_value(num, den))
         }
@@ -112,7 +112,7 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
             Ok(rational_value(num, den))
         }
         (Value::Rational(x), Value::Integer(y)) | (Value::Integer(y), Value::Rational(x)) => {
-            let sum: Rational = (x.as_ref() + Rational::from(y)).into();
+            let sum: Rational = x.as_ref() + Rational::from(y);
             let (num, den) = sum.into_numer_denom();
             Ok(rational_value(num, den))
         }
@@ -188,7 +188,7 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
             Ok(rational_value(num, den))
         }
         (Value::Rational(x), Value::Integer(y)) | (Value::Integer(y), Value::Rational(x)) => {
-            let prod: Rational = (x.as_ref() * Rational::from(y)).into();
+            let prod: Rational = x.as_ref() * Rational::from(y);
             let (num, den) = prod.into_numer_denom();
             Ok(rational_value(num, den))
         }
@@ -215,6 +215,43 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 .map(|x| mul_values(x, &Value::Real(s.clone())))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::List(result))
+        }
+        // a * a → a^2
+        _ if a == b => Ok(Value::Call {
+            head: "Power".to_string(),
+            args: vec![a.clone(), Value::Integer(Integer::from(2))],
+        }),
+        // a^n * a → a^(n+1)
+        (Value::Call { head, args: pargs }, _)
+            if head == "Power" && pargs.len() == 2 && pargs[0] == *b =>
+        {
+            let exp = match &pargs[1] {
+                Value::Integer(n) => n.clone() + 1,
+                _ => return Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                }),
+            };
+            Ok(Value::Call {
+                head: "Power".to_string(),
+                args: vec![pargs[0].clone(), Value::Integer(exp)],
+            })
+        }
+        // a * a^n → a^(n+1)
+        (_, Value::Call { head, args: pargs })
+            if head == "Power" && pargs.len() == 2 && pargs[0] == *a =>
+        {
+            let exp = match &pargs[1] {
+                Value::Integer(n) => n.clone() + 1,
+                _ => return Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                }),
+            };
+            Ok(Value::Call {
+                head: "Power".to_string(),
+                args: vec![pargs[0].clone(), Value::Integer(exp)],
+            })
         }
         _ => Ok(Value::Call {
             head: "Times".to_string(),
@@ -345,12 +382,12 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
             Ok(rational_value(num, den))
         }
         (Value::Rational(a), Value::Integer(b)) => {
-            let quot: Rational = (a.as_ref() / Rational::from(b)).into();
+            let quot: Rational = a.as_ref() / Rational::from(b);
             let (num, den) = quot.into_numer_denom();
             Ok(rational_value(num, den))
         }
         (Value::Integer(a), Value::Rational(b)) => {
-            let quot: Rational = (Rational::from(a) / b.as_ref()).into();
+            let quot: Rational = Rational::from(a) / b.as_ref();
             let (num, den) = quot.into_numer_denom();
             Ok(rational_value(num, den))
         }
@@ -396,6 +433,36 @@ pub fn builtin_minus(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// Walk symbolic numeric tree, resolve known constants to f64.
+/// Returns None if any leaf isn't a number or known constant.
+fn symbolic_to_f64(val: &Value) -> Option<f64> {
+    match val {
+        Value::Integer(n) => Some(n.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => Some(r.as_ref().to_f64()),
+        Value::Symbol(s) => match s.as_str() {
+            "Pi" => Some(std::f64::consts::PI),
+            "E" => Some(std::f64::consts::E),
+            "Degree" => Some(std::f64::consts::PI / 180.0),
+            _ => None,
+        },
+        Value::Call { head, args } => {
+            let nums: Vec<f64> = args.iter().filter_map(symbolic_to_f64).collect();
+            if nums.len() != args.len() {
+                return None;
+            }
+            match head.as_str() {
+                "Plus" => Some(nums.iter().sum()),
+                "Times" => Some(nums.iter().product()),
+                "Power" if nums.len() == 2 => Some(nums[0].powf(nums[1])),
+                "Minus" if nums.len() == 1 => Some(-nums[0]),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -410,10 +477,24 @@ pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
             let (num, den) = abs.into_numer_denom();
             Ok(rational_value(num, den))
         }
-        _ => Ok(Value::Call {
-            head: "Abs".to_string(),
-            args: args.to_vec(),
-        }),
+        other => {
+            // Try numeric resolution for symbolic forms like Abs[3 - Pi]
+            if let Some(f) = symbolic_to_f64(other) {
+                if f < 0.0 {
+                    Ok(Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(Integer::from(-1)), args[0].clone()],
+                    })
+                } else {
+                    Ok(args[0].clone())
+                }
+            } else {
+                Ok(Value::Call {
+                    head: "Abs".to_string(),
+                    args: args.to_vec(),
+                })
+            }
+        }
     }
 }
 
@@ -535,5 +616,72 @@ mod tests {
     #[test]
     fn test_abs_real() {
         assert_eq!(builtin_abs(&[real(-3.14)]).unwrap(), real(3.14));
+    }
+
+    #[test]
+    fn test_abs_symbolic_positive() {
+        // Abs[3 + Pi] → 3 + Pi (positive numeric resolution)
+        let arg = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![
+                int(3),
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![int(1), Value::Symbol("Pi".to_string())],
+                },
+            ],
+        };
+        let result = builtin_abs(&[arg.clone()]).unwrap();
+        assert_eq!(result, arg);
+    }
+
+    #[test]
+    fn test_abs_symbolic_negative() {
+        // Abs[3 - Pi] → Times[-1, 3 - Pi] (negative numeric resolution)
+        let arg = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![
+                int(3),
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![int(-1), Value::Symbol("Pi".to_string())],
+                },
+            ],
+        };
+        let result = builtin_abs(&[arg.clone()]).unwrap();
+        let expected = Value::Call {
+            head: "Times".to_string(),
+            args: vec![int(-1), arg],
+        };
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_abs_symbolic_unknown() {
+        // Abs[x] → Abs[x] (can't resolve symbolically)
+        let arg = Value::Symbol("x".to_string());
+        let result = builtin_abs(&[arg.clone()]).unwrap();
+        let expected = Value::Call {
+            head: "Abs".to_string(),
+            args: vec![arg],
+        };
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_abs_pi_minus_3() {
+        // Abs[Pi - 3] → Pi - 3 (positive numeric resolution)
+        let arg = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![
+                Value::Symbol("Pi".to_string()),
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![int(-1), int(3)],
+                },
+            ],
+        };
+        let result = builtin_abs(&[arg.clone()]).unwrap();
+        assert_eq!(result, arg);
     }
 }

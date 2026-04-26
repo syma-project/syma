@@ -154,7 +154,7 @@ pub fn builtin_random_real(args: &[Value]) -> Result<Value, EvalError> {
                 _ => {
                     return Err(EvalError::NoMatch {
                         head: "RandomReal".to_string(),
-                        args: args.to_vec(),
+                        args: Box::new(args.to_vec()),
                     });
                 }
             };
@@ -163,7 +163,7 @@ pub fn builtin_random_real(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ => Err(EvalError::NoMatch {
             head: "RandomReal".to_string(),
-            args: args.to_vec(),
+            args: Box::new(args.to_vec()),
         }),
     }
 }

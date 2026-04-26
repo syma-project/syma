@@ -448,7 +448,7 @@ pub struct ClassConstructor {
 #[derive(Debug, Clone)]
 pub enum EvalError {
     /// No matching definition for the given arguments.
-    NoMatch { head: String, args: Vec<Value> },
+    NoMatch { head: String, args: Box<Vec<Value>> },
     /// Type error.
     TypeError { expected: String, got: String },
     /// Division by zero.
@@ -458,9 +458,9 @@ pub enum EvalError {
     /// Unknown symbol.
     UnknownSymbol(String),
     /// User-thrown error.
-    Thrown(Value),
+    Thrown(Box<Value>),
     /// Return[expr] — return from a function.
-    Return(Value),
+    Return(Box<Value>),
     /// Break[] — break from a loop.
     Break,
     /// Continue[] — skip to next iteration in a loop.
@@ -492,8 +492,8 @@ impl fmt::Display for EvalError {
                 write!(f, "Index {} out of bounds (length {})", index, length)
             }
             EvalError::UnknownSymbol(s) => write!(f, "Unknown symbol: {}", s),
-            EvalError::Thrown(v) => write!(f, "Thrown: {}", v),
-            EvalError::Return(v) => write!(f, "Return: {}", v),
+            EvalError::Thrown(v) => write!(f, "Thrown: {}", v.as_ref()),
+            EvalError::Return(v) => write!(f, "Return: {}", v.as_ref()),
             EvalError::Break => write!(f, "Break"),
             EvalError::Continue => write!(f, "Continue"),
             EvalError::Error(s) => write!(f, "Error: {}", s),
@@ -704,7 +704,7 @@ impl Value {
             Value::Integer(n) => Some(n.to_i64().unwrap_or(0)),
             Value::Real(r) => Some(r.to_f64() as i64),
             Value::Rational(r) => {
-                if *r.denom() == Integer::from(1) {
+                if *r.denom() == 1 {
                     r.numer().to_i64()
                 } else {
                     Some(r.to_f64() as i64)

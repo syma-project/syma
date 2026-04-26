@@ -8,7 +8,7 @@ pub fn builtin_throw(args: &[Value]) -> Result<Value, EvalError> {
             "Throw requires exactly 1 argument".to_string(),
         ));
     }
-    Err(EvalError::Thrown(args[0].clone()))
+    Err(EvalError::Thrown(Box::new(args[0].clone())))
 }
 
 /// Error["message"] — raise a general error.
@@ -37,6 +37,6 @@ mod tests {
     #[test]
     fn test_throw() {
         let result = builtin_throw(&[int(99)]);
-        assert!(matches!(result, Err(EvalError::Thrown(Value::Integer(_)))));
+        assert!(matches!(result, Err(EvalError::Thrown(ref v)) if matches!(v.as_ref(), Value::Integer(_))));
     }
 }
