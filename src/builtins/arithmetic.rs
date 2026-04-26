@@ -234,13 +234,44 @@ pub fn builtin_times(args: &[Value]) -> Result<Value, EvalError> {
     if factors.is_empty() {
         return Ok(Value::Integer(Integer::from(1)));
     }
-    if factors.len() == 1 {
-        return Ok(factors.swap_remove(0));
+
+    // Fold mul_values over remaining factors to handle numeric/list multiplication.
+    let mut result = Value::Integer(Integer::from(1));
+    for factor in factors {
+        result = mul_values(&result, &factor)?;
     }
-    Ok(Value::Call {
-        head: "Times".to_string(),
-        args: factors,
-    })
+    // Flatten any remaining nested Times
+    flatten_times(result)
+}
+
+/// Flatten nested Times: Times[Times[a, b], c] → Times[a, b, c].
+/// Non-Times values are returned unchanged.
+fn flatten_times(v: Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Call { head, mut args } if head == "Times" => {
+            let mut flat = Vec::new();
+            for arg in args.drain(..) {
+                if let Value::Call { head: h, args: inner } = &arg {
+                    if h == "Times" {
+                        flat.extend(inner.clone());
+                        continue;
+                    }
+                }
+                flat.push(arg);
+            }
+            if flat.is_empty() {
+                Ok(Value::Integer(Integer::from(1)))
+            } else if flat.len() == 1 {
+                Ok(flat.swap_remove(0))
+            } else {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: flat,
+                })
+            }
+        }
+        _ => Ok(v),
+    }
 }
 
 /// Try to combine two factors into one (e.g., x * x → x^2, x^n * x → x^(n+1)).
