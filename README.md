@@ -19,7 +19,7 @@ Source → Lexer → Parser → AST → Evaluator → Value
 | `value.rs` | 1 | `Value` enum — runtime types (atoms, List, Call, Assoc, Function, Builtin, Sequence, …) |
 | `env.rs` | 1 | Lexical scoping via `Rc<RefCell<Scope>>` chains |
 | `pattern.rs` | 1 | Pattern matching engine — blanks, sequences (`__`, `___`), guards, alternatives, list/call patterns, backtracking |
-| `builtins/` | 17 files | ~100+ builtins: arithmetic, list, string, math, symbolic (Simplify/D/Integrate), pattern, I/O, FFI, parallel, linalg, graphics, … |
+| `builtins/` | 18 files | ~100+ builtins: arithmetic, list, string, math, domains (Element/Refine/Assuming), symbolic (Simplify/D/Integrate), pattern, I/O, FFI, parallel, linalg, graphics, … |
 | `cli.rs` | 1 | Package scaffolding (`syma new`, `run`, `build`, `test`, `add`, `remove`) |
 | `debug.rs` | 1 | DAP (Debug Adapter Protocol) support |
 | `kernel.rs` | 1 | JSON-over-stdin/stdout kernel mode (IDE integration) |
@@ -35,6 +35,22 @@ Source → Lexer → Parser → AST → Evaluator → Value
 - **Lazy Rubi loading** — `Integrate` loads 185 rule files on first call via `OnceLock`.
 - **Sequence values** — `x__` binds to `Value::Sequence`, which auto-splats in lists and calls (Wolfram-compatible).
 - **High-precision numeric** — `Value::Real` uses `rug::Float` (arbitrary precision); `N[expr, prec]` for numeric evaluation.
+- **Domain system** — `Element[x, dom]`, `Refine[expr, assum]`, `Assuming[assum, expr]` with domain constants `Reals`, `Integers`, `Rationals`, `Complexes`, `Booleans`, `Primes`. `$Assumptions` global scoped via `Assuming`. Comparison functions (`<`, `>`, `<=`, `>=`) return symbolic `Call` for non-numeric args, enabling `x > 0` as assumption syntax.
+- **`ToString` uses `InputForm`** — infix notation (e.g., `a + b`) instead of `FullForm` (`Plus[a, b]`).
+
+### Refine Simplifications
+
+| Pattern | Assumption | Result |
+|---------|-----------|--------|
+| `Sqrt[x^2]` | `x >= 0` | `x` |
+| `Sqrt[x^2]` | `x ∈ Reals` | `Abs[x]` |
+| `Abs[x]` | `x >= 0` | `x` |
+| `Abs[x]` | `x < 0` | `-x` |
+| `Conjugate[x]` | `x ∈ Reals` | `x` |
+| `Re[x]` | `x ∈ Reals` | `x` |
+| `Im[x]` | `x ∈ Reals` | `0` |
+| `Sign[x]` | `x > 0` | `1` |
+| `Sign[x]` | `x < 0` | `-1` |
 
 ## Development
 
