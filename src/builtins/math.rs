@@ -1124,23 +1124,14 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             if n.is_negative() {
                 if *n == -1 {
-                    return Ok(Value::Complex {
-                        re: 0.0,
-                        im: 1.0,
-                    });
+                    return Ok(Value::Complex { re: 0.0, im: 1.0 });
                 }
                 // Sqrt[-n] = I * Sqrt[n]
                 let abs_n = n.clone().abs();
                 let sqrt_n = builtin_sqrt(&[Value::Integer(abs_n)])?;
                 return Ok(Value::Call {
                     head: "Times".to_string(),
-                    args: vec![
-                        Value::Complex {
-                            re: 0.0,
-                            im: 1.0,
-                        },
-                        sqrt_n,
-                    ],
+                    args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_n],
                 });
             }
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1165,13 +1156,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                 let sqrt_part = builtin_sqrt(&[abs_rational])?;
                 return Ok(Value::Call {
                     head: "Times".to_string(),
-                    args: vec![
-                        Value::Complex {
-                            re: 0.0,
-                            im: 1.0,
-                        },
-                        sqrt_part,
-                    ],
+                    args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_part],
                 });
             }
             // Check if numerator and denominator are perfect squares
@@ -2440,13 +2425,7 @@ mod tests {
     #[test]
     fn test_sqrt_negative() {
         let result = builtin_sqrt(&[int(-1)]).unwrap();
-        assert_eq!(
-            result,
-            Value::Complex {
-                re: 0.0,
-                im: 1.0
-            }
-        );
+        assert_eq!(result, Value::Complex { re: 0.0, im: 1.0 });
     }
 
     #[test]

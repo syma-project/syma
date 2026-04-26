@@ -485,31 +485,32 @@ pub(super) fn eval_recurrence_table(args: &[Expr], env: &Env) -> Result<Value, E
         match expr {
             Expr::Call { head, args } if args.len() == 1 => {
                 if let Expr::Symbol(s) = head.as_ref()
-                    && s == func_name {
-                        // Determine the index: integer literal, or the var_name symbol → use current_i
-                        let idx = match &args[0] {
-                            Expr::Integer(k) => k.to_i64().unwrap_or(0),
-                            Expr::Symbol(v) if *v == var_name => current_i,
-                            _ => {
-                                // Unknown index form — recurse and return a call
-                                return Expr::Call {
-                                    head: Box::new(substitute_fn_refs(
-                                        head, func_name, var_name, current_i, computed,
-                                    )),
-                                    args: vec![substitute_fn_refs(
-                                        &args[0], func_name, var_name, current_i, computed,
-                                    )],
-                                };
-                            }
-                        };
-                        if let Some(val) = computed.get(&idx) {
-                            return match val {
-                                Value::Integer(n) => Expr::Integer(n.clone()),
-                                Value::Real(r) => Expr::Real(r.clone()),
-                                _ => expr.clone(),
+                    && s == func_name
+                {
+                    // Determine the index: integer literal, or the var_name symbol → use current_i
+                    let idx = match &args[0] {
+                        Expr::Integer(k) => k.to_i64().unwrap_or(0),
+                        Expr::Symbol(v) if *v == var_name => current_i,
+                        _ => {
+                            // Unknown index form — recurse and return a call
+                            return Expr::Call {
+                                head: Box::new(substitute_fn_refs(
+                                    head, func_name, var_name, current_i, computed,
+                                )),
+                                args: vec![substitute_fn_refs(
+                                    &args[0], func_name, var_name, current_i, computed,
+                                )],
                             };
                         }
+                    };
+                    if let Some(val) = computed.get(&idx) {
+                        return match val {
+                            Value::Integer(n) => Expr::Integer(n.clone()),
+                            Value::Real(r) => Expr::Real(r.clone()),
+                            _ => expr.clone(),
+                        };
                     }
+                }
                 // Not a func_name call — recurse into head and args
                 let new_head = Box::new(substitute_fn_refs(
                     head, func_name, var_name, current_i, computed,

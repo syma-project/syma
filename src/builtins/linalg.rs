@@ -1192,9 +1192,7 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
                 r += 1;
             }
         }
-        basis.push(Value::List(
-            v.into_iter().map(rational_to_value).collect(),
-        ));
+        basis.push(Value::List(v.into_iter().map(rational_to_value).collect()));
     }
 
     Ok(Value::List(basis))

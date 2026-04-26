@@ -37,6 +37,8 @@ mod tests {
     #[test]
     fn test_throw() {
         let result = builtin_throw(&[int(99)]);
-        assert!(matches!(result, Err(EvalError::Thrown(ref v)) if matches!(v.as_ref(), Value::Integer(_))));
+        assert!(
+            matches!(result, Err(EvalError::Thrown(ref v)) if matches!(v.as_ref(), Value::Integer(_)))
+        );
     }
 }

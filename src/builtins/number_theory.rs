@@ -59,10 +59,7 @@ pub fn is_prime_u64(n: u64) -> bool {
     if n == 2 || n == 3 || n == 5 || n == 7 {
         return true;
     }
-    if n.is_multiple_of(2)
-        || (n % Integer::from(3)).is_zero()
-        || (n % Integer::from(5)).is_zero()
-    {
+    if n.is_multiple_of(2) || (n % Integer::from(3)).is_zero() || (n % Integer::from(5)).is_zero() {
         return false;
     }
     WITNESSES.iter().all(|&a| miller_rabin(n, a))
@@ -421,7 +418,11 @@ pub fn builtin_moebius_mu(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
             // Otherwise μ(n) = (-1)^(number of distinct prime factors)
-            let sign = if factors.len().is_multiple_of(2) { 1 } else { -1 };
+            let sign = if factors.len().is_multiple_of(2) {
+                1
+            } else {
+                -1
+            };
             Ok(Value::Integer(Integer::from(sign)))
         }
         _ => Err(EvalError::TypeError {
@@ -701,9 +702,7 @@ pub fn builtin_digit_count(args: &[Value]) -> Result<Value, EvalError> {
     };
     let specific_digit = if args.len() == 3 {
         match &args[2] {
-            Value::Integer(d) if *d >= 0 && *d < base => {
-                d.to_u32().unwrap()
-            }
+            Value::Integer(d) if *d >= 0 && *d < base => d.to_u32().unwrap(),
             _ => {
                 return Err(EvalError::Error(
                     "DigitCount: invalid digit for this base".to_string(),

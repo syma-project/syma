@@ -1,11 +1,11 @@
 pub mod arithmetic;
-pub mod clearing;
 pub mod association;
+pub mod clearing;
 pub mod comparison;
 pub mod dataset;
 pub mod developer;
-pub mod domains;
 pub mod discrete;
+pub mod domains;
 pub mod error;
 pub mod ffi;
 pub mod filesystem;

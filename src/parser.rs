@@ -242,8 +242,10 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut members = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+            self.skip_newlines();
+            if self.at(&Token::RBrace) {
+                break;
+            }
             members.push(self.parse_member_def()?);
         }
         self.expect(&Token::RBrace)?;
@@ -327,7 +329,9 @@ impl Parser {
             let mut stmts = Vec::new();
             while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
                 self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+                if self.at(&Token::RBrace) {
+                    break;
+                }
                 stmts.push(self.parse_statement()?);
                 while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                     self.advance();
@@ -359,8 +363,10 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+            self.skip_newlines();
+            if self.at(&Token::RBrace) {
+                break;
+            }
             body.push(self.parse_statement()?);
             while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
@@ -377,8 +383,10 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+            self.skip_newlines();
+            if self.at(&Token::RBrace) {
+                break;
+            }
             let pattern = self.parse_pattern_no_rule()?;
             #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
@@ -424,8 +432,10 @@ impl Parser {
 
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+            self.skip_newlines();
+            if self.at(&Token::RBrace) {
+                break;
+            }
             body.push(self.parse_statement()?);
             while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                 self.advance();
@@ -448,7 +458,9 @@ impl Parser {
         let mut members = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             self.skip_newlines();
-            if self.at(&Token::RBrace) { break; }
+            if self.at(&Token::RBrace) {
+                break;
+            }
             members.push(self.parse_member_def()?);
         }
         self.expect(&Token::RBrace)?;
@@ -470,7 +482,9 @@ impl Parser {
         let mut rules = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             self.skip_newlines();
-            if self.at(&Token::RBrace) { break; }
+            if self.at(&Token::RBrace) {
+                break;
+            }
             let lhs = self.parse_pattern_no_rule()?;
             #[allow(clippy::if_same_then_else)]
             let rhs = if self.at(&Token::Rule) {
@@ -501,7 +515,9 @@ impl Parser {
         let mut branches = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             self.skip_newlines();
-            if self.at(&Token::RBrace) { break; }
+            if self.at(&Token::RBrace) {
+                break;
+            }
             let pattern = self.parse_pattern()?;
             self.expect(&Token::FatArrow)?;
             let result = self.parse_expression()?;
@@ -549,7 +565,9 @@ impl Parser {
             let mut body = Vec::new();
             while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
                 self.skip_newlines();
-                if self.at(&Token::RBrace) { break; }
+                if self.at(&Token::RBrace) {
+                    break;
+                }
                 body.push(self.parse_statement()?);
                 while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
                     self.advance();
@@ -880,19 +898,45 @@ impl Parser {
                 // Only trigger for tokens that unambiguously start an expression:
                 // literals, identifiers, slots, parens/braces/assoc, not, and keywords.
                 // Exclude +, - so `x - y` remains subtraction not Times[x, -y].
-                Token::Integer(_) | Token::Real(_) | Token::Str(_)
-                    | Token::True | Token::False | Token::Null
-                    | Token::Ident(_) | Token::Slot | Token::SlotN(_)
-                    | Token::LParen | Token::LAssoc
-                    | Token::Not
-                    | Token::If | Token::Which | Token::Switch | Token::Match
-                    | Token::For | Token::While | Token::Do
-                    | Token::Try | Token::Catch | Token::Finally | Token::Throw
-                    | Token::Function | Token::Class | Token::Extends
-                    | Token::With | Token::Method | Token::Field | Token::Constructor
-                    | Token::Module | Token::Import | Token::Export | Token::As
-                    | Token::RuleKw | Token::Hold | Token::HoldComplete | Token::ReleaseHold
-                    | Token::Mixin => {
+                Token::Integer(_)
+                | Token::Real(_)
+                | Token::Str(_)
+                | Token::True
+                | Token::False
+                | Token::Null
+                | Token::Ident(_)
+                | Token::Slot
+                | Token::SlotN(_)
+                | Token::LParen
+                | Token::LAssoc
+                | Token::Not
+                | Token::If
+                | Token::Which
+                | Token::Switch
+                | Token::Match
+                | Token::For
+                | Token::While
+                | Token::Do
+                | Token::Try
+                | Token::Catch
+                | Token::Finally
+                | Token::Throw
+                | Token::Function
+                | Token::Class
+                | Token::Extends
+                | Token::With
+                | Token::Method
+                | Token::Field
+                | Token::Constructor
+                | Token::Module
+                | Token::Import
+                | Token::Export
+                | Token::As
+                | Token::RuleKw
+                | Token::Hold
+                | Token::HoldComplete
+                | Token::ReleaseHold
+                | Token::Mixin => {
                     let right = self.parse_pow_expr()?;
                     left = Expr::Call {
                         head: Box::new(Expr::Symbol("Times".to_string())),

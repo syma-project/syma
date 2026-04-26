@@ -1,4 +1,4 @@
-use crate::value::{EvalError, Value};
+use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
 pub fn builtin_string_join(args: &[Value]) -> Result<Value, EvalError> {
@@ -42,7 +42,11 @@ pub fn builtin_to_string(args: &[Value]) -> Result<Value, EvalError> {
             "ToString requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Str(args[0].to_string()))
+    let formatted = Value::Formatted {
+        format: Format::InputForm,
+        value: Box::new(args[0].clone()),
+    };
+    Ok(Value::Str(formatted.to_string()))
 }
 
 pub fn builtin_to_expression(args: &[Value]) -> Result<Value, EvalError> {

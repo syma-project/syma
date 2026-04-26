@@ -66,7 +66,10 @@ impl Hinter for SymaHelper {
     type Hint = String;
 }
 impl Validator for SymaHelper {
-    fn validate(&self, _ctx: &mut ValidationContext<'_>) -> Result<ValidationResult, ReadlineError> {
+    fn validate(
+        &self,
+        _ctx: &mut ValidationContext<'_>,
+    ) -> Result<ValidationResult, ReadlineError> {
         Ok(ValidationResult::Valid(None))
     }
 }

@@ -68,7 +68,9 @@ fn try_unwrap_one_identity<'a>(
     attr_checker: Option<&AttributeChecker>,
 ) -> Option<&'a Value> {
     if let Value::Call { head, args } = value
-        && args.len() == 1 && attr_checker.is_some_and(|c| c.has_attr(head, "OneIdentity")) {
+        && args.len() == 1
+        && attr_checker.is_some_and(|c| c.has_attr(head, "OneIdentity"))
+    {
         return Some(&args[0]);
     }
     None
@@ -642,10 +644,7 @@ fn match_repeated_pattern(
 fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     let mut result = Vec::new();
     for arg in args {
-        if let Expr::Call {
-            head: h,
-            args: a,
-        } = arg
+        if let Expr::Call { head: h, args: a } = arg
             && let Expr::Symbol(s) = h.as_ref()
             && s == head
         {
@@ -816,8 +815,11 @@ fn match_call_pattern(
             }
 
             // 3. OneIdentity: for single arg, try matching inner pattern directly
-            if is_one_identity && args.len() == 1 && vargs.len() == 1
-                && let MatchResult::Match(b) = match_pattern(&args[0], &vargs[0], attr_checker) {
+            if is_one_identity
+                && args.len() == 1
+                && vargs.len() == 1
+                && let MatchResult::Match(b) = match_pattern(&args[0], &vargs[0], attr_checker)
+            {
                 return MatchResult::Match(b);
             }
 

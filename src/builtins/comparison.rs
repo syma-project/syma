@@ -49,12 +49,10 @@ pub fn builtin_less(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a < b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
-        _ => {
-            Ok(Value::Call {
-                head: "Less".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call {
+            head: "Less".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -130,12 +128,10 @@ pub fn builtin_less_equal(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a <= b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
-        _ => {
-            Ok(Value::Call {
-                head: "LessEqual".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call {
+            head: "LessEqual".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 
@@ -172,12 +168,10 @@ pub fn builtin_greater_equal(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Bool(*a >= b_f))
         }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
-        _ => {
-            Ok(Value::Call {
-                head: "GreaterEqual".to_string(),
-                args: args.to_vec(),
-            })
-        }
+        _ => Ok(Value::Call {
+            head: "GreaterEqual".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 

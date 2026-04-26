@@ -46,7 +46,7 @@ pub enum Token {
     RDoubleBracket, // ]]
 
     // ── Whitespace ──
-    Newline,         // \n  (statement separator, distinct from Semicolon)
+    Newline, // \n  (statement separator, distinct from Semicolon)
 
     // ── Operators ──
     Plus,       // +
@@ -86,14 +86,14 @@ pub enum Token {
     FuncRef,         // & (function reference / pure function)
 
     // ── Compound assignment ──
-    PlusAssign,      // +=
-    MinusAssign,     // -=
-    StarAssign,      // *=
-    SlashAssign,     // /=
-    CaretAssign,     // ^=
-    Increment,       // ++
-    Decrement,       // --
-    Unset,           // =.  (clear definition)
+    PlusAssign,  // +=
+    MinusAssign, // -=
+    StarAssign,  // *=
+    SlashAssign, // /=
+    CaretAssign, // ^=
+    Increment,   // ++
+    Decrement,   // --
+    Unset,       // =.  (clear definition)
 
     // ── Special ──
     Quote,        // ' (quote)
@@ -1373,41 +1373,25 @@ mod tests {
         let toks = tokens("x++");
         assert_eq!(
             toks,
-            vec![
-                Token::Ident("x".to_string()),
-                Token::Increment,
-                Token::Eof,
-            ]
+            vec![Token::Ident("x".to_string()), Token::Increment, Token::Eof,]
         );
         // Test --
         let toks = tokens("x--");
         assert_eq!(
             toks,
-            vec![
-                Token::Ident("x".to_string()),
-                Token::Decrement,
-                Token::Eof,
-            ]
+            vec![Token::Ident("x".to_string()), Token::Decrement, Token::Eof,]
         );
         // Test ++ prefix
         let toks = tokens("++x");
         assert_eq!(
             toks,
-            vec![
-                Token::Increment,
-                Token::Ident("x".to_string()),
-                Token::Eof,
-            ]
+            vec![Token::Increment, Token::Ident("x".to_string()), Token::Eof,]
         );
         // Test -- prefix
         let toks = tokens("--x");
         assert_eq!(
             toks,
-            vec![
-                Token::Decrement,
-                Token::Ident("x".to_string()),
-                Token::Eof,
-            ]
+            vec![Token::Decrement, Token::Ident("x".to_string()), Token::Eof,]
         );
     }
 
@@ -1416,11 +1400,7 @@ mod tests {
         let toks = tokens("x =.");
         assert_eq!(
             toks,
-            vec![
-                Token::Ident("x".to_string()),
-                Token::Unset,
-                Token::Eof,
-            ]
+            vec![Token::Ident("x".to_string()), Token::Unset, Token::Eof,]
         );
     }
 }

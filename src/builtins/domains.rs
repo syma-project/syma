@@ -4,7 +4,14 @@ use rug::Integer;
 
 pub fn register(env: &Env) {
     // Domain symbols
-    for sym in &["Reals", "Integers", "Rationals", "Complexes", "Booleans", "Primes"] {
+    for sym in &[
+        "Reals",
+        "Integers",
+        "Rationals",
+        "Complexes",
+        "Booleans",
+        "Primes",
+    ] {
         env.set(sym.to_string(), Value::Symbol(sym.to_string()));
     }
     env.set(
@@ -42,7 +49,7 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
             return Ok(Value::Call {
                 head: "Element".to_string(),
                 args: args.to_vec(),
-            })
+            });
         }
     };
 
@@ -84,14 +91,13 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
         }
         "Reals" => {
             if is_concrete(x) {
-                Value::Symbol(if matches!(
-                    x,
-                    Value::Integer(_) | Value::Rational(_) | Value::Real(_)
-                ) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
+                Value::Symbol(
+                    if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
+                        "True".to_string()
+                    } else {
+                        "False".to_string()
+                    },
+                )
             } else {
                 return Ok(Value::Call {
                     head: "Element".to_string(),
@@ -110,9 +116,7 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Booleans" => match x {
-            Value::Symbol(s) if s == "True" || s == "False" => {
-                Value::Symbol("True".to_string())
-            }
+            Value::Symbol(s) if s == "True" || s == "False" => Value::Symbol("True".to_string()),
             Value::Bool(_) => Value::Symbol("True".to_string()),
             _ => {
                 if is_concrete(x) {
@@ -180,9 +184,7 @@ fn trial_prime_check(n: &Integer) -> bool {
 fn builtin_refine(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     match args.len() {
         1 => {
-            let assum = env
-                .get("$Assumptions")
-                .unwrap_or(Value::List(vec![]));
+            let assum = env.get("$Assumptions").unwrap_or(Value::List(vec![]));
             refine_expr(&args[0], &assum)
         }
         2 => refine_expr(&args[0], &args[1]),
@@ -339,14 +341,16 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
         // Other calls: refine all arguments
         Value::Call { head, args } => {
             let mut changed = false;
-            let refined_args: Result<Vec<Value>, EvalError> =
-                args.iter().map(|a| {
+            let refined_args: Result<Vec<Value>, EvalError> = args
+                .iter()
+                .map(|a| {
                     let r = refine_expr(a, assum)?;
                     if &r != a {
                         changed = true;
                     }
                     Ok(r)
-                }).collect();
+                })
+                .collect();
             let refined_args = refined_args?;
             if changed {
                 Ok(Value::Call {
@@ -472,30 +476,65 @@ mod tests {
 
     #[test]
     fn test_element_integers() {
-        assert_eq!(builtin_element(&[int(3), sym("Integers")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[real(3.0), sym("Integers")]).unwrap(), sym("False"));
-        assert_eq!(builtin_element(&[sym("x"), sym("Integers")]).unwrap(),
-            Value::Call { head: "Element".to_string(), args: vec![sym("x"), sym("Integers")] });
+        assert_eq!(
+            builtin_element(&[int(3), sym("Integers")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[real(3.0), sym("Integers")]).unwrap(),
+            sym("False")
+        );
+        assert_eq!(
+            builtin_element(&[sym("x"), sym("Integers")]).unwrap(),
+            Value::Call {
+                head: "Element".to_string(),
+                args: vec![sym("x"), sym("Integers")]
+            }
+        );
     }
 
     #[test]
     fn test_element_reals() {
-        assert_eq!(builtin_element(&[int(3), sym("Reals")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[real(2.5), sym("Reals")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[Value::Complex { re: 1.0, im: 1.0 }, sym("Reals")]).unwrap(), sym("False"));
+        assert_eq!(
+            builtin_element(&[int(3), sym("Reals")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[real(2.5), sym("Reals")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[Value::Complex { re: 1.0, im: 1.0 }, sym("Reals")]).unwrap(),
+            sym("False")
+        );
     }
 
     #[test]
     fn test_element_complexes() {
-        assert_eq!(builtin_element(&[int(3), sym("Complexes")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[Value::Complex { re: 1.0, im: 1.0 }, sym("Complexes")]).unwrap(), sym("True"));
+        assert_eq!(
+            builtin_element(&[int(3), sym("Complexes")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[Value::Complex { re: 1.0, im: 1.0 }, sym("Complexes")]).unwrap(),
+            sym("True")
+        );
     }
 
     #[test]
     fn test_element_booleans() {
-        assert_eq!(builtin_element(&[sym("True"), sym("Booleans")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[sym("False"), sym("Booleans")]).unwrap(), sym("True"));
-        assert_eq!(builtin_element(&[int(0), sym("Booleans")]).unwrap(), sym("False"));
+        assert_eq!(
+            builtin_element(&[sym("True"), sym("Booleans")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[sym("False"), sym("Booleans")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[int(0), sym("Booleans")]).unwrap(),
+            sym("False")
+        );
     }
 
     #[test]
@@ -531,10 +570,13 @@ mod tests {
             args: vec![sym("x"), sym("Reals")],
         };
         let result = builtin_refine(&[expr, assum], &Env::new()).unwrap();
-        assert_eq!(result, Value::Call {
-            head: "Abs".to_string(),
-            args: vec![sym("x")],
-        });
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Abs".to_string(),
+                args: vec![sym("x")],
+            }
+        );
     }
 
     #[test]
@@ -548,7 +590,10 @@ mod tests {
             head: "Greater".to_string(),
             args: vec![sym("x"), int(0)],
         };
-        assert_eq!(builtin_refine(&[expr, assum], &Env::new()).unwrap(), sym("x"));
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            sym("x")
+        );
     }
 
     #[test]
@@ -563,10 +608,13 @@ mod tests {
             args: vec![sym("x"), int(0)],
         };
         let result = builtin_refine(&[expr, assum], &Env::new()).unwrap();
-        assert_eq!(result, Value::Call {
-            head: "Times".to_string(),
-            args: vec![int(-1), sym("x")],
-        });
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![int(-1), sym("x")],
+            }
+        );
     }
 
     #[test]
@@ -580,7 +628,10 @@ mod tests {
             head: "Element".to_string(),
             args: vec![sym("x"), sym("Reals")],
         };
-        assert_eq!(builtin_refine(&[expr, assum], &Env::new()).unwrap(), sym("x"));
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            sym("x")
+        );
     }
 
     #[test]
@@ -608,7 +659,10 @@ mod tests {
             head: "Element".to_string(),
             args: vec![sym("x"), sym("Reals")],
         };
-        assert_eq!(builtin_refine(&[expr, assum], &Env::new()).unwrap(), sym("x"));
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            sym("x")
+        );
     }
 
     #[test]
@@ -631,7 +685,10 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(builtin_refine(&[expr, assum], &Env::new()).unwrap(), sym("x"));
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            sym("x")
+        );
     }
 
     #[test]
@@ -658,16 +715,19 @@ mod tests {
             args: vec![sym("x"), int(0)],
         };
         let result = builtin_refine(&[expr, assum], &Env::new()).unwrap();
-        assert_eq!(result, Value::List(vec![
-            sym("x"),
-            Value::Call {
-                head: "Sqrt".to_string(),
-                args: vec![Value::Call {
-                    head: "Power".to_string(),
-                    args: vec![sym("y"), int(2)],
-                }],
-            },
-        ]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                sym("x"),
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![sym("y"), int(2)],
+                    }],
+                },
+            ])
+        );
     }
 
     #[test]
@@ -692,7 +752,10 @@ mod tests {
             head: "Less".to_string(),
             args: vec![sym("x"), int(0)],
         };
-        assert_eq!(builtin_refine(&[expr2, assum2], &Env::new()).unwrap(), int(-1));
+        assert_eq!(
+            builtin_refine(&[expr2, assum2], &Env::new()).unwrap(),
+            int(-1)
+        );
     }
 
     #[test]

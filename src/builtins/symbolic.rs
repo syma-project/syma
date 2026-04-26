@@ -837,29 +837,30 @@ fn integrate(expr: &Value, var: &str) -> Value {
             // where F is the antiderivative of f, and a, b are constants
             head @ ("Sin" | "Cos" | "Exp" | "Tan") if args.len() == 1 => {
                 if let Some((a, b)) = try_extract_linear(&args[0], var)
-                    && a != Value::Integer(Integer::from(0)) {
-                        // Compute ∫ f(u) du where u = a*x + b
-                        let inner = Value::Call {
-                            head: head.to_string(),
-                            args: vec![Value::Symbol("u".to_string())],
-                        };
-                        let f_of_u = integrate(&inner, "u");
-                        // Substitute back u = a*x + b
-                        let mut result = substitute_var(
-                            &f_of_u,
-                            "u",
-                            &Value::Call {
-                                head: "Plus".to_string(),
-                                args: vec![
-                                    simplify_call("Times", &[a.clone(), x.clone()]),
-                                    b.clone().unwrap_or(Value::Integer(Integer::from(0))),
-                                ],
-                            },
-                        );
-                        // Multiply by 1/a for the chain rule
-                        let inv_a = simplify_call("Power", &[a, Value::Integer(Integer::from(-1))]);
-                        result = simplify_call("Times", &[inv_a, result]);
-                        return result;
+                    && a != Value::Integer(Integer::from(0))
+                {
+                    // Compute ∫ f(u) du where u = a*x + b
+                    let inner = Value::Call {
+                        head: head.to_string(),
+                        args: vec![Value::Symbol("u".to_string())],
+                    };
+                    let f_of_u = integrate(&inner, "u");
+                    // Substitute back u = a*x + b
+                    let mut result = substitute_var(
+                        &f_of_u,
+                        "u",
+                        &Value::Call {
+                            head: "Plus".to_string(),
+                            args: vec![
+                                simplify_call("Times", &[a.clone(), x.clone()]),
+                                b.clone().unwrap_or(Value::Integer(Integer::from(0))),
+                            ],
+                        },
+                    );
+                    // Multiply by 1/a for the chain rule
+                    let inv_a = simplify_call("Power", &[a, Value::Integer(Integer::from(-1))]);
+                    result = simplify_call("Times", &[inv_a, result]);
+                    return result;
                 }
                 Value::Call {
                     head: "Integrate".to_string(),
@@ -1489,10 +1490,7 @@ fn split_coeff_var(term: &Value) -> (Integer, Value) {
 fn combine_plus_terms(val: Value) -> Value {
     match val {
         Value::Call { head, args } if head == "Plus" => {
-            let expanded: Vec<Value> = args
-                .into_iter()
-                .flat_map(expand_times_over_plus)
-                .collect();
+            let expanded: Vec<Value> = args.into_iter().flat_map(expand_times_over_plus).collect();
             let mut groups: Vec<(Value, Integer)> = Vec::new();
             for term in expanded {
                 let term = combine_plus_terms(term);
@@ -1545,30 +1543,33 @@ fn expand_times_over_plus(val: Value) -> Vec<Value> {
     match &val {
         Value::Call { head, args } if head == "Times" => {
             for (i, arg) in args.iter().enumerate() {
-                if let Value::Call { head: h, args: plus_args } = arg
+                if let Value::Call {
+                    head: h,
+                    args: plus_args,
+                } = arg
                     && h == "Plus"
                 {
-                        let factor_args: Vec<Value> = args
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, v)| v.clone())
-                            .collect();
-                        let factor = if factor_args.len() == 1 {
-                            factor_args.into_iter().next().unwrap()
-                        } else {
-                            Value::Call {
-                                head: "Times".to_string(),
-                                args: factor_args,
-                            }
-                        };
-                        return plus_args
-                            .iter()
-                            .map(|pa| simplify_call("Times", &[factor.clone(), pa.clone()]))
-                            .collect();
-                    }
+                    let factor_args: Vec<Value> = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, v)| v.clone())
+                        .collect();
+                    let factor = if factor_args.len() == 1 {
+                        factor_args.into_iter().next().unwrap()
+                    } else {
+                        Value::Call {
+                            head: "Times".to_string(),
+                            args: factor_args,
+                        }
+                    };
+                    return plus_args
+                        .iter()
+                        .map(|pa| simplify_call("Times", &[factor.clone(), pa.clone()]))
+                        .collect();
                 }
-                vec![val]
+            }
+            vec![val]
         }
         _ => vec![val],
     }

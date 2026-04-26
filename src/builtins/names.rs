@@ -40,10 +40,12 @@ pub fn builtin_names(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     } else {
         let pattern = match &args[0] {
             Value::Str(s) => s.clone(),
-            other => return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: other.type_name().to_string(),
-            }),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "String".to_string(),
+                    got: other.type_name().to_string(),
+                });
+            }
         };
         all.into_iter()
             .filter(|name| super::string::glob_match(&pattern, name))

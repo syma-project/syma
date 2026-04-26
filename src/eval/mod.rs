@@ -661,10 +661,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let new_val = eval(
                 &Expr::Call {
                     head: Box::new(Expr::Symbol("Plus".to_string())),
-                    args: vec![
-                        expr.as_ref().clone(),
-                        Expr::Integer(Integer::from(-1)),
-                    ],
+                    args: vec![expr.as_ref().clone(), Expr::Integer(Integer::from(-1))],
                 },
                 env,
             )?;
@@ -684,23 +681,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Unset: expr =. ──
-        Expr::Unset { expr } => {
-            match expr.as_ref() {
-                Expr::Symbol(s) => {
-                    if env.has_attribute(s, "Protected") && env.get(s).is_some() {
-                        return Err(EvalError::Error(format!(
-                            "Symbol {} is protected; cannot unset",
-                            s
-                        )));
-                    }
-                    env.remove(s);
-                    Ok(Value::Null)
+        Expr::Unset { expr } => match expr.as_ref() {
+            Expr::Symbol(s) => {
+                if env.has_attribute(s, "Protected") && env.get(s).is_some() {
+                    return Err(EvalError::Error(format!(
+                        "Symbol {} is protected; cannot unset",
+                        s
+                    )));
                 }
-                _ => Err(EvalError::Error(
-                    "Unset requires a symbol target".to_string(),
-                )),
+                env.remove(s);
+                Ok(Value::Null)
             }
-        }
+            _ => Err(EvalError::Error(
+                "Unset requires a symbol target".to_string(),
+            )),
+        },
 
         // ── Rule definition ──
         Expr::RuleDef { name, rules } => {
@@ -2222,7 +2217,10 @@ mod tests {
             panic!("Parse error for input {:?}: {:?}", input, e);
         });
         eval_program(&ast, &env).unwrap_or_else(|e| {
-            panic!("Eval error for input {:?} with AST {:?}: {:?}", input, ast, e);
+            panic!(
+                "Eval error for input {:?} with AST {:?}: {:?}",
+                input, ast, e
+            );
         })
     }
 
@@ -4401,27 +4399,42 @@ mod tests {
 
     #[test]
     fn test_plus_assign_eval() {
-        assert_eq!(eval_str("x = 3; x += 2; x"), Value::Integer(Integer::from(5)));
+        assert_eq!(
+            eval_str("x = 3; x += 2; x"),
+            Value::Integer(Integer::from(5))
+        );
     }
 
     #[test]
     fn test_minus_assign_eval() {
-        assert_eq!(eval_str("x = 10; x -= 3; x"), Value::Integer(Integer::from(7)));
+        assert_eq!(
+            eval_str("x = 10; x -= 3; x"),
+            Value::Integer(Integer::from(7))
+        );
     }
 
     #[test]
     fn test_times_assign_eval() {
-        assert_eq!(eval_str("x = 4; x *= 3; x"), Value::Integer(Integer::from(12)));
+        assert_eq!(
+            eval_str("x = 4; x *= 3; x"),
+            Value::Integer(Integer::from(12))
+        );
     }
 
     #[test]
     fn test_divide_assign_eval() {
-        assert_eq!(eval_str("x = 10; x /= 2; x"), Value::Integer(Integer::from(5)));
+        assert_eq!(
+            eval_str("x = 10; x /= 2; x"),
+            Value::Integer(Integer::from(5))
+        );
     }
 
     #[test]
     fn test_caret_assign_eval() {
-        assert_eq!(eval_str("x = 3; x ^= 2; x"), Value::Integer(Integer::from(9)));
+        assert_eq!(
+            eval_str("x = 3; x ^= 2; x"),
+            Value::Integer(Integer::from(9))
+        );
     }
 
     #[test]
@@ -4470,6 +4483,9 @@ mod tests {
         // Chained: x = y = 5 → y = 5 → 5, then x = 5 → 5, result is 5
         assert_eq!(eval_str("x = y = 5"), Value::Integer(Integer::from(5)));
         // Both x and y should now be 5
-        assert_eq!(eval_str("x = y = 5; x + y"), Value::Integer(Integer::from(10)));
+        assert_eq!(
+            eval_str("x = y = 5; x + y"),
+            Value::Integer(Integer::from(10))
+        );
     }
 }
