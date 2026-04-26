@@ -1737,6 +1737,52 @@ impl Parser {
                         list: Box::new(right),
                     };
                 }
+                // Implicit multiplication (juxtaposition) in patterns
+                Token::Integer(_)
+                | Token::Real(_)
+                | Token::Str(_)
+                | Token::True
+                | Token::False
+                | Token::Null
+                | Token::Ident(_)
+                | Token::Slot
+                | Token::SlotN(_)
+                | Token::LParen
+                | Token::LAssoc
+                | Token::Not
+                | Token::If
+                | Token::Which
+                | Token::Switch
+                | Token::Match
+                | Token::For
+                | Token::While
+                | Token::Do
+                | Token::Try
+                | Token::Catch
+                | Token::Finally
+                | Token::Throw
+                | Token::Function
+                | Token::Class
+                | Token::Extends
+                | Token::With
+                | Token::Method
+                | Token::Field
+                | Token::Constructor
+                | Token::Module
+                | Token::Import
+                | Token::Export
+                | Token::As
+                | Token::RuleKw
+                | Token::Hold
+                | Token::HoldComplete
+                | Token::ReleaseHold
+                | Token::Mixin => {
+                    let right = self.parse_pattern_pow()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol("Times".to_string())),
+                        args: vec![left, right],
+                    };
+                }
                 _ => break,
             }
         }
