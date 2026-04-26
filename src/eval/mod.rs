@@ -362,17 +362,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             step,
             body,
         } => {
-            let child_env = env.child();
-            eval(init, &child_env)?;
-            while eval(condition, &child_env)?.to_bool() {
-                // Body
-                match eval(body, &child_env) {
+            eval(init, env)?;
+            while eval(condition, env)?.to_bool() {
+                match eval(body, env) {
                     Ok(_) | Err(EvalError::Continue) => {}
                     Err(EvalError::Break) => break,
                     Err(e) => return Err(e),
                 }
-                // Step (always runs after body unless Break)
-                match eval(step, &child_env) {
+                match eval(step, env) {
                     Ok(_) | Err(EvalError::Continue) => {}
                     Err(EvalError::Break) => break,
                     Err(e) => return Err(e),

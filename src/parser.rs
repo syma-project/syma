@@ -2490,6 +2490,57 @@ impl Parser {
                 Ok(Expr::Symbol("HoldComplete".to_string()))
             }
 
+            // ── For loop ──
+            Token::For => {
+                self.advance();
+                if self.at(&Token::LParen) {
+                    // C-style: for (init; condition; step) body
+                    self.advance();
+                    let init = if self.at(&Token::Semicolon) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::Semicolon)?;
+                    let condition = if self.at(&Token::Semicolon) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::Semicolon)?;
+                    let step = if self.at(&Token::RParen) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::RParen)?;
+                    let body = self.parse_body()?;
+                    Ok(Expr::For {
+                        init: Box::new(init),
+                        condition: Box::new(condition),
+                        step: Box::new(step),
+                        body: Box::new(body),
+                    })
+                } else {
+                    // WL-style: For[init, condition, step, body]
+                    self.expect(&Token::LBracket)?;
+                    let init = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let step = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let body = self.parse_expression()?;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::For {
+                        init: Box::new(init),
+                        condition: Box::new(condition),
+                        step: Box::new(step),
+                        body: Box::new(body),
+                    })
+                }
+            }
+
             // ── If expression ──
             Token::If => {
                 self.advance();
