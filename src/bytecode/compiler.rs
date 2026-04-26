@@ -344,6 +344,20 @@ impl BytecodeCompiler {
                 self.emit(Instruction::LoadSym(dst, idx));
                 Ok(dst)
             }
+            // ── Slot sequence ──
+            Expr::SlotSequence(None) => {
+                let dst = self.regs.alloc()?;
+                let idx = self.symbol_idx("##");
+                self.emit(Instruction::LoadSym(dst, idx));
+                Ok(dst)
+            }
+            Expr::SlotSequence(Some(_n)) => {
+                // Load full ## — tree-walk evaluation handles slicing at runtime.
+                let dst = self.regs.alloc()?;
+                let idx = self.symbol_idx("##");
+                self.emit(Instruction::LoadSym(dst, idx));
+                Ok(dst)
+            }
             // ── Pure function sugar ──
             Expr::Pure { body } => {
                 let slot_count = count_slots(body);
@@ -949,6 +963,8 @@ fn count_slots(expr: &Expr) -> usize {
     match expr {
         Expr::Slot(None) => 1,
         Expr::Slot(Some(idx)) => *idx,
+        Expr::SlotSequence(None) => 1,
+        Expr::SlotSequence(Some(idx)) => *idx,
         Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
         Expr::Assoc(items) => items.iter().map(|(_, v)| count_slots(v)).max().unwrap_or(0),
         Expr::Call { head, args } => args

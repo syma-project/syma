@@ -105,8 +105,10 @@ pub enum Token {
     Quote,        // ' (quote)
     Tilde,        // ~ (splice)
     QuestionMark, // ?
-    Slot,         // #
-    SlotN(usize), // #1, #2, ...
+    Slot,                // #
+    SlotN(usize),        // #1, #2, ...
+    SlotSequence,        // ##
+    SlotSequenceN(usize), // ##2, ##3, ...
 
     // ── Keywords ──
     If,
@@ -204,6 +206,8 @@ impl fmt::Display for Token {
             Token::QuestionMark => write!(f, "?"),
             Token::Slot => write!(f, "#"),
             Token::SlotN(n) => write!(f, "#{}", n),
+            Token::SlotSequence => write!(f, "##"),
+            Token::SlotSequenceN(n) => write!(f, "##{}", n),
             Token::If => write!(f, "If"),
             Token::Which => write!(f, "Which"),
             Token::Switch => write!(f, "Switch"),
@@ -757,11 +761,33 @@ impl Lexer {
                     push!(Token::Dot);
                 }
 
-                // Slot: # or #N
+                // Slot: # / #N / ## / ##N
                 '#' => {
                     self.advance();
                     if let Some(c) = self.peek() {
-                        if c.is_ascii_digit() {
+                        if c == '#' {
+                            // ## or ##n (slot sequence)
+                            self.advance();
+                            if let Some(d) = self.peek() {
+                                if d.is_ascii_digit() {
+                                    let mut num_str = String::new();
+                                    while let Some(digit) = self.peek() {
+                                        if digit.is_ascii_digit() {
+                                            num_str.push(digit);
+                                            self.advance();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let n: usize = num_str.parse().unwrap_or(1);
+                                    push!(Token::SlotSequenceN(n));
+                                } else {
+                                    push!(Token::SlotSequence);
+                                }
+                            } else {
+                                push!(Token::SlotSequence);
+                            }
+                        } else if c.is_ascii_digit() {
                             let mut num_str = String::new();
                             while let Some(d) = self.peek() {
                                 if d.is_ascii_digit() {

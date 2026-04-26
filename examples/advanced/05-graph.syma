@@ -245,7 +245,7 @@ class WeightedGraph extends Graph {
                   For[j = 1, j <= Length[edges], j++,
                       (e = Part[edges, j];
                        If[MemberQ[rem, e.target] && e.weight < bestW,
-                           (bestW = e.weight; best = e)]))];
+                           (bestW = e.weight; best = e)])]);
              If[best == Null, Break[]];
              medges = Append[medges, best];
              nv = Lookup[vertices, best.target];

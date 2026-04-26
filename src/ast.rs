@@ -53,6 +53,9 @@ pub enum Expr {
     /// #, #1, #2 — slot in pure function
     Slot(Option<usize>),
 
+    /// ##, ##2, ##3 — slot sequence in pure function (expands to args)
+    SlotSequence(Option<usize>),
+
     /// Function[{x, y}, body] — named-parameter lambda
     Function {
         params: Vec<Symbol>,
@@ -340,6 +343,7 @@ impl PartialEq for Expr {
                 l1 == l2 && r1 == r2
             }
             (Expr::Slot(a), Expr::Slot(b)) => a == b,
+            (Expr::SlotSequence(a), Expr::SlotSequence(b)) => a == b,
             (Expr::Pure { body: a }, Expr::Pure { body: b }) => a == b,
             (
                 Expr::Function {
@@ -759,6 +763,8 @@ impl fmt::Display for Expr {
             Expr::RuleDelayed { lhs, rhs } => write!(f, "{} :> {}", lhs, rhs),
             Expr::Slot(None) => write!(f, "#"),
             Expr::Slot(Some(n)) => write!(f, "#{}", n),
+            Expr::SlotSequence(None) => write!(f, "##"),
+            Expr::SlotSequence(Some(n)) => write!(f, "##{}", n),
             Expr::Function { params, body } => {
                 write!(f, "Function[")?;
                 if params.len() == 1 {

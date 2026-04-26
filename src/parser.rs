@@ -949,6 +949,8 @@ impl Parser {
                 | Token::Ident(_)
                 | Token::Slot
                 | Token::SlotN(_)
+                | Token::SlotSequence
+                | Token::SlotSequenceN(_)
                 | Token::LParen
                 | Token::LAssoc
                 | Token::Not
@@ -1280,6 +1282,14 @@ impl Parser {
             Token::SlotN(n) => {
                 self.advance();
                 Ok(Expr::Slot(Some(n)))
+            }
+            Token::SlotSequence => {
+                self.advance();
+                Ok(Expr::SlotSequence(None))
+            }
+            Token::SlotSequenceN(n) => {
+                self.advance();
+                Ok(Expr::SlotSequence(Some(n)))
             }
 
             // Parenthesized expression or compound expression (stmt; stmt; expr)
@@ -1838,6 +1848,8 @@ impl Parser {
                 | Token::Ident(_)
                 | Token::Slot
                 | Token::SlotN(_)
+                | Token::SlotSequence
+                | Token::SlotSequenceN(_)
                 | Token::LParen
                 | Token::LAssoc
                 | Token::Not
@@ -2217,6 +2229,14 @@ impl Parser {
             Token::SlotN(n) => {
                 self.advance();
                 Ok(Expr::Slot(Some(n)))
+            }
+            Token::SlotSequence => {
+                self.advance();
+                Ok(Expr::SlotSequence(None))
+            }
+            Token::SlotSequenceN(n) => {
+                self.advance();
+                Ok(Expr::SlotSequence(Some(n)))
             }
 
             // List pattern: {pat1, pat2, ...}

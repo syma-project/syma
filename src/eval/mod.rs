@@ -1038,6 +1038,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             })
         }
 
+        // ── Slot sequence: ## or ##n ──
+        Expr::SlotSequence(None) => env.get("##").ok_or_else(|| {
+            EvalError::Error("Slot sequence ## used outside of pure function".to_string())
+        }),
+        Expr::SlotSequence(Some(n)) => match env.get("##") {
+            Some(Value::Sequence(items)) => {
+                let start = n.saturating_sub(1);
+                if start >= items.len() {
+                    Ok(Value::Sequence(vec![]))
+                } else {
+                    Ok(Value::Sequence(items[start..].to_vec()))
+                }
+            }
+            _ => Err(EvalError::Error(format!(
+                "Slot sequence ##{} used outside of pure function",
+                n
+            ))),
+        },
+
         // ── Pure function sugar: expr & ──
         Expr::Pure { body } => {
             let slot_count = count_slots(body);
@@ -1067,6 +1086,8 @@ fn count_slots(expr: &Expr) -> usize {
     match expr {
         Expr::Slot(None) => 1,
         Expr::Slot(Some(idx)) => *idx,
+        Expr::SlotSequence(None) => 1,
+        Expr::SlotSequence(Some(idx)) => *idx,
         Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
         Expr::Assoc(items) => items.iter().map(|(_, v)| count_slots(v)).max().unwrap_or(0),
         Expr::Call { head, args } => args
@@ -1367,7 +1388,7 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             rhs: Box::new(substitute_in_expr(rhs, subs)),
         },
         Expr::Slot(_) => expr.clone(),
-        Expr::Function { params, body } => Expr::Function {
+        Expr::SlotSequence(_) => expr.clone(),        Expr::Function { params, body } => Expr::Function {
             params: params.clone(),
             body: Box::new(substitute_in_expr(body, subs)),
         },
@@ -2181,6 +2202,10 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     child_env.set(param.clone(), args[i].clone());
                 }
             }
+            // Bind ## to all args as Sequence (for slot sequence expansion)
+            child_env.set("##".to_string(), Value::Sequence(args.to_vec()));
+            // Bind #0 to the function itself (for anonymous recursion)
+            child_env.set("#0".to_string(), func.clone());
             // Catch Return[expr] and unwrap it as the pure function result
             eval(body, &child_env).or_else(|e| match e {
                 EvalError::Return(v) => Ok(*v),
@@ -2714,6 +2739,21 @@ mod tests {
     use crate::builtins;
     use crate::lexer;
     use crate::parser;
+
+    /// Run a closure in a thread with 8MB stack (avoids stack overflow
+    /// from deep eval recursion in test harness with default 2MB stack).
+    fn with_large_stack<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
 
     fn eval_str(input: &str) -> Value {
         let env = Env::new();
@@ -4631,6 +4671,102 @@ mod tests {
                 Value::Integer(Integer::from(8)),
             ])
         );
+    }
+
+    // ── Slot sequence ## / ##n tests ──
+
+    #[test]
+    fn test_slot_sequence_all() {
+        assert_eq!(
+            eval_str("(## &)[1, 2, 3]"),
+            Value::Sequence(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_slot_sequence_from_n() {
+        assert_eq!(
+            eval_str("(##2 &)[10, 20, 30]"),
+            Value::Sequence(vec![Value::Integer(Integer::from(20)), Value::Integer(Integer::from(30))])
+        );
+    }
+
+    #[test]
+    fn test_slot_sequence_single_arg() {
+        assert_eq!(
+            eval_str("(## &)[42]"),
+            Value::Sequence(vec![Value::Integer(Integer::from(42))])
+        );
+    }
+
+    #[test]
+    fn test_slot_sequence_zero_args() {
+        assert_eq!(eval_str("(## &)[]"), Value::Sequence(vec![]));
+    }
+
+    #[test]
+    fn test_slot_sequence_past_end() {
+        assert_eq!(eval_str("(##4 &)[1, 2]"), Value::Sequence(vec![]));
+    }
+
+    #[test]
+    fn test_slot_sequence_splices_in_call() {
+        assert_eq!(
+            eval_str("(Plus[##, 3] &)[1, 2]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_slot_sequence_with_slots() {
+        assert_eq!(
+            eval_str("(# + ## &)[1, 2, 3]"),
+            Value::Integer(Integer::from(7))
+        );
+    }
+
+    #[test]
+    fn test_slot_self_reference_no_recursion() {
+        // #0 resolves without error
+        eval_str("(#0 &)[42]");
+    }
+
+    #[test]
+    fn test_slot_self_reference_simple_recursion() {
+        assert_eq!(
+            eval_str("(If[# == 0, 0, #0[# - 1]] &)[3]"),
+            Value::Integer(Integer::from(0))
+        );
+    }
+
+    #[test]
+    fn test_slot_self_reference_factorial_2() {
+        assert_eq!(
+            eval_str("(If[# == 0, 1, # * #0[# - 1]] &)[2]"),
+            Value::Integer(Integer::from(2))
+        );
+    }
+
+    #[test]
+    fn test_slot_self_reference_factorial_3() {
+        assert_eq!(
+            eval_str("(If[# == 0, 1, # * #0[# - 1]] &)[3]"),
+            Value::Integer(Integer::from(6))
+        );
+    }
+
+    #[test]
+    fn test_slot_self_reference_factorial_5() {
+        with_large_stack(|| {
+            assert_eq!(
+                eval_str("(If[# == 0, 1, # * #0[# - 1]] &)[5]"),
+                Value::Integer(Integer::from(120))
+            );
+        });
     }
 
     // ── Closure / lexical capture tests ──
