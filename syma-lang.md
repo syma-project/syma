@@ -111,6 +111,34 @@ factorial[0] := 1
 factorial[n_Integer /; n > 0] := n * factorial[n - 1]
 ```
 
+**C/Python style (paren/block form):**
+
+```
+def f(x) = expr            (* immediate: evaluate expr once at definition *)
+def f(x) := expr           (* delayed: re-evaluate expr each call *)
+def f(x) { stmts }         (* delayed with block body *)
+
+def f(x, y) = x + y        (* multiple params *)
+def f(x_Integer) = x       (* type-constrained param *)
+def f(_) = 1               (* anonymous blank param *)
+def f(x, y) {              (* block body *)
+    result = x + y
+    result
+}
+```
+
+Bare identifiers in the param list auto-convert to named blanks: `x` → `x_`.
+The C-style `def` desugars to the same `Expr::FuncDef` node as the WL-style `:=` form.
+
+Multiple `def` definitions for the same function also coexist and are tried in order:
+
+```
+def f(x) = x + 1
+def f(x, y) = x + y
+f[3]              (* => 4, matched first definition *)
+f[3, 4]           (* => 7, matched second definition *)
+```
+
 ### 3.3 Pure Functions (Lambda)
 
 ```
@@ -707,6 +735,8 @@ All control flow constructs are expressions that return values.
 
 ### 9.1 Conditionals
 
+**Wolfram Language style (bracket form):**
+
 ```
 If[condition, then, else]
 
@@ -723,7 +753,34 @@ Switch[expr,
 ]
 ```
 
+**C/Python style (paren/block form):**
+
+```
+if (condition) body
+if (condition) body else body
+if (condition) { stmts } else { stmts }
+if (condition) body else if (condition2) body else body  (* else if chaining *)
+```
+
+The C-style `if` desugars to the same `If` AST node as the bracket form.
+
+Examples:
+
+```
+if (x > 0) Print["positive"] else Print["non-positive"]
+
+if (x > 0) {
+    Print["positive"]
+    Abs[x]
+} else {
+    Print["non-positive"]
+    0
+}
+```
+
 ### 9.2 Loops
+
+**Wolfram Language style (bracket form):**
 
 ```
 For[i = 1, i <= 10, i++, body]
@@ -732,6 +789,31 @@ While[condition, body]
 
 Do[body, {i, 1, 10}]           (* iterate i from 1 to 10 *)
 Do[body, {i, list}]             (* iterate over list elements *)
+```
+
+**C/Python style (paren/block form):**
+
+```
+for (init; condition; step) body
+for (init; condition; step) { stmts }
+for (;;) body                  (* infinite loop *)
+
+while (condition) body
+while (condition) { stmts }
+```
+
+The C-style `for` and `while` desugar to the same `For`/`While` AST nodes as the bracket forms.
+
+Examples:
+
+```
+for (i = 0; i < 10; i = i + 1) {
+    Print[i]
+}
+
+while (running) {
+    step[]
+}
 ```
 
 ### 9.3 Functional Iteration (Preferred)
@@ -1188,11 +1270,14 @@ Lexer notes:
 program        = { statement ";" }
 
 statement      = definition | expression | import_stmt | export_stmt
+                 | def_stmt
 
 definition     = func_def | rule_def | class_def | module_def | mixin_def
                  | assign
 
 func_def       = ident "[" [ pattern { "," pattern } ] "]" ":=" expression
+def_stmt       = "def" ident "(" [ pattern { "," pattern } ] ")"
+                 ( "=" expression | ":=" expression | "{" { statement ";" } "}" )
 rule_def       = "rule" ident "=" "{" { rule_line } "}"
 class_def      = "class" ident [ "extends" ident ] [ "with" ident_list ]
                  "{" { member_def } "}"
@@ -1257,13 +1342,16 @@ primary_expr   = atom
                  | "<|" [ assoc_entries ] "|>"              (* association *)
                  | "match" expression "{" { match_branch } "}"
                  | "If" "[" expression "," expression [ "," expression ] "]"
+                 | "if" "(" expression ")" block_body [ "else" block_body ]
                  | "Which" "[" expr_pair { "," expr_pair } "]"
                  | "Switch" "[" expression "," expr_pair { "," expr_pair } "]"
                  | "try" "{" { statement ";" } "}"
                    "catch" ident "{" { statement ";" } "}"
                    [ "finally" "{" { statement ";" } "}" ]
                  | "For" "[" expression "," expression "," expression "," expression "]"
+                 | "for" "(" [ expression ] ";" expression ";" [ expression ] ")" block_body
                  | "While" "[" expression "," expression "]"
+                 | "while" "(" expression ")" block_body
                  | "Do" "[" expression "," iterator_spec "]"
 
 (* ── Atoms ── *)
@@ -1292,6 +1380,8 @@ assoc_entry    = ( string | ident ) "->" expression
 params         = ident | "{" ident { "," ident } "}"
 iterator_spec  = "{" ident "," expression "}"
                  | "{" ident "," expression "," expression "}"
+
+block_body     = expression | "{" { statement ";" } "}"
 
 rule_line      = pattern ("->" | ":>") expression
 

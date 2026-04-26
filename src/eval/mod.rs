@@ -2927,6 +2927,70 @@ mod tests {
         assert_eq!(eval_str("If[False, 1]"), Value::Null);
     }
 
+    #[test]
+    fn test_if_c_style() {
+        assert_eq!(
+            eval_str("if (True) 1 else 2"),
+            Value::Integer(Integer::from(1))
+        );
+    }
+
+    #[test]
+    fn test_if_c_style_block() {
+        assert_eq!(
+            eval_str("if (False) { 1; 2 } else { 3; 4 }"),
+            Value::Integer(Integer::from(4))
+        );
+    }
+
+    #[test]
+    fn test_if_c_style_else_if() {
+        assert_eq!(
+            eval_str("if (False) 1 else if (True) 2 else 3"),
+            Value::Integer(Integer::from(2))
+        );
+    }
+
+    #[test]
+    fn test_while_c_style() {
+        assert_eq!(
+            eval_str("i = 0; while (i < 3) { i = i + 1 }; i"),
+            Value::Integer(Integer::from(3))
+        );
+    }
+
+    #[test]
+    fn test_for_c_style() {
+        assert_eq!(
+            eval_str("s = 0; for (i = 0; i < 5; i = i + 1) { s = s + i }; s"),
+            Value::Integer(Integer::from(10))
+        );
+    }
+
+    #[test]
+    fn test_def_eval() {
+        assert_eq!(
+            eval_str("def f(x) = x + 1; f[3]"),
+            Value::Integer(Integer::from(4))
+        );
+    }
+
+    #[test]
+    fn test_def_block_eval() {
+        assert_eq!(
+            eval_str("def f(x, y) { x + y }; f[2, 3]"),
+            Value::Integer(Integer::from(5))
+        );
+    }
+
+    #[test]
+    fn test_def_delayed_eval() {
+        assert_eq!(
+            eval_str("def f(x) := x^2; f[4]"),
+            Value::Integer(Integer::from(16))
+        );
+    }
+
     // ── Comparison ──
 
     #[test]

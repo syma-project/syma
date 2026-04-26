@@ -114,6 +114,7 @@ impl Parser {
             Token::Match => self.parse_match(),
             Token::Try => self.parse_try(),
             Token::Throw => self.parse_throw(),
+            Token::Def => self.parse_def(),
             _ => {
                 let expr = self.parse_expression()?;
                 // Check for assignment or function definition
@@ -602,6 +603,106 @@ impl Parser {
             head: Box::new(Expr::Symbol("Throw".to_string())),
             args: vec![expr],
         })
+    }
+
+    /// Parse C-style function def: def name(params) = expr | { block }
+    fn parse_def(&mut self) -> Result<Expr, ParseError> {
+        self.expect(&Token::Def)?;
+        let name = self.expect_ident()?;
+
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        if !self.at(&Token::RParen) {
+            loop {
+                let param = self.parse_expression()?;
+                params.push(Self::convert_def_param(param));
+                if self.at(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+
+        if self.at(&Token::Assign) {
+            // def f(x) = expr — immediate
+            self.advance();
+            let body = self.parse_expression()?;
+            Ok(Expr::FuncDef {
+                name,
+                params,
+                body: Box::new(body),
+                delayed: false,
+            })
+        } else if self.at(&Token::DelayedAssign) {
+            // def f(x) := expr — delayed
+            self.advance();
+            let body = self.parse_expression()?;
+            Ok(Expr::FuncDef {
+                name,
+                params,
+                body: Box::new(body),
+                delayed: true,
+            })
+        } else if self.at(&Token::LBrace) {
+            // def f(x) { stmts } — delayed with block body
+            let body = self.parse_body()?;
+            Ok(Expr::FuncDef {
+                name,
+                params,
+                body: Box::new(body),
+                delayed: true,
+            })
+        } else {
+            Err(ParseError {
+                message: "expected '=', ':=', or '{' after function parameters".to_string(),
+                token: Some(self.peek().clone()),
+                span: self.peek_span(),
+            })
+        }
+    }
+
+    /// Convert a C-style def parameter.
+    /// Bare identifiers (no `_`) become named blanks: `x` → `x_`.
+    /// Identifiers containing `_` delegate to `convert_pattern`.
+    fn convert_def_param(expr: Expr) -> Expr {
+        match &expr {
+            Expr::Symbol(s) if !s.contains('_') => Expr::NamedBlank {
+                name: s.clone(),
+                type_constraint: None,
+            },
+            _ => Self::convert_pattern(expr),
+        }
+    }
+
+    /// Parse { stmt1; stmt2; ... } as a block of statements (not a List literal).
+    fn parse_block(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect(&Token::LBrace)?;
+        let mut stmts = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            stmts.push(self.parse_statement()?);
+            while self.at(&Token::Semicolon) || self.at(&Token::Newline) {
+                self.advance();
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(stmts)
+    }
+
+    /// Parse a body: either { block } or a single expression.
+    /// Returns Expr::Null for empty block or single expression.
+    fn parse_body(&mut self) -> Result<Expr, ParseError> {
+        if self.at(&Token::LBrace) {
+            let stmts = self.parse_block()?;
+            Ok(match stmts.len() {
+                0 => Expr::Null,
+                1 => stmts.into_iter().next().unwrap(),
+                _ => Expr::Sequence(stmts),
+            })
+        } else {
+            self.parse_expression()
+        }
     }
 
     // ── Expressions (precedence climbing) ──
@@ -1106,6 +1207,14 @@ impl Parser {
                         self.advance();
                         Expr::Symbol("Null".to_string())
                     }
+                    Token::Else => {
+                        self.advance();
+                        Expr::Symbol("else".to_string())
+                    }
+                    Token::Def => {
+                        self.advance();
+                        Expr::Symbol("def".to_string())
+                    }
                     _ => self.parse_unary_expr()?,
                 };
                 Ok(Expr::Information(Box::new(expr)))
@@ -1356,25 +1465,45 @@ impl Parser {
             // Match expression
             Token::Match => self.parse_match(),
 
-            // If expression
+            // If expression — C-style: if (cond) body [else body], WL-style: If[cond, then, else]
             Token::If => {
                 self.advance();
-                self.expect(&Token::LBracket)?;
-                let condition = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let then_branch = self.parse_expression()?;
-                let else_branch = if self.at(&Token::Comma) {
+                if self.at(&Token::LParen) {
+                    // C-style: if (condition) body [else body]
                     self.advance();
-                    Some(Box::new(self.parse_expression()?))
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::RParen)?;
+                    let then_branch = self.parse_body()?;
+                    let else_branch = if self.at(&Token::Else) {
+                        self.advance();
+                        Some(Box::new(self.parse_body()?))
+                    } else {
+                        None
+                    };
+                    Ok(Expr::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(then_branch),
+                        else_branch,
+                    })
                 } else {
-                    None
-                };
-                self.expect(&Token::RBracket)?;
-                Ok(Expr::If {
-                    condition: Box::new(condition),
-                    then_branch: Box::new(then_branch),
-                    else_branch,
-                })
+                    // WL-style: If[cond, then, else]
+                    self.expect(&Token::LBracket)?;
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let then_branch = self.parse_expression()?;
+                    let else_branch = if self.at(&Token::Comma) {
+                        self.advance();
+                        Some(Box::new(self.parse_expression()?))
+                    } else {
+                        None
+                    };
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(then_branch),
+                        else_branch,
+                    })
+                }
             }
 
             // Which expression
@@ -1416,38 +1545,82 @@ impl Parser {
                 })
             }
 
-            // For loop
+            // For loop — C-style: for (init; test; incr) body, WL-style: For[init, test, incr, body]
             Token::For => {
                 self.advance();
-                self.expect(&Token::LBracket)?;
-                let init = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let condition = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let step = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let body = self.parse_expression()?;
-                self.expect(&Token::RBracket)?;
-                Ok(Expr::For {
-                    init: Box::new(init),
-                    condition: Box::new(condition),
-                    step: Box::new(step),
-                    body: Box::new(body),
-                })
+                if self.at(&Token::LParen) {
+                    // C-style: for (init; condition; step) body
+                    self.advance();
+                    let init = if self.at(&Token::Semicolon) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::Semicolon)?;
+                    let condition = if self.at(&Token::Semicolon) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::Semicolon)?;
+                    let step = if self.at(&Token::RParen) {
+                        Expr::Null
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.expect(&Token::RParen)?;
+                    let body = self.parse_body()?;
+                    Ok(Expr::For {
+                        init: Box::new(init),
+                        condition: Box::new(condition),
+                        step: Box::new(step),
+                        body: Box::new(body),
+                    })
+                } else {
+                    // WL-style: For[init, condition, step, body]
+                    self.expect(&Token::LBracket)?;
+                    let init = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let step = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let body = self.parse_expression()?;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::For {
+                        init: Box::new(init),
+                        condition: Box::new(condition),
+                        step: Box::new(step),
+                        body: Box::new(body),
+                    })
+                }
             }
 
-            // While loop
+            // While loop — C-style: while (cond) body, WL-style: While[cond, body]
             Token::While => {
                 self.advance();
-                self.expect(&Token::LBracket)?;
-                let condition = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let body = self.parse_statement()?;
-                self.expect(&Token::RBracket)?;
-                Ok(Expr::While {
-                    condition: Box::new(condition),
-                    body: Box::new(body),
-                })
+                if self.at(&Token::LParen) {
+                    // C-style: while (condition) body
+                    self.advance();
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::RParen)?;
+                    let body = self.parse_body()?;
+                    Ok(Expr::While {
+                        condition: Box::new(condition),
+                        body: Box::new(body),
+                    })
+                } else {
+                    // WL-style: While[cond, body]
+                    self.expect(&Token::LBracket)?;
+                    let condition = self.parse_expression()?;
+                    self.expect(&Token::Comma)?;
+                    let body = self.parse_statement()?;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::While {
+                        condition: Box::new(condition),
+                        body: Box::new(body),
+                    })
+                }
             }
 
             // Do loop
@@ -2951,6 +3124,157 @@ mod tests {
     }
 
     #[test]
+    fn test_if_c_style() {
+        let expr = parse_one("if (True) 1 else 2");
+        match expr {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                assert_eq!(*condition, Expr::Bool(true));
+                assert_eq!(*then_branch, Expr::Integer(Integer::from(1)));
+                assert_eq!(*else_branch.unwrap(), Expr::Integer(Integer::from(2)));
+            }
+            _ => panic!("Expected If"),
+        }
+    }
+
+    #[test]
+    fn test_if_c_style_block() {
+        let expr = parse_one("if (x > 0) { a; b } else { c; d }");
+        match expr {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                match *condition {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    _ => panic!("Expected Greater call"),
+                }
+                match *then_branch {
+                    Expr::Sequence(ref stmts) => assert_eq!(stmts.len(), 2),
+                    _ => panic!("Expected Sequence for then branch"),
+                }
+                assert!(else_branch.is_some());
+                match *else_branch.unwrap() {
+                    Expr::Sequence(ref stmts) => assert_eq!(stmts.len(), 2),
+                    _ => panic!("Expected Sequence for else branch"),
+                }
+            }
+            _ => panic!("Expected If"),
+        }
+    }
+
+    #[test]
+    fn test_if_c_style_else_if() {
+        let expr = parse_one("if (a) x else if (b) y else z");
+        match expr {
+            Expr::If {
+                condition, then_branch, else_branch,
+            } => {
+                assert_eq!(*condition, Expr::Symbol("a".to_string()));
+                assert_eq!(*then_branch, Expr::Symbol("x".to_string()));
+                // else branch should be another If
+                match *else_branch.unwrap() {
+                    Expr::If { condition: c, then_branch: t, else_branch: e } => {
+                        assert_eq!(*c, Expr::Symbol("b".to_string()));
+                        assert_eq!(*t, Expr::Symbol("y".to_string()));
+                        assert_eq!(*e.unwrap(), Expr::Symbol("z".to_string()));
+                    }
+                    _ => panic!("Expected nested If for else if"),
+                }
+            }
+            _ => panic!("Expected If"),
+        }
+    }
+
+    #[test]
+    fn test_while_c_style() {
+        let expr = parse_one("while (x > 0) body");
+        match expr {
+            Expr::While { condition, body } => {
+                match *condition {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    _ => panic!("Expected Greater"),
+                }
+                assert_eq!(*body, Expr::Symbol("body".to_string()));
+            }
+            _ => panic!("Expected While"),
+        }
+    }
+
+    #[test]
+    fn test_while_c_style_block() {
+        let expr = parse_one("while (x > 0) { a; b }");
+        match expr {
+            Expr::While { condition, body } => {
+                match *condition {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    _ => panic!("Expected Greater"),
+                }
+                match *body {
+                    Expr::Sequence(ref stmts) => assert_eq!(stmts.len(), 2),
+                    _ => panic!("Expected Sequence in body"),
+                }
+            }
+            _ => panic!("Expected While"),
+        }
+    }
+
+    #[test]
+    fn test_for_c_style() {
+        let expr = parse_one("for (i = 0; i < 10; i = i + 1) body");
+        match expr {
+            Expr::For { init, condition, step: _, body } => {
+                match *init {
+                    Expr::Assign { .. } => {}
+                    _ => panic!("Expected Assign for init"),
+                }
+                match *condition {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Less".to_string())),
+                    _ => panic!("Expected Less"),
+                }
+                assert_eq!(*body, Expr::Symbol("body".to_string()));
+            }
+            _ => panic!("Expected For"),
+        }
+    }
+
+    #[test]
+    fn test_for_c_style_block() {
+        let expr = parse_one("for (i = 0; i < 10; i = i + 1) { Print[i] }");
+        match expr {
+            Expr::For { init, condition, step: _, body } => {
+                assert!(matches!(*init, Expr::Assign { .. }));
+                assert!(matches!(*condition, Expr::Call { .. }));
+                match *body {
+                    Expr::Call { head, .. } => {
+                        assert_eq!(*head, Expr::Symbol("Print".to_string()));
+                    }
+                    _ => panic!("Expected Print call in body"),
+                }
+            }
+            _ => panic!("Expected For"),
+        }
+    }
+
+    #[test]
+    fn test_for_c_style_empty_parts() {
+        let expr = parse_one("for (;;) body");
+        match expr {
+            Expr::For { init, condition, step, body } => {
+                assert_eq!(*init, Expr::Null);
+                assert_eq!(*condition, Expr::Null);
+                assert_eq!(*step, Expr::Null);
+                assert_eq!(*body, Expr::Symbol("body".to_string()));
+            }
+            _ => panic!("Expected For"),
+        }
+    }
+
+    #[test]
     fn test_rule() {
         let expr = parse_one("a -> b");
         match expr {
@@ -3283,6 +3607,113 @@ mod tests {
                 );
             }
             _ => panic!("Expected DestructAssign"),
+        }
+    }
+
+    // ── C-style function definition (def) ──
+
+    #[test]
+    fn test_def_simple() {
+        let expr = parse_one("def f(x) = x + 1");
+        match expr {
+            Expr::FuncDef { name, params, body, delayed } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: None });
+                assert!(!delayed);
+                match *body {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Plus".to_string())),
+                    _ => panic!("Expected Plus call"),
+                }
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_multi_param() {
+        let expr = parse_one("def f(x, y) = x + y");
+        match expr {
+            Expr::FuncDef { name, params, .. } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: None });
+                assert_eq!(params[1], Expr::NamedBlank { name: "y".to_string(), type_constraint: None });
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_typed_param() {
+        let expr = parse_one("def f(x_Integer) = x");
+        match expr {
+            Expr::FuncDef { name, params, .. } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: Some("Integer".to_string()) });
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_anonymous() {
+        let expr = parse_one("def f(_) = 1");
+        match expr {
+            Expr::FuncDef { name, params, .. } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], Expr::Blank { type_constraint: None });
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_delayed() {
+        let expr = parse_one("def f(x) := x^2");
+        match expr {
+            Expr::FuncDef { name, params: _, body, delayed } => {
+                assert_eq!(name, "f");
+                assert!(delayed);
+                match *body {
+                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Power".to_string())),
+                    _ => panic!("Expected Power call"),
+                }
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_block() {
+        let expr = parse_one("def f(x, y) { a; b; c }");
+        match expr {
+            Expr::FuncDef { name, params, body, delayed } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 2);
+                assert!(delayed);
+                match *body {
+                    Expr::Sequence(ref stmts) => assert_eq!(stmts.len(), 3),
+                    _ => panic!("Expected Sequence"),
+                }
+            }
+            _ => panic!("Expected FuncDef"),
+        }
+    }
+
+    #[test]
+    fn test_def_no_params() {
+        let expr = parse_one("def f() = 42");
+        match expr {
+            Expr::FuncDef { name, params, body, delayed } => {
+                assert_eq!(name, "f");
+                assert!(params.is_empty());
+                assert!(!delayed);
+                assert_eq!(*body, Expr::Integer(Integer::from(42)));
+            }
+            _ => panic!("Expected FuncDef"),
         }
     }
 }
