@@ -2177,23 +2177,35 @@ impl Parser {
                 Ok(Expr::Null)
             }
 
-            // Parenthesized pattern (alternatives)
+            // Parenthesized pattern: (expr), (a; b; c) seq, or (a|b|c) alternatives
             Token::LParen => {
                 self.advance();
-                let mut patterns = vec![self.parse_pattern()?];
-                while self.at(&Token::PipeAlt) {
-                    self.advance();
-                    patterns.push(self.parse_pattern()?);
-                }
-                self.expect(&Token::RParen)?;
-
-                if patterns.len() == 1 {
-                    Ok(patterns.into_iter().next().unwrap())
-                } else {
+                let first = self.parse_statement()?;
+                if self.at(&Token::Semicolon) {
+                    let mut exprs = vec![first];
+                    while self.at(&Token::Semicolon) {
+                        self.advance();
+                        if self.at(&Token::RParen) {
+                            break;
+                        }
+                        exprs.push(self.parse_statement()?);
+                    }
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::Sequence(exprs))
+                } else if self.at(&Token::PipeAlt) {
+                    let mut patterns = vec![first];
+                    while self.at(&Token::PipeAlt) {
+                        self.advance();
+                        patterns.push(self.parse_statement()?);
+                    }
+                    self.expect(&Token::RParen)?;
                     Ok(Expr::Call {
                         head: Box::new(Expr::Symbol("Alternatives".to_string())),
                         args: patterns,
                     })
+                } else {
+                    self.expect(&Token::RParen)?;
+                    Ok(first)
                 }
             }
 
@@ -2405,11 +2417,14 @@ impl Parser {
         // Parse first argument
         let first = self.parse_pattern()?;
         args.push(self.wrap_seq_or_single(first)?);
+        // Skip newlines before checking for comma (args can span multiple lines)
+        self.skip_newlines();
         // Handle remaining comma-separated arguments
         while self.at(&Token::Comma) {
             self.advance();
             let next = self.parse_pattern()?;
             args.push(self.wrap_seq_or_single(next)?);
+            self.skip_newlines();
         }
         Ok(args)
     }
