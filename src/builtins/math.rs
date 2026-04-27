@@ -1407,9 +1407,55 @@ pub fn builtin_factorial(args: &[Value]) -> Result<Value, EvalError> {
             let n_i64 = n.to_i64().unwrap_or(0);
             Ok(Value::Integer(factorial(n_i64)))
         }
-        _ => Err(EvalError::Error(
-            "Factorial requires a non-negative integer".to_string(),
-        )),
+        // For non-integer n: n! → Gamma[1 + n]
+        // Directly compute 1 + n and call builtin_gamma so it evaluates
+        Value::Real(r) => {
+            let one_plus_r = r.clone() + 1;
+            builtin_gamma(&[Value::Real(one_plus_r)])
+        }
+        // Symbolic n: keep as unevaluated Factorial[n]
+        _ => Ok(Value::Call {
+            head: "Factorial".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Gamma[z] — the gamma function.
+///
+/// Numerically evaluated for real arguments; otherwise returned unevaluated.
+pub fn builtin_gamma(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Gamma requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        // Gamma[0] is undefined (pole)
+        Value::Integer(n) if n.is_zero() => Ok(Value::Call {
+            head: "ComplexInfinity".to_string(),
+            args: vec![],
+        }),
+        // Gamma[n] = (n-1)! for positive integer
+        Value::Integer(n) if *n > 0 => {
+            let n_i64 = n.to_i64().unwrap_or(0);
+            Ok(Value::Integer(factorial(n_i64 - 1)))
+        }
+        // Gamma[n] for negative integer → unevaluated (pole)
+        Value::Integer(_) => Ok(Value::Call {
+            head: "ComplexInfinity".to_string(),
+            args: vec![],
+        }),
+        // Real argument — compute via MPFR gamma function
+        Value::Real(r) => {
+            // rug::Float::gamma should be available via the transcendental trait
+            let result = r.clone().gamma();
+            Ok(Value::Real(result))
+        }
+        _ => Ok(Value::Call {
+            head: "Gamma".to_string(),
+            args: args.to_vec(),
+        }),
     }
 }
 

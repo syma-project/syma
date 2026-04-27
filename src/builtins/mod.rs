@@ -239,6 +239,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "GCD", math::builtin_gcd);
     register_builtin(env, "LCM", math::builtin_lcm);
     register_builtin(env, "Factorial", math::builtin_factorial);
+    register_builtin(env, "Gamma", math::builtin_gamma);
 
     // ── Hyperbolic functions ──
     register_builtin(env, "Sinh", math::builtin_sinh);
@@ -1248,8 +1249,8 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Mod" => "Mod[m, n] gives the remainder when m is divided by n.",
         "GCD" => "GCD[n1, n2, ...] gives the greatest common divisor of the arguments.",
         "LCM" => "LCM[n1, n2, ...] gives the least common multiple of the arguments.",
-        "Factorial" => "Factorial[n] or n! gives the factorial of n.",
-
+        "Factorial" => "Factorial[n] or n! gives the factorial of n. For non-integer n, returns Gamma[1 + n].",
+        "Gamma" => "Gamma[z] gives the Euler gamma function of z.",
         // ── Symbolic ──
         "Simplify" => "Simplify[expr] attempts to simplify expr. (Currently a pass-through.)",
         "Expand" => "Expand[expr] expands products and powers in expr. (Currently a pass-through.)",

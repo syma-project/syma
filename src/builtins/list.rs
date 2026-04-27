@@ -346,9 +346,24 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                     let idx = normalize_index(index, items.len())?;
                     current = items[idx].clone();
                 }
+                Value::Call { head, args: call_args } => {
+                    if index == 0 {
+                        current = Value::Symbol(head.clone());
+                    } else {
+                        let idx = (index - 1) as usize;
+                        if idx < call_args.len() {
+                            current = call_args[idx].clone();
+                        } else {
+                            return Err(EvalError::IndexOutOfBounds {
+                                index,
+                                length: call_args.len(),
+                            });
+                        }
+                    }
+                }
                 _ => {
                     return Err(EvalError::TypeError {
-                        expected: "List".to_string(),
+                        expected: "List or Call".to_string(),
                         got: current.type_name().to_string(),
                     });
                 }
@@ -395,6 +410,32 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                     index,
                     length: s.len(),
                 })
+            }
+        }
+        // Part[Call[f, args], n] — index into call arguments
+        // n = 0 → head f, n > 0 → args[n-1]
+        Value::Call { head, args: call_args } => {
+            let index = match &args[1] {
+                Value::Integer(n) => n.to_i64().unwrap_or(0),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
+            };
+            if index == 0 {
+                Ok(Value::Symbol(head.clone()))
+            } else {
+                let idx = (index - 1) as usize;
+                if idx < call_args.len() {
+                    Ok(call_args[idx].clone())
+                } else {
+                    Err(EvalError::IndexOutOfBounds {
+                        index,
+                        length: call_args.len(),
+                    })
+                }
             }
         }
         _ => Err(EvalError::TypeError {

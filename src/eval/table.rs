@@ -5,6 +5,9 @@ use crate::ast::*;
 use crate::env::Env;
 use crate::value::*;
 
+/// Default iteration limit when Infinity is used as a bound.
+const INFINITY_LIMIT: i64 = 100;
+
 /// Convert a Value back to an Expr for re-processing by special forms.
 pub(super) fn value_to_expr(v: &Value) -> Expr {
     match v {
@@ -76,7 +79,21 @@ pub(super) fn eval_table(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     eval_table_recursive(expr, iter_specs, env, 0)
 }
 
+/// Evaluate an iterator bound expression to an integer, supporting Infinity.
+fn eval_bound_as_integer(expr: &Expr, env: &Env, label: &str) -> Result<i64, EvalError> {
+    let val = super::eval(expr, env)?;
+    if matches!(&val, Value::Symbol(s) if s == "Infinity") {
+        Ok(INFINITY_LIMIT)
+    } else {
+        val.to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer or Infinity".to_string(),
+            got: format!("{label} bound {}", val.type_name()),
+        })
+    }
+}
+
 /// Parse an iterator spec list and generate iteration values.
+/// Also handles Infinity as a bound (substitutes INFINITY_LIMIT).
 pub(super) fn eval_iterator_spec(
     items: &[Expr],
     env: &Env,
@@ -103,12 +120,15 @@ pub(super) fn eval_iterator_spec(
                     }),
                 }
             } else {
-                let n = super::eval(&items[1], env)?.to_integer().ok_or_else(|| {
-                    EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    }
-                })?;
+                let val = super::eval(&items[1], env)?;
+                let n = if matches!(&val, Value::Symbol(s) if s == "Infinity") {
+                    INFINITY_LIMIT
+                } else {
+                    val.to_integer().ok_or_else(|| EvalError::TypeError {
+                        expected: "Integer or Infinity".to_string(),
+                        got: val.type_name().to_string(),
+                    })?
+                };
                 let values: Vec<Value> =
                     (1..=n).map(|i| Value::Integer(Integer::from(i))).collect();
                 Ok((var_name, values))
@@ -116,20 +136,16 @@ pub(super) fn eval_iterator_spec(
         }
         3 => {
             // {var, min, max}
-            let min =
-                super::eval(&items[1], env)?
-                    .to_integer()
-                    .ok_or_else(|| EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    })?;
-            let max =
-                super::eval(&items[2], env)?
-                    .to_integer()
-                    .ok_or_else(|| EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    })?;
+            let min = eval_bound_as_integer(&items[1], env, "min")?;
+            let max_val = super::eval(&items[2], env)?;
+            let max = if matches!(&max_val, Value::Symbol(s) if s == "Infinity") {
+                INFINITY_LIMIT
+            } else {
+                max_val.to_integer().ok_or_else(|| EvalError::TypeError {
+                    expected: "Integer or Infinity".to_string(),
+                    got: max_val.type_name().to_string(),
+                })?
+            };
             let values: Vec<Value> = (min..=max)
                 .map(|i| Value::Integer(Integer::from(i)))
                 .collect();
@@ -137,20 +153,8 @@ pub(super) fn eval_iterator_spec(
         }
         4 => {
             // {var, min, max, step}
-            let min =
-                super::eval(&items[1], env)?
-                    .to_integer()
-                    .ok_or_else(|| EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    })?;
-            let max =
-                super::eval(&items[2], env)?
-                    .to_integer()
-                    .ok_or_else(|| EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: "non-Integer".to_string(),
-                    })?;
+            let min = eval_bound_as_integer(&items[1], env, "min")?;
+            let max = eval_bound_as_integer(&items[2], env, "max")?;
             let step =
                 super::eval(&items[3], env)?
                     .to_integer()
@@ -263,13 +267,31 @@ fn eval_table_recursive(
 }
 
 /// Sum[expr, {i, min, max}] — like Table but adds results.
+///
+/// Supports multiple iterators for nested summation:
+/// Sum[expr, {i, ...}, {j, ...}] = Sum over i then j.
+/// Works with Infinity as upper bound (treats Infinity as no upper bound,
+/// but since the evaluator is eager, iterating to Infinity would hang;
+/// callers should use this with care — symbolic Infinity is accepted
+/// but produces a bounded range up to a reasonable limit).
 pub(super) fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Sum requires exactly 2 arguments".to_string(),
+            "Sum requires at least 2 arguments: Sum[expr, {i, min, max}, ...]".to_string(),
         ));
     }
-    let iter_items = match &args[1] {
+    eval_sum_recursive(&args[0], &args[1..], env)
+}
+
+fn eval_sum_recursive(
+    expr: &Expr,
+    iter_specs: &[Expr],
+    env: &Env,
+) -> Result<Value, EvalError> {
+    if iter_specs.is_empty() {
+        return super::eval(expr, env);
+    }
+    let iter_items = match &iter_specs[0] {
         Expr::List(items) => items,
         _ => {
             return Err(EvalError::Error(
@@ -280,14 +302,13 @@ pub(super) fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
 
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
-    let expr = &args[0];
     let child_env = env.child();
     let mut acc = Value::Integer(Integer::from(0));
 
     for val in values {
         child_env.set(var_name.clone(), val);
-        let val = super::eval(expr, &child_env)?;
-        acc = crate::builtins::add_values_public(&acc, &val)?;
+        let term = eval_sum_recursive(expr, &iter_specs[1..], &child_env)?;
+        acc = crate::builtins::add_values_public(&acc, &term)?;
     }
 
     Ok(acc)

@@ -1328,6 +1328,15 @@ impl Parser {
                     };
                 }
 
+                // Postfix factorial: expr!  →  Factorial[expr]
+                Token::Not => {
+                    self.advance();
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Symbol("Factorial".to_string())),
+                        args: vec![expr],
+                    };
+                }
+
                 _ => break,
             }
         }
