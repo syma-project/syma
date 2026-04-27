@@ -1261,7 +1261,8 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "Factor" => "Factor[expr] factors the polynomial expr. (Planned.)",
         "Solve" => "Solve[eqns, vars] solves equations for variables. (Planned.)",
-        "Series" => "Series[expr, {x, x0, n}] computes a power series expansion. (Planned.)",
+        "Series" => "Series[expr, {x, x0, n}] computes a power series expansion to order n.\n\
+             Returns a SeriesData object that displays with an O[x-x0]^(n+1) remainder term.",
 
         // ── Discrete Calculus ──
         "DiscreteDelta" => {
@@ -1589,6 +1590,8 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "InputForm[expr] displays expr using infix notation (e.g., `a + b` instead of `Plus[a, b]`)."
         }
         "FullForm" => "FullForm[expr] displays expr in head[arg, ...] notation.",
+        "StandardForm" => "StandardForm[expr] displays expr in StandardForm (infix notation with SeriesData special display).",
+        "OutputForm" => "OutputForm[expr] displays expr in OutputForm (plain-text, same as StandardForm for terminal).",
         "Short" => {
             "Short[expr] displays expr with top-level truncation (shows at most 5 items).\nShort[expr, n] displays at most n top-level items."
         }

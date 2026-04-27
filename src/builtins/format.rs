@@ -35,6 +35,32 @@ pub fn builtin_full_form(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+/// StandardForm[expr] — display expr in StandardForm (infix with SeriesData special display).
+pub fn builtin_standard_form(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "StandardForm requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Formatted {
+        format: Format::StandardForm,
+        value: Box::new(args[0].clone()),
+    })
+}
+
+/// OutputForm[expr] — display expr in OutputForm (plain-text, same as StandardForm for terminal).
+pub fn builtin_output_form(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "OutputForm requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Formatted {
+        format: Format::OutputForm,
+        value: Box::new(args[0].clone()),
+    })
+}
+
 /// Short[expr] — display with top-level truncation (default 5 items).
 /// Short[expr, n] — display with at most n top-level items.
 pub fn builtin_short(args: &[Value]) -> Result<Value, EvalError> {
@@ -242,6 +268,8 @@ pub fn builtin_syntax_length(args: &[Value]) -> Result<Value, EvalError> {
 pub const SYMBOLS: &[&str] = &[
     "InputForm",
     "FullForm",
+    "StandardForm",
+    "OutputForm",
     "Short",
     "Shallow",
     "NumberForm",
@@ -258,6 +286,8 @@ pub fn register(env: &crate::env::Env) {
     use super::register_builtin;
     register_builtin(env, "InputForm", builtin_input_form);
     register_builtin(env, "FullForm", builtin_full_form);
+    register_builtin(env, "StandardForm", builtin_standard_form);
+    register_builtin(env, "OutputForm", builtin_output_form);
     register_builtin(env, "Short", builtin_short);
     register_builtin(env, "Shallow", builtin_shallow);
     register_builtin(env, "NumberForm", builtin_number_form);

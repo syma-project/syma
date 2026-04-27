@@ -173,6 +173,8 @@ impl SymaKernel {
                 let fmt = format_str.and_then(|s| match s.to_lowercase().as_str() {
                     "inputform" => Some(Format::InputForm),
                     "fullform" => Some(Format::FullForm),
+                    "standardform" => Some(Format::StandardForm),
+                    "outputform" => Some(Format::OutputForm),
                     _ => None,
                 });
                 (input, fmt)

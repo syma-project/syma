@@ -2,6 +2,7 @@ use crate::env::Env;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+use rug::Rational;
 use rug::ops::Pow;
 
 // ── Simplify ──
@@ -1405,8 +1406,8 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         got: spec[2].type_name().to_string(),
     })?;
 
-    let x_sym = Value::Symbol(var.clone());
-    let mut terms = Vec::new();
+    let _x_sym = Value::Symbol(var.clone());
+    let mut coefficients: Vec<Value> = Vec::new();
     let mut derivative = args[0].clone();
 
     for n in 0..=order {
@@ -1414,9 +1415,7 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         let factorial_val = Value::Integer(super::math::factorial(n));
         let coeff = match (&coeff_val, &factorial_val) {
             (Value::Integer(c), Value::Integer(f)) if !f.is_zero() => {
-                let c_f = Float::with_val(DEFAULT_PRECISION, c);
-                let f_f = Float::with_val(DEFAULT_PRECISION, f);
-                Value::Real(c_f / f_f)
+                Value::Rational(Box::new(Rational::from((c.clone(), f.clone()))))
             }
             (Value::Real(c), Value::Integer(f)) if !f.is_zero() => {
                 let f_f = Float::with_val(DEFAULT_PRECISION, f);
@@ -1430,28 +1429,19 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 ],
             ),
         };
-        // Combine like terms within each coefficient before multiplying by x^n
         let coeff = combine_plus_terms(coeff);
-        if n == 0 {
-            terms.push(coeff);
-        } else {
-            let x_minus_x0 = simplify_call(
-                "Plus",
-                &[
-                    x_sym.clone(),
-                    simplify_call("Times", &[Value::Integer(Integer::from(-1)), x0.clone()]),
-                ],
-            );
-            let power_term = if n == 1 {
-                x_minus_x0
-            } else {
-                simplify_call("Power", &[x_minus_x0, Value::Integer(Integer::from(n))])
-            };
-            terms.push(simplify_call("Times", &[coeff, power_term]));
-        }
+        coefficients.push(coeff);
         derivative = differentiate(&derivative, &var, env);
     }
-    Ok(simplify_call("Plus", &terms))
+
+    Ok(Value::SeriesData {
+        variable: Box::new(Value::Symbol(var)),
+        expansion_point: Box::new(x0),
+        coefficients,
+        min_exponent: 0,
+        max_exponent: order as i32 + 1,
+        denominator: 1,
+    })
 }
 
 /// Extract numeric coefficient and variable part from a term.
@@ -2075,11 +2065,24 @@ mod tests {
         let var_spec = Value::List(vec![sym("x"), int(0), int(1)]);
         let expr = simplify_call("Sin", &[sym("x")]);
         let result = builtin_series(&[expr, var_spec], &env()).unwrap();
-        let result_str = format!("{:?}", result);
-        assert!(
-            !result_str.is_empty(),
-            "Series[Sin[x], {{x, 0, 1}}] should produce a non-empty result"
-        );
+        // Should return SeriesData
+        assert!(matches!(result, Value::SeriesData { .. }));
+        if let Value::SeriesData { coefficients, max_exponent, .. } = &result {
+            assert_eq!(coefficients.len(), 2); // n=0 and n=1
+            assert_eq!(*max_exponent, 2); // order+1
+        }
+    }
+
+    #[test]
+    fn test_series_exp_10() {
+        // Series[Exp[x], {x, 0, 10}]
+        let var_spec = Value::List(vec![sym("x"), int(0), int(10)]);
+        let expr = simplify_call("Exp", &[sym("x")]);
+        let result = builtin_series(&[expr, var_spec], &env()).unwrap();
+        assert!(matches!(result, Value::SeriesData { .. }));
+        if let Value::SeriesData { coefficients, .. } = &result {
+            assert_eq!(coefficients.len(), 11); // n=0 through n=10
+        }
     }
 
     // ── Simplify tests ──

@@ -118,6 +118,10 @@ pub enum Format {
     FullForm,
     /// InputForm (infix notation with operators, e.g. `a + b` instead of `Plus[a, b]`).
     InputForm,
+    /// StandardForm — default formatted display (infix, with type-specific rendering like O[x]^n for SeriesData).
+    StandardForm,
+    /// OutputForm — plain-text output (same as StandardForm for terminal use).
+    OutputForm,
     /// Truncated output — at most `n` top-level items. `Short[expr]` alias with default 5.
     Short(usize),
     /// Limit nesting depth — at most `n` levels shown. `Shallow[expr]` default depth 3.
@@ -326,6 +330,19 @@ pub enum Value {
     // ── Hold ──
     Hold(Box<Value>),
     HoldComplete(Box<Value>),
+
+    // ── Series ──
+    /// A truncated power series (analogous to Mathematica's SeriesData).
+    /// Represents Sum[coeffs[i]*(x-x0)^(min+i), {i, 0, len-1}] + O[x-x0]^max
+    SeriesData {
+        variable: Box<Value>,
+        expansion_point: Box<Value>,
+        coefficients: Vec<Value>,
+        min_exponent: i32,
+        /// Exclusive upper bound — the O-term uses this exponent.
+        max_exponent: i32,
+        denominator: i32,
+    },
 
     // ── FFI ──
     /// A loaded native dynamic library.
@@ -606,6 +623,25 @@ impl PartialEq for Value {
             // Hold: compare inner values
             (Value::Hold(a), Value::Hold(b)) => a == b,
             (Value::HoldComplete(a), Value::HoldComplete(b)) => a == b,
+            // SeriesData: compare all fields
+            (
+                Value::SeriesData {
+                    variable: v1,
+                    expansion_point: e1,
+                    coefficients: c1,
+                    min_exponent: mn1,
+                    max_exponent: mx1,
+                    denominator: d1,
+                },
+                Value::SeriesData {
+                    variable: v2,
+                    expansion_point: e2,
+                    coefficients: c2,
+                    min_exponent: mn2,
+                    max_exponent: mx2,
+                    denominator: d2,
+                },
+            ) => v1 == v2 && e1 == e2 && c1 == c2 && mn1 == mn2 && mx1 == mx2 && d1 == d2,
             _ => false,
         }
     }
@@ -643,6 +679,7 @@ impl Value {
             Value::PackedArray(_) => "PackedArray",
             Value::Hold(_) => "Hold",
             Value::HoldComplete(_) => "HoldComplete",
+            Value::SeriesData { .. } => "SeriesData",
             Value::NativeLib { .. } => "NativeLib",
             Value::NativeFunction { .. } => "NativeFunction",
             Value::Formatted { format, value } => match format {
@@ -654,7 +691,9 @@ impl Value {
                 Format::BaseForm(_) => "BaseForm",
                 Format::Grid => "Grid",
                 Format::Deferred => "Deferred",
-                Format::Standard | Format::FullForm => value.type_name(),
+                Format::Standard | Format::FullForm | Format::StandardForm | Format::OutputForm => {
+                    value.type_name()
+                }
             },
         }
     }
@@ -771,6 +810,30 @@ impl Value {
             (Value::Dataset(a), other) => a.as_ref().struct_eq(other),
             (other, Value::Dataset(a)) => other.struct_eq(a.as_ref()),
             (Value::PackedArray(a), Value::PackedArray(b)) => a == b,
+            (
+                Value::SeriesData {
+                    variable: v1,
+                    expansion_point: e1,
+                    coefficients: c1,
+                    min_exponent: mn1,
+                    max_exponent: mx1,
+                    denominator: d1,
+                },
+                Value::SeriesData {
+                    variable: v2,
+                    expansion_point: e2,
+                    coefficients: c2,
+                    min_exponent: mn2,
+                    max_exponent: mx2,
+                    denominator: d2,
+                },
+            ) => v1.struct_eq(v2)
+                && e1.struct_eq(e2)
+                && c1.len() == c2.len()
+                && c1.iter().zip(c2.iter()).all(|(a, b)| a.struct_eq(b))
+                && mn1 == mn2
+                && mx1 == mx2
+                && d1 == d2,
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
@@ -998,6 +1061,52 @@ mod tests {
         assert_eq!(format!("{}", Value::Complex { re: 0.0, im: -1.0 }), "-I");
         assert_eq!(format!("{}", Value::Complex { re: 1.0, im: 2.0 }), "1+2I");
         assert_eq!(format!("{}", Value::Complex { re: 1.0, im: -2.0 }), "1-2I");
+    }
+
+    #[test]
+    fn test_series_data_input_form() {
+        let series = Value::SeriesData {
+            variable: Box::new(Value::Symbol("x".to_string())),
+            expansion_point: Box::new(Value::Integer(Integer::from(0))),
+            coefficients: vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(1)),
+                Value::Rational(Box::new(Rational::from((1, 2)))),
+                Value::Rational(Box::new(Rational::from((1, 6)))),
+            ],
+            min_exponent: 0,
+            max_exponent: 4,
+            denominator: 1,
+        };
+        let formatted = Value::Formatted {
+            format: Format::InputForm,
+            value: Box::new(series),
+        };
+        let s = formatted.to_string();
+        assert_eq!(s, "1 + x + 1/2 x^2 + 1/6 x^3 + O[x]^4");
+    }
+
+    #[test]
+    fn test_series_data_full_form() {
+        let series = Value::SeriesData {
+            variable: Box::new(Value::Symbol("x".to_string())),
+            expansion_point: Box::new(Value::Integer(Integer::from(0))),
+            coefficients: vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(1)),
+            ],
+            min_exponent: 0,
+            max_exponent: 2,
+            denominator: 1,
+        };
+        let formatted = Value::Formatted {
+            format: Format::FullForm,
+            value: Box::new(series),
+        };
+        let s = formatted.to_string();
+        assert!(s.starts_with("SeriesData["));
+        assert!(s.contains("x"));
+        assert!(s.contains("1, 1"));
     }
 }
 
@@ -1239,6 +1348,26 @@ impl fmt::Display for Value {
             }
             Value::Hold(v) => write!(f, "Hold[{}]", v),
             Value::HoldComplete(v) => write!(f, "HoldComplete[{}]", v),
+            Value::SeriesData {
+                variable,
+                expansion_point,
+                coefficients,
+                min_exponent,
+                max_exponent,
+                denominator,
+            } => {
+                write!(f, "SeriesData[")?;
+                write!(f, "{}, ", variable)?;
+                write!(f, "{}, ", expansion_point)?;
+                write!(f, "{{")?;
+                for (i, coeff) in coefficients.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", coeff)?;
+                }
+                write!(f, "}}, {}, {}, {}]", min_exponent, max_exponent, denominator)
+            }
             Value::NativeLib { name, .. } => write!(f, "NativeLib[\"{}\"]", name),
             Value::NativeFunction {
                 lib_name,
@@ -1249,6 +1378,8 @@ impl fmt::Display for Value {
                 Format::Standard => write!(f, "{}", value),
                 Format::FullForm => format_full_form(value, f),
                 Format::InputForm => format_input_form(value, f),
+                Format::StandardForm => format_input_form(value, f),
+                Format::OutputForm => format_input_form(value, f),
                 Format::Short(n) => format_short(value, *n, f),
                 Format::Shallow(depth) => format_shallow(value, *depth, 0, f),
                 Format::NumberForm { digits } => format_number_form(value, *digits, f),
@@ -1526,6 +1657,68 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 }
             }
         }
+        Value::SeriesData {
+            variable,
+            expansion_point,
+            coefficients,
+            min_exponent,
+            max_exponent,
+            ..
+        } => {
+            let var_str = format!("{}", variable);
+            let x0 = expansion_point;
+            let mut first = true;
+
+            for (i, coeff) in coefficients.iter().enumerate() {
+                if is_value_zero(coeff) {
+                    continue;
+                }
+                let exp = min_exponent + i as i32;
+                let is_neg = is_negative_number(coeff);
+
+                if first {
+                    if is_neg {
+                        write!(f, "-")?;
+                    }
+                    first = false;
+                } else {
+                    write!(f, " {} ", if is_neg { "-" } else { "+" })?;
+                }
+
+                if exp == 0 {
+                    write!(f, "{}", abs_value(coeff))?;
+                } else {
+                    let abs = abs_value(coeff);
+                    let omit = is_value_one(&abs);
+                    if !omit {
+                        write!(f, "{} ", abs)?;
+                    }
+
+                    if **x0 == Value::Integer(Integer::from(0)) {
+                        if exp == 1 {
+                            write!(f, "{}", var_str)?;
+                        } else {
+                            write!(f, "{}^{}", var_str, exp)?;
+                        }
+                    } else {
+                        if exp == 1 {
+                            write!(f, "({} - {})", var_str, x0)?;
+                        } else {
+                            write!(f, "({} - {})^{}", var_str, x0, exp)?;
+                        }
+                    }
+                }
+            }
+
+            // O-term
+            write!(f, " + O[")?;
+            if **x0 == Value::Integer(Integer::from(0)) {
+                write!(f, "{}", var_str)?;
+            } else {
+                write!(f, "({} - {})", var_str, x0)?;
+            }
+            write!(f, "]^{}", max_exponent)
+        }
         _ => write!(f, "{}", v),
     }
 }
@@ -1596,6 +1789,27 @@ fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             }
             write!(f, "]")
         }
+        Value::SeriesData {
+            variable,
+            expansion_point,
+            coefficients,
+            min_exponent,
+            max_exponent,
+            denominator,
+        } => {
+            write!(f, "SeriesData[")?;
+            format_full_form(variable, f)?;
+            write!(f, ", ")?;
+            format_full_form(expansion_point, f)?;
+            write!(f, ", {{")?;
+            for (i, coeff) in coefficients.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                format_full_form(coeff, f)?;
+            }
+            write!(f, "}}, {}, {}, {}]", min_exponent, max_exponent, denominator)
+        }
         _ => write!(f, "{}", v),
     }
 }
@@ -1607,6 +1821,35 @@ fn is_negative_number(v: &Value) -> bool {
         Value::Real(r) => r.is_sign_negative(),
         Value::Rational(r) => r.is_negative(),
         _ => false,
+    }
+}
+
+/// Check if a value is zero (for skipping terms in SeriesData display).
+fn is_value_zero(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Rational(r) => r.is_zero(),
+        _ => false,
+    }
+}
+
+/// Check if a value is exactly 1 (for coefficient display in SeriesData).
+fn is_value_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n == Integer::from(1),
+        Value::Rational(r) => **r == Rational::from(1),
+        _ => false,
+    }
+}
+
+/// Return the absolute value of a numeric value (for SeriesData display).
+fn abs_value(v: &Value) -> Value {
+    match v {
+        Value::Integer(n) => Value::Integer(n.clone().abs()),
+        Value::Real(r) => Value::Real(r.clone().abs()),
+        Value::Rational(r) => Value::Rational(Box::new(r.clone().abs())),
+        other => other.clone(),
     }
 }
 

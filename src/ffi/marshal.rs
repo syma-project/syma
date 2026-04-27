@@ -368,6 +368,33 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("type".into(), JVal::String(type_name.into()));
             JVal::Object(m)
         }
+        Value::SeriesData {
+            variable,
+            expansion_point,
+            coefficients,
+            min_exponent,
+            max_exponent,
+            denominator,
+        } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("seriesdata".into()));
+            m.insert("var".into(), value_to_json_full(variable));
+            m.insert("pt".into(), value_to_json_full(expansion_point));
+            m.insert(
+                "coeffs".into(),
+                JVal::Array(coefficients.iter().map(value_to_json_full).collect()),
+            );
+            m.insert(
+                "nmin".into(),
+                JVal::Number((*min_exponent as i64).into()),
+            );
+            m.insert(
+                "nmax".into(),
+                JVal::Number((*max_exponent as i64).into()),
+            );
+            m.insert("den".into(), JVal::Number((*denominator as i64).into()));
+            JVal::Object(m)
+        }
     }
 }
 
