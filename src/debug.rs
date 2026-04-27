@@ -312,6 +312,7 @@ fn format_value(val: &Value) -> String {
         Value::Assoc(_) => "<association>".to_string(),
         Value::Rule { .. } => "<rule>".to_string(),
         Value::RuleSet { name, .. } => format!("<ruleset {}>", name),
+        Value::DispatchedRules { rules, .. } => format!("<dispatched {} rules>", rules.len()),
         Value::Pattern(_) => "<pattern>".to_string(),
         Value::Module { name, .. } => format!("<module {}>", name),
         Value::Object { class_name, .. } => format!("<object {}>", class_name),

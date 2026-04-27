@@ -8,6 +8,23 @@ use crate::pattern::{
 };
 use crate::value::*;
 
+/// Extract a dispatch key from a runtime Value for use with DispatchedRules lookup.
+fn extract_value_dispatch_key(value: &Value) -> (String, Vec<Option<String>>) {
+    match value {
+        Value::Call { head, args } => {
+            let arg_keys: Vec<Option<String>> =
+                args.iter().map(|a| Some(a.type_name().to_string())).collect();
+            (head.clone(), arg_keys)
+        }
+        Value::List(items) => {
+            let arg_keys: Vec<Option<String>> =
+                items.iter().map(|a| Some(a.type_name().to_string())).collect();
+            ("List".to_string(), arg_keys)
+        }
+        _ => (value.type_name().to_string(), vec![]),
+    }
+}
+
 /// Apply rules to a value, optionally evaluating pattern guards.
 pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Value, EvalError> {
     let _attr_checker = AttributeChecker::new(env.attributes.clone());
@@ -59,6 +76,103 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                         }
                     }
                     return substitute_value(rhs_expr, &bindings);
+                }
+            }
+            Ok(value.clone())
+        }
+        Value::DispatchedRules { index, rules } => {
+            let (head_name, arg_keys) = extract_value_dispatch_key(value);
+            let candidate_indices = index
+                .get(&head_name)
+                .and_then(|sig_map| sig_map.get(&arg_keys));
+            if let Some(indices) = candidate_indices {
+                'next_rule: for &idx in indices {
+                    let (lhs, rhs) = &rules[idx];
+                    if let Value::Pattern(lhs_expr) = lhs
+                        && let MatchResult::Match(bindings) =
+                            match_pattern(&lhs_expr, value, Some(&_attr_checker))
+                        && let Value::Pattern(rhs_expr) = rhs
+                    {
+                        let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
+                        let slot_values: Vec<Value> = match value {
+                            Value::Call { args, .. } => args.clone(),
+                            Value::List(items) => items.clone(),
+                            _ => vec![],
+                        };
+                        if let Some(guard_expr) = guard {
+                            let guard_env = env.child();
+                            for (name, val) in &bindings {
+                                guard_env.set(name.clone(), val.clone());
+                            }
+                            guard_env.set("#".to_string(), value.clone());
+                            for (i, sv) in slot_values.iter().enumerate() {
+                                guard_env.set(format!("#{}", i + 1), sv.clone());
+                            }
+                            if !super::eval(guard_expr, &guard_env)?.to_bool() {
+                                continue 'next_rule;
+                            }
+                        }
+                        let mut guard_exprs = Vec::new();
+                        collect_nested_guards(inner_pat, &mut guard_exprs);
+                        for guard_expr in &guard_exprs {
+                            let guard_env = env.child();
+                            for (name, val) in &bindings {
+                                guard_env.set(name.clone(), val.clone());
+                            }
+                            guard_env.set("#".to_string(), value.clone());
+                            for (i, sv) in slot_values.iter().enumerate() {
+                                guard_env.set(format!("#{}", i + 1), sv.clone());
+                            }
+                            if !super::eval(guard_expr, &guard_env)?.to_bool() {
+                                continue 'next_rule;
+                            }
+                        }
+                        return substitute_value(&rhs_expr, &bindings);
+                    }
+                }
+            } else {
+                'next_rule: for (lhs, rhs) in rules {
+                    if let Value::Pattern(lhs_expr) = lhs
+                        && let MatchResult::Match(bindings) =
+                            match_pattern(&lhs_expr, value, Some(&_attr_checker))
+                        && let Value::Pattern(rhs_expr) = rhs
+                    {
+                        let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
+                        let slot_values: Vec<Value> = match value {
+                            Value::Call { args, .. } => args.clone(),
+                            Value::List(items) => items.clone(),
+                            _ => vec![],
+                        };
+                        if let Some(guard_expr) = guard {
+                            let guard_env = env.child();
+                            for (name, val) in &bindings {
+                                guard_env.set(name.clone(), val.clone());
+                            }
+                            guard_env.set("#".to_string(), value.clone());
+                            for (i, sv) in slot_values.iter().enumerate() {
+                                guard_env.set(format!("#{}", i + 1), sv.clone());
+                            }
+                            if !super::eval(guard_expr, &guard_env)?.to_bool() {
+                                continue 'next_rule;
+                            }
+                        }
+                        let mut guard_exprs = Vec::new();
+                        collect_nested_guards(inner_pat, &mut guard_exprs);
+                        for guard_expr in &guard_exprs {
+                            let guard_env = env.child();
+                            for (name, val) in &bindings {
+                                guard_env.set(name.clone(), val.clone());
+                            }
+                            guard_env.set("#".to_string(), value.clone());
+                            for (i, sv) in slot_values.iter().enumerate() {
+                                guard_env.set(format!("#{}", i + 1), sv.clone());
+                            }
+                            if !super::eval(guard_expr, &guard_env)?.to_bool() {
+                                continue 'next_rule;
+                            }
+                        }
+                        return substitute_value(&rhs_expr, &bindings);
+                    }
                 }
             }
             Ok(value.clone())

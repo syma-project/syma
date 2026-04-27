@@ -297,6 +297,13 @@ pub enum Value {
         rules: Vec<(Value, Value)>,
     },
 
+    /// A dispatch-indexed rule set for O(1) lookup by head name and arg-type pattern.
+    /// Built by the `Dispatch[rules]` builtin.
+    DispatchedRules {
+        index: HashMap<String, HashMap<Vec<Option<String>>, Vec<usize>>>,
+        rules: Vec<(Value, Value)>,
+    },
+
     // ── Pattern (for internal use) ──
     Pattern(Expr),
 
@@ -566,6 +573,10 @@ impl PartialEq for Value {
                 },
             ) => n1 == n2 && r1 == r2,
             (
+                Value::DispatchedRules { index: i1, rules: r1 },
+                Value::DispatchedRules { index: i2, rules: r2 },
+            ) => i1 == i2 && r1 == r2,
+            (
                 Value::Module {
                     name: n1,
                     exports: e1,
@@ -672,6 +683,7 @@ impl Value {
             Value::Object { class_name, .. } => class_name,
             Value::Class(class_def) => &class_def.name,
             Value::RuleSet { .. } => "RuleSet",
+            Value::DispatchedRules { .. } => "DispatchedRules",
             Value::Pattern(_) => "Pattern",
             Value::Module { .. } => "Module",
             Value::Image(_) => "Image",
@@ -1204,6 +1216,7 @@ impl fmt::Display for Value {
             }
             Value::Class(class_def) => write!(f, "Class[{}]", class_def.name),
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
+            Value::DispatchedRules { rules, .. } => write!(f, "DispatchedRules[{} rules]", rules.len()),
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
             Value::Module { name, exports, .. } => {
                 write!(

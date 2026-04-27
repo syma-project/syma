@@ -939,6 +939,211 @@ pub fn builtin_alphabet(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(letters))
 }
 
+// ── New string functions ──
+
+pub fn builtin_to_character_code(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ToCharacterCode requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => {
+            let codes: Vec<Value> = s.chars()
+                .map(|c| Value::Integer(Integer::from(c as u32)))
+                .collect();
+            Ok(Value::List(codes))
+        }
+        _ => Err(EvalError::NoMatch {
+            head: "ToCharacterCode".to_string(),
+            args: args.to_vec().into(),
+        }),
+    }
+}
+
+pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FromCharacterCode requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::List(codes) => {
+            let mut s = String::new();
+            for code in codes {
+                if let Value::Integer(n) = code {
+                    if let Some(val) = n.to_u32() {
+                        if let Some(c) = char::from_u32(val) {
+                            s.push(c);
+                        }
+                    }
+                }
+            }
+            Ok(Value::Str(s))
+        }
+        _ => Err(EvalError::NoMatch {
+            head: "FromCharacterCode".to_string(),
+            args: args.to_vec().into(),
+        }),
+    }
+}
+
+pub fn builtin_edit_distance(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "EditDistance requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let (s1, s2) = match (&args[0], &args[1]) {
+        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
+        _ => return Err(EvalError::NoMatch {
+            head: "EditDistance".to_string(),
+            args: args.to_vec().into(),
+        }),
+    };
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    // Levenshtein distance via DP
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+        }
+    }
+    Ok(Value::Integer(Integer::from(dp[m][n] as i64)))
+}
+
+pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubsequence requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let (s1, s2) = match (&args[0], &args[1]) {
+        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
+        _ => return Err(EvalError::NoMatch {
+            head: "LongestCommonSubsequence".to_string(),
+            args: args.to_vec().into(),
+        }),
+    };
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    // Backtrack to find LCS string
+    let mut result = String::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result.push(a[i - 1]);
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] > dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    let result: String = result.chars().rev().collect();
+    Ok(Value::Str(result))
+}
+
+pub fn builtin_longest_common_sub_string(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubString requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let (s1, s2) = match (&args[0], &args[1]) {
+        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
+        _ => return Err(EvalError::NoMatch {
+            head: "LongestCommonSubString".to_string(),
+            args: args.to_vec().into(),
+        }),
+    };
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    let mut max_len = 0usize;
+    let mut max_end = 0usize;
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+                if dp[i][j] > max_len {
+                    max_len = dp[i][j];
+                    max_end = i;
+                }
+            }
+        }
+    }
+    if max_len == 0 {
+        return Ok(Value::Str(String::new()));
+    }
+    let result: String = a[max_end - max_len..max_end].iter().collect();
+    Ok(Value::Str(result))
+}
+
+pub fn builtin_word_count(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "WordCount requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => {
+            let count = s.split_whitespace().count();
+            Ok(Value::Integer(Integer::from(count as i64)))
+        }
+        _ => Err(EvalError::NoMatch {
+            head: "WordCount".to_string(),
+            args: args.to_vec().into(),
+        }),
+    }
+}
+
+pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "SentenceCount requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => {
+            let sentences: Vec<&str> = s.split(|c| matches!(c, '.' | '!' | '?')).filter(|s| !s.trim().is_empty()).collect();
+            let count = sentences.len();
+            Ok(Value::Integer(Integer::from(count as i64)))
+        }
+        _ => Err(EvalError::NoMatch {
+            head: "SentenceCount".to_string(),
+            args: args.to_vec().into(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -290,7 +290,7 @@ fn extract_dispatch_key_expr(expr: &Expr) -> Option<(String, Vec<Option<String>>
             Some((head_name, arg_keys))
         }
         Expr::Symbol(s) => Some((s.clone(), vec![])),
-        Expr::List(_) => Some(("List".to_string(), vec![Some("List".())])),
+        Expr::List(_) => Some(("List".to_string(), vec![Some("List".to_string())])),
         _ => None,
     }
 }

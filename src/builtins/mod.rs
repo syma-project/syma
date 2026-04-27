@@ -134,6 +134,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "FreeQ", pattern::builtin_free_q);
     register_builtin_env(env, "Cases", pattern::builtin_cases);
     register_builtin_env(env, "DeleteCases", pattern::builtin_delete_cases);
+    register_builtin(env, "Dispatch", pattern::builtin_dispatch);
 
     // ── String ──
     register_builtin(env, "StringJoin", string::builtin_string_join);
@@ -432,6 +433,13 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "TextWords", string::builtin_text_words);
     register_builtin(env, "CharacterCounts", string::builtin_character_counts);
     register_builtin(env, "Alphabet", string::builtin_alphabet);
+    register_builtin(env, "ToCharacterCode", string::builtin_to_character_code);
+    register_builtin(env, "FromCharacterCode", string::builtin_from_character_code);
+    register_builtin(env, "EditDistance", string::builtin_edit_distance);
+    register_builtin(env, "LongestCommonSubsequence", string::builtin_longest_common_subsequence);
+    register_builtin(env, "LongestCommonSubString", string::builtin_longest_common_sub_string);
+    register_builtin(env, "WordCount", string::builtin_word_count);
+    register_builtin(env, "SentenceCount", string::builtin_sentence_count);
 
     // ── Parallel computation ──
     register_builtin_env(env, "ParallelMap", parallel::builtin_parallel_map);
@@ -1157,6 +1165,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "DeleteCases[{e1, e2, ...}, pattern] removes elements that match pattern.\n\
              DeleteCases[list, pattern, levelspec] — not yet supported."
         }
+        "Dispatch" => "Dispatch[rules] builds a dispatch-indexed rule set for O(1) lookup by head name and argument type patterns. Use for large rule sets like Rubi.",
 
         // ── String ──
         "StringJoin" => "StringJoin[s1, s2, ...] or s1 <> s2 <> ... concatenates strings.",

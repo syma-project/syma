@@ -299,6 +299,18 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("r".into(), JVal::Array(pairs));
             JVal::Object(m)
         }
+        Value::DispatchedRules { rules, .. } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("dispatched".into()));
+            let pairs: Vec<JVal> = rules
+                .iter()
+                .map(|(lhs, rhs)| {
+                    JVal::Array(vec![value_to_json_full(lhs), value_to_json_full(rhs)])
+                })
+                .collect();
+            m.insert("r".into(), JVal::Array(pairs));
+            JVal::Object(m)
+        }
         Value::Pattern(expr) => {
             let mut m = Map::new();
             m.insert("t".into(), JVal::String("pat".into()));
