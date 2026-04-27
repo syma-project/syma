@@ -485,6 +485,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 delayed: *delayed,
             });
 
+            // Sort definitions so more specific (literal) patterns come first.
+            func.definitions.sort_by(|a, b| {
+                specificity(&b.params).cmp(&specificity(&a.params))
+            });
+
             env.set(name.clone(), Value::Function(Arc::new(func)));
             Ok(Value::Null)
         }
@@ -548,32 +553,62 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     env.set_attributes(&sym_name, attrs);
                     Ok(val)
                 }
-                // this.field = value  (desugared to Assign(field[this], value))
+                // f[args] = value  — set a function definition with immediate RHS
+                // Mathematica: Set[f[args], val]  defines a specific rule for f.
+                // Also handles desugared OOP field access: this.field = val
+                // is parsed as Assign(Call(field[this]), val). When the target
+                // evaluates to an Object, treat as field access.
+                // Guard: Part[...] = val is handled by the next branch.
                 Expr::Call {
                     head,
                     args: call_args,
-                } if call_args.len() == 1 => {
-                    if let Expr::Symbol(field_name) = head.as_ref() {
-                        let target = eval(&call_args[0], env)?;
-                        match target {
-                            Value::Object {
+                } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part") => {
+                    if let Expr::Symbol(name) = head.as_ref() {
+                        // Check for OOP field access: field[object] = value
+                        // where object evaluates to an Object
+                        if call_args.len() == 1 {
+                            let target = eval(&call_args[0], env)?;
+                            if let Value::Object {
                                 class_name,
                                 mut fields,
-                            } => {
-                                fields.insert(field_name.clone(), val.clone());
+                            } = target
+                            {
+                                fields.insert(name.clone(), val.clone());
                                 let updated = Value::Object { class_name, fields };
                                 if let Expr::Symbol(s) = &call_args[0]
                                     && s == "this"
                                 {
                                     env.set("this".to_string(), updated.clone());
                                 }
-                                Ok(val)
+                                return Ok(val);
                             }
-                            _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                         }
-                    } else {
-                        Err(EvalError::Error("Invalid assignment target".to_string()))
+                        // Otherwise: function definition via assignment
+                        // f[args] = val  → add FunctionDefinition for name with
+                        // params = args (as patterns), body = val (converted to Expr)
+                        let body_expr = table::value_to_expr(&val);
+                        let func = if let Some(Value::Function(f)) = env.get(name) {
+                            Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
+                        } else {
+                            FunctionDef {
+                                name: name.clone(),
+                                definitions: Vec::new(),
+                            }
+                        };
+                        let mut func = func;
+                        func.definitions.push(FunctionDefinition {
+                            params: call_args.clone(),
+                            body: body_expr,
+                            delayed: false,
+                        });
+                        // Sort definitions so more specific ones match first
+                        func.definitions.sort_by(|a, b| {
+                            specificity(&b.params).cmp(&specificity(&a.params))
+                        });
+                        env.set(name.clone(), Value::Function(Arc::new(func)));
+                        return Ok(val);
                     }
+                    Err(EvalError::Error("Invalid assignment target".to_string()))
                 }
                 // x[[i]] = val  (desugared to Assign(Part[x, i], val))
                 Expr::Call {
@@ -1582,33 +1617,67 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                         env.set_attributes(&sym_name, attrs);
                         Ok(val)
                     }
-                    // this.field = value  (desugared to Set[field[this], value])
+                    // f[args] = value  or SetDelayed[f[args], val]
+                    // — function definition with immediate or delayed RHS.
+                    // Also handles desugared OOP field access: this.field = val
+                    // is parsed as Set[field[this], val]. When target is an
+                    // Object, treat as field access.
                     Expr::Call {
                         head,
                         args: call_args,
-                    } if call_args.len() == 1 => {
-                        if let Expr::Symbol(field_name) = head.as_ref() {
-                            let target = eval(&call_args[0], env)?;
-                            match target {
-                                Value::Object {
+                    } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
+                        && !matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+                    {
+                        if let Expr::Symbol(name) = head.as_ref() {
+                            // Check for OOP field access: field[object] = value
+                            // where object evaluates to an Object
+                            if call_args.len() == 1 {
+                                let target = eval(&call_args[0], env)?;
+                                if let Value::Object {
                                     class_name,
                                     mut fields,
-                                } => {
-                                    fields.insert(field_name.clone(), val.clone());
+                                } = target
+                                {
+                                    fields.insert(name.clone(), val.clone());
                                     let updated = Value::Object { class_name, fields };
-                                    // If target is 'this', update it in the environment
                                     if let Expr::Symbol(s) = &call_args[0]
                                         && s == "this"
                                     {
                                         env.set("this".to_string(), updated.clone());
                                     }
-                                    Ok(val)
+                                    return Ok(val);
                                 }
-                                _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                             }
-                        } else {
-                            Err(EvalError::Error("Invalid assignment target".to_string()))
+                            // Otherwise: function definition via Set/SetDelayed
+                            // SetDelayed[f[args], body] — use body as-is
+                            // Set[f[args], val] — evaluate RHS then store as Expr
+                            let body_expr = if s == "SetDelayed" {
+                                args[1].clone()
+                            } else {
+                                table::value_to_expr(&val)
+                            };
+                            let func = if let Some(Value::Function(f)) = env.get(name) {
+                                Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
+                            } else {
+                                FunctionDef {
+                                    name: name.clone(),
+                                    definitions: Vec::new(),
+                                }
+                            };
+                            let mut func = func;
+                            func.definitions.push(FunctionDefinition {
+                                params: call_args.clone(),
+                                body: body_expr,
+                                delayed: s == "SetDelayed",
+                            });
+                            // Sort definitions so more specific ones match first
+                            func.definitions.sort_by(|a, b| {
+                                specificity(&b.params).cmp(&specificity(&a.params))
+                            });
+                            env.set(name.clone(), Value::Function(Arc::new(func)));
+                            return Ok(val);
                         }
+                        Err(EvalError::Error("Invalid assignment target".to_string()))
                     }
                     _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                 }
@@ -1981,6 +2050,46 @@ fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     result
 }
 
+// ── Recursion limit ($RecursionLimit) ──
+
+thread_local! {
+    static RECURSION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn get_recursion_limit(env: &Env) -> usize {
+    match env.get("$RecursionLimit") {
+        Some(Value::Integer(n)) => {
+            let n = n.to_usize().unwrap_or(1024);
+            if n == 0 { usize::MAX } else { n }
+        }
+        Some(Value::Symbol(s)) if s == "Infinity" => usize::MAX,
+        _ => 1024,
+    }
+}
+
+struct RecursionGuard;
+
+impl RecursionGuard {
+    fn new(env: &Env, _func_name: &str) -> Result<Self, EvalError> {
+        let limit = get_recursion_limit(env);
+        let depth = RECURSION_DEPTH.get();
+        if depth >= limit {
+            return Err(EvalError::Error(format!(
+                "$RecursionLimit::reclim: Recursion depth of {} exceeded.",
+                depth
+            )));
+        }
+        RECURSION_DEPTH.set(depth + 1);
+        Ok(RecursionGuard)
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        RECURSION_DEPTH.set(RECURSION_DEPTH.get() - 1);
+    }
+}
+
 /// Apply a function value to arguments.
 pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // ── Flat attribute: flatten nested calls with same head ──
@@ -2154,6 +2263,9 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 profiler::Profiler::reset(&func_def.name);
             }
 
+            // ── Recursion depth check ──
+            let _guard = RecursionGuard::new(env, &func_def.name)?;
+
             // Try each definition in order
             for def in &func_def.definitions {
                 if let Some(bindings) = try_match_params(&def.params, args, env)? {
@@ -2181,6 +2293,9 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             params,
             env: captured_env,
         } => {
+            // ── Recursion depth check ──
+            let _guard = RecursionGuard::new(env, "#0")?;
+
             // Use the captured defining environment for lexical scoping (closures).
             // Fall back to the call-site environment when no env was captured
             // (e.g., PureFunction created by the bytecode compiler).
@@ -2368,6 +2483,36 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 args: args.to_vec(),
             })
         }
+    }
+}
+
+/// Rank specificity of a function definition's parameter list.
+/// Higher score = more specific (tried first in rule ordering).
+fn specificity(params: &[Expr]) -> usize {
+    params.iter().map(|p| specificity_expr(p)).sum()
+}
+
+/// Specificity score for a single pattern expression.
+fn specificity_expr(p: &Expr) -> usize {
+    match p {
+        // Literal values: most specific
+        Expr::Integer(_) | Expr::Real(_) | Expr::Str(_) | Expr::Bool(_) => 3,
+        // Type-constrained blank: x_Integer or _Integer
+        Expr::Blank {
+            type_constraint: Some(_),
+        }
+        | Expr::NamedBlank {
+            type_constraint: Some(_),
+            ..
+        } => 2,
+        // Named blank: x_
+        Expr::NamedBlank { .. } => 1,
+        // Bare blank, blank sequence, blank null sequence: least specific
+        Expr::Blank { .. } | Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. } => 0,
+        // PatternGuard: score based on inner pattern + bonus for having a condition
+        Expr::PatternGuard { pattern, .. } => specificity_expr(pattern) + 1,
+        // Other patterns (call patterns, list patterns, alternatives): default
+        _ => 0,
     }
 }
 
@@ -2901,6 +3046,40 @@ mod tests {
                 Value::Integer(Integer::from(1)),
                 Value::Integer(Integer::from(2)),
             ])
+        );
+    }
+
+    // ── Recursion limit ($RecursionLimit) ──
+
+    #[test]
+    fn test_recursion_limit_default() {
+        assert_eq!(
+            eval_str("$RecursionLimit"),
+            Value::Integer(Integer::from(1024))
+        );
+    }
+
+    #[test]
+    fn test_recursion_limit_below_limit() {
+        let result = with_large_stack(|| {
+            eval_str("$RecursionLimit = 20; f[x_] := 1 + f[x-1]; f[0] := 0; f[10]")
+        });
+        assert_eq!(result, Value::Integer(Integer::from(10)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Recursion depth")]
+    fn test_recursion_limit_exceeded() {
+        eval_str("$RecursionLimit = 5; f[x_] := 1 + f[x-1]; f[0] := 0; f[10]");
+    }
+
+    #[test]
+    fn test_recursion_limit_infinity() {
+        // Infinity disables the limit check — use shallow recursion to avoid
+        // native stack overflow from the tree-walk evaluator.
+        assert_eq!(
+            eval_str("$RecursionLimit = Infinity; f[x_] := x; f[42]"),
+            Value::Integer(Integer::from(42))
         );
     }
 

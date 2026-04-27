@@ -30,6 +30,7 @@ pub mod symbolic;
 
 use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
 use crate::value::{BuiltinFn, EvalError, Value};
+use rug::Integer;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -601,6 +602,12 @@ pub fn register_builtins(env: &Env) {
             }
         }
     }
+
+    // ── System limits ──
+    env.set(
+        "$RecursionLimit".to_string(),
+        Value::Integer(Integer::from(1024)),
+    );
 }
 
 // ── Custom Notation builtins ──
