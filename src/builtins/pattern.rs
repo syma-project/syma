@@ -272,6 +272,115 @@ pub fn builtin_delete_cases(args: &[Value], env: &Env) -> Result<Value, EvalErro
     Ok(Value::List(result))
 }
 
+// ── Dispatch ──
+
+/// Extract a dispatch key from an Expr pattern.
+fn extract_dispatch_key_expr(expr: &Expr) -> Option<(String, Vec<Option<String>>)> {
+    let inner = match expr {
+        Expr::PatternGuard { pattern, .. } => pattern.as_ref(),
+        _ => expr,
+    };
+    match inner {
+        Expr::Call { head, args } => {
+            let head_name = match head.as_ref() {
+                Expr::Symbol(s) => s.clone(),
+                _ => return None,
+            };
+            let arg_keys = args.iter().map(|arg| get_arg_dispatch_key(arg)).collect();
+            Some((head_name, arg_keys))
+        }
+        Expr::Symbol(s) => Some((s.clone(), vec![])),
+        Expr::List(_) => Some(("List".to_string(), vec![Some("List".())])),
+        _ => None,
+    }
+}
+
+fn extract_dispatch_key_value(val: &Value) -> Option<(String, Vec<Option<String>>)> {
+    match val {
+        Value::Pattern(expr) => extract_dispatch_key_expr(expr),
+        _ => None,
+    }
+}
+
+fn get_arg_dispatch_key(arg: &Expr) -> Option<String> {
+    let inner = match arg {
+        Expr::PatternGuard { pattern, .. } => pattern.as_ref(),
+        _ => arg,
+    };
+    match inner {
+        Expr::Blank { type_constraint: None } => Some("Blank".to_string()),
+        Expr::Blank { type_constraint: Some(tc) } => Some(tc.clone()),
+        Expr::NamedBlank { type_constraint: None, .. } => Some("Blank".to_string()),
+        Expr::NamedBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
+        Expr::BlankSequence { type_constraint: None, .. } => Some("BlankSequence".to_string()),
+        Expr::BlankSequence { type_constraint: Some(tc), .. } => Some(tc.clone()),
+        Expr::BlankNullSequence { type_constraint: None, .. } => Some("BlankNullSequence".to_string()),
+        Expr::BlankNullSequence { type_constraint: Some(tc), .. } => Some(tc.clone()),
+        Expr::OptionalBlank { type_constraint: None, .. } => Some("OptionalBlank".to_string()),
+        Expr::OptionalBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
+        Expr::OptionalNamedBlank { type_constraint: None, .. } => Some("OptionalBlank".to_string()),
+        Expr::OptionalNamedBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
+        Expr::Integer(_) => Some("Integer".to_string()),
+        Expr::Real(_) => Some("Real".to_string()),
+        Expr::Str(_) => Some("String".to_string()),
+        Expr::Bool(_) => Some("Boolean".to_string()),
+        Expr::Null => Some("Null".to_string()),
+        Expr::Symbol(s) if s.ends_with('_') => Some("Blank".to_string()),
+        Expr::Symbol(s) => Some(s.clone()),
+        Expr::Call { head, .. } => match head.as_ref() {
+            Expr::Symbol(s) => Some(s.clone()),
+            _ => None,
+        },
+        Expr::List(_) => Some("List".to_string()),
+        _ => None,
+    }
+}
+
+fn extract_rules_value(val: &Value) -> Vec<(Value, Value)> {
+    match val {
+        Value::RuleSet { rules, .. } => rules.clone(),
+        Value::List(items) => {
+            let mut rules = Vec::new();
+            for item in items {
+                match item {
+                    Value::Rule { lhs, rhs, .. } => {
+                        rules.push((lhs.as_ref().clone(), rhs.as_ref().clone()));
+                    }
+                    Value::Pattern(pat_expr) => {
+                        rules.push((Value::Pattern(pat_expr.clone()), Value::Null));
+                    }
+                    _ => {}
+                }
+            }
+            rules
+        }
+        Value::Rule { lhs, rhs, .. } => vec![(lhs.as_ref().clone(), rhs.as_ref().clone())],
+        _ => vec![],
+    }
+}
+
+/// `Dispatch[rules]` — build a dispatch-indexed rule set for O(1) lookup.
+pub fn builtin_dispatch(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "Dispatch requires exactly 1 argument".to_string(),
+        ));
+    }
+    let rules = extract_rules_value(&args[0]);
+    let mut index: HashMap<String, HashMap<Vec<Option<String>>, Vec<usize>>> = HashMap::new();
+    for (idx, (lhs, _rhs)) in rules.iter().enumerate() {
+        if let Some((head_name, arg_keys)) = extract_dispatch_key_value(lhs) {
+            index
+                .entry(head_name)
+                .or_default()
+                .entry(arg_keys)
+                .or_default()
+                .push(idx);
+        }
+    }
+    Ok(Value::DispatchedRules { index, rules })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
