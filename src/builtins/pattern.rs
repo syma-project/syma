@@ -43,38 +43,7 @@ pub fn builtin_match_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
     let attr_checker = AttributeChecker::new(env.attributes.clone());
-    let result = match &args[1] {
-        Value::Pattern(pat_expr) => {
-            // Handle PatternGuard — need to evaluate the guard condition
-            if let Expr::PatternGuard { pattern, condition } = pat_expr {
-                if matches!(
-                    match_pattern(pattern, &args[0], Some(&attr_checker)),
-                    MatchResult::Match(_)
-                ) {
-                    // Evaluate guard condition with # bound to the value
-                    let guard_env = env.child();
-                    guard_env.set("#".to_string(), args[0].clone());
-                    eval(condition, &guard_env)?.to_bool()
-                } else {
-                    false
-                }
-            } else {
-                matches!(
-                    match_pattern(pat_expr, &args[0], Some(&attr_checker)),
-                    MatchResult::Match(_)
-                )
-            }
-        }
-        // Compound values containing Pattern elements → convert to pattern expr
-        _ if contains_pattern_value(&args[1]) => {
-            let pat_expr = value_to_pattern_expr(&args[1]);
-            matches!(
-                match_pattern(&pat_expr, &args[0], Some(&attr_checker)),
-                MatchResult::Match(_)
-            )
-        }
-        _ => args[0].struct_eq(&args[1]),
-    };
+    let result = matches_value(&args[0], &args[1], Some(&attr_checker), Some(env));
     Ok(Value::Bool(result))
 }
 
@@ -103,74 +72,17 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
     let attr_checker = AttributeChecker::new(env.attributes.clone());
-    #[inline]
-    fn check_match(
-        value: &Value,
-        pattern: &Value,
-        attr_checker: &AttributeChecker,
-        env: Option<&Env>,
-    ) -> bool {
-        match pattern {
-            Value::Pattern(pat_expr) => {
-                if let Expr::PatternGuard { pattern, condition } = pat_expr {
-                    if matches!(
-                        match_pattern(pattern, value, Some(attr_checker)),
-                        MatchResult::Match(_)
-                    ) {
-                        if let Some(env) = env {
-                            let guard_env = env.child();
-                            guard_env.set("#".to_string(), value.clone());
-                            eval(condition, &guard_env)
-                                .map(|v| v.to_bool())
-                                .unwrap_or(false)
-                        } else {
-                            true
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    matches!(
-                        match_pattern(pat_expr, value, Some(attr_checker)),
-                        MatchResult::Match(_)
-                    )
-                }
-            }
-            _ if contains_pattern_value(pattern) => {
-                let pat_expr = value_to_pattern_expr(pattern);
-                matches!(
-                    match_pattern(&pat_expr, value, Some(attr_checker)),
-                    MatchResult::Match(_)
-                )
-            }
-            _ => value.struct_eq(pattern),
-        }
-    }
-    fn contains_pattern(
-        value: &Value,
-        pattern: &Value,
-        attr_checker: &AttributeChecker,
-        env: Option<&Env>,
-    ) -> bool {
-        if check_match(value, pattern, attr_checker, env) {
+    fn contains_pattern(value: &Value, pattern: &Value, ac: &AttributeChecker, env: &Env) -> bool {
+        if matches_value(value, pattern, Some(ac), Some(env)) {
             return true;
         }
         match value {
-            Value::List(items) => items
-                .iter()
-                .any(|item| contains_pattern(item, pattern, attr_checker, env)),
-            Value::Call { args, .. } => args
-                .iter()
-                .any(|arg| contains_pattern(arg, pattern, attr_checker, env)),
+            Value::List(items) => items.iter().any(|i| contains_pattern(i, pattern, ac, env)),
+            Value::Call { args, .. } => args.iter().any(|a| contains_pattern(a, pattern, ac, env)),
             _ => false,
         }
     }
-    Ok(Value::Bool(!contains_pattern(
-        &args[0],
-        &args[1],
-        &attr_checker,
-        Some(env),
-    )))
+    Ok(Value::Bool(!contains_pattern(&args[0], &args[1], &attr_checker, env)))
 }
 
 /// Check if a value matches a pattern.
@@ -307,33 +219,31 @@ fn get_arg_dispatch_key(arg: &Expr) -> Option<String> {
         Expr::PatternGuard { pattern, .. } => pattern.as_ref(),
         _ => arg,
     };
-    match inner {
-        Expr::Blank { type_constraint: None } => Some("Blank".to_string()),
-        Expr::Blank { type_constraint: Some(tc) } => Some(tc.clone()),
-        Expr::NamedBlank { type_constraint: None, .. } => Some("Blank".to_string()),
-        Expr::NamedBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
-        Expr::BlankSequence { type_constraint: None, .. } => Some("BlankSequence".to_string()),
-        Expr::BlankSequence { type_constraint: Some(tc), .. } => Some(tc.clone()),
-        Expr::BlankNullSequence { type_constraint: None, .. } => Some("BlankNullSequence".to_string()),
-        Expr::BlankNullSequence { type_constraint: Some(tc), .. } => Some(tc.clone()),
-        Expr::OptionalBlank { type_constraint: None, .. } => Some("OptionalBlank".to_string()),
-        Expr::OptionalBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
-        Expr::OptionalNamedBlank { type_constraint: None, .. } => Some("OptionalBlank".to_string()),
-        Expr::OptionalNamedBlank { type_constraint: Some(tc), .. } => Some(tc.clone()),
-        Expr::Integer(_) => Some("Integer".to_string()),
-        Expr::Real(_) => Some("Real".to_string()),
-        Expr::Str(_) => Some("String".to_string()),
-        Expr::Bool(_) => Some("Boolean".to_string()),
-        Expr::Null => Some("Null".to_string()),
-        Expr::Symbol(s) if s.ends_with('_') => Some("Blank".to_string()),
-        Expr::Symbol(s) => Some(s.clone()),
+    // Helper: resolve type_constraint to dispatch key
+    let tc_or = |tc: &Option<String>, default: &str| -> String {
+        tc.clone().unwrap_or_else(|| default.to_string())
+    };
+    Some(match inner {
+        Expr::Blank { type_constraint: tc } => tc_or(tc, "Blank"),
+        Expr::NamedBlank { type_constraint: tc, .. } => tc_or(tc, "Blank"),
+        Expr::BlankSequence { type_constraint: tc, .. } => tc_or(tc, "BlankSequence"),
+        Expr::BlankNullSequence { type_constraint: tc, .. } => tc_or(tc, "BlankNullSequence"),
+        Expr::OptionalBlank { type_constraint: tc, .. } => tc_or(tc, "OptionalBlank"),
+        Expr::OptionalNamedBlank { type_constraint: tc, .. } => tc_or(tc, "OptionalBlank"),
+        Expr::Integer(_) => "Integer".to_string(),
+        Expr::Real(_) => "Real".to_string(),
+        Expr::Str(_) => "String".to_string(),
+        Expr::Bool(_) => "Boolean".to_string(),
+        Expr::Null => "Null".to_string(),
+        Expr::Symbol(s) if s.ends_with('_') => "Blank".to_string(),
+        Expr::Symbol(s) => s.clone(),
         Expr::Call { head, .. } => match head.as_ref() {
-            Expr::Symbol(s) => Some(s.clone()),
-            _ => None,
+            Expr::Symbol(s) => s.clone(),
+            _ => return None,
         },
-        Expr::List(_) => Some("List".to_string()),
-        _ => None,
-    }
+        Expr::List(_) => "List".to_string(),
+        _ => return None,
+    })
 }
 
 fn extract_rules_value(val: &Value) -> Vec<(Value, Value)> {

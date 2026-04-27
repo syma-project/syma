@@ -5,6 +5,22 @@ use rug::Integer;
 use rug::Rational;
 use rug::ops::Pow;
 
+/// Build a symbolic Call node.
+fn call(head: &str, args: Vec<Value>) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args,
+    }
+}
+
+/// Build a symbolic Call from a slice (copies args).
+fn call_ref(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
 // ── Simplify ──
 
 pub fn builtin_simplify(args: &[Value]) -> Result<Value, EvalError> {
@@ -40,16 +56,10 @@ pub fn simplify_call(head: &str, args: &[Value]) -> Value {
             if matches!(&canceled.1, Value::Integer(n) if *n == 1) {
                 canceled.0
             } else {
-                Value::Call {
-                    head: "Divide".to_string(),
-                    args: vec![canceled.0, canceled.1],
-                }
+                call("Divide", vec![canceled.0, canceled.1])
             }
         }
-        _ => Value::Call {
-            head: head.to_string(),
-            args: args.to_vec(),
-        },
+        _ => call_ref(head, args),
     }
 }
 
@@ -73,10 +83,7 @@ fn simplify_plus(args: &[Value]) -> Value {
     if terms.len() == 1 {
         return terms.into_iter().next().unwrap();
     }
-    Value::Call {
-        head: "Plus".to_string(),
-        args: terms,
-    }
+    call("Plus", terms)
 }
 
 fn simplify_times(args: &[Value]) -> Value {
@@ -165,19 +172,13 @@ fn simplify_times(args: &[Value]) -> Value {
     } else if result.len() == 1 {
         result.into_iter().next().unwrap()
     } else {
-        Value::Call {
-            head: "Times".to_string(),
-            args: result,
-        }
+        call("Times", result)
     }
 }
 
 fn simplify_power(args: &[Value]) -> Value {
     if args.len() != 2 {
-        return Value::Call {
-            head: "Power".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Power", args);
     }
     match &args[1] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(1)),
@@ -190,52 +191,34 @@ fn simplify_power(args: &[Value]) -> Value {
                 let new_exp = simplify_call("Times", &[inner[1].clone(), args[1].clone()]);
                 simplify_call("Power", &[inner[0].clone(), new_exp])
             }
-            _ => Value::Call {
-                head: "Power".to_string(),
-                args: args.to_vec(),
-            },
+            _ => call_ref("Power", args),
         },
     }
 }
 
 fn simplify_sin(args: &[Value]) -> Value {
     if args.len() != 1 {
-        return Value::Call {
-            head: "Sin".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Sin", args);
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(0)),
-        _ => Value::Call {
-            head: "Sin".to_string(),
-            args: args.to_vec(),
-        },
+        _ => call_ref("Sin", args),
     }
 }
 
 fn simplify_cos(args: &[Value]) -> Value {
     if args.len() != 1 {
-        return Value::Call {
-            head: "Cos".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Cos", args);
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(1)),
-        _ => Value::Call {
-            head: "Cos".to_string(),
-            args: args.to_vec(),
-        },
+        _ => call_ref("Cos", args),
     }
 }
 
 fn simplify_log(args: &[Value]) -> Value {
     if args.len() != 1 {
-        return Value::Call {
-            head: "Log".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Log", args);
     }
     match &args[0] {
         Value::Integer(n) if *n == 1 => Value::Integer(Integer::from(0)),
@@ -244,34 +227,22 @@ fn simplify_log(args: &[Value]) -> Value {
             if (r.clone() - e_val).abs() < 1e-10 {
                 Value::Integer(Integer::from(1))
             } else {
-                Value::Call {
-                    head: "Log".to_string(),
-                    args: args.to_vec(),
-                }
+                call_ref("Log", args)
             }
         }
         Value::Call { head, args: inner } if head == "Exp" && inner.len() == 1 => inner[0].clone(),
-        _ => Value::Call {
-            head: "Log".to_string(),
-            args: args.to_vec(),
-        },
+        _ => call_ref("Log", args),
     }
 }
 
 fn simplify_exp(args: &[Value]) -> Value {
     if args.len() != 1 {
-        return Value::Call {
-            head: "Exp".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Exp", args);
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(1)),
         Value::Call { head, args: inner } if head == "Log" && inner.len() == 1 => inner[0].clone(),
-        _ => Value::Call {
-            head: "Exp".to_string(),
-            args: args.to_vec(),
-        },
+        _ => call_ref("Exp", args),
     }
 }
 
@@ -294,24 +265,16 @@ fn expand_value(val: &Value) -> Value {
                 "Times" => expand_times(&expanded_args),
                 "Power" => expand_power(&expanded_args),
                 "Divide" if args.len() == 2 => {
-                    // Cancel common factors before expanding
                     let canceled = cancel_common_factors(&args[0], &args[1]);
                     let num_expanded = expand_value(&canceled.0);
                     let den_expanded = expand_value(&canceled.1);
-                    // If denominator is 1, just return numerator
                     if matches!(&den_expanded, Value::Integer(n) if *n == 1) {
                         num_expanded
                     } else {
-                        Value::Call {
-                            head: "Divide".to_string(),
-                            args: vec![num_expanded, den_expanded],
-                        }
+                        call("Divide", vec![num_expanded, den_expanded])
                     }
                 }
-                _ => Value::Call {
-                    head: head.to_string(),
-                    args: expanded_args,
-                },
+                _ => call(head, expanded_args),
             }
         }
         _ => val.clone(),
@@ -411,10 +374,7 @@ fn rebuild_from_factors(factors: &[(Value, Integer)]) -> Value {
 
 fn expand_times(args: &[Value]) -> Value {
     if args.len() != 2 {
-        return Value::Call {
-            head: "Times".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Times", args);
     }
     let (left, right) = (&args[0], &args[1]);
     if let Value::Call {
@@ -441,18 +401,12 @@ fn expand_times(args: &[Value]) -> Value {
             .collect();
         return simplify_call("Plus", &terms);
     }
-    Value::Call {
-        head: "Times".to_string(),
-        args: args.to_vec(),
-    }
+    call_ref("Times", args)
 }
 
 fn expand_power(args: &[Value]) -> Value {
     if args.len() != 2 {
-        return Value::Call {
-            head: "Power".to_string(),
-            args: args.to_vec(),
-        };
+        return call_ref("Power", args);
     }
     let (base, exp) = (&args[0], &args[1]);
     if let Value::Integer(n) = exp
@@ -494,10 +448,7 @@ fn expand_power(args: &[Value]) -> Value {
         }
         return simplify_call("Plus", &terms);
     }
-    Value::Call {
-        head: "Power".to_string(),
-        args: args.to_vec(),
-    }
+    call_ref("Power", args)
 }
 
 fn binomial(n: i64, k: i64) -> i64 {
@@ -795,15 +746,9 @@ pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
                     ),
                 ],
             ),
-            _ => Value::Call {
-                head: "D".to_string(),
-                args: vec![expr.clone(), Value::Symbol(var.to_string())],
-            },
+            _ => call("D", vec![expr.clone(), Value::Symbol(var.to_string())]),
         },
-        _ => Value::Call {
-            head: "D".to_string(),
-            args: vec![expr.clone(), Value::Symbol(var.to_string())],
-        },
+        _ => call("D", vec![expr.clone(), Value::Symbol(var.to_string())]),
     }
 }
 
@@ -866,10 +811,7 @@ fn integrate(expr: &Value, var: &str) -> Value {
                     };
                     simplify_call("Times", &[const_product, var_part])
                 } else {
-                    Value::Call {
-                        head: "Integrate".to_string(),
-                        args: vec![expr.clone(), x],
-                    }
+                    call("Integrate", vec![expr.clone(), x])
                 }
             }
             "Power" if args.len() == 2 && args[0].struct_eq(&x) => match &args[1] {
@@ -900,10 +842,7 @@ fn integrate(expr: &Value, var: &str) -> Value {
                         ],
                     )
                 }
-                _ => Value::Call {
-                    head: "Integrate".to_string(),
-                    args: vec![expr.clone(), x],
-                },
+                _ => call("Integrate", vec![expr.clone(), x]),
             },
             "Sin" if args.len() == 1 && args[0].struct_eq(&x) => simplify_call(
                 "Times",
@@ -980,20 +919,11 @@ fn integrate(expr: &Value, var: &str) -> Value {
                     result = simplify_call("Times", &[inv_a, result]);
                     return result;
                 }
-                Value::Call {
-                    head: "Integrate".to_string(),
-                    args: vec![expr.clone(), x],
-                }
+                call("Integrate", vec![expr.clone(), x])
             }
-            _ => Value::Call {
-                head: "Integrate".to_string(),
-                args: vec![expr.clone(), x],
-            },
+            _ => call("Integrate", vec![expr.clone(), x]),
         },
-        _ => Value::Call {
-            head: "Integrate".to_string(),
-            args: vec![expr.clone(), x],
-        },
+        _ => call("Integrate", vec![expr.clone(), x]),
     }
 }
 
@@ -1387,22 +1317,16 @@ fn solve_polynomial(expr: &Value, var: &str) -> Value {
                         ])
                     }
                 }
-                _ => Value::Call {
-                    head: "Solve".to_string(),
-                    args: vec![
-                        simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
-                        Value::Symbol(var.to_string()),
-                    ],
-                },
+                _ => call("Solve", vec![
+                    simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
+                    Value::Symbol(var.to_string()),
+                ]),
             }
         }
-        _ => Value::Call {
-            head: "Solve".to_string(),
-            args: vec![
-                simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
-                Value::Symbol(var.to_string()),
-            ],
-        },
+        _ => call("Solve", vec![
+            simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
+            Value::Symbol(var.to_string()),
+        ]),
     }
 }
 

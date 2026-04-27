@@ -1,6 +1,33 @@
 use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
+/// Extract a `&str` from a `&Value`, returning TypeError if not a string.
+fn str_of<'a>(v: &'a Value) -> Result<&'a str, EvalError> {
+    match v {
+        Value::Str(s) => Ok(s.as_str()),
+        _ => Err(EvalError::TypeError {
+            expected: "String".to_string(),
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+/// Extract a single string argument from args at the given index.
+fn str_arg<'a>(args: &'a [Value], idx: usize) -> Result<&'a str, EvalError> {
+    match args.get(idx) {
+        Some(v) => str_of(v),
+        None => Err(EvalError::TypeError {
+            expected: "String".to_string(),
+            got: "<missing>".to_string(),
+        }),
+    }
+}
+
+/// Extract two string arguments.
+fn str_args<'a>(args: &'a [Value], a: usize, b: usize) -> Result<(&'a str, &'a str), EvalError> {
+    Ok((str_arg(args, a)?, str_arg(args, b)?))
+}
+
 pub fn builtin_string_join(args: &[Value]) -> Result<Value, EvalError> {
     let mut result = String::new();
     // If single list argument, join the list elements as strings.
@@ -27,13 +54,8 @@ pub fn builtin_string_length(args: &[Value]) -> Result<Value, EvalError> {
             "StringLength requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Integer(Integer::from(s.len() as i64))),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Integer(Integer::from(s.len() as i64)))
 }
 
 pub fn builtin_to_string(args: &[Value]) -> Result<Value, EvalError> {
@@ -55,15 +77,7 @@ pub fn builtin_to_expression(args: &[Value]) -> Result<Value, EvalError> {
             "ToExpression requires exactly 1 argument".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?;
     let tokens = crate::lexer::tokenize(s)
         .map_err(|e| EvalError::Error(format!("ToExpression parse error: {}", e)))?;
     let ast = crate::parser::parse(tokens)
@@ -79,28 +93,8 @@ pub fn builtin_string_split(args: &[Value]) -> Result<Value, EvalError> {
             "StringSplit requires 1 or 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let delim = if args.len() == 2 {
-        match &args[1] {
-            Value::Str(d) => d.as_str(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: args[1].type_name().to_string(),
-                });
-            }
-        }
-    } else {
-        " "
-    };
+    let s = str_arg(args, 0)?;
+    let delim = if args.len() == 2 { str_arg(args, 1)? } else { " " };
     Ok(Value::List(
         s.split(delim)
             .map(|part| Value::Str(part.to_string()))
@@ -114,40 +108,16 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
             "StringReplace requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?.to_string();
     match &args[1] {
         Value::Rule {
             lhs,
             rhs,
             delayed: false,
         } => {
-            let old = match lhs.as_ref() {
-                Value::Str(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "String".to_string(),
-                        got: lhs.type_name().to_string(),
-                    });
-                }
-            };
-            let new = match rhs.as_ref() {
-                Value::Str(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "String".to_string(),
-                        got: rhs.type_name().to_string(),
-                    });
-                }
-            };
-            Ok(Value::Str(s.replace(&old, &new)))
+            let old = str_of(lhs.as_ref())?;
+            let new = str_of(rhs.as_ref())?;
+            Ok(Value::Str(s.replace(old, new)))
         }
         Value::List(rules) => {
             let mut result = s;
@@ -157,7 +127,8 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
                     rhs,
                     delayed: false,
                 } = rule
-                    && let (Value::Str(old), Value::Str(new)) = (lhs.as_ref(), rhs.as_ref())
+                    && let Ok(old) = str_of(lhs.as_ref())
+                    && let Ok(new) = str_of(rhs.as_ref())
                 {
                     result = result.replace(old, new);
                 }
@@ -177,25 +148,13 @@ pub fn builtin_string_take(args: &[Value]) -> Result<Value, EvalError> {
             "StringTake requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?;
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
     let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 {
-        n as usize
-    } else {
-        chars.len().saturating_sub((-n) as usize)
-    };
+    let count = if n >= 0 { n as usize } else { chars.len().saturating_sub((-n) as usize) };
     Ok(Value::Str(chars[..count.min(chars.len())].iter().collect()))
 }
 
@@ -205,25 +164,13 @@ pub fn builtin_string_drop(args: &[Value]) -> Result<Value, EvalError> {
             "StringDrop requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?;
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
     let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 {
-        n as usize
-    } else {
-        chars.len().saturating_sub((-n) as usize)
-    };
+    let count = if n >= 0 { n as usize } else { chars.len().saturating_sub((-n) as usize) };
     Ok(Value::Str(chars[count.min(chars.len())..].iter().collect()))
 }
 
@@ -233,25 +180,8 @@ pub fn builtin_string_contains_q(args: &[Value]) -> Result<Value, EvalError> {
             "StringContainsQ requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let sub = match &args[1] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    Ok(Value::Bool(s.contains(sub.as_str())))
+    let (s, sub) = str_args(args, 0, 1)?;
+    Ok(Value::Bool(s.contains(sub)))
 }
 
 pub fn builtin_string_reverse(args: &[Value]) -> Result<Value, EvalError> {
@@ -260,13 +190,8 @@ pub fn builtin_string_reverse(args: &[Value]) -> Result<Value, EvalError> {
             "StringReverse requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(s.chars().rev().collect())),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Str(s.chars().rev().collect()))
 }
 
 pub fn builtin_to_upper_case(args: &[Value]) -> Result<Value, EvalError> {
@@ -275,13 +200,8 @@ pub fn builtin_to_upper_case(args: &[Value]) -> Result<Value, EvalError> {
             "ToUpperCase requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(s.to_uppercase())),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Str(s.to_uppercase()))
 }
 
 pub fn builtin_to_lower_case(args: &[Value]) -> Result<Value, EvalError> {
@@ -290,13 +210,8 @@ pub fn builtin_to_lower_case(args: &[Value]) -> Result<Value, EvalError> {
             "ToLowerCase requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(s.to_lowercase())),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Str(s.to_lowercase()))
 }
 
 /// Characters["string"] — split string into a list of single-character strings.
@@ -306,15 +221,8 @@ pub fn builtin_characters(args: &[Value]) -> Result<Value, EvalError> {
             "Characters requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::List(
-            s.chars().map(|c| Value::Str(c.to_string())).collect(),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::List(s.chars().map(|c| Value::Str(c.to_string())).collect()))
 }
 
 /// StringMatchQ["string", "pattern"] — check if string matches a glob pattern.
@@ -324,24 +232,7 @@ pub fn builtin_string_match_q(args: &[Value]) -> Result<Value, EvalError> {
             "StringMatchQ requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let pat = match &args[1] {
-        Value::Str(p) => p,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
+    let (s, pat) = str_args(args, 0, 1)?;
     Ok(Value::Bool(glob_match(pat, s)))
 }
 
@@ -373,31 +264,15 @@ pub fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
             "StringPadLeft requires 2 or 3 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?.to_string();
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
     let pad = if args.len() == 3 {
-        match &args[2] {
-            Value::Str(p) => p.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: args[2].type_name().to_string(),
-                });
-            }
-        }
+        str_arg(args, 2)?.to_string()
     } else {
-        " ".to_string()
+        ' '.to_string()
     };
     if n <= 0 || s.len() >= n as usize {
         return Ok(Value::Str(s));
@@ -414,31 +289,15 @@ pub fn builtin_string_pad_right(args: &[Value]) -> Result<Value, EvalError> {
             "StringPadRight requires 2 or 3 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?.to_string();
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
     let pad = if args.len() == 3 {
-        match &args[2] {
-            Value::Str(p) => p.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: args[2].type_name().to_string(),
-                });
-            }
-        }
+        str_arg(args, 2)?.to_string()
     } else {
-        " ".to_string()
+        ' '.to_string()
     };
     if n <= 0 || s.len() >= n as usize {
         return Ok(Value::Str(s));
@@ -455,13 +314,8 @@ pub fn builtin_string_trim(args: &[Value]) -> Result<Value, EvalError> {
             "StringTrim requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(s.trim().to_string())),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Str(s.trim().to_string()))
 }
 
 /// StringStartsQ["str", "prefix"] — check if string starts with prefix.
@@ -471,13 +325,8 @@ pub fn builtin_string_starts_q(args: &[Value]) -> Result<Value, EvalError> {
             "StringStartsQ requires exactly 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.starts_with(p.as_str()))),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let (s, p) = str_args(args, 0, 1)?;
+    Ok(Value::Bool(s.starts_with(p)))
 }
 
 /// StringEndsQ["str", "suffix"] — check if string ends with suffix.
@@ -487,13 +336,8 @@ pub fn builtin_string_ends_q(args: &[Value]) -> Result<Value, EvalError> {
             "StringEndsQ requires exactly 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::Str(s), Value::Str(p)) => Ok(Value::Bool(s.ends_with(p.as_str()))),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let (s, p) = str_args(args, 0, 1)?;
+    Ok(Value::Bool(s.ends_with(p)))
 }
 
 /// StringPart[s, n] — get the nth character (1-indexed). Negative n counts from end.
@@ -503,15 +347,7 @@ pub fn builtin_string_part(args: &[Value]) -> Result<Value, EvalError> {
             "StringPart requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?;
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
@@ -523,7 +359,6 @@ pub fn builtin_string_part(args: &[Value]) -> Result<Value, EvalError> {
     } else if n < 0 {
         len + n
     } else {
-        // n == 0 — invalid for 1-indexed
         return Err(EvalError::Error(format!(
             "StringPart: position {} is out of bounds (string length {})",
             n, len
@@ -545,26 +380,9 @@ pub fn builtin_string_position(args: &[Value]) -> Result<Value, EvalError> {
             "StringPosition requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let sub = match &args[1] {
-        Value::Str(sub) => sub.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
+    let (s, sub) = str_args(args, 0, 1)?;
     let positions: Vec<Value> = s
-        .match_indices(&sub)
+        .match_indices(sub)
         .map(|(pos, _)| Value::Integer(Integer::from(pos as i64 + 1)))
         .collect();
     Ok(Value::List(positions))
@@ -577,25 +395,8 @@ pub fn builtin_string_count(args: &[Value]) -> Result<Value, EvalError> {
             "StringCount requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let sub = match &args[1] {
-        Value::Str(sub) => sub.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    let count = s.match_indices(&sub).count();
+    let (s, sub) = str_args(args, 0, 1)?;
+    let count = s.match_indices(sub).count();
     Ok(Value::Integer(Integer::from(count as i64)))
 }
 
@@ -606,15 +407,7 @@ pub fn builtin_string_repeat(args: &[Value]) -> Result<Value, EvalError> {
             "StringRepeat requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?;
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
@@ -632,25 +425,8 @@ pub fn builtin_string_delete(args: &[Value]) -> Result<Value, EvalError> {
             "StringDelete requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let sub = match &args[1] {
-        Value::Str(sub) => sub.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    Ok(Value::Str(s.replace(&sub, "")))
+    let (s, sub) = str_args(args, 0, 1)?;
+    Ok(Value::Str(s.replace(sub, "")))
 }
 
 /// StringInsert[s, ins, n] — insert ins at position n in s (1-indexed). Negative n counts from end.
@@ -660,24 +436,8 @@ pub fn builtin_string_insert(args: &[Value]) -> Result<Value, EvalError> {
             "StringInsert requires exactly 3 arguments: StringInsert[s, ins, n]".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let ins = match &args[1] {
-        Value::Str(ins) => ins.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
+    let s = str_arg(args, 0)?.to_string();
+    let ins = str_arg(args, 1)?.to_string();
     let n = args[2].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[2].type_name().to_string(),
@@ -685,10 +445,8 @@ pub fn builtin_string_insert(args: &[Value]) -> Result<Value, EvalError> {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
     let idx = if n >= 1 {
-        // n is 1-indexed; n=1 means before first character
         ((n - 1).min(len)) as usize
     } else if n < 0 {
-        // n=-1 means before last character
         let pos = len + n;
         if pos < 0 {
             return Err(EvalError::Error(format!(
@@ -722,7 +480,7 @@ pub fn builtin_string_riffle(args: &[Value]) -> Result<Value, EvalError> {
             "StringRiffle requires exactly 2 arguments".to_string(),
         ));
     }
-    let list = match &args[0] {
+    let items = match &args[0] {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::TypeError {
@@ -731,23 +489,15 @@ pub fn builtin_string_riffle(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let sep = match &args[1] {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    let parts: Vec<String> = list
+    let sep = str_arg(args, 1)?;
+    let parts: Vec<String> = items
         .iter()
         .map(|v| match v {
             Value::Str(s) => s.clone(),
             other => other.to_string(),
         })
         .collect();
-    Ok(Value::Str(parts.join(&sep)))
+    Ok(Value::Str(parts.join(sep)))
 }
 
 /// StringFreeQ[s, sub] — True if s does NOT contain sub.
@@ -757,25 +507,8 @@ pub fn builtin_string_free_q(args: &[Value]) -> Result<Value, EvalError> {
             "StringFreeQ requires exactly 2 arguments".to_string(),
         ));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let sub = match &args[1] {
-        Value::Str(sub) => sub,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    Ok(Value::Bool(!s.contains(sub.as_str())))
+    let (s, sub) = str_args(args, 0, 1)?;
+    Ok(Value::Bool(!s.contains(sub)))
 }
 
 /// LetterQ[s] — True if s is non-empty and all characters are Unicode letters.
@@ -785,15 +518,8 @@ pub fn builtin_letter_q(args: &[Value]) -> Result<Value, EvalError> {
             "LetterQ requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Bool(
-            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))
 }
 
 /// DigitQ[s] — True if s is non-empty and all characters are ASCII digits.
@@ -803,15 +529,8 @@ pub fn builtin_digit_q(args: &[Value]) -> Result<Value, EvalError> {
             "DigitQ requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Bool(
-            !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())))
 }
 
 /// UpperCaseQ[s] — True if s is non-empty and all letters are uppercase.
@@ -822,18 +541,9 @@ pub fn builtin_upper_case_q(args: &[Value]) -> Result<Value, EvalError> {
             "UpperCaseQ requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-            Ok(Value::Bool(
-                !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()),
-            ))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
+    Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_uppercase())))
 }
 
 /// LowerCaseQ[s] — True if s is non-empty and all letters are lowercase.
@@ -844,18 +554,9 @@ pub fn builtin_lower_case_q(args: &[Value]) -> Result<Value, EvalError> {
             "LowerCaseQ requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-            Ok(Value::Bool(
-                !letters.is_empty() && letters.iter().all(|c| c.is_lowercase()),
-            ))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
+    Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_lowercase())))
 }
 
 /// TextWords[s] — split string into a list of words (by whitespace).
@@ -865,19 +566,9 @@ pub fn builtin_text_words(args: &[Value]) -> Result<Value, EvalError> {
             "TextWords requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let words: Vec<Value> = s
-                .split_whitespace()
-                .map(|w| Value::Str(w.to_string()))
-                .collect();
-            Ok(Value::List(words))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let s = str_arg(args, 0)?;
+    let words: Vec<Value> = s.split_whitespace().map(|w| Value::Str(w.to_string())).collect();
+    Ok(Value::List(words))
 }
 
 /// CharacterCounts[s] — return a list of {char, count} pairs sorted by character.
@@ -887,30 +578,23 @@ pub fn builtin_character_counts(args: &[Value]) -> Result<Value, EvalError> {
             "CharacterCounts requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let mut counts = std::collections::HashMap::new();
-            for c in s.chars() {
-                *counts.entry(c).or_insert(0) += 1;
-            }
-            let mut pairs: Vec<(char, usize)> = counts.into_iter().collect();
-            pairs.sort_by_key(|a| a.0);
-            let list: Vec<Value> = pairs
-                .into_iter()
-                .map(|(ch, count)| {
-                    Value::List(vec![
-                        Value::Str(ch.to_string()),
-                        Value::Integer(Integer::from(count as i64)),
-                    ])
-                })
-                .collect();
-            Ok(Value::List(list))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+    let s = str_arg(args, 0)?;
+    let mut counts = std::collections::HashMap::new();
+    for c in s.chars() {
+        *counts.entry(c).or_insert(0) += 1;
     }
+    let mut pairs: Vec<(char, usize)> = counts.into_iter().collect();
+    pairs.sort_by_key(|a| a.0);
+    let list: Vec<Value> = pairs
+        .into_iter()
+        .map(|(ch, count)| {
+            Value::List(vec![
+                Value::Str(ch.to_string()),
+                Value::Integer(Integer::from(count as i64)),
+            ])
+        })
+        .collect();
+    Ok(Value::List(list))
 }
 
 /// Alphabet[] — list of lowercase Latin letters.
@@ -947,18 +631,14 @@ pub fn builtin_to_character_code(args: &[Value]) -> Result<Value, EvalError> {
             "ToCharacterCode requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let codes: Vec<Value> = s.chars()
-                .map(|c| Value::Integer(Integer::from(c as u32)))
-                .collect();
-            Ok(Value::List(codes))
-        }
-        _ => Err(EvalError::NoMatch {
-            head: "ToCharacterCode".to_string(),
-            args: args.to_vec().into(),
-        }),
-    }
+    let s = str_arg(args, 0).map_err(|_| EvalError::NoMatch {
+        head: "ToCharacterCode".to_string(),
+        args: args.to_vec().into(),
+    })?;
+    let codes: Vec<Value> = s.chars()
+        .map(|c| Value::Integer(Integer::from(c as u32)))
+        .collect();
+    Ok(Value::List(codes))
 }
 
 pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
@@ -967,25 +647,23 @@ pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
             "FromCharacterCode requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::List(codes) => {
-            let mut s = String::new();
-            for code in codes {
-                if let Value::Integer(n) = code {
-                    if let Some(val) = n.to_u32() {
-                        if let Some(c) = char::from_u32(val) {
-                            s.push(c);
-                        }
+    if let Value::List(codes) = &args[0] {
+        let mut s = String::new();
+        for code in codes {
+            if let Value::Integer(n) = code {
+                if let Some(val) = n.to_u32() {
+                    if let Some(c) = char::from_u32(val) {
+                        s.push(c);
                     }
                 }
             }
-            Ok(Value::Str(s))
         }
-        _ => Err(EvalError::NoMatch {
-            head: "FromCharacterCode".to_string(),
-            args: args.to_vec().into(),
-        }),
+        return Ok(Value::Str(s));
     }
+    Err(EvalError::NoMatch {
+        head: "FromCharacterCode".to_string(),
+        args: args.to_vec().into(),
+    })
 }
 
 pub fn builtin_edit_distance(args: &[Value]) -> Result<Value, EvalError> {
@@ -994,18 +672,14 @@ pub fn builtin_edit_distance(args: &[Value]) -> Result<Value, EvalError> {
             "EditDistance requires exactly 2 arguments".to_string(),
         ));
     }
-    let (s1, s2) = match (&args[0], &args[1]) {
-        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
-        _ => return Err(EvalError::NoMatch {
-            head: "EditDistance".to_string(),
-            args: args.to_vec().into(),
-        }),
-    };
+    let (s1, s2) = str_args(args, 0, 1).map_err(|_| EvalError::NoMatch {
+        head: "EditDistance".to_string(),
+        args: args.to_vec().into(),
+    })?;
     let a: Vec<char> = s1.chars().collect();
     let b: Vec<char> = s2.chars().collect();
     let m = a.len();
     let n = b.len();
-    // Levenshtein distance via DP
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
     for i in 0..=m {
         dp[i][0] = i;
@@ -1030,13 +704,10 @@ pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalE
             "LongestCommonSubsequence requires exactly 2 arguments".to_string(),
         ));
     }
-    let (s1, s2) = match (&args[0], &args[1]) {
-        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
-        _ => return Err(EvalError::NoMatch {
-            head: "LongestCommonSubsequence".to_string(),
-            args: args.to_vec().into(),
-        }),
-    };
+    let (s1, s2) = str_args(args, 0, 1).map_err(|_| EvalError::NoMatch {
+        head: "LongestCommonSubsequence".to_string(),
+        args: args.to_vec().into(),
+    })?;
     let a: Vec<char> = s1.chars().collect();
     let b: Vec<char> = s2.chars().collect();
     let m = a.len();
@@ -1051,7 +722,6 @@ pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalE
             }
         }
     }
-    // Backtrack to find LCS string
     let mut result = String::new();
     let (mut i, mut j) = (m, n);
     while i > 0 && j > 0 {
@@ -1075,13 +745,10 @@ pub fn builtin_longest_common_sub_string(args: &[Value]) -> Result<Value, EvalEr
             "LongestCommonSubString requires exactly 2 arguments".to_string(),
         ));
     }
-    let (s1, s2) = match (&args[0], &args[1]) {
-        (Value::Str(a), Value::Str(b)) => (a.as_str(), b.as_str()),
-        _ => return Err(EvalError::NoMatch {
-            head: "LongestCommonSubString".to_string(),
-            args: args.to_vec().into(),
-        }),
-    };
+    let (s1, s2) = str_args(args, 0, 1).map_err(|_| EvalError::NoMatch {
+        head: "LongestCommonSubString".to_string(),
+        args: args.to_vec().into(),
+    })?;
     let a: Vec<char> = s1.chars().collect();
     let b: Vec<char> = s2.chars().collect();
     let m = a.len();
@@ -1113,16 +780,12 @@ pub fn builtin_word_count(args: &[Value]) -> Result<Value, EvalError> {
             "WordCount requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let count = s.split_whitespace().count();
-            Ok(Value::Integer(Integer::from(count as i64)))
-        }
-        _ => Err(EvalError::NoMatch {
-            head: "WordCount".to_string(),
-            args: args.to_vec().into(),
-        }),
-    }
+    let s = str_arg(args, 0).map_err(|_| EvalError::NoMatch {
+        head: "WordCount".to_string(),
+        args: args.to_vec().into(),
+    })?;
+    let count = s.split_whitespace().count();
+    Ok(Value::Integer(Integer::from(count as i64)))
 }
 
 pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
@@ -1131,17 +794,12 @@ pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
             "SentenceCount requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Str(s) => {
-            let sentences: Vec<&str> = s.split(|c| matches!(c, '.' | '!' | '?')).filter(|s| !s.trim().is_empty()).collect();
-            let count = sentences.len();
-            Ok(Value::Integer(Integer::from(count as i64)))
-        }
-        _ => Err(EvalError::NoMatch {
-            head: "SentenceCount".to_string(),
-            args: args.to_vec().into(),
-        }),
-    }
+    let s = str_arg(args, 0).map_err(|_| EvalError::NoMatch {
+        head: "SentenceCount".to_string(),
+        args: args.to_vec().into(),
+    })?;
+    let sentences: Vec<&str> = s.split(|c| matches!(c, '.' | '!' | '?')).filter(|s| !s.trim().is_empty()).collect();
+    Ok(Value::Integer(Integer::from(sentences.len() as i64)))
 }
 
 #[cfg(test)]
