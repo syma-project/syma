@@ -4,6 +4,7 @@ use crate::eval::eval;
 use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::EvalError;
 use crate::value::Value;
+use std::collections::HashMap;
 
 /// Convert a value back to an Expr for pattern matching.
 /// Handles nested Pattern values inside lists/calls.

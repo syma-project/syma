@@ -1206,9 +1206,9 @@ pub fn builtin_floor(args: &[Value]) -> Result<Value, EvalError> {
             let int_val = floored.to_integer().unwrap_or(Integer::from(0));
             Ok(Value::Integer(int_val))
         }
-        _ => Err(EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: args[0].type_name().to_string(),
+        _ => Err(EvalError::NoMatch {
+            head: "Floor".to_string(),
+            args: args.to_vec().into(),
         }),
     }
 }
@@ -1226,9 +1226,9 @@ pub fn builtin_ceiling(args: &[Value]) -> Result<Value, EvalError> {
             let int_val = ceiled.to_integer().unwrap_or(Integer::from(0));
             Ok(Value::Integer(int_val))
         }
-        _ => Err(EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: args[0].type_name().to_string(),
+        _ => Err(EvalError::NoMatch {
+            head: "Ceiling".to_string(),
+            args: args.to_vec().into(),
         }),
     }
 }
@@ -1246,9 +1246,9 @@ pub fn builtin_round(args: &[Value]) -> Result<Value, EvalError> {
             let int_val = rounded.to_integer().unwrap_or(Integer::from(0));
             Ok(Value::Integer(int_val))
         }
-        _ => Err(EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: args[0].type_name().to_string(),
+        _ => Err(EvalError::NoMatch {
+            head: "Round".to_string(),
+            args: args.to_vec().into(),
         }),
     }
 }

@@ -12,6 +12,7 @@ pub mod nb;
 pub use export::builtin_export;
 pub use import::builtin_import;
 
+use crate::env::Env;
 use crate::value::EvalError;
 use crate::value::Value;
 use std::io::Write as IoWrite;
@@ -222,6 +223,204 @@ pub fn builtin_read_list(args: &[Value]) -> Result<Value, EvalError> {
         .map_err(|e| EvalError::Error(format!("ReadList failed: {}", e)))?;
     let lines: Vec<Value> = text.lines().map(|s| Value::Str(s.to_string())).collect();
     Ok(Value::List(lines))
+}
+
+// ── FileRead ───────────────────────────────────────────────────────────────────
+
+/// FileRead[path] — Read entire file contents as a string.
+pub fn builtin_file_read(args: &[Value]) -> Result<Value, EvalError> {
+    let path = match args {
+        [Value::Str(s)] => s.clone(),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "FileRead".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| EvalError::Error(format!("FileRead failed: {}", e)))?;
+    Ok(Value::Str(contents))
+}
+
+// ── FileWrite ──────────────────────────────────────────────────────────────────
+
+/// FileWrite[path, content] — Write a string to a file.
+pub fn builtin_file_write(args: &[Value]) -> Result<Value, EvalError> {
+    let (path, content) = match args {
+        [Value::Str(p), Value::Str(c)] => (p.clone(), c.clone()),
+        [Value::Str(p), other] => (p.clone(), format!("{}", other)),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "FileWrite".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    std::fs::write(&path, &content)
+        .map_err(|e| EvalError::Error(format!("FileWrite failed: {}", e)))?;
+    Ok(Value::Null)
+}
+
+// ── FileExists ─────────────────────────────────────────────────────────────────
+
+/// FileExists[path] — Return True if the file or directory exists.
+pub fn builtin_file_exists(args: &[Value]) -> Result<Value, EvalError> {
+    let path = match args {
+        [Value::Str(s)] => s.clone(),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "FileExists".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+}
+
+// ── DirectoryCreate ────────────────────────────────────────────────────────────
+
+/// DirectoryCreate[path] — Create directory (and any missing parent directories).
+pub fn builtin_directory_create(args: &[Value]) -> Result<Value, EvalError> {
+    let path = match args {
+        [Value::Str(s)] => s.clone(),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "DirectoryCreate".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    std::fs::create_dir_all(&path)
+        .map_err(|e| EvalError::Error(format!("DirectoryCreate failed: {}", e)))?;
+    Ok(Value::Str(path))
+}
+
+// ── CopyFile ───────────────────────────────────────────────────────────────────
+
+/// CopyFile[src, dst] — Copy a file. Returns the number of bytes copied.
+pub fn builtin_copy_file(args: &[Value]) -> Result<Value, EvalError> {
+    let (src, dst) = match args {
+        [Value::Str(s), Value::Str(d)] => (s.clone(), d.clone()),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "CopyFile".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    let bytes = std::fs::copy(&src, &dst)
+        .map_err(|e| EvalError::Error(format!("CopyFile failed: {}", e)))?;
+    Ok(Value::Integer(rug::Integer::from(bytes)))
+}
+
+// ── MoveFile ───────────────────────────────────────────────────────────────────
+
+/// MoveFile[src, dst] — Move/rename a file.
+pub fn builtin_move_file(args: &[Value]) -> Result<Value, EvalError> {
+    let (src, dst) = match args {
+        [Value::Str(s), Value::Str(d)] => (s.clone(), d.clone()),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "MoveFile".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    std::fs::rename(&src, &dst)
+        .map_err(|e| EvalError::Error(format!("MoveFile failed: {}", e)))?;
+    Ok(Value::Str(dst))
+}
+
+// ── DeleteFile ─────────────────────────────────────────────────────────────────
+
+/// DeleteFile[path] — Delete a file.
+pub fn builtin_delete_file(args: &[Value]) -> Result<Value, EvalError> {
+    let path = match args {
+        [Value::Str(s)] => s.clone(),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "DeleteFile".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    std::fs::remove_file(&path)
+        .map_err(|e| EvalError::Error(format!("DeleteFile failed: {}", e)))?;
+    Ok(Value::Bool(true))
+}
+
+// ── Timing ─────────────────────────────────────────────────────────────────────
+
+/// Timing[expr] — Measure evaluation time.
+/// Returns `{elapsed_seconds, result}`.
+pub fn builtin_timing(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::NoMatch {
+            head: "Timing".to_string(),
+            args: args.to_vec().into(),
+        });
+    }
+    let start = std::time::Instant::now();
+    let result = crate::eval::apply_function(
+        &Value::Symbol("Identity".to_string()),
+        &[args[0].clone()],
+        env,
+    );
+    let elapsed = start.elapsed();
+    let evaluated = match result {
+        Ok(v) => v,
+        Err(_) => args[0].clone(),
+    };
+    let seconds = rug::Float::with_val(
+        crate::value::DEFAULT_PRECISION,
+        elapsed.as_secs_f64(),
+    );
+    Ok(Value::List(vec![Value::Real(seconds), evaluated]))
+}
+
+// ── Echo ───────────────────────────────────────────────────────────────────────
+
+/// Echo[expr] — Print the expression and return it.
+pub fn builtin_echo(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::NoMatch {
+            head: "Echo".to_string(),
+            args: args.to_vec().into(),
+        });
+    }
+    let mut last_result = args[0].clone();
+    for arg in args {
+        eprintln!("{}", arg);
+        match crate::eval::apply_function(
+            &Value::Symbol("Identity".to_string()),
+            &[arg.clone()],
+            env,
+        ) {
+            Ok(v) => {
+                println!("{}", v);
+                last_result = v;
+            }
+            Err(_) => {
+                println!("{}", arg);
+                last_result = arg.clone();
+            }
+        }
+    }
+    Ok(last_result)
+}
+
+// ── Quit ───────────────────────────────────────────────────────────────────────
+
+/// Quit[] — Exit the Syma session.
+pub fn builtin_quit(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Err(EvalError::NoMatch {
+            head: "Quit".to_string(),
+            args: args.to_vec().into(),
+        });
+    }
+    std::process::exit(0)
 }
 
 #[cfg(test)]
@@ -662,5 +861,185 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let imported = builtin_import(&[Value::Str(path.to_string())]).unwrap();
         assert_eq!(imported, data);
         fs::remove_file(path).ok();
+    }
+
+    // ── New builtin tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_file_read_write_roundtrip() {
+        use std::fs;
+        let path = "/tmp/test_syma_file_rw.txt";
+        let content = "Hello, Syma file I/O!";
+        let write_result = builtin_file_write(&[
+            Value::Str(path.to_string()),
+            Value::Str(content.to_string()),
+        ]);
+        assert!(write_result.is_ok(), "FileWrite should succeed: {:?}", write_result);
+        let read_result = builtin_file_read(&[Value::Str(path.to_string())]);
+        assert!(read_result.is_ok(), "FileRead should succeed: {:?}", read_result);
+        let val = read_result.unwrap();
+        assert_eq!(val, Value::Str(content.to_string()));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_file_read_nonexistent() {
+        let result = builtin_file_read(&[Value::Str("/nonexistent_file_xyz.txt".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_read_wrong_args() {
+        // No args
+        let result = builtin_file_read(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+        // Integer arg
+        let result = builtin_file_read(&[Value::Integer(rug::Integer::from(42))]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+        // Too many args
+        let result = builtin_file_read(&[
+            Value::Str("/tmp/x.txt".into()),
+            Value::Str("extra".into()),
+        ]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_file_write_wrong_args() {
+        // No args
+        let result = builtin_file_write(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+        // Non-string path
+        let result = builtin_file_write(&[
+            Value::Integer(rug::Integer::from(1)),
+            Value::Str("hello".into()),
+        ]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_file_write_non_string_content() {
+        use std::fs;
+        let path = "/tmp/test_syma_write_int.txt";
+        let result = builtin_file_write(&[
+            Value::Str(path.to_string()),
+            Value::Integer(rug::Integer::from(42)),
+        ]);
+        assert!(result.is_ok());
+        let contents = fs::read_to_string(path).unwrap();
+        assert_eq!(contents, "42");
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_file_exists() {
+        use std::fs;
+        let path = "/tmp/test_syma_exists_check.txt";
+        fs::write(path, "data").ok();
+        let result = builtin_file_exists(&[Value::Str(path.to_string())]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = builtin_file_exists(&[Value::Str("/nonexistent_file_abc.txt".into())]).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Wrong arg count
+        let result = builtin_file_exists(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type() {
+        let result = builtin_file_exists(&[Value::Integer(rug::Integer::from(1))]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_directory_create() {
+        use std::fs;
+        let path = "/tmp/test_syma_dir_create/subdir";
+        let result = builtin_directory_create(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok());
+        assert!(std::path::Path::new(path).is_dir());
+        fs::remove_dir_all("/tmp/test_syma_dir_create").ok();
+
+        // Wrong args
+        let result = builtin_directory_create(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_copy_file() {
+        use std::fs;
+        let src = "/tmp/test_syma_copy_src.txt";
+        let dst = "/tmp/test_syma_copy_dst.txt";
+        fs::write(src, "copy me").ok();
+        let result = builtin_copy_file(&[
+            Value::Str(src.to_string()),
+            Value::Str(dst.to_string()),
+        ]);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::Integer(n) => {
+                let bytes: u64 = n.to_u64().unwrap();
+                assert_eq!(bytes, 7); // "copy me" is 7 bytes
+            }
+            other => panic!("Expected Integer, got {:?}", other),
+        }
+        let contents = fs::read_to_string(dst).unwrap();
+        assert_eq!(contents, "copy me");
+        fs::remove_file(src).ok();
+        fs::remove_file(dst).ok();
+
+        // Wrong args
+        let result = builtin_copy_file(&[Value::Str(src.to_string())]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_move_file() {
+        use std::fs;
+        let src = "/tmp/test_syma_move_src.txt";
+        let dst = "/tmp/test_syma_move_dst.txt";
+        fs::write(src, "move me").ok();
+        let result = builtin_move_file(&[
+            Value::Str(src.to_string()),
+            Value::Str(dst.to_string()),
+        ]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Str(dst.to_string()));
+        assert!(!std::path::Path::new(src).exists());
+        assert!(std::path::Path::new(dst).exists());
+        fs::remove_file(dst).ok();
+
+        // Wrong args
+        let result = builtin_move_file(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+    }
+
+    #[test]
+    fn test_delete_file() {
+        use std::fs;
+        let path = "/tmp/test_syma_delete.txt";
+        fs::write(path, "delete me").ok();
+        let result = builtin_delete_file(&[Value::Str(path.to_string())]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Bool(true));
+        assert!(!std::path::Path::new(path).exists());
+
+        // Wrong args
+        let result = builtin_delete_file(&[]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
+
+        // Non-existent file
+        let result = builtin_delete_file(&[Value::Str("/nonexistent_file_xyz.txt".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quit_wrong_args() {
+        let result = builtin_quit(&[Value::Str("arg".into())]);
+        assert!(matches!(result, Err(EvalError::NoMatch { .. })));
     }
 }
