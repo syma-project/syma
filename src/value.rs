@@ -1549,7 +1549,18 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 "Divide" if args.len() == 2 => {
                     format_input_form(&args[0], f)?;
                     write!(f, "/")?;
-                    format_input_form(&args[1], f)
+                    let denom = &args[1];
+                    if matches!(
+                        denom,
+                        Value::Call { head: h, .. } if h == "Plus" || h == "Times"
+                    ) {
+                        write!(f, "(")?;
+                        format_input_form(denom, f)?;
+                        write!(f, ")")?;
+                    } else {
+                        format_input_form(denom, f)?;
+                    }
+                    Ok(())
                 }
                 "Minus" if args.len() == 1 => {
                     write!(f, "-")?;

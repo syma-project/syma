@@ -35,6 +35,17 @@ pub fn simplify_call(head: &str, args: &[Value]) -> Value {
         "Cos" => simplify_cos(args),
         "Log" => simplify_log(args),
         "Exp" => simplify_exp(args),
+        "Divide" if args.len() == 2 => {
+            let canceled = cancel_common_factors(&args[0], &args[1]);
+            if matches!(&canceled.1, Value::Integer(n) if *n == 1) {
+                canceled.0
+            } else {
+                Value::Call {
+                    head: "Divide".to_string(),
+                    args: vec![canceled.0, canceled.1],
+                }
+            }
+        }
         _ => Value::Call {
             head: head.to_string(),
             args: args.to_vec(),
@@ -282,6 +293,21 @@ fn expand_value(val: &Value) -> Value {
             match head.as_str() {
                 "Times" => expand_times(&expanded_args),
                 "Power" => expand_power(&expanded_args),
+                "Divide" if args.len() == 2 => {
+                    // Cancel common factors before expanding
+                    let canceled = cancel_common_factors(&args[0], &args[1]);
+                    let num_expanded = expand_value(&canceled.0);
+                    let den_expanded = expand_value(&canceled.1);
+                    // If denominator is 1, just return numerator
+                    if matches!(&den_expanded, Value::Integer(n) if *n == 1) {
+                        num_expanded
+                    } else {
+                        Value::Call {
+                            head: "Divide".to_string(),
+                            args: vec![num_expanded, den_expanded],
+                        }
+                    }
+                }
                 _ => Value::Call {
                     head: head.to_string(),
                     args: expanded_args,
@@ -290,6 +316,97 @@ fn expand_value(val: &Value) -> Value {
         }
         _ => val.clone(),
     }
+}
+
+/// Cancel common factors between numerator and denominator.
+/// Handles Power[a, m] / Power[a, n] → Power[a, n-m] / Power[a, m-n] etc.
+fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
+    // Collect num factors as (base, exp) pairs
+    let mut num_factors: Vec<(Value, Integer)> = Vec::new();
+    collect_power_factors(num, &mut num_factors);
+
+    // Collect den factors as (base, exp) pairs
+    let mut den_factors: Vec<(Value, Integer)> = Vec::new();
+    collect_power_factors(den, &mut den_factors);
+
+    // For each matching base, subtract exponents
+    let mut remaining_num: Vec<(Value, Integer)> = Vec::new();
+    let mut remaining_den: Vec<(Value, Integer)> = Vec::new();
+
+    for (nb, ne) in &num_factors {
+        if let Some((db, de)) = den_factors.iter_mut().find(|(b, _)| *b == *nb) {
+            if ne > de {
+                remaining_num.push((nb.clone(), ne.clone() - de.clone()));
+            } else if *de > *ne {
+                remaining_den.push((nb.clone(), de.clone() - ne.clone()));
+            }
+            // equal: cancel completely
+        } else {
+            remaining_num.push((nb.clone(), ne.clone()));
+        }
+    }
+
+    // Add unmatched den factors
+    for (db, de) in &den_factors {
+        if !num_factors.iter().any(|(b, _)| *b == *db) {
+            remaining_den.push((db.clone(), de.clone()));
+        }
+    }
+
+    let new_num = rebuild_from_factors(&remaining_num);
+    let new_den = rebuild_from_factors(&remaining_den);
+
+    (new_num, new_den)
+}
+
+/// Collect factors into (base, exp) pairs.
+/// Times[a, b^2, c] → [(a,1), (b,2), (c,1)]
+/// Power[a, 3] → [(a, 3)]
+/// x → [(x, 1)]
+fn collect_power_factors(val: &Value, factors: &mut Vec<(Value, Integer)>) {
+    match val {
+        Value::Call { head, args } if head == "Times" => {
+            for arg in args {
+                collect_power_factors(arg, factors);
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let base = &args[0];
+            let exp = match &args[1] {
+                Value::Integer(n) => n.clone(),
+                _ => Integer::from(1),
+            };
+            factors.push((base.clone(), exp));
+        }
+        _ => {
+            factors.push((val.clone(), Integer::from(1)));
+        }
+    }
+}
+
+/// Rebuild a Value from (base, exp) factors.
+fn rebuild_from_factors(factors: &[(Value, Integer)]) -> Value {
+    if factors.is_empty() {
+        return Value::Integer(Integer::from(1));
+    }
+    if factors.len() == 1 {
+        let (base, exp) = &factors[0];
+        if exp == &Integer::from(1) {
+            return base.clone();
+        }
+        return simplify_call("Power", &[base.clone(), Value::Integer(exp.clone())]);
+    }
+    let terms: Vec<Value> = factors
+        .iter()
+        .map(|(base, exp)| {
+            if exp == &Integer::from(1) {
+                base.clone()
+            } else {
+                simplify_call("Power", &[base.clone(), Value::Integer(exp.clone())])
+            }
+        })
+        .collect();
+    simplify_call("Times", &terms)
 }
 
 fn expand_times(args: &[Value]) -> Value {
