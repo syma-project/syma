@@ -712,7 +712,7 @@ fn apply_together(val: &Value) -> Value {
     match val {
         Value::Call { head, args } if head == "Plus" => {
             // Combine all terms over a common denominator
-            let fractions: Vec<(&Value, &Value)> = args
+            let fractions: Vec<(Value, Value)> = args
                 .iter()
                 .map(|term| term_to_fraction(term))
                 .collect();

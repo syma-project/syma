@@ -710,6 +710,8 @@ pub fn builtin_lambert_w(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+const NEG_INV_E: f64 = -1.0 / std::f64::consts::E;
+
 fn lambert_w_approx(z: f64) -> f64 {
     if z == 0.0 {
         return 0.0;
@@ -792,7 +794,7 @@ fn compute_eta_numeric(s: f64) -> f64 {
 // ── Registration helper ──
 
 pub fn register_sfs(env: &crate::env::Env) {
-    use crate::builtins::{register_builtin, register_builtin_env};
+    use crate::builtins::register_builtin;
 
     register_builtin(env, "Erf", builtin_erf);
     register_builtin(env, "Erfc", builtin_erfc);

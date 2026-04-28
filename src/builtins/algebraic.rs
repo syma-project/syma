@@ -23,7 +23,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
                     Value::Real(r) => {
                         let f = r.to_f64();
                         // Best-effort: convert to string and parse as Rational
-                        c.push(Rational::parse(f.to_string()));
+                        c.push((rug::Rational::from_str(&f.to_string()).unwrap_or(rug::Rational::from(f))));
                     }
                     _ => {
                         return Err(EvalError::TypeError {
