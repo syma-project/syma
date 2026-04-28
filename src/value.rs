@@ -549,8 +549,14 @@ impl PartialEq for Value {
                 a1 == b1 && a2 == b2
             }
             (
-                Value::Root { coeffs: ca, index: ia },
-                Value::Root { coeffs: cb, index: ib },
+                Value::Root {
+                    coeffs: ca,
+                    index: ia,
+                },
+                Value::Root {
+                    coeffs: cb,
+                    index: ib,
+                },
             ) => ca == cb && ia == ib,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -745,7 +751,11 @@ impl Value {
         match type_name {
             "Number" => matches!(
                 self,
-                Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. } | Value::Root { .. }
+                Value::Integer(_)
+                    | Value::Real(_)
+                    | Value::Rational(_)
+                    | Value::Complex { .. }
+                    | Value::Root { .. }
             ),
             "Integer" => matches!(self, Value::Integer(_)),
             "Real" => matches!(self, Value::Real(_)),

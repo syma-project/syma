@@ -729,11 +729,14 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     lazy_load_d(env)?;
 
     // Unwrap Hold/Pattern wrappers from HoldAll attribute
-    let unwrapped: Vec<Value> = args.iter().map(|a| match a {
-        Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
-        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
-        _ => a.clone(),
-    }).collect();
+    let unwrapped: Vec<Value> = args
+        .iter()
+        .map(|a| match a {
+            Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
+            Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+            _ => a.clone(),
+        })
+        .collect();
 
     // Check if second argument is a List {x, n} or {x, n, x0}
     if let Value::List(items) = &unwrapped[1] {
@@ -807,7 +810,11 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
 
     // If the expression is a D call, evaluate the inner D first.
     // This handles nested derivatives like D[D[f, x], x].
-    if let Value::Call { head: ref h, ref args } = concrete {
+    if let Value::Call {
+        head: ref h,
+        ref args,
+    } = concrete
+    {
         if h == "D" && args.len() == 2 {
             // Call eval_d_2 directly with already-unwrapped args
             let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
@@ -879,7 +886,7 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
             Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => var.clone(),
         };
-return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
+        return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
     }
     Ok(Value::Call {
         head: "D".to_string(),
@@ -1020,20 +1027,25 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         if items.len() == 3 {
             let vn = match &items[0] {
                 Value::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::TypeError {
-                    expected: "Symbol (variable name)".to_string(),
-                    got: items[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Symbol (variable name)".to_string(),
+                        got: items[0].type_name().to_string(),
+                    });
+                }
             };
             (Some(vn), Some((items[1].clone(), items[2].clone())))
         } else {
             (None, None)
         }
     } else {
-        (match &second {
-            Value::Symbol(s) => Some(s.clone()),
-            _ => None,
-        }, None)
+        (
+            match &second {
+                Value::Symbol(s) => Some(s.clone()),
+                _ => None,
+            },
+            None,
+        )
     };
 
     // Load Rubi rules (lazy, once)
@@ -1053,7 +1065,9 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     // Dispatch to Integrate function definitions (loaded from .syma files)
     if let Some(Value::Function(func_def)) = env.get("Integrate") {
         for def in &func_def.definitions {
-            if let Some(bindings) = crate::eval::try_match_params(&def.params, &indefinite_args, env)? {
+            if let Some(bindings) =
+                crate::eval::try_match_params(&def.params, &indefinite_args, env)?
+            {
                 if let Some(guard_expr) = &def.guard {
                     let guard_env = env.child();
                     for (name, value) in &bindings {
@@ -1068,7 +1082,10 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
                     child_env.set(name.clone(), value.clone());
                 }
                 match crate::eval::eval(&def.body, &child_env) {
-                    Ok(result) => { antideriv = Some(result); break; }
+                    Ok(result) => {
+                        antideriv = Some(result);
+                        break;
+                    }
                     Err(_) => continue,
                 }
             }

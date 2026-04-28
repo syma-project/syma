@@ -693,7 +693,10 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
                 let theta = im.atan2(*re);
                 let r_pow = r.powi(n as i32);
                 let theta_n = theta * (n as f64);
-                Ok(normalize_complex(r_pow * theta_n.cos(), r_pow * theta_n.sin()))
+                Ok(normalize_complex(
+                    r_pow * theta_n.cos(),
+                    r_pow * theta_n.sin(),
+                ))
             } else {
                 let abs_exp = Value::Integer((-exp.clone()));
                 let power = builtin_power(&[args[0].clone(), abs_exp])?;
@@ -868,7 +871,10 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
             if let Some(v) = val_to_f64(other) {
                 if v == 0.0 {
                     crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
-                    crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
+                    crate::messages::emit(
+                        "Infinity::indet",
+                        &[format!("{} ComplexInfinity", args[0])],
+                    );
                     Ok(Value::Symbol("ComplexInfinity".to_string()))
                 } else {
                     Ok(normalize_complex(re / v, im / v))
@@ -886,7 +892,10 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
                 let denom = re * re + im * im;
                 if denom == 0.0 {
                     crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
-                    crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
+                    crate::messages::emit(
+                        "Infinity::indet",
+                        &[format!("{} ComplexInfinity", args[0])],
+                    );
                     Ok(Value::Symbol("ComplexInfinity".to_string()))
                 } else {
                     Ok(normalize_complex(v * re / denom, -v * im / denom))
@@ -917,9 +926,7 @@ pub fn builtin_minus(args: &[Value]) -> Result<Value, EvalError> {
                 let (num, den) = neg.into_numer_denom();
                 Ok(rational_value(num, den))
             }
-            Value::Complex { re, im } => {
-                Ok(normalize_complex(-re, -im))
-            }
+            Value::Complex { re, im } => Ok(normalize_complex(-re, -im)),
             _ => Ok(Value::Call {
                 head: "Times".to_string(),
                 args: vec![Value::Integer(Integer::from(-1)), args[0].clone()],
@@ -1008,7 +1015,9 @@ pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_re(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Re requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Re requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Complex { re, .. } => Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, *re))),
@@ -1024,7 +1033,9 @@ pub fn builtin_re(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_im(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Im requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Im requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Complex { im, .. } => Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, *im))),
@@ -1039,7 +1050,9 @@ pub fn builtin_im(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_reim(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ReIm requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ReIm requires exactly 1 argument".to_string(),
+        ));
     }
     let re_val = builtin_re(args)?;
     let im_val = builtin_im(args)?;
@@ -1048,7 +1061,9 @@ pub fn builtin_reim(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_conjugate(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Conjugate requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Conjugate requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Complex { re, im } => Ok(normalize_complex(*re, -im)),
@@ -1062,7 +1077,9 @@ pub fn builtin_conjugate(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Arg requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Arg requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Complex { re, im } => {
@@ -1075,7 +1092,10 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
             } else if n.is_positive() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
             } else {
-                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, std::f64::consts::PI)))
+                Ok(Value::Real(Float::with_val(
+                    DEFAULT_PRECISION,
+                    std::f64::consts::PI,
+                )))
             }
         }
         Value::Real(r) => {
@@ -1097,7 +1117,9 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Sign requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Sign requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Complex { re, im } => {
@@ -1135,7 +1157,9 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_abs_arg(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("AbsArg requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "AbsArg requires exactly 1 argument".to_string(),
+        ));
     }
     let abs_val = builtin_abs(args)?;
     let arg_val = builtin_arg(args)?;

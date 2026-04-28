@@ -538,7 +538,11 @@ fn flatten_times(v: &Value) -> Vec<Value> {
         Value::Call { head, args } if head == "Times" => {
             let mut result = Vec::new();
             for arg in args {
-                if let Value::Call { head: h2, args: _a2 } = arg {
+                if let Value::Call {
+                    head: h2,
+                    args: _a2,
+                } = arg
+                {
                     if h2 == "Times" {
                         result.extend(flatten_times(arg));
                     } else {

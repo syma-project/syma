@@ -1413,7 +1413,10 @@ impl Parser {
                     token: None,
                     span,
                 })?;
-                Ok(Expr::Complex { re: 0.0, im: im_val })
+                Ok(Expr::Complex {
+                    re: 0.0,
+                    im: im_val,
+                })
             }
             Token::Str(s) => {
                 self.advance();

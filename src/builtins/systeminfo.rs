@@ -37,8 +37,7 @@ fn os_name() -> &'static str {
 
 /// Get the architecture normalized with dash (x86-64, aarch64).
 fn arch_name() -> String {
-    std::env::consts::ARCH
-        .replace("x86_64", "x86-64")
+    std::env::consts::ARCH.replace("x86_64", "x86-64")
 }
 
 /// Get the hostname. Falls back to "Unknown" if not available.

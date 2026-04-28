@@ -11,7 +11,10 @@ fn run_basics_example() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("42"), "stdout: {stdout}");
     assert!(stdout.contains("hello world"), "stdout: {stdout}");
-    assert!(stdout.contains("6"), "1+2+3 should yield 6, stdout: {stdout}");
+    assert!(
+        stdout.contains("6"),
+        "1+2+3 should yield 6, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -50,7 +53,10 @@ fn run_control_flow_example() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("yes"), "stdout: {stdout}");
     assert!(stdout.contains("math works"), "stdout: {stdout}");
-    assert!(stdout.contains("7"), "abs[-7] should yield 7, stdout: {stdout}");
+    assert!(
+        stdout.contains("7"),
+        "abs[-7] should yield 7, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -62,8 +68,14 @@ fn run_map_fold_select_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("15"), "Sum 1..5 should be 15, stdout: {stdout}");
-    assert!(stdout.contains("120"), "Product 1..5 should be 120, stdout: {stdout}");
+    assert!(
+        stdout.contains("15"),
+        "Sum 1..5 should be 15, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("120"),
+        "Product 1..5 should be 120, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -75,8 +87,14 @@ fn run_patterns_and_rules_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("55"), "fib[10] should be 55, stdout: {stdout}");
-    assert!(stdout.contains("120"), "fact[5] should be 120, stdout: {stdout}");
+    assert!(
+        stdout.contains("55"),
+        "fib[10] should be 55, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("120"),
+        "fact[5] should be 120, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -88,9 +106,18 @@ fn run_applied_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("32"), "celsiusToF[0] should be 32, stdout: {stdout}");
-    assert!(stdout.contains("5"), "dist[0,0,3,4] should be 5, stdout: {stdout}");
-    assert!(stdout.contains("3628800"), "fact[10] should be 3628800, stdout: {stdout}");
+    assert!(
+        stdout.contains("32"),
+        "celsiusToF[0] should be 32, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("5"),
+        "dist[0,0,3,4] should be 5, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("3628800"),
+        "fact[10] should be 3628800, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -112,7 +139,10 @@ fn run_pi_series_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("3.1"), "pi series should approximate 3.1, stdout: {stdout}");
+    assert!(
+        stdout.contains("3.1"),
+        "pi series should approximate 3.1, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -124,7 +154,10 @@ fn run_newtons_method_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1.414"), "sqrt(2) approx should be 1.414, stdout: {stdout}");
+    assert!(
+        stdout.contains("1.414"),
+        "sqrt(2) approx should be 1.414, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -136,7 +169,10 @@ fn run_numerical_integration_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("3.14"), "numerical integration of pi should be ~3.14, stdout: {stdout}");
+    assert!(
+        stdout.contains("3.14"),
+        "numerical integration of pi should be ~3.14, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -148,7 +184,10 @@ fn run_taylor_series_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("2.718"), "e^1 Taylor approx should be 2.718, stdout: {stdout}");
+    assert!(
+        stdout.contains("2.718"),
+        "e^1 Taylor approx should be 2.718, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -160,8 +199,14 @@ fn run_monte_carlo_pi_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Estimate"), "monte carlo should produce an estimate, stdout: {stdout}");
-    assert!(stdout.contains("3."), "monte carlo pi estimate should be ~3.x, stdout: {stdout}");
+    assert!(
+        stdout.contains("Estimate"),
+        "monte carlo should produce an estimate, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("3."),
+        "monte carlo pi estimate should be ~3.x, stdout: {stdout}"
+    );
 }
 
 #[test]

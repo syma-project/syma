@@ -14,10 +14,16 @@ struct Cmplx {
 
 impl Cmplx {
     fn add(self, other: Cmplx) -> Cmplx {
-        Cmplx { re: self.re + other.re, im: self.im + other.im }
+        Cmplx {
+            re: self.re + other.re,
+            im: self.im + other.im,
+        }
     }
     fn sub(self, other: Cmplx) -> Cmplx {
-        Cmplx { re: self.re - other.re, im: self.im - other.im }
+        Cmplx {
+            re: self.re - other.re,
+            im: self.im - other.im,
+        }
     }
     fn mul(self, other: Cmplx) -> Cmplx {
         Cmplx {
@@ -28,7 +34,10 @@ impl Cmplx {
     fn div(self, other: Cmplx) -> Cmplx {
         let denom = other.re * other.re + other.im * other.im;
         if denom < 1e-30 {
-            return Cmplx { re: f64::INFINITY, im: f64::INFINITY };
+            return Cmplx {
+                re: f64::INFINITY,
+                im: f64::INFINITY,
+            };
         }
         Cmplx {
             re: (self.re * other.re + self.im * other.im) / denom,
@@ -47,10 +56,16 @@ fn poly_eval_cmplx(coeffs: &[f64], x: Cmplx) -> Cmplx {
     if n == 0 {
         return Cmplx { re: 0.0, im: 0.0 };
     }
-    let mut result = Cmplx { re: coeffs[n - 1], im: 0.0 };
+    let mut result = Cmplx {
+        re: coeffs[n - 1],
+        im: 0.0,
+    };
     for i in (0..n - 1).rev() {
         result = result.mul(x);
-        result = result.add(Cmplx { re: coeffs[i], im: 0.0 });
+        result = result.add(Cmplx {
+            re: coeffs[i],
+            im: 0.0,
+        });
     }
     result
 }
@@ -133,14 +148,14 @@ pub fn find_polynomial_roots(coeffs: &[Rational]) -> Vec<(f64, f64)> {
     }
 
     // Newton refinement for each root (using original Rational coefficients for accuracy)
-    let mut final_roots: Vec<(f64, f64)> = roots
-        .into_iter()
-        .map(|z| (z.re, z.im))
-        .collect();
+    let mut final_roots: Vec<(f64, f64)> = roots.into_iter().map(|z| (z.re, z.im)).collect();
 
     let df_coeff = poly_derivative_f64(&cf);
     for root in &mut final_roots {
-        let mut z = Cmplx { re: root.0, im: root.1 };
+        let mut z = Cmplx {
+            re: root.0,
+            im: root.1,
+        };
         for _ in 0..50 {
             let p = poly_eval_cmplx(&cf, z);
             let dp = poly_eval_cmplx(&df_coeff, z);
@@ -165,12 +180,12 @@ pub fn find_polynomial_roots(coeffs: &[Rational]) -> Vec<(f64, f64)> {
     }
 
     // Sort by (real ascending, imaginary ascending)
-    final_roots.sort_by(|a, b| {
-        match a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal) {
+    final_roots.sort_by(
+        |a, b| match a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal) {
             Ordering::Equal => a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal),
             ord => ord,
-        }
-    });
+        },
+    );
 
     final_roots
 }
@@ -294,8 +309,7 @@ fn poly_remainder(a: &[Rational], b: &[Rational]) -> Vec<Rational> {
         let shift = deg_rem - deg_b;
         for i in 0..=deg_b {
             if i + shift < rem.len() {
-                rem[i + shift]
-                    -= factor.clone() * b[i].clone();
+                rem[i + shift] -= factor.clone() * b[i].clone();
             }
         }
     }
@@ -477,17 +491,9 @@ fn sign_changes_at_inf(sturm: &[Vec<Rational>], neg_inf: bool) -> i32 {
             continue;
         }
         let sign = if neg_inf && deg % 2 == 1 {
-            if lc.is_positive() {
-                -1
-            } else {
-                1
-            }
+            if lc.is_positive() { -1 } else { 1 }
         } else {
-            if lc.is_positive() {
-                1
-            } else {
-                -1
-            }
+            if lc.is_positive() { 1 } else { -1 }
         };
         if prev_sign != 0 && prev_sign != sign {
             changes += 1;
@@ -578,13 +584,17 @@ pub fn min_poly_scale_int(p: &[Rational], root_idx: usize, c: i64) -> Vec<Ration
     }
     if c == -1 {
         // p(-x): alternate sign coefficients
-        return p.iter().enumerate().map(|(i, coef)| {
-            if i % 2 == 1 {
-                -(&*coef.clone())
-            } else {
-                (&*coef.clone()).into()
-            }
-        }).collect();
+        return p
+            .iter()
+            .enumerate()
+            .map(|(i, coef)| {
+                if i % 2 == 1 {
+                    -(&*coef.clone())
+                } else {
+                    (&*coef.clone()).into()
+                }
+            })
+            .collect();
     }
     let deg = poly_degree(p);
     let abs_c = c.abs();
@@ -729,11 +739,7 @@ fn min_poly_resultant_z(
 
 /// Determinant of a matrix whose entries are polynomials (Vec<Rational>).
 /// Each polynomial is represented as coefficients [c0, c1, ..., c_maxdeg].
-fn poly_matrix_det(
-    matrix: &[Vec<Vec<Rational>>],
-    n: usize,
-    max_deg: usize,
-) -> Vec<Rational> {
+fn poly_matrix_det(matrix: &[Vec<Vec<Rational>>], n: usize, max_deg: usize) -> Vec<Rational> {
     if n == 0 {
         return vec![Rational::from(1)];
     }
@@ -920,12 +926,7 @@ fn binomial(n: usize, k: usize) -> Rational {
 }
 
 /// Minimal polynomial for alpha * beta.
-fn min_poly_mul(
-    p: &[Rational],
-    _root_p: usize,
-    q: &[Rational],
-    _root_q: usize,
-) -> Vec<Rational> {
+fn min_poly_mul(p: &[Rational], _root_p: usize, q: &[Rational], _root_q: usize) -> Vec<Rational> {
     // For z = alpha * beta: alpha = z / beta, so p(z/beta) = 0.
     // p(z/beta) * beta^n = sum_{k=0..n} p[k] * z^k * beta^(n-k)
     // This is a polynomial in beta with polynomial coefficients in z.
@@ -955,12 +956,7 @@ fn min_poly_mul(
 }
 
 /// Minimal polynomial for alpha / beta.
-fn min_poly_div(
-    p: &[Rational],
-    _root_p: usize,
-    q: &[Rational],
-    _root_q: usize,
-) -> Vec<Rational> {
+fn min_poly_div(p: &[Rational], _root_p: usize, q: &[Rational], _root_q: usize) -> Vec<Rational> {
     // For z = alpha / beta: alpha = z * beta.
     // p(z * beta) = 0.
     // p(z * beta) = sum_{k=0..n} p[k] * (z*beta)^k = sum_{k=0..n} p[k] * z^k * beta^k
@@ -984,7 +980,11 @@ fn min_poly_div(
 
 /// Remove content (GCD of all coefficients) and normalize sign.
 fn remove_content(poly: &[Rational]) -> Vec<Rational> {
-    let deg = if poly.is_empty() { 0 } else { poly_degree(poly) };
+    let deg = if poly.is_empty() {
+        0
+    } else {
+        poly_degree(poly)
+    };
     if deg == 0 {
         return poly.to_vec();
     }
@@ -1007,7 +1007,10 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     // Make content an integer gcd (take rational content, then integer part)
     // For simplicity, just divide by the first nonzero coefficient's abs to make monic-ish
     let lead = poly[deg].clone();
-    let mut result: Vec<Rational> = poly.iter().map(|c| (c.clone() / lead.clone()).into()).collect();
+    let mut result: Vec<Rational> = poly
+        .iter()
+        .map(|c| (c.clone() / lead.clone()).into())
+        .collect();
 
     // Ensure leading coefficient is positive
     if !result[deg].is_zero() && result[deg].is_negative() {
@@ -1037,9 +1040,7 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
             .map(|c| (c.clone() * common_den.clone()).into())
             .collect();
         // Check if all are now integers
-        let all_int = result.iter().all(|c| {
-            c.denom() == &Rational::from(1)
-        });
+        let all_int = result.iter().all(|c| c.denom() == &Rational::from(1));
         if !all_int {
             // denominators differ; keep as-is
         }
@@ -1058,7 +1059,11 @@ fn lcm_int(a: Rational, b: Rational) -> Rational {
 }
 
 fn strip_zeros_poly(coeffs: &[Rational]) -> Vec<Rational> {
-    let deg = if coeffs.is_empty() { 0 } else { poly_degree(coeffs) };
+    let deg = if coeffs.is_empty() {
+        0
+    } else {
+        poly_degree(coeffs)
+    };
     if deg == 0 && (!coeffs.is_empty() && coeffs[0].is_zero()) {
         return vec![Rational::from(0)];
     }
@@ -1123,11 +1128,7 @@ pub fn remove_content_poly(poly: &[Rational]) -> Vec<Rational> {
 }
 
 /// Scale a Root by a Rational: if alpha is root of p, find min poly of c*alpha.
-pub fn min_poly_scale(
-    p: &[Rational],
-    _root_idx: usize,
-    scale: &Rational,
-) -> Vec<Rational> {
+pub fn min_poly_scale(p: &[Rational], _root_idx: usize, scale: &Rational) -> Vec<Rational> {
     if scale.is_zero() {
         return vec![Rational::from(0)];
     }
@@ -1170,11 +1171,7 @@ mod tests {
             1
         );
         assert_eq!(
-            poly_degree(&[
-                Rational::from(1),
-                Rational::from(0),
-                Rational::from(3)
-            ]),
+            poly_degree(&[Rational::from(1), Rational::from(0), Rational::from(3)]),
             2
         );
     }
@@ -1182,11 +1179,7 @@ mod tests {
     #[test]
     fn test_poly_eval_basic() {
         // x^2 - 2 = -2 + 0*x + 1*x^2, coeffs = [-2, 0, 1]
-        let coeffs = vec![
-            Rational::from(-2),
-            Rational::from(0),
-            Rational::from(1),
-        ];
+        let coeffs = vec![Rational::from(-2), Rational::from(0), Rational::from(1)];
         let x2 = Rational::from(2);
         let result = poly_eval(&coeffs, &x2);
         assert_eq!(result, Rational::from(2)); // 4 - 2 = 2
@@ -1205,11 +1198,7 @@ mod tests {
     #[test]
     fn test_find_roots_quadratic() {
         // x^2 - 2, roots are ±sqrt(2) ≈ ±1.4142
-        let coeffs = vec![
-            Rational::from(-2),
-            Rational::from(0),
-            Rational::from(1),
-        ];
+        let coeffs = vec![Rational::from(-2), Rational::from(0), Rational::from(1)];
         let roots = find_polynomial_roots(&coeffs);
         assert_eq!(roots.len(), 2);
         assert!((roots[0].0 + std::f64::consts::SQRT_2).abs() < 1e-6);
@@ -1247,11 +1236,7 @@ mod tests {
     #[test]
     fn test_poly_derivative() {
         // d/dx(-2 + 0*x + 1*x^2) = 0 + 2*x = [0, 2]
-        let coeffs = vec![
-            Rational::from(-2),
-            Rational::from(0),
-            Rational::from(1),
-        ];
+        let coeffs = vec![Rational::from(-2), Rational::from(0), Rational::from(1)];
         let deriv = poly_derivative(&coeffs);
         assert_eq!(deriv.len(), 2);
         assert_eq!(deriv[0], Rational::from(0));
@@ -1261,19 +1246,11 @@ mod tests {
     #[test]
     fn test_count_real_roots() {
         // x^2 - 2 has 2 real roots
-        let coeffs = vec![
-            Rational::from(-2),
-            Rational::from(0),
-            Rational::from(1),
-        ];
+        let coeffs = vec![Rational::from(-2), Rational::from(0), Rational::from(1)];
         assert_eq!(count_real_roots(&coeffs), 2);
 
         // x^2 + 1 has 0 real roots
-        let coeffs = vec![
-            Rational::from(1),
-            Rational::from(0),
-            Rational::from(1),
-        ];
+        let coeffs = vec![Rational::from(1), Rational::from(0), Rational::from(1)];
         assert_eq!(count_real_roots(&coeffs), 0);
     }
 }

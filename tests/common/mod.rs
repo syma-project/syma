@@ -6,7 +6,6 @@
 /// mod common;
 /// use common::*;
 /// ```
-
 use std::process::Command;
 
 /// Run `cargo run --bin syma -- -e <expr>` and return trimmed stdout on success.

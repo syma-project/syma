@@ -4,7 +4,8 @@ use super::*;
 
 #[test]
 fn localsymbol_write_then_read() {
-    let (out, _) = syma_eval_with_temp_home(r#"LocalSymbol["test_int"] = 42; LocalSymbol["test_int"]"#);
+    let (out, _) =
+        syma_eval_with_temp_home(r#"LocalSymbol["test_int"] = 42; LocalSymbol["test_int"]"#);
     assert!(out.contains("42"), "Should read back 42, got: {out}");
 }
 
@@ -43,7 +44,14 @@ fn localsymbol_persists_across_calls() {
     let _ = std::fs::create_dir_all(&tmp);
 
     let output1 = Command::new("cargo")
-        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"] = 99"#])
+        .args([
+            "run",
+            "--bin",
+            "syma",
+            "--",
+            "-e",
+            r#"LocalSymbol["persist_key"] = 99"#,
+        ])
         .env("SYMA_HOME", &tmp)
         .output()
         .expect("failed first call");
@@ -54,7 +62,14 @@ fn localsymbol_persists_across_calls() {
     );
 
     let output2 = Command::new("cargo")
-        .args(["run", "--bin", "syma", "--", "-e", r#"LocalSymbol["persist_key"]"#])
+        .args([
+            "run",
+            "--bin",
+            "syma",
+            "--",
+            "-e",
+            r#"LocalSymbol["persist_key"]"#,
+        ])
         .env("SYMA_HOME", &tmp)
         .output()
         .expect("failed second call");

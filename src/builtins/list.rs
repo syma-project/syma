@@ -370,10 +370,7 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                     } else if index == 1 {
                         current = Value::Str(name.clone());
                     } else {
-                        return Err(EvalError::IndexOutOfBounds {
-                            index,
-                            length: 1,
-                        });
+                        return Err(EvalError::IndexOutOfBounds { index, length: 1 });
                     }
                 }
                 _ => {
@@ -471,10 +468,7 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
             } else if index == 1 {
                 Ok(Value::Str(name.clone()))
             } else {
-                Err(EvalError::IndexOutOfBounds {
-                    index,
-                    length: 1,
-                })
+                Err(EvalError::IndexOutOfBounds { index, length: 1 })
             }
         }
         _ => Err(EvalError::TypeError {

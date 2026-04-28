@@ -1240,14 +1240,14 @@ fn eval_args_with_attributes(
             // For Symbol args, evaluate first to resolve bound variable names,
             // then wrap as Pattern to prevent further evaluation.
             // For non-Symbol args, wrap as Pattern directly.
-            let vals = args.iter().map(|arg| {
-                match arg {
-                    Expr::Symbol(_) => eval(arg, env).map(|v| Value::Pattern(
-                        crate::eval::table::value_to_expr(&v),
-                    )),
+            let vals = args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Symbol(_) => eval(arg, env)
+                        .map(|v| Value::Pattern(crate::eval::table::value_to_expr(&v))),
                     _ => Ok(Value::Pattern(arg.clone())),
-                }
-            }).collect::<Result<Vec<_>, _>>()?;
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(vals);
         }
         if hold_first {

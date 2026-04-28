@@ -42,8 +42,14 @@ fn eval_short_builtin() {
 #[test]
 fn eval_grid_builtin() {
     let out = syma_eval("Grid[{{1, 2, 3}, {10, 20, 30}}]");
-    assert!(out.contains("1"), "Grid output should contain values, got: {out}");
-    assert!(out.contains("10"), "Grid output should contain values, got: {out}");
+    assert!(
+        out.contains("1"),
+        "Grid output should contain values, got: {out}"
+    );
+    assert!(
+        out.contains("10"),
+        "Grid output should contain values, got: {out}"
+    );
 }
 
 #[test]

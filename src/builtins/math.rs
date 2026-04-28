@@ -1253,8 +1253,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
             if n.is_negative() {
                 let numer = n.numer().clone().abs();
                 let denom = n.denom().clone();
-                let abs_rational =
-                    Value::Rational(Box::new(rug::Rational::from((numer, denom))));
+                let abs_rational = Value::Rational(Box::new(rug::Rational::from((numer, denom))));
                 let sqrt_part = builtin_sqrt(&[abs_rational])?;
                 return Ok(Value::Call {
                     head: "Times".to_string(),
@@ -1283,10 +1282,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
             } else {
                 Ok(Value::Call {
                     head: "Times".to_string(),
-                    args: vec![
-                        Value::Rational(Box::new(outside_rat)),
-                        sqrt_part,
-                    ],
+                    args: vec![Value::Rational(Box::new(outside_rat)), sqrt_part],
                 })
             }
         }
@@ -1302,7 +1298,10 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::Real(r.clone().sqrt()))
         }
-        Value::Call { head, args: call_args } if head == "Times" => {
+        Value::Call {
+            head,
+            args: call_args,
+        } if head == "Times" => {
             let mut outside = Integer::from(1);
             let mut inside_args: Vec<Value> = Vec::new();
             for arg in call_args {
