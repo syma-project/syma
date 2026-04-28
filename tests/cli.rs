@@ -543,3 +543,4 @@ fn test_run_oop_example() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+

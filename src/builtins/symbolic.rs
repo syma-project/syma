@@ -662,18 +662,162 @@ fn binomial(n: i64, k: i64) -> i64 {
 // ── Differentiation ──
 
 /// D[expr, x] — Symbolic differentiation.
+/// D[expr, x, y, ...] — Mixed partial derivatives.
+/// D[expr, {x, n}] — n-th order derivative.
+/// D[expr, {x, n}, y, ...] — n-th derivative w.r.t. x, then y, etc.
+///
 /// Implemented as Syma rules loaded from D.syma on first use.
+/// Multi-arg and n-th-order forms are normalized to D[f, var] (2-arg)
+/// before dispatching to Syma rules.
 ///
 /// Loading order (disk → embedded):
 /// 1. Search paths (SYMA_HOME/SystemFiles, current dir, etc.)
 /// 2. Executable-relative SystemFiles/Kernel/Calculus/D.syma
 /// 3. Embedded source (compiled-in fallback for `cargo run` without install)
 pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "D requires exactly 2 arguments".to_string(),
+            "D requires at least 2 arguments".to_string(),
         ));
     }
+
+    // Normalize multi-arg and n-th-order forms to D[f, var] (2-arg)
+    let normalized = match args.len() {
+        2 => args.to_vec(),
+        3 => {
+            // D[f, {x, n}] — n-th order derivative
+            if let Value::List(items) = &args[1] {
+                if items.is_empty() {
+                    return Err(EvalError::Error(
+                        "D: order spec {x, n} cannot be empty".to_string(),
+                    ));
+                }
+                let var = items[0].clone();
+                if items.len() == 2 {
+                    // D[f, {x, n}]
+                    let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
+                        "D: order n must be a non-negative integer".to_string(),
+                    ))?;
+                    if n < 0 {
+                        return Err(EvalError::Error(
+                            "D: order n must be a non-negative integer".to_string(),
+                        ));
+                    }
+                    let mut expr = args[0].clone();
+                    for _ in 0..n as usize {
+                        expr = Value::Call {
+                            head: "D".to_string(),
+                            args: vec![expr, var.clone()],
+                        };
+                    }
+                    vec![expr, var]
+                } else if items.len() == 3 {
+                    // D[f, {x, n, x0}] — evaluate at x = x0
+                    let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
+                        "D: order n must be a non-negative integer".to_string(),
+                    ))?;
+                    if n < 0 {
+                        return Err(EvalError::Error(
+                            "D: order n must be a non-negative integer".to_string(),
+                        ));
+                    }
+                    let mut expr = args[0].clone();
+                    for _ in 0..n as usize {
+                        expr = Value::Call {
+                            head: "D".to_string(),
+                            args: vec![expr, var.clone()],
+                        };
+                    }
+                    // Substitute x -> x0 via substitute_and_eval
+                    let var_name = match &var {
+                        Value::Symbol(s) => s.clone(),
+                        _ => {
+                            return Err(EvalError::Error(
+                                "D: variable in {x, n, x0} must be a symbol".to_string(),
+                            ));
+                        }
+                    };
+                    return Ok(substitute_and_eval(&expr, &var_name, &items[2]));
+                } else {
+                    return Err(EvalError::Error(
+                        "D: order spec must be {x, n} or {x, n, x0}".to_string(),
+                    ));
+                }
+            } else {
+                // D[f, x, y] — two more vars, fold: D[D[f, x], y]
+                vec![
+                    Value::Call {
+                        head: "D".to_string(),
+                        args: vec![args[0].clone(), args[1].clone()],
+                    },
+                    args[2].clone(),
+                ]
+            }
+        }
+        _ => {
+            // D[f, {x, n}, y, z, ...] or D[f, x, y, z, ...]
+            if let Value::List(items) = &args[1] {
+                if items.is_empty() {
+                    return Err(EvalError::Error(
+                        "D: order spec {x, n} cannot be empty".to_string(),
+                    ));
+                }
+                let var = items[0].clone();
+                let n = if items.len() >= 2 {
+                    items[1].to_integer().ok_or_else(|| EvalError::Error(
+                        "D: order n must be a non-negative integer".to_string(),
+                    ))?
+                } else {
+                    return Err(EvalError::Error(
+                        "D: order spec must be {x, n} or {x, n, x0}".to_string(),
+                    ));
+                };
+                if n < 0 {
+                    return Err(EvalError::Error(
+                        "D: order n must be a non-negative integer".to_string(),
+                    ));
+                }
+                let mut expr = args[0].clone();
+                for _ in 0..n as usize {
+                    expr = Value::Call {
+                        head: "D".to_string(),
+                        args: vec![expr, var.clone()],
+                    };
+                }
+                // Fold remaining args: D[expr, a, b, c] -> D[D[D[expr, a], b], c]
+                let mut current = expr;
+                for arg in args[2..].iter().rev() {
+                    current = Value::Call {
+                        head: "D".to_string(),
+                        args: vec![current, arg.clone()],
+                    };
+                }
+                vec![current, var.clone()]
+            } else {
+                // D[f, x, y, z, ...] — fold: D[D[D[f, x], y], z]
+                let mut current = args[0].clone();
+                for arg in args[1..].iter().rev() {
+                    current = Value::Call {
+                        head: "D".to_string(),
+                        args: vec![current, arg.clone()],
+                    };
+                }
+                // The outermost differentiation variable
+                let last_var = args[args.len() - 1].clone();
+                // current is now D[D[...D[f, x], y], z] but we built it reversed.
+                // Actually we need to rebuild properly:
+                // D[f, x, y, z] = D[D[D[f, x], y], z]
+                let mut expr = args[0].clone();
+                for arg in &args[1..args.len()-1] {
+                    expr = Value::Call {
+                        head: "D".to_string(),
+                        args: vec![expr, arg.clone()],
+                    };
+                }
+                vec![expr, last_var]
+            }
+        }
+    };
 
     // Load D.syma definitions on first use
     lazy_load_d(env)?;
@@ -682,13 +826,13 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if let Some(Value::Function(_)) = env.get("D").as_ref()
         && let Some(d_func) = env.get("D")
     {
-        return crate::eval::apply_function(&d_func, args, env);
+        return crate::eval::apply_function(&d_func, &normalized, env);
     }
 
     // Fallback: return unevaluated
     Ok(Value::Call {
         head: "D".to_string(),
-        args: args.to_vec(),
+        args: normalized,
     })
 }
 
@@ -2336,92 +2480,9 @@ mod tests {
         }
     }
 
-    // ── Differentiation tests ──
-
-    #[test]
-    fn test_d_power_rule() {
-        // D[x^3, x] = 3x^2
-        let expr = simplify_call("Power", &[sym("x"), int(3)]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        match &result {
-            Value::Call { head, args } if head == "Times" => {
-                assert!(args.iter().any(|a| *a == int(3)));
-            }
-            _ => panic!("Expected Times containing 3, got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn test_d_sin() {
-        // D[Sin[x], x] = Cos[x]
-        let expr = simplify_call("Sin", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        assert_eq!(result, simplify_call("Cos", &[sym("x")]));
-    }
-
-    #[test]
-    fn test_d_cos() {
-        // D[Cos[x], x] = -Sin[x]
-        let expr = simplify_call("Cos", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        match &result {
-            Value::Call { head, .. } if head == "Times" => {}
-            _ => panic!("Expected Times (for -Sin[x]), got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn test_d_exp() {
-        // D[Exp[x], x] = Exp[x]
-        let expr = simplify_call("Exp", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        assert_eq!(result, simplify_call("Exp", &[sym("x")]));
-    }
-
-    #[test]
-    fn test_d_log() {
-        // D[Log[x], x] = 1/x = x^(-1)
-        let expr = simplify_call("Log", &[sym("x")]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        match &result {
-            Value::Call { head, .. } if head == "Power" => {}
-            _ => panic!("Expected Power (for 1/x = x^-1), got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn test_d_sum_rule() {
-        // D[x^2 + Sin[x], x] = 2x + Cos[x]
-        let expr = simplify_call(
-            "Plus",
-            &[
-                simplify_call("Power", &[sym("x"), int(2)]),
-                simplify_call("Sin", &[sym("x")]),
-            ],
-        );
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        match &result {
-            Value::Call { head, .. } if head == "Plus" => {}
-            _ => panic!("Expected Plus (sum rule), got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn test_d_constant() {
-        // D[5, x] = 0
-        let result = builtin_d(&[int(5), sym("x")], &env()).unwrap();
-        assert_eq!(result, int(0));
-    }
-
-    #[test]
-    fn test_d_linear() {
-        // D[3*x, x] = 3
-        let expr = simplify_call("Times", &[int(3), sym("x")]);
-        let result = builtin_d(&[expr, sym("x")], &env()).unwrap();
-        assert_eq!(result, int(3));
-    }
-
-    // ── Integration tests ──
+    // ── Differentiation integration tests ──
+    // Moved to tests/cli.rs — D is now implemented as Syma rules (D.syma),
+    // so tests go through the full language pipeline (lexer→parser→eval).
 
     #[test]
     fn test_integrate_power() {
