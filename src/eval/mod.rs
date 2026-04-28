@@ -1237,28 +1237,23 @@ fn eval_args_with_attributes(
         let hold_rest = env.has_attribute(name, "HoldRest");
 
         if hold_all {
-            let vals = args
-                .iter()
-                .map(|arg| {
-                    match arg {
-                        Expr::Symbol(_) => {
-                            // Evaluate to resolve bindings, then wrap as Hold to prevent further eval
-                            eval(arg, env).map(|v| Value::Hold(Box::new(v)))
-                        }
-                        _ => Ok(Value::Pattern(arg.clone())),
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            // For Symbol args, evaluate first to resolve bound variable names,
+            // then wrap as Pattern to prevent further evaluation.
+            // For non-Symbol args, wrap as Pattern directly.
+            let vals = args.iter().map(|arg| {
+                match arg {
+                    Expr::Symbol(_) => eval(arg, env).map(|v| Value::Pattern(
+                        crate::eval::table::value_to_expr(&v),
+                    )),
+                    _ => Ok(Value::Pattern(arg.clone())),
+                }
+            }).collect::<Result<Vec<_>, _>>()?;
             return Ok(vals);
         }
         if hold_first {
             let mut vals = Vec::with_capacity(args.len());
             if let Some(first) = args.first() {
-                let v = match first {
-                    Expr::Symbol(_) => eval(first, env).map(|v| Value::Hold(Box::new(v))),
-                    _ => Ok(Value::Pattern(first.clone())),
-                };
-                vals.push(v?);
+                vals.push(Value::Pattern(first.clone()));
             }
             for rest in &args[1..] {
                 vals.push(eval(rest, env)?);
@@ -1271,11 +1266,7 @@ fn eval_args_with_attributes(
                 vals.push(eval(first, env)?);
             }
             for rest in &args[1..] {
-                let v = match rest {
-                    Expr::Symbol(_) => eval(rest, env).map(|v| Value::Hold(Box::new(v))),
-                    _ => Ok(Value::Pattern(rest.clone())),
-                };
-                vals.push(v?);
+                vals.push(Value::Pattern(rest.clone()));
             }
             return Ok(vals);
         }
@@ -2263,7 +2254,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 
             // Try each definition in order
             let mut found_result: Option<Result<Value, EvalError>> = None;
-            for def in &func_def.definitions {
+            for (_def_idx, def) in func_def.definitions.iter().enumerate() {
                 let match_result = try_match_params(&def.params, args, env)?;
                 if let Some(bindings) = match_result {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)

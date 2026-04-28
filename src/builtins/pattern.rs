@@ -71,13 +71,6 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             "FreeQ requires exactly 2 arguments".to_string(),
         ));
     }
-    eprintln!(
-        "DEBUG FreeQ: args=[{}/{}, {}/{}]",
-        args[0],
-        args[0].type_name(),
-        args[1],
-        args[1].type_name()
-    );
     let attr_checker = AttributeChecker::new(env.attributes.clone());
     fn expr_to_val(e: &Expr) -> Value {
         match e {
@@ -143,14 +136,6 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         }
     }
     let result = !contains_pattern(&args[0], &args[1], &attr_checker, env);
-    eprintln!(
-        "DEBUG FreeQ: args=[{}/ {:?}, {}/ {:?}], result={}",
-        args[0],
-        args[0].type_name(),
-        args[1],
-        args[1].type_name(),
-        result
-    );
     Ok(Value::Bool(result))
 }
 

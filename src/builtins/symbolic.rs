@@ -728,8 +728,15 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     lazy_load_d(env)?;
 
+    // Unwrap Hold/Pattern wrappers from HoldAll attribute
+    let unwrapped: Vec<Value> = args.iter().map(|a| match a {
+        Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        _ => a.clone(),
+    }).collect();
+
     // Check if second argument is a List {x, n} or {x, n, x0}
-    if let Value::List(items) = &args[1] {
+    if let Value::List(items) = &unwrapped[1] {
         if !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
             let var = items[0].clone();
             let n = items[1].to_integer().ok_or_else(|| {
@@ -741,7 +748,7 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 ));
             }
             // Repeatedly differentiate n times w.r.t. var
-            let mut result = args[0].clone();
+            let mut result = unwrapped[0].clone();
             for _ in 0..n as usize {
                 result = eval_d_2(result, var.clone(), env)?;
             }
@@ -755,18 +762,15 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                         ));
                     }
                 };
-                if args.len() > 2 {
-                    // D[f, {x, n, x0}, y, ...] — differentiate w.r.t. remaining vars
-                    // (x is already substituted, so we skip it for remaining vars)
-                    for arg in &args[2..] {
+                if unwrapped.len() > 2 {
+                    for arg in &unwrapped[2..] {
                         result = eval_d_2(result, arg.clone(), env)?;
                     }
                 }
                 return Ok(substitute_and_eval(&result, &var_name, &items[2]));
             }
-            if args.len() > 2 {
-                // D[f, {x, n}, y, z, ...] — fold remaining vars
-                for arg in &args[2..] {
+            if unwrapped.len() > 2 {
+                for arg in &unwrapped[2..] {
                     result = eval_d_2(result, arg.clone(), env)?;
                 }
             }
@@ -775,16 +779,16 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     // Multi-arg: D[f, x, y, z, ...] — fold left: D[D[D[f, x], y], z]
-    if args.len() > 2 {
-        let mut result = args[0].clone();
-        for arg in &args[1..] {
+    if unwrapped.len() > 2 {
+        let mut result = unwrapped[0].clone();
+        for arg in &unwrapped[1..] {
             result = eval_d_2(result, arg.clone(), env)?;
         }
         return Ok(result);
     }
 
     // 2-arg case: D[f, x]
-    eval_d_2(args[0].clone(), args[1].clone(), env)
+    eval_d_2(unwrapped[0].clone(), unwrapped[1].clone(), env)
 }
 
 /// Evaluate D[expr, var] (2-arg form) by dispatching to Syma function definitions.
@@ -803,29 +807,11 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
 
     // If the expression is a D call, evaluate the inner D first.
     // This handles nested derivatives like D[D[f, x], x].
-    if let Value::Call {
-        head: ref h,
-        args: ref args,
-    } = concrete
-    {
-        eprintln!(
-            "DEBUG eval_d_2: concrete head={}, args.len={}",
-            h,
-            args.len()
-        );
-        if h == "D" && !args.is_empty() {
-            eprintln!("DEBUG eval_d_2: inner D call detected, evaluating inner D");
-            // Evaluate the inner D call
-            match crate::eval::apply_function(&Value::Symbol("D".to_string()), args, env) {
-                Ok(inner_result) => {
-                    eprintln!("DEBUG eval_d_2: inner D result={}", inner_result);
-                    return eval_d_2(inner_result, var, env);
-                }
-                Err(e) => {
-                    eprintln!("DEBUG eval_d_2: inner D error={}", e);
-                    return Err(e);
-                }
-            }
+    if let Value::Call { head: ref h, ref args } = concrete {
+        if h == "D" && args.len() == 2 {
+            // Call eval_d_2 directly with already-unwrapped args
+            let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
+            return eval_d_2(inner_result, var, env);
         }
     }
 
@@ -885,13 +871,15 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
         // symbolic names. By evaluating the Expr in env, we resolve them to actual values.
         let concrete_expr = match &expr {
             Value::Pattern(p) => crate::eval::eval(p, env)?,
+            Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => expr.clone(),
         };
         let concrete_var = match &var {
             Value::Pattern(p) => crate::eval::eval(p, env)?,
+            Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => var.clone(),
         };
-        return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
+return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
     }
     Ok(Value::Call {
         head: "D".to_string(),
@@ -989,6 +977,14 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
 
     for (expr, _suppress) in stmts {
         crate::eval::eval(expr, env).map_err(|e| EvalError::Error(e.to_string()))?;
+    }
+
+    // After loading, ensure the D function is in the root scope so it's
+    // accessible from all child scopes.
+    if let Some(d_func) = env.get("D") {
+        if let Value::Function(_) = &d_func {
+            env.root_env().set("D".to_string(), d_func);
+        }
     }
 
     Ok(())
@@ -2547,6 +2543,29 @@ fn try_numerical_eval(head: &str, args: &[Value]) -> Option<Value> {
     }
 }
 
+fn extract_symbol_from(val: &Value) -> Result<String, EvalError> {
+    let val = match val {
+        Value::Hold(inner) | Value::HoldComplete(inner) => inner.as_ref(),
+        _ => val,
+    };
+    match val {
+        Value::Symbol(s) | Value::Str(s) => Ok(s.clone()),
+        Value::Builtin(name, _) => Ok(name.clone()),
+        Value::Function(fd) => Ok(fd.name.clone()),
+        Value::Pattern(p) => match p {
+            Expr::Symbol(s) => Ok(s.clone()),
+            _ => Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: val.type_name().to_string(),
+            }),
+        },
+        _ => Err(EvalError::TypeError {
+            expected: "Symbol or String".to_string(),
+            got: val.type_name().to_string(),
+        }),
+    }
+}
+
 /// SetAttributes[sym, attr1, attr2, ...] — set attributes on a symbol.
 pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 {
@@ -2554,26 +2573,7 @@ pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalEr
             "SetAttributes requires at least 2 arguments: symbol and attributes".to_string(),
         ));
     }
-    let sym_name = match &args[0] {
-        Value::Symbol(s) | Value::Str(s) => s.clone(),
-        Value::Builtin(name, _) => name.clone(),
-        Value::Function(fd) => fd.name.clone(),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "Symbol or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Symbol or String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let sym_name = extract_symbol_from(&args[0])?;
     // Locked attribute prevents modification
     if env.has_attribute(&sym_name, "Locked") {
         return Ok(Value::Null);
@@ -2590,26 +2590,7 @@ pub fn builtin_clear_attributes(args: &[Value], env: &Env) -> Result<Value, Eval
                 .to_string(),
         ));
     }
-    let sym_name = match &args[0] {
-        Value::Symbol(s) | Value::Str(s) => s.clone(),
-        Value::Builtin(name, _) => name.clone(),
-        Value::Function(fd) => fd.name.clone(),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "Symbol or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Symbol or String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let sym_name = extract_symbol_from(&args[0])?;
     // Locked attribute prevents modification
     if env.has_attribute(&sym_name, "Locked") {
         return Ok(Value::Null);
