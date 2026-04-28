@@ -1625,7 +1625,18 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     format_input_form(exp, f)
                 }
                 "Divide" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    let numer = &args[0];
+                    let needs_numer_parens = matches!(
+                        numer,
+                        Value::Call { head: h, .. } if h == "Plus" || h == "Times"
+                    );
+                    if needs_numer_parens {
+                        write!(f, "(")?;
+                        format_input_form(numer, f)?;
+                        write!(f, ")")?;
+                    } else {
+                        format_input_form(numer, f)?;
+                    }
                     write!(f, "/")?;
                     let denom = &args[1];
                     if matches!(
@@ -1916,6 +1927,7 @@ fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 min_exponent, max_exponent, denominator
             )
         }
+        Value::Rational(r) => write!(f, "Rational[{}, {}]", r.numer(), r.denom()),
         _ => write!(f, "{}", v),
     }
 }

@@ -854,6 +854,21 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     };
     let concrete = flattened.unwrap_or(concrete);
 
+    // Normalize Divide[a, b] → Times[a, Power[b, -1]] so D rules can match
+    let concrete = match &concrete {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                args[0].clone(),
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![args[1].clone(), Value::Integer(Integer::from(-1))],
+                },
+            ],
+        },
+        _ => concrete,
+    };
+
     // Handle multi-arg Times/Plus in Rust
     if let Value::Call { ref head, ref args } = concrete {
         let name = head.as_str();
@@ -882,28 +897,34 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     if let Some(d_func) = env.get("D")
         && let Value::Function(_) = &d_func
     {
-        // Evaluate Pattern args in the current environment to resolve symbolic
-        // variable names (u, n, etc.) that come from parent rule bodies.
-        // D has HoldAll, so args come as Value::Pattern(Expr). When the D call
-        // originates from another D rule's body (e.g., D[u, x] from the Power rule),
-        // the Expr contains symbolic variable names. Passing Pattern-wrapped symbols
-        // to the D function definitions causes pattern matching to bind to those
-        // symbolic names. By evaluating the Expr in env, we resolve them to actual values.
-        let concrete_expr = match &expr {
-            Value::Pattern(p) => crate::eval::eval(p, env)?,
-            Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
-            _ => expr.clone(),
-        };
+        // Use the normalized concrete expression (Divide→Times, flattened) for matching.
+        // For the variable, evaluate Pattern to resolve symbolic names from rule bodies.
         let concrete_var = match &var {
             Value::Pattern(p) => crate::eval::eval(p, env)?,
             Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => var.clone(),
         };
-        return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
+        return match crate::eval::apply_function(&d_func, &[concrete.clone(), concrete_var.clone()], env) {
+            Ok(v) => Ok(v),
+            Err(EvalError::NoMatch { .. }) => {
+                // No D rule matched — return unevaluated D with concrete (unwrapped) args
+                Ok(Value::Call {
+                    head: "D".to_string(),
+                    args: vec![concrete, concrete_var],
+                })
+            }
+            Err(e) => Err(e),
+        };
     }
+    // Use concrete (unwrapped, normalized) values for the unevaluated return
+    let concrete_var = match &var {
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
+        _ => var.clone(),
+    };
     Ok(Value::Call {
         head: "D".to_string(),
-        args: vec![expr, var],
+        args: vec![concrete, concrete_var],
     })
 }
 
@@ -1028,6 +1049,22 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let expr = match &args[0] {
         Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
         _ => args[0].clone(),
+    };
+    // Normalize Divide[a, b] → Times[a, Power[b, -1]] for Rubi rule matching
+    let expr = match &expr {
+        Value::Call { head, args: dargs } if head == "Divide" && dargs.len() == 2 => {
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    dargs[0].clone(),
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![dargs[1].clone(), Value::Integer(Integer::from(-1))],
+                    },
+                ],
+            }
+        }
+        _ => expr,
     };
 
     // Extract variable name and optional bounds for definite integral
