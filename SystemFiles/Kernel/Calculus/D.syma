@@ -3,8 +3,8 @@
 (* Constants don't change with respect to any variable *)
 D[c_, x_] := 0 /; FreeQ[c, x]
 
-(* d(x)/dx = 1, but only for symbols (not composite expressions) *)
-D[x_, x_] := 1 /; MatchQ[x_, _Symbol]
+(* d(x)/dx = 1, both args must be the same symbol *)
+D[var_, x_] := 1 /; (var == x) && MatchQ[var, _Symbol]
 
 (* Linearity: D(f + g, x) = D(f, x) + D(g, x) *)
 D[Plus[f_, g_], x_] := Plus[D[f, x], D[g, x]]
@@ -15,8 +15,9 @@ D[Times[f_, g_], x_] := Plus[Times[D[f, x], g], Times[f, D[g, x]]]
 (* Power rule with constant exponent: d(u^n)/dx = n*u^(n-1)*u' *)
 D[Power[u_, n_], x_] := Times[n, Power[u, Plus[n, -1]], D[u, x]]
 
-(* Chain rule for unknown heads: D(f(u), x) = D(f(u), u) * D(u, x) *)
-D[f_[u_], x_] := Times[D[f[u], u], D[u, x]]
+(* Chain rule for unknown heads: D(f(u), x) = D(f(u), u) * D(u, x)
+   Guards: avoid infinite recursion when u == x or func_[u] is the same as the original expression *)
+D[func_[u_], x_] := Times[D[func[u], u], D[u, x]] /; (u != x) && (func[u] != func[x])
 
 (* Trigonometric derivatives *)
 D[Sin[u_], x_] := Times[Cos[u], D[u, x]]

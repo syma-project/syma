@@ -2239,10 +2239,17 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     for (name, value) in &bindings {
                         child_env.set(name.clone(), value.clone());
                     }
-                    // Catch Return[expr] and unwrap it as the function result
+                    // Catch Return[expr] and unwrap it as the function result.
+                    // Catch NoMatch and return unevaluated Call (symbolic form).
                     match eval(&def.body, &child_env) {
                         Ok(v) => return Ok(v),
                         Err(EvalError::Return(v)) => return Ok(*v),
+                        Err(EvalError::NoMatch { head, args }) => {
+                            return Ok(Value::Call {
+                                head,
+                                args: *args,
+                            });
+                        }
                         Err(e) => return Err(e),
                     }
                 }
