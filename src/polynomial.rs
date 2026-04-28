@@ -580,7 +580,7 @@ pub fn min_poly_operation(
 /// Minimal polynomial for c * alpha where alpha is root p_i of poly p.
 /// If c is integer, then the poly for c*alpha is obtained by substituting x -> x/c in p,
 /// i.e., p(x/c) * c^deg. Result: coefficients are scaled.
-pub fn min_poly_scale_int(p: &[Rational], root_idx: usize, c: i64) -> Vec<Rational> {
+pub fn min_poly_scale_int(p: &[Rational], _root_idx: usize, c: i64) -> Vec<Rational> {
     if c == 1 {
         return p.to_vec();
     }
@@ -612,8 +612,8 @@ pub fn min_poly_scale_int(p: &[Rational], root_idx: usize, c: i64) -> Vec<Ration
         if sign_c < 0 && i % 2 == 1 && power % 2 == 1 {
             // sign correction
         }
-            if sign_c < 0 && (deg - i) % 2 == 1 {
-           coef = Rational::from(-&coef.clone());
+        if sign_c < 0 && (deg - i) % 2 == 1 {
+            coef = Rational::from(-&coef.clone());
         }
         result.push(coef);
     }
@@ -767,7 +767,7 @@ fn poly_matrix_det(matrix: &[Vec<Vec<Rational>>], n: usize, max_deg: usize) -> V
     for pt in 0..num_points {
         // Evaluate each matrix entry at z = pt, get rational value.
         let num = pt; // use pt as evaluation point
-        let num_r = Rational::from(num);
+        let _num_r = Rational::from(num);
         let num_float = num as f64;
         // Build numeric matrix
         let mut num_matrix: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
@@ -840,14 +840,14 @@ fn determinant_f64(matrix: &[Vec<f64>]) -> f64 {
 
 /// Interpolate a polynomial from values at integer points 0..=max_deg.
 /// Returns coefficient vector. The evaluations should have len = max_deg + 1.
-fn interpolate_from_integers(evals: &[(i64, i64)], max_deg: usize) -> Vec<Rational> {
+fn interpolate_from_integers(evals: &[(i64, i64)], _max_deg: usize) -> Vec<Rational> {
     let n = evals.len(); // = max_deg + 1
     let mut coeffs = vec![Rational::from(0); n];
 
     // Newton interpolation
     for i in 0..n {
         let mut molecule = evals[i].1;
-        let mut denominator = 1i64;
+        let _denominator = 1i64;
         for j in 0..n {
             if i == j {
                 continue;

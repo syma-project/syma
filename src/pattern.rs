@@ -887,7 +887,7 @@ fn match_call_pattern(
             head: vhead,
             args: vargs,
         } => {
-            let (head_name, mut head_bindings) = match head_match {
+            let (head_name, head_bindings) = match head_match {
                 Some(hm) => hm,
                 None => return MatchResult::NoMatch,
             };

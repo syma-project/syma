@@ -11,7 +11,6 @@ use crate::env::Env;
 use crate::eval::eval;
 use crate::value::{EvalError, Value};
 use rug::Integer;
-use rug::Rational;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression Inspection
@@ -79,14 +78,17 @@ fn parse_level_spec(spec: &Value) -> Vec<(i32, i32)> {
                 parse_level_spec(&items[0])
             } else {
                 // List of individual levels
-                items.iter().filter_map(|v| {
-                    if let Value::Integer(n) = v {
-                        let lv = n.to_i64().unwrap_or(0) as i32;
-                        Some((lv, lv))
-                    } else {
-                        None
-                    }
-                }).collect()
+                items
+                    .iter()
+                    .filter_map(|v| {
+                        if let Value::Integer(n) = v {
+                            let lv = n.to_i64().unwrap_or(0) as i32;
+                            Some((lv, lv))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
             }
         }
         Value::Symbol(s) if s == "Infinity" => vec![(0, i32::MAX)],
@@ -97,11 +99,15 @@ fn parse_level_spec(spec: &Value) -> Vec<(i32, i32)> {
 /// Count the total number of leaves in a value tree.
 fn count_leaves(val: &Value) -> usize {
     match val {
-        Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. }
-        | Value::Str(_) | Value::Bool(_) | Value::Null | Value::Symbol(_) => 1,
-        Value::List(items) | Value::Sequence(items) => {
-            items.iter().map(count_leaves).sum()
-        }
+        Value::Integer(_)
+        | Value::Real(_)
+        | Value::Rational(_)
+        | Value::Complex { .. }
+        | Value::Str(_)
+        | Value::Bool(_)
+        | Value::Null
+        | Value::Symbol(_) => 1,
+        Value::List(items) | Value::Sequence(items) => items.iter().map(count_leaves).sum(),
         Value::Call { args, .. } => args.iter().map(count_leaves).sum(),
         Value::Rule { lhs, rhs, .. } => count_leaves(lhs) + count_leaves(rhs),
         Value::Assoc(map) => map.values().map(count_leaves).sum(),
@@ -121,9 +127,7 @@ fn compute_depth(val: &Value) -> usize {
         Value::Call { args, .. } if !args.is_empty() => {
             1 + args.iter().map(compute_depth).max().unwrap_or(0)
         }
-        Value::Rule { lhs, rhs, .. } => {
-            1 + std::cmp::max(compute_depth(lhs), compute_depth(rhs))
-        }
+        Value::Rule { lhs, rhs, .. } => 1 + std::cmp::max(compute_depth(lhs), compute_depth(rhs)),
         Value::Assoc(map) if !map.is_empty() => {
             1 + map.values().map(compute_depth).max().unwrap_or(0)
         }
@@ -141,7 +145,9 @@ fn compute_depth(val: &Value) -> usize {
 /// Return parts of expr at specified level(s).
 pub fn builtin_level(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
-        return Err(EvalError::Error("Level expects 1 or 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Level expects 1 or 2 arguments".to_string(),
+        ));
     }
     let spec = if args.len() == 2 {
         parse_level_spec(&args[1])
@@ -174,14 +180,16 @@ pub fn builtin_depth(args: &[Value]) -> Result<Value, EvalError> {
 /// Return the part of expr at the specified position.
 pub fn builtin_extract(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
-        return Err(EvalError::Error("Extract expects 2 or more arguments".to_string()));
+        return Err(EvalError::Error(
+            "Extract expects 2 or more arguments".to_string(),
+        ));
     }
-    let mut current = &args[0];
+    let mut current = args[0].clone();
 
     // Parse indices from args[1..]
     let indices: Vec<usize> = (1..args.len())
         .filter_map(|i| match &args[i] {
-            Value::List(items) => None, // handle separately
+            Value::List(_) => None, // handle separately
             Value::Integer(n) => n.to_usize(),
             _ => None,
         })
@@ -190,13 +198,16 @@ pub fn builtin_extract(args: &[Value]) -> Result<Value, EvalError> {
     // Handle spec as a single list argument: Extract[expr, {i, j, ...}]
     let indices = if indices.is_empty() && args.len() == 2 {
         if let Value::List(items) = &args[1] {
-            items.iter().filter_map(|v| {
-                if let Value::Integer(n) = v {
-                    n.to_usize()
-                } else {
-                    None
-                }
-            }).collect()
+            items
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Integer(n) = v {
+                        n.to_usize()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         } else {
             return Err(EvalError::Error(
                 "Extract indices must be Integers or a list of Integers".to_string(),
@@ -207,35 +218,37 @@ pub fn builtin_extract(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     for &idx in &indices {
-        current = extract_part(current, idx).ok_or_else(|| {
-            EvalError::Error(format!("Extract: part {} does not exist", idx))
-        })?;
+        current = extract_part(&current, idx)
+            .ok_or_else(|| EvalError::Error(format!("Extract: part {} does not exist", idx)))?;
     }
-    Ok(current.clone())
+    Ok(current)
 }
 
 /// Extract a 1-based index from a value.
-fn extract_part(val: &Value, idx: usize) -> Option<&Value> {
+fn extract_part(val: &Value, idx: usize) -> Option<Value> {
     if idx == 0 {
-        return Some(val); // part 0 is the expression itself ( WL convention: head )
+        return Some(val.clone());
     }
     let idx = idx - 1; // convert to 0-based
 
     match val {
-        Value::List(items) => items.get(idx),
+        Value::List(items) => items.get(idx).cloned(),
         Value::Call { head, args } => {
             if idx == 0 {
-                // Part 1 of a call is the head
-                Some(&Value::Symbol(head.to_string()))
+                Some(Value::Symbol(head.clone()))
             } else {
-                args.get(idx - 1)
+                args.get(idx - 1).cloned()
             }
         }
         Value::Rule { lhs, rhs, .. } => {
-            if idx == 0 { Some(lhs.as_ref()) } else { Some(rhs.as_ref()) }
+            if idx == 0 {
+                Some((**lhs).clone())
+            } else {
+                Some((**rhs).clone())
+            }
         }
-        Value::Assoc(map) => map.values().nth(idx),
-        Value::Sequence(items) => items.get(idx),
+        Value::Assoc(map) => map.values().nth(idx).cloned(),
+        Value::Sequence(items) => items.get(idx).cloned(),
         _ => None,
     }
 }
@@ -248,7 +261,9 @@ fn extract_part(val: &Value, idx: usize) -> Option<&Value> {
 /// Replace[expr, rule] or Replace[expr, rule, levelspec]
 pub fn builtin_replace(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(EvalError::Error("Replace expects 2 or 3 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Replace expects 2 or 3 arguments".to_string(),
+        ));
     }
     let spec = if args.len() == 3 {
         parse_level_spec(&args[2])
@@ -275,7 +290,9 @@ pub fn builtin_replace(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// ReplaceList[expr, rule]
 pub fn builtin_replace_list(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("ReplaceList expects exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "ReplaceList expects exactly 2 arguments".to_string(),
+        ));
     }
     let mut results = Vec::new();
     collect_all_replacements(&args[0], &args[1], env, &mut results)?;
@@ -370,7 +387,11 @@ fn value_replace_child(val: &Value, pos: usize, new_child: &Value) -> Result<Val
 /// Try applying a rule to a value. Returns the value unchanged if rule doesn't match.
 fn try_apply_rule(val: &Value, rule: &Value, env: &Env) -> Result<Value, EvalError> {
     match rule {
-        Value::Rule { lhs, rhs, delayed: false } => {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: false,
+        } => {
             // Immediate rule: check if val matches lhs
             if val.struct_eq(lhs) {
                 Ok((**rhs).clone())
@@ -378,7 +399,11 @@ fn try_apply_rule(val: &Value, rule: &Value, env: &Env) -> Result<Value, EvalErr
                 Ok(val.clone())
             }
         }
-        Value::Rule { lhs, rhs, delayed: true } => {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: true,
+        } => {
             // Delayed rule: check structural match, then evaluate rhs
             if val.struct_eq(lhs) {
                 eval(&convert_value_to_expr(rhs), env)
@@ -465,7 +490,11 @@ fn build_from_children(val: &Value, children: &[Value]) -> Result<Value, EvalErr
             head: head.clone(),
             args: children.to_vec(),
         }),
-        Value::Rule { lhs, rhs, delayed } => {
+        Value::Rule {
+            lhs: _,
+            rhs: _,
+            delayed,
+        } => {
             if children.len() >= 2 {
                 Ok(Value::Rule {
                     lhs: Box::new(children[0].clone()),
@@ -484,7 +513,9 @@ fn build_from_children(val: &Value, children: &[Value]) -> Result<Value, EvalErr
 /// Check[expr1, expr2] — evaluate expr1; if it generates an error, evaluate expr2 instead.
 pub fn builtin_check(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Check expects exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Check expects exactly 2 arguments".to_string(),
+        ));
     }
     // expr1 is held initially — we need to evaluate it manually
     // Since this is a builtin with HoldAll semantics, args[0] is already the unevaluated value
@@ -506,7 +537,9 @@ pub fn builtin_check(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// NumericQ[val] — True if val is or contains only numerical data.
 pub fn builtin_numeric_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("NumericQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "NumericQ expects exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(is_numeric_value(&args[0])))
 }
@@ -527,19 +560,39 @@ fn is_numeric_value(val: &Value) -> bool {
 fn is_numeric_function(head: &str) -> bool {
     matches!(
         head,
-        "Sin" | "Cos" | "Tan" | "ArcSin" | "ArcCos" | "ArcTan"
-            | "Log" | "Log2" | "Log10" | "Exp" | "Sqrt"
-            | "Floor" | "Ceiling" | "Round"
-            | "Plus" | "Times" | "Power" | "Divide"
-            | "Abs" | "Sign" | "Gamma" | "Factorial"
-            | "Pi" | "E"
+        "Sin"
+            | "Cos"
+            | "Tan"
+            | "ArcSin"
+            | "ArcCos"
+            | "ArcTan"
+            | "Log"
+            | "Log2"
+            | "Log10"
+            | "Exp"
+            | "Sqrt"
+            | "Floor"
+            | "Ceiling"
+            | "Round"
+            | "Plus"
+            | "Times"
+            | "Power"
+            | "Divide"
+            | "Abs"
+            | "Sign"
+            | "Gamma"
+            | "Factorial"
+            | "Pi"
+            | "E"
     )
 }
 
 /// RealQ[val] — True if val is a real number.
 pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("RealQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "RealQ expects exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(matches!(
         &args[0],
@@ -552,7 +605,9 @@ pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
 /// ExactNumberQ[val] — True if val is an exact number (Integer, Rational, or complex with exact parts).
 pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ExactNumberQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ExactNumberQ expects exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(matches!(
         &args[0],
@@ -564,7 +619,9 @@ pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
 /// VectorQ[list, test] — True if list is a uniform list and all elements pass test.
 pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 1 || args.len() > 2 {
-        return Err(EvalError::Error("VectorQ expects 1 or 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "VectorQ expects 1 or 2 arguments".to_string(),
+        ));
     }
     let items = match &args[0] {
         Value::List(items) => items,
@@ -587,15 +644,12 @@ pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         for item in items {
             let result = match test {
                 Value::PureFunction { .. } | Value::Function(_) | Value::Builtin(..) => {
-                    let call = Value::Call {
+                    let _call = Value::Call {
                         head: "Apply".to_string(),
                         args: vec![test.clone(), item.clone()],
                     };
                     // Simple invocation
-                    let res = builtin_apply(
-                        &[test.clone(), Value::List(vec![item.clone()])],
-                        env,
-                    );
+                    let res = builtin_apply(&[test.clone(), Value::List(vec![item.clone()])], env);
                     match res {
                         Ok(v) => v.to_bool(),
                         Err(_) => false,
@@ -607,7 +661,7 @@ pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                         Value::Symbol(s) => s.clone(),
                         _ => test.to_string(),
                     };
-                    let call = Value::Call {
+                    let _call = Value::Call {
                         head,
                         args: vec![item.clone()],
                     };
@@ -626,7 +680,9 @@ pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// MatrixQ[list] — True if list is a uniform rectangular matrix of atoms.
 pub fn builtin_matrix_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("MatrixQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "MatrixQ expects exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::List(rows) => {
@@ -637,9 +693,8 @@ pub fn builtin_matrix_q(args: &[Value]) -> Result<Value, EvalError> {
                 Value::List(cols) => cols.len(),
                 _ => return Ok(Value::Bool(false)),
             };
-            rows.iter().all(|row| {
-                matches!(row, Value::List(cols) if cols.len() == row_len)
-            })
+            rows.iter()
+                .all(|row| matches!(row, Value::List(cols) if cols.len() == row_len))
         }
         _ => false,
     }
@@ -650,15 +705,22 @@ pub fn builtin_matrix_q(args: &[Value]) -> Result<Value, EvalError> {
 /// ScalarQ[val] — True if val is not a List or Call (a scalar value).
 pub fn builtin_scalar_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ScalarQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ScalarQ expects exactly 1 argument".to_string(),
+        ));
     }
-    Ok(Value::Bool(!matches!(&args[0], Value::List(_) | Value::Call { .. })))
+    Ok(Value::Bool(!matches!(
+        &args[0],
+        Value::List(_) | Value::Call { .. }
+    )))
 }
 
 /// ArrayQ[val] — True if val is a uniform n-dimensional array.
 pub fn builtin_array_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ArrayQ expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ArrayQ expects exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(is_array_value(&args[0])))
 }
@@ -671,7 +733,10 @@ fn is_array_value(val: &Value) -> bool {
             }
             let first_type = items[0].type_name();
             items.iter().all(|v| v.type_name() == first_type)
-                && (matches!(items[0], Value::List(_)) || items.iter().all(|v| !matches!(v, Value::List(_) | Value::Call { .. })))
+                && (matches!(items[0], Value::List(_))
+                    || items
+                        .iter()
+                        .all(|v| !matches!(v, Value::List(_) | Value::Call { .. })))
         }
         _ => false,
     }
@@ -684,7 +749,9 @@ fn is_array_value(val: &Value) -> bool {
 /// FullSimplify[expr] — more aggressive simplification using multiple strategies.
 pub fn builtin_full_simplify(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("FullSimplify expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "FullSimplify expects exactly 1 argument".to_string(),
+        ));
     }
     // Apply multiple simplification strategies and pick the shortest
     let original = &args[0];
@@ -703,7 +770,9 @@ pub fn builtin_full_simplify(args: &[Value]) -> Result<Value, EvalError> {
 /// Together[expr] — combine sum of rational expressions into a single fraction.
 pub fn builtin_together(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Together expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Together expects exactly 1 argument".to_string(),
+        ));
     }
     Ok(apply_together(&args[0]))
 }
@@ -712,10 +781,8 @@ fn apply_together(val: &Value) -> Value {
     match val {
         Value::Call { head, args } if head == "Plus" => {
             // Combine all terms over a common denominator
-            let fractions: Vec<(Value, Value)> = args
-                .iter()
-                .map(|term| term_to_fraction(term))
-                .collect();
+            let fractions: Vec<(Value, Value)> =
+                args.iter().map(|term| term_to_fraction(term)).collect();
 
             if fractions.is_empty() {
                 return val.clone();
@@ -810,10 +877,12 @@ fn combine_numerators(nums: &[Value], dens: &[Value], common_den: &Value) -> Val
 /// Cancel[expr] — cancel common factors in a rational expression.
 pub fn builtin_cancel(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Cancel expects exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Cancel expects exactly 1 argument".to_string(),
+        ));
     }
     // For numeric rational expressions, simplify directly
-    if let Value::Rational(r) = &args[0] {
+    if let Value::Rational(_r) = &args[0] {
         // Already canonical
         return Ok(args[0].clone());
     }
@@ -844,23 +913,12 @@ fn cancel_value(val: &Value) -> Value {
 
 fn factor_value(val: &Value) -> Value {
     // Call into existing Factor implementation
-    crate::builtins::symbolic::builtin_factor(&[val.clone()])
-        .unwrap_or_else(|_| val.clone())
+    crate::builtins::symbolic::builtin_factor(&[val.clone()]).unwrap_or_else(|_| val.clone())
 }
 
 fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
     // Simple cancellation: if both are Times with matching factors
-    if let (
-        Value::Call {
-            head: h1,
-            args: a1,
-        },
-        Value::Call {
-            head: h2,
-            args: a2,
-        },
-    ) = (num, den)
-    {
+    if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den) {
         if h1 == "Times" && h2 == "Times" {
             let mut remaining_num: Vec<Value> = Vec::new();
             let mut remaining_den: Vec<Value> = Vec::new();
@@ -914,7 +972,9 @@ fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
 /// Apart[expr] — partial fraction decomposition.
 pub fn builtin_apart(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 1 || args.len() > 2 {
-        return Err(EvalError::Error("Apart expects 1 or 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Apart expects 1 or 2 arguments".to_string(),
+        ));
     }
     // For rational expressions a/(b*x+c)(d*x+e), decompose
     // Full symbolicApart is complex; implement basic case for integer coefficients
@@ -928,8 +988,7 @@ fn apart_value(val: &Value) -> Value {
     // 2. Factor denominator into linear terms
     // 3. Set up and solve the partial fraction system
     // For the MVP, return the expression as-is for complex cases
-            crate::builtins::symbolic::builtin_simplify(&[val.clone()])
-        .unwrap_or_else(|_| val.clone())
+    crate::builtins::symbolic::builtin_simplify(&[val.clone()]).unwrap_or_else(|_| val.clone())
 }
 
 /// Collect[expr, x] — collect terms with same powers of x.
@@ -949,8 +1008,8 @@ pub fn builtin_collect(args: &[Value]) -> Result<Value, EvalError> {
 
 fn collect_value(val: &Value, var: &str) -> Value {
     // Expand first, then group by powers of var
-    let expanded = crate::builtins::symbolic::builtin_expand(&[val.clone()])
-        .unwrap_or_else(|_| val.clone());
+    let expanded =
+        crate::builtins::symbolic::builtin_expand(&[val.clone()]).unwrap_or_else(|_| val.clone());
 
     // Extract terms from Plus
     let terms = match &expanded {
@@ -959,8 +1018,7 @@ fn collect_value(val: &Value, var: &str) -> Value {
     };
 
     // Group by power of var
-    let mut groups: std::collections::HashMap<i64, Vec<Value>> =
-        std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<i64, Vec<Value>> = std::collections::HashMap::new();
 
     for term in &terms {
         let (power, coeff) = extract_power_and_coeff(term, var);
@@ -968,7 +1026,7 @@ fn collect_value(val: &Value, var: &str) -> Value {
     }
 
     // Sort by power descending
-    let mut powers: Vec<i64> = groups.into_iter().map(|(p, _)| p).collect();
+    let mut powers: Vec<i64> = groups.keys().cloned().collect();
     powers.sort_unstable_by(|a, b| b.cmp(a));
 
     let mut result_terms: Vec<Value> = Vec::new();
@@ -1036,10 +1094,7 @@ fn extract_power_and_coeff(term: &Value, var: &str) -> (i64, Value) {
             for arg in args {
                 match arg {
                     Value::Symbol(s) if s == var => power += 1,
-                    Value::Call {
-                        head: h,
-                        args: a,
-                    } if h == "Power" && a.len() == 2 => {
+                    Value::Call { head: h, args: a } if h == "Power" && a.len() == 2 => {
                         if let Value::Symbol(s) = &a[0] {
                             if s == var {
                                 power += a[1].to_integer().unwrap_or(1);

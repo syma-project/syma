@@ -1,8 +1,7 @@
 use crate::env::Env;
 use crate::polynomial;
-use crate::value::{EvalError, Value, DEFAULT_PRECISION, rational_value};
-use rug::{Float, Integer, Rational};
-use rug::ops::Pow;
+use crate::value::{EvalError, Value, rational_value};
+use rug::{Integer, Rational};
 
 // ── Root constructor ────────────────────────────────────────────────────────────────────────────
 
@@ -23,7 +22,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
                     Value::Real(r) => {
                         let f = r.to_f64();
                         // Best-effort: convert to string and parse as Rational
-                        c.push((rug::Rational::from_str(&f.to_string()).unwrap_or(rug::Rational::from(f))));
+                        c.push(rug::Rational::from_f64(f).unwrap_or(rug::Rational::from(0)));
                     }
                     _ => {
                         return Err(EvalError::TypeError {
@@ -47,9 +46,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             let v = usize::try_from(n).unwrap_or(1);
             if v == 0 {
-                return Err(EvalError::Error(
-                    "Root index must be >= 1".to_string(),
-                ));
+                return Err(EvalError::Error("Root index must be >= 1".to_string()));
             }
             v
         }
@@ -104,10 +101,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── MinimalPolynomial ───────────────────────────────────────────────────────────
 
-pub fn builtin_minimal_polynomial(
-    args: &[Value],
-    _env: &Env,
-) -> Result<Value, EvalError> {
+pub fn builtin_minimal_polynomial(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(EvalError::Error(
             "MinimalPolynomial requires at least 1 argument".to_string(),
@@ -132,10 +126,7 @@ pub fn builtin_minimal_polynomial(
         }
         Value::Rational(r) => {
             let (num, den) = r.clone().into_numer_denom();
-            Ok(Value::List(vec![
-                Value::Integer(-num),
-                Value::Integer(den),
-            ]))
+            Ok(Value::List(vec![Value::Integer(-num), Value::Integer(den)]))
         }
         _ => Ok(Value::Call {
             head: "MinimalPolynomial".to_string(),
@@ -238,13 +229,8 @@ fn root_add(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 index: ib,
             },
         ) => {
-            let minp = polynomial::min_poly_operation(
-                ca,
-                *ia,
-                cb,
-                *ib,
-                polynomial::AlgebraicOp::Add,
-            );
+            let minp =
+                polynomial::min_poly_operation(ca, *ia, cb, *ib, polynomial::AlgebraicOp::Add);
             if polynomial::poly_degree(&minp) == 0 {
                 return Ok(Value::Integer(Integer::from(0)));
             }
@@ -277,13 +263,8 @@ fn root_mul(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 index: ib,
             },
         ) => {
-            let minp = polynomial::min_poly_operation(
-                ca,
-                *ia,
-                cb,
-                *ib,
-                polynomial::AlgebraicOp::Mul,
-            );
+            let minp =
+                polynomial::min_poly_operation(ca, *ia, cb, *ib, polynomial::AlgebraicOp::Mul);
             if polynomial::poly_degree(&minp) == 0 {
                 return Ok(Value::Integer(Integer::from(0)));
             }
@@ -312,8 +293,7 @@ fn root_as_f64(v: &Value) -> Result<f64, EvalError> {
                 let (re, im) = roots[*index - 1];
                 if im.abs() > 0.01 {
                     return Err(EvalError::Error(
-                        "Root: complex root not yet supported in RootReduce"
-                            .to_string(),
+                        "Root: complex root not yet supported in RootReduce".to_string(),
                     ));
                 }
                 Ok(re)
@@ -363,10 +343,9 @@ fn to_radicals_value(v: &Value) -> Result<Value, EvalError> {
                 _ => Ok(v.clone()),
             }
         }
-        Value::Integer(_)
-        | Value::Rational(_)
-        | Value::Real(_)
-        | Value::Complex { .. } => Ok(v.clone()),
+        Value::Integer(_) | Value::Rational(_) | Value::Real(_) | Value::Complex { .. } => {
+            Ok(v.clone())
+        }
         Value::Call { head, args: sub } => {
             let converted: Result<Vec<Value>, _> = sub.iter().map(to_radicals_value).collect();
             Ok(Value::Call {
@@ -375,8 +354,7 @@ fn to_radicals_value(v: &Value) -> Result<Value, EvalError> {
             })
         }
         Value::List(items) => {
-            let converted: Result<Vec<Value>, _> =
-                items.iter().map(to_radicals_value).collect();
+            let converted: Result<Vec<Value>, _> = items.iter().map(to_radicals_value).collect();
             Ok(Value::List(converted?))
         }
         _ => Ok(v.clone()),
@@ -453,7 +431,10 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
     };
     let denominator = Value::Call {
         head: "Times".to_string(),
-        args: vec![Value::Integer(Integer::from(2)), polynomial::rational_to_value(a)],
+        args: vec![
+            Value::Integer(Integer::from(2)),
+            polynomial::rational_to_value(a),
+        ],
     };
 
     Ok(Value::Call {
@@ -542,10 +523,7 @@ fn isolating_interval_real(coeffs: &[Rational], approx: f64) -> Result<Value, Ev
         }
     }
 
-    Ok(Value::List(vec![
-        rat_value(&lo),
-        rat_value(&hi),
-    ]))
+    Ok(Value::List(vec![rat_value(&lo), rat_value(&hi)]))
 }
 
 fn rat_value(r: &Rational) -> Value {

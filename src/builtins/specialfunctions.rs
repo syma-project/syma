@@ -1,6 +1,7 @@
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+use rug::ops::Pow;
 
 // Helper: convert a Value to f64.
 fn to_f64(v: &Value) -> Option<f64> {
@@ -114,14 +115,6 @@ fn inverse_erf_approx(x: f64) -> f64 {
         w
     }
 }
-        w
-    }
-}
-
-fn abs_diff_break(diff: f64, w: f64, _x: f64) {
-    if diff.abs() < 1e-16 { /* signal handled by loop */ }
-    let _ = (w, );
-}
 
 pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
@@ -165,7 +158,7 @@ pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
             let gamma_x = fx.clone().gamma();
             let gamma_y = fy.clone().gamma();
             let gamma_xy = fx_sum.gamma();
-            Ok(Value::Real((&gamma_x * &gamma_y) / gamma_xy))
+            Ok(Value::Real(&gamma_x * &gamma_y / &gamma_xy))
         }
         (Value::Real(x), Value::Real(y)) => {
             if x.is_sign_negative() || y.is_sign_negative() {
@@ -176,7 +169,7 @@ pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
             let gamma_y = y.clone().gamma();
             let sum = Float::with_val(prec, x + y);
             let gamma_xy = sum.gamma();
-            Ok(Value::Real((&gamma_x * &gamma_y) / gamma_xy))
+            Ok(Value::Real(&gamma_x * &gamma_y / &gamma_xy))
         }
         _ => Ok(unevaluated("Beta", args)),
     }
@@ -209,13 +202,13 @@ fn is_small_even_positive(n: &Float) -> Option<u64> {
     if diff > 1e-10 {
         return None;
     }
-    let int_val = rounded.to_integer();
+    let int_val = rounded.to_integer()?;
     if !int_val.is_negative()
         && int_val % Integer::from(2) == Integer::from(0)
         && int_val > Integer::from(1)
         && int_val <= Integer::from(20)
     {
-        Some(int_val.to_u64())
+        int_val.to_u64()
     } else {
         None
     }
@@ -238,7 +231,7 @@ fn zeta_even(k: u64) -> Float {
     let n_div_2 = (k / 2 - 1) as usize;
     let (bn_num, bn_den) = bernoulli[n_div_2];
     let two_pi = Float::with_val(prec, 2.0 * std::f64::consts::PI);
-    let two_pi_n = two_pi.pow(k);
+    let two_pi_n = two_pi.pow(&Integer::from(k));
     let mut factorial = Float::with_val(prec, 1u32);
     for i in 2..=k as i64 {
         factorial *= Float::with_val(prec, i);
@@ -285,7 +278,10 @@ fn compute_zeta_numeric(s: &Float) -> Float {
         let mut sum = Float::with_val(prec, 0.0);
         for n in 1..=1_000_000u32 {
             let n_f = Float::with_val(prec, n);
-            let term = Float::with_val(prec, 1.0) / n_f.pow(s_f.clone());
+            {
+                let nf_pow = n_f.pow(&s_f.clone());
+                Float::with_val(prec, 1.0) / nf_pow
+            }
             sum += term.clone();
             if term < tolerance.clone() {
                 break;
@@ -297,11 +293,19 @@ fn compute_zeta_numeric(s: &Float) -> Float {
         let mut sum = Float::with_val(prec, 0.0);
         for n in 1..=max_n {
             let n_f = Float::with_val(prec, n);
-            sum += Float::with_val(prec, 1.0) / n_f.pow(s_f.clone());
+            {
+                let nf_pow = n_f.pow(&s_f.clone());
+                sum += Float::with_val(prec, 1.0) / nf_pow;
+            }
         }
         let n_last = Float::with_val(prec, max_n);
         let one = Float::with_val(prec, 1u32);
-        let tail = (&n_last.pow(&one - &s_f)) / (&s_f - &one);
+        {
+            let exponent = &one - &s_f;
+            let n_last_pow = n_last.pow(&exponent);
+            let denom = &s_f - &one;
+            &n_last_pow / &denom
+        }
         sum + tail
     }
 }
@@ -438,7 +442,7 @@ pub fn builtin_polygamma(args: &[Value]) -> Result<Value, EvalError> {
             factorial *= i as f64;
         }
         let mut sum = 0.0_f64;
-        let p = f64::from(n_int + 1);
+        let p = (n_int + 1) as f64;
         let mut k: u32 = 0;
         while k < 10_000_000 {
             let term = 1.0 / (k as f64 + z).powf(p);
@@ -559,11 +563,9 @@ pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     match (n_val, z_val) {
-        (Value::Integer(n), Value::Integer(z)) | (Value::Integer(n), Value::Real(z))
-            if !n.is_negative() =>
-        {
-            if let (Some(n), Some(z)) = (n.to_u64(), to_f64(z_val)) {
-                return Ok(real(bessel_j_series(n, z)));
+        (Value::Integer(n), _) if !n.is_negative() => {
+            if let (Some(n_u64), Some(z)) = (n.to_u64(), to_f64(z_val)) {
+                return Ok(real(bessel_j_series(n_u64, z)));
             }
         }
         _ => {}
@@ -625,8 +627,7 @@ pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match (&args[0], &args[1]) {
-        (Value::Integer(n), _) | (_, Value::Integer(_)) | (_, Value::Real(_))
-            if matches!(&args[0], Value::Integer(n) if !n.is_negative()) =>
+        (Value::Integer(n), &_) if !n.is_negative() =>
         {
             if let (Some(n), Some(z)) = (to_f64(&args[0]), to_f64(&args[1])) {
                 return Ok(real(bessel_i_series(n as u64, z)));
@@ -685,7 +686,6 @@ pub fn builtin_lambert_w(args: &[Value]) -> Result<Value, EvalError> {
             "LambertW requires exactly 1 argument".to_string(),
         ));
     }
-    const NEG_INV_E: f64 = -1.0 / std::f64::consts::E;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(n) => {

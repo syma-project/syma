@@ -401,6 +401,26 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
             m.insert("den".into(), JVal::Number((*denominator as i64).into()));
             JVal::Object(m)
         }
+        Value::Root { coeffs, index } => {
+            let mut m = Map::new();
+            m.insert("t".into(), JVal::String("root".into()));
+            m.insert(
+                "coeffs".into(),
+                JVal::Array(
+                    coeffs
+                        .iter()
+                        .map(|c| {
+                            JVal::Array(vec![
+                                JVal::String(c.numer().to_string()),
+                                JVal::String(c.denom().to_string()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
+            m.insert("idx".into(), JVal::Number((*index as u64).into()));
+            JVal::Object(m)
+        }
     }
 }
 

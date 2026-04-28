@@ -9,8 +9,8 @@ use std::collections::HashMap;
 // ── Color Palette ──────────────────────────────────────────────────────────────
 
 const DEFAULT_PALETTE: &[&str] = &[
-    "#4285F4", "#EA4335", "#FBBC05", "#34A853", "#FF6D01", "#46BDC6",
-    "#9C27B0", "#795548", "#607D8B", "#F44336", "#E91E63", "#9E9E9E",
+    "#4285F4", "#EA4335", "#FBBC05", "#34A853", "#FF6D01", "#46BDC6", "#9C27B0", "#795548",
+    "#607D8B", "#F44336", "#E91E63", "#9E9E9E",
 ];
 
 /// Get a color from the palette by index (wraps around).
@@ -60,7 +60,15 @@ fn nice_step(range: f64) -> f64 {
     let exp = rough.log10().floor();
     let base = 10.0_f64.powf(exp);
     let frac = rough / base;
-    let nice = if frac < 1.5 { 1.0 } else if frac < 3.5 { 2.0 } else if frac < 7.5 { 5.0 } else { 10.0 };
+    let nice = if frac < 1.5 {
+        1.0
+    } else if frac < 3.5 {
+        2.0
+    } else if frac < 7.5 {
+        5.0
+    } else {
+        10.0
+    };
     nice * base
 }
 
@@ -129,13 +137,21 @@ fn svg_with_axes(
     svg.push_str(content);
 
     // Axes
-    let y0 = if y_min <= 0.0 && y_max >= 0.0 { ty(0.0) } else { MARGIN_TOP + plot_h };
+    let y0 = if y_min <= 0.0 && y_max >= 0.0 {
+        ty(0.0)
+    } else {
+        MARGIN_TOP + plot_h
+    };
     svg.push_str(&format!(
         "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
         MARGIN_LEFT, y0, MARGIN_LEFT + plot_w, y0, AXIS_COLOR
     ));
 
-    let x0 = if x_min <= 0.0 && x_max >= 0.0 { tx(0.0) } else { MARGIN_LEFT };
+    let x0 = if x_min <= 0.0 && x_max >= 0.0 {
+        tx(0.0)
+    } else {
+        MARGIN_LEFT
+    };
     svg.push_str(&format!(
         "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
         x0, MARGIN_TOP, x0, MARGIN_TOP + plot_h, AXIS_COLOR
@@ -160,7 +176,11 @@ fn svg_with_axes(
     }
 
     // Tick labels (Y)
-    let x_label_x = if x_label.is_empty() { MARGIN_LEFT - 8.0 } else { MARGIN_LEFT - 32.0 };
+    let x_label_x = if x_label.is_empty() {
+        MARGIN_LEFT - 8.0
+    } else {
+        MARGIN_LEFT - 32.0
+    };
     for tick in axis_ticks(y_min, y_max) {
         let sy = ty(tick);
         svg.push_str(&format!(
@@ -207,10 +227,14 @@ fn svg_with_axes(
 
 /// Map data coordinates to SVG coordinates.
 fn map_to_svg(
-    x: f64, y: f64,
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
-    width: f64, height: f64,
+    x: f64,
+    y: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: f64,
+    height: f64,
 ) -> (f64, f64) {
     let plot_w = width - MARGIN_LEFT - MARGIN_RIGHT;
     let plot_h = height - MARGIN_TOP - MARGIN_BOTTOM;
@@ -255,15 +279,23 @@ fn auto_bins(n: usize) -> usize {
 
 pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("BarChart requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "BarChart requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("BarChart: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "BarChart: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 1 { &args[1] } else { &Value::Assoc(HashMap::new()) };
+    let options = if args.len() > 1 {
+        &args[1]
+    } else {
+        &Value::Assoc(HashMap::new())
+    };
     let (width, height, _) = parse_chart_options(options);
 
     // Parse data as either {v1, v2, ...} or {{x1, y1}, {x2, y2}, ...}
@@ -279,15 +311,17 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
             }
             result
         }
-        _ => {
-            data.iter().enumerate()
-                .filter_map(|(i, v)| to_f64(v).map(|y| (i as f64 + 1.0, y)))
-                .collect()
-        }
+        _ => data
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| to_f64(v).map(|y| (i as f64 + 1.0, y)))
+            .collect(),
     };
 
     if bars.is_empty() {
-        return Err(EvalError::Error("BarChart: no valid data points".to_string()));
+        return Err(EvalError::Error(
+            "BarChart: no valid data points".to_string(),
+        ));
     }
 
     // Compute bounds
@@ -320,12 +354,52 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
     let mut content = String::new();
     for (i, (bx, by)) in bars.iter().enumerate() {
         let color = palette_color(i);
-        let base_y = if *by >= 0.0 { y_min_padded } else { y_max_padded };
+        let base_y = if *by >= 0.0 {
+            y_min_padded
+        } else {
+            y_max_padded
+        };
 
-        let (sx_left, _) = map_to_svg(bx - bar_width / 2.0, 0.0, x_min_padded, x_max_padded, y_min_padded, y_max_padded, width, height);
-        let (sx_right, _) = map_to_svg(bx + bar_width / 2.0, 0.0, x_min_padded, x_max_padded, y_min_padded, y_max_padded, width, height);
-        let (_, sy_base) = map_to_svg(0.0, base_y, x_min_padded, x_max_padded, y_min_padded, y_max_padded, width, height);
-        let (_, sy_top) = map_to_svg(0.0, *by, x_min_padded, x_max_padded, y_min_padded, y_max_padded, width, height);
+        let (sx_left, _) = map_to_svg(
+            bx - bar_width / 2.0,
+            0.0,
+            x_min_padded,
+            x_max_padded,
+            y_min_padded,
+            y_max_padded,
+            width,
+            height,
+        );
+        let (sx_right, _) = map_to_svg(
+            bx + bar_width / 2.0,
+            0.0,
+            x_min_padded,
+            x_max_padded,
+            y_min_padded,
+            y_max_padded,
+            width,
+            height,
+        );
+        let (_, sy_base) = map_to_svg(
+            0.0,
+            base_y,
+            x_min_padded,
+            x_max_padded,
+            y_min_padded,
+            y_max_padded,
+            width,
+            height,
+        );
+        let (_, sy_top) = map_to_svg(
+            0.0,
+            *by,
+            x_min_padded,
+            x_max_padded,
+            y_min_padded,
+            y_max_padded,
+            width,
+            height,
+        );
 
         let sw = (sx_right - sx_left).abs();
         let sh = (sy_top - sy_base).abs().max(0.0);
@@ -338,17 +412,24 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height,
-        x_min_padded, x_max_padded,
-        y_min_padded, y_max_padded,
-        "", "",
+        &content,
+        width,
+        height,
+        x_min_padded,
+        x_max_padded,
+        y_min_padded,
+        y_max_padded,
+        "",
+        "",
     )))
 }
 
 /// Generate a 3D bar chart — for now returns symbolic unevaluated expression.
 pub fn builtin_bar_chart_3d(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("BarChart3D requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "BarChart3D requires at least 1 argument".to_string(),
+        ));
     }
     Ok(Value::Call {
         head: "Chart3D".to_string(),
@@ -360,15 +441,21 @@ pub fn builtin_bar_chart_3d(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("Histogram requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Histogram requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("Histogram: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "Histogram: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 2 { &args[2] } else {
+    let options = if args.len() > 2 {
+        &args[2]
+    } else {
         if args.len() == 2 {
             match &args[1] {
                 Value::Assoc(_) => &args[1],
@@ -395,7 +482,9 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
             Value::List(edges) => {
                 let edge_vals: Vec<f64> = edges.iter().filter_map(|e| to_f64(e)).collect();
                 if edge_vals.len() < 2 {
-                    return Err(EvalError::Error("Histogram: need at least 2 bin edges".to_string()));
+                    return Err(EvalError::Error(
+                        "Histogram: need at least 2 bin edges".to_string(),
+                    ));
                 }
                 return build_histogram_svg(&nums, &edge_vals, width, height);
             }
@@ -406,7 +495,11 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     let range = data_max - data_min;
-    let dx = if range == 0.0 { 1.0 } else { range / bins as f64 };
+    let dx = if range == 0.0 {
+        1.0
+    } else {
+        range / bins as f64
+    };
     let edges: Vec<f64> = (0..=bins).map(|i| data_min + i as f64 * dx).collect();
 
     build_histogram_svg(&nums, &edges, width, height)
@@ -420,7 +513,9 @@ fn build_histogram_svg(
 ) -> Result<Value, EvalError> {
     let n_bins = edges.len() - 1;
     if n_bins == 0 {
-        return Err(EvalError::Error("Histogram: need at least 1 bin".to_string()));
+        return Err(EvalError::Error(
+            "Histogram: need at least 1 bin".to_string(),
+        ));
     }
 
     let mut counts = vec![0i64; n_bins];
@@ -468,10 +563,7 @@ fn build_histogram_svg(
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height,
-        x_min, x_max,
-        0.0, y_max,
-        "", "Count",
+        &content, width, height, x_min, x_max, 0.0, y_max, "", "Count",
     )))
 }
 
@@ -484,15 +576,23 @@ pub fn builtin_histogram_list(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("PieChart requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "PieChart requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("PieChart: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "PieChart: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 1 { &args[1] } else { &Value::Assoc(HashMap::new()) };
+    let options = if args.len() > 1 {
+        &args[1]
+    } else {
+        &Value::Assoc(HashMap::new())
+    };
     let (width, height, _) = parse_chart_options(options);
 
     struct PieSlice {
@@ -519,16 +619,22 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
             }
             result
         }
-        _ => {
-            data.iter()
-                .filter_map(|v| to_f64(v).map(|val| PieSlice { value: val, label: None }))
-                .collect()
-        }
+        _ => data
+            .iter()
+            .filter_map(|v| {
+                to_f64(v).map(|val| PieSlice {
+                    value: val,
+                    label: None,
+                })
+            })
+            .collect(),
     };
 
     let total: f64 = slices.iter().map(|s| s.value).sum();
     if total <= 0.0 {
-        return Err(EvalError::Error("PieChart: total must be positive".to_string()));
+        return Err(EvalError::Error(
+            "PieChart: total must be positive".to_string(),
+        ));
     }
 
     let cx = width / 2.0;
@@ -554,7 +660,11 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
         let r_inner = r * 0.98;
         let (x1, y1) = (cx + r_inner * a_start.cos(), cy - r_inner * a_start.sin());
         let (x2, y2) = (cx + r_inner * a_end.cos(), cy - r_inner * a_end.sin());
-        let large_arc = if slice_angle > std::f64::consts::PI { 1 } else { 0 };
+        let large_arc = if slice_angle > std::f64::consts::PI {
+            1
+        } else {
+            0
+        };
 
         if fraction.abs() >= 1e-12 {
             svg.push_str(&format!(
@@ -586,15 +696,23 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("DonutChart requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "DonutChart requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("DonutChart: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "DonutChart: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 1 { &args[1] } else { &Value::Assoc(HashMap::new()) };
+    let options = if args.len() > 1 {
+        &args[1]
+    } else {
+        &Value::Assoc(HashMap::new())
+    };
     let (width, height, _) = parse_chart_options(options);
 
     let inner_ratio = if let Value::Assoc(map) = options {
@@ -631,16 +749,22 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
             }
             result
         }
-        _ => {
-            data.iter()
-                .filter_map(|v| to_f64(v).map(|val| PieSlice { value: val, label: None }))
-                .collect()
-        }
+        _ => data
+            .iter()
+            .filter_map(|v| {
+                to_f64(v).map(|val| PieSlice {
+                    value: val,
+                    label: None,
+                })
+            })
+            .collect(),
     };
 
     let total: f64 = slices.iter().map(|s| s.value).sum();
     if total <= 0.0 {
-        return Err(EvalError::Error("DonutChart: total must be positive".to_string()));
+        return Err(EvalError::Error(
+            "DonutChart: total must be positive".to_string(),
+        ));
     }
 
     let cx = width / 2.0;
@@ -673,7 +797,11 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
         let (ox2, oy2) = (cx + r_outer * a_end.cos(), cy - r_outer * a_end.sin());
         let (ix1, iy1) = (cx + r_inner * a_end.cos(), cy - r_inner * a_end.sin());
         let (ix2, iy2) = (cx + r_inner * a_start.cos(), cy - r_inner * a_start.sin());
-        let large_arc = if slice_angle > std::f64::consts::PI { 1 } else { 0 };
+        let large_arc = if slice_angle > std::f64::consts::PI {
+            1
+        } else {
+            0
+        };
 
         svg.push_str(&format!(
             "<path d=\"M {:.1} {:.1} A {:.1} {:.1} 0 {} 1 {:.1} {:.1} L {:.1} {:.1} A {:.1} {:.1} 0 {} 0 {:.1} {:.1} Z\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
@@ -708,15 +836,23 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("BubbleChart requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "BubbleChart requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("BubbleChart: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "BubbleChart: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 1 { &args[1] } else { &Value::Assoc(HashMap::new()) };
+    let options = if args.len() > 1 {
+        &args[1]
+    } else {
+        &Value::Assoc(HashMap::new())
+    };
     let (width, height, _) = parse_chart_options(options);
 
     struct Bubble {
@@ -725,23 +861,32 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
         r: f64,
     }
 
-    let bubbles: Vec<Bubble> = data.iter().filter_map(|item| {
-        if let Value::List(p) = item {
-            if p.len() >= 2 {
-                let x = to_f64(&p[0])?;
-                let y = to_f64(&p[1])?;
-                let r = if p.len() >= 3 { to_f64(&p[2]).unwrap_or(1.0) } else { 1.0 };
-                Some(Bubble { x, y, r })
+    let bubbles: Vec<Bubble> = data
+        .iter()
+        .filter_map(|item| {
+            if let Value::List(p) = item {
+                if p.len() >= 2 {
+                    let x = to_f64(&p[0])?;
+                    let y = to_f64(&p[1])?;
+                    let r = if p.len() >= 3 {
+                        to_f64(&p[2]).unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+                    Some(Bubble { x, y, r })
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    }).collect();
+        })
+        .collect();
 
     if bubbles.is_empty() {
-        return Err(EvalError::Error("BubbleChart: no valid data points".to_string()));
+        return Err(EvalError::Error(
+            "BubbleChart: no valid data points".to_string(),
+        ));
     }
 
     let x_vals: Vec<f64> = bubbles.iter().map(|b| b.x).collect();
@@ -751,17 +896,33 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
     let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
     let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    let x_range = if x_max - x_min > 0.0 { x_max - x_min } else { 2.0 };
-    let y_range = if y_max - y_min > 0.0 { y_max - y_min } else { 2.0 };
+    let x_range = if x_max - x_min > 0.0 {
+        x_max - x_min
+    } else {
+        2.0
+    };
+    let y_range = if y_max - y_min > 0.0 {
+        y_max - y_min
+    } else {
+        2.0
+    };
     let x_min_p = x_min - x_range * 0.08;
     let x_max_p = x_max + x_range * 0.08;
     let y_min_p = y_min - y_range * 0.08;
     let y_max_p = y_max + y_range * 0.08;
 
-    let max_r = bubbles.iter().map(|b| b.r).fold(f64::NEG_INFINITY, f64::max);
+    let max_r = bubbles
+        .iter()
+        .map(|b| b.r)
+        .fold(f64::NEG_INFINITY, f64::max);
     let min_r = bubbles.iter().map(|b| b.r).fold(f64::INFINITY, f64::min);
-    let r_range = if max_r - min_r > 0.0 { max_r - min_r } else { 1.0 };
-    let max_plot_r = (width - MARGIN_LEFT - MARGIN_RIGHT).min(height - MARGIN_TOP - MARGIN_BOTTOM) * 0.06;
+    let r_range = if max_r - min_r > 0.0 {
+        max_r - min_r
+    } else {
+        1.0
+    };
+    let max_plot_r =
+        (width - MARGIN_LEFT - MARGIN_RIGHT).min(height - MARGIN_TOP - MARGIN_BOTTOM) * 0.06;
     let min_plot_r = max_plot_r * 0.3;
 
     let scale_radius = |r: f64| -> f64 {
@@ -774,7 +935,9 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
 
     let mut content = String::new();
     for (i, bubble) in bubbles.iter().enumerate() {
-        let (sx, sy) = map_to_svg(bubble.x, bubble.y, x_min_p, x_max_p, y_min_p, y_max_p, width, height);
+        let (sx, sy) = map_to_svg(
+            bubble.x, bubble.y, x_min_p, x_max_p, y_min_p, y_max_p, width, height,
+        );
         let sr = scale_radius(bubble.r);
         let color = palette_color(i);
 
@@ -785,10 +948,7 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height,
-        x_min_p, x_max_p,
-        y_min_p, y_max_p,
-        "", "",
+        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "",
     )))
 }
 
@@ -796,20 +956,30 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error("WaterfallChart requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "WaterfallChart requires at least 1 argument".to_string(),
+        ));
     }
 
     let data = get_list(&args[0])?;
     if data.is_empty() {
-        return Err(EvalError::Error("WaterfallChart: data must not be empty".to_string()));
+        return Err(EvalError::Error(
+            "WaterfallChart: data must not be empty".to_string(),
+        ));
     }
 
-    let options = if args.len() > 1 { &args[1] } else { &Value::Assoc(HashMap::new()) };
+    let options = if args.len() > 1 {
+        &args[1]
+    } else {
+        &Value::Assoc(HashMap::new())
+    };
     let (width, height, _) = parse_chart_options(options);
 
     let values: Vec<f64> = data.iter().filter_map(|v| to_f64(v)).collect();
     if values.is_empty() {
-        return Err(EvalError::Error("WaterfallChart: no numeric data".to_string()));
+        return Err(EvalError::Error(
+            "WaterfallChart: no numeric data".to_string(),
+        ));
     }
 
     struct WaterfallBar {
@@ -833,9 +1003,19 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
         cum = to;
     }
 
-    let y_max = bars.iter().map(|b| b.from.max(b.to)).fold(f64::NEG_INFINITY, f64::max);
-    let y_min = bars.iter().map(|b| b.from.min(b.to)).fold(f64::INFINITY, f64::min);
-    let y_range = if y_max - y_min > 0.0 { y_max - y_min } else { 1.0 };
+    let y_max = bars
+        .iter()
+        .map(|b| b.from.max(b.to))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let y_min = bars
+        .iter()
+        .map(|b| b.from.min(b.to))
+        .fold(f64::INFINITY, f64::min);
+    let y_range = if y_max - y_min > 0.0 {
+        y_max - y_min
+    } else {
+        1.0
+    };
     let y_min_p = y_min - y_range * 0.08;
     let y_max_p = y_max + y_range * 0.08;
     let x_min_p = 0.5_f64;
@@ -856,10 +1036,32 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
             neg_color
         };
 
-        let (sx, _) = map_to_svg(bar.x - bar_width / 2.0, 0.0, x_min_p, x_max_p, y_min_p, y_max_p, width, height);
-        let (_, sy_from) = map_to_svg(0.0, bar.from, x_min_p, x_max_p, y_min_p, y_max_p, width, height);
-        let (_, sy_to) = map_to_svg(0.0, bar.to, x_min_p, x_max_p, y_min_p, y_max_p, width, height);
-        let (_, sx_r) = map_to_svg(bar.x + bar_width / 2.0, 0.0, x_min_p, x_max_p, y_min_p, y_max_p, width, height);
+        let (sx, _) = map_to_svg(
+            bar.x - bar_width / 2.0,
+            0.0,
+            x_min_p,
+            x_max_p,
+            y_min_p,
+            y_max_p,
+            width,
+            height,
+        );
+        let (_, sy_from) = map_to_svg(
+            0.0, bar.from, x_min_p, x_max_p, y_min_p, y_max_p, width, height,
+        );
+        let (_, sy_to) = map_to_svg(
+            0.0, bar.to, x_min_p, x_max_p, y_min_p, y_max_p, width, height,
+        );
+        let (_, sx_r) = map_to_svg(
+            bar.x + bar_width / 2.0,
+            0.0,
+            x_min_p,
+            x_max_p,
+            y_min_p,
+            y_max_p,
+            width,
+            height,
+        );
 
         let sw = (sx_r - sx).abs();
         let sh = (sy_to - sy_from).abs().max(0.0);
@@ -872,10 +1074,7 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height,
-        x_min_p, x_max_p,
-        y_min_p, y_max_p,
-        "", "",
+        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "",
     )))
 }
 
@@ -937,7 +1136,9 @@ pub fn builtin_region_plot_eval(
                 let y_lo = ymin + j as f64 * dy;
                 let (sx, sy) = map_to_svg(x_lo, y_lo, xmin, xmax, ymin, ymax, width, height);
                 let (_, sy_lo) = map_to_svg(x_lo, y_lo + dy, xmin, xmax, ymin, ymax, width, height);
-                let sw = (map_to_svg(x_lo + dx, y_lo, xmin, xmax, ymin, ymax, width, height).0 - sx).abs();
+                let sw = (map_to_svg(x_lo + dx, y_lo, xmin, xmax, ymin, ymax, width, height).0
+                    - sx)
+                    .abs();
                 let sh = (sy - sy_lo).abs();
                 content.push_str(&format!(
                     "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.5\"/>\n",
@@ -948,9 +1149,7 @@ pub fn builtin_region_plot_eval(
     }
 
     Ok(svg_with_axes(
-        &content, width, height,
-        xmin, xmax, ymin, ymax,
-        "", "",
+        &content, width, height, xmin, xmax, ymin, ymax, "", "",
     ))
 }
 
@@ -959,7 +1158,8 @@ pub fn builtin_region_plot_eval(
 pub fn builtin_contour_plot(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
-            "ContourPlot requires at least 3 arguments: f, {x, xmin, xmax}, {y, ymin, ymax}.".to_string(),
+            "ContourPlot requires at least 3 arguments: f, {x, xmin, xmax}, {y, ymin, ymax}."
+                .to_string(),
         ));
     }
     Ok(Value::Call {
@@ -982,20 +1182,34 @@ pub fn builtin_contour_plot_eval(
     let (xmin, xmax) = x_range;
     let (ymin, ymax) = y_range;
 
-    let grid: Vec<Vec<f64>> = (0..=ny).map(|j| {
-        (0..=nx).map(|i| {
-            let x = xmin + i as f64 * (xmax - xmin) / nx as f64;
-            let y = ymin + j as f64 * (ymax - ymin) / ny as f64;
-            func(x, y)
-        }).collect()
-    }).collect();
+    let grid: Vec<Vec<f64>> = (0..=ny)
+        .map(|j| {
+            (0..=nx)
+                .map(|i| {
+                    let x = xmin + i as f64 * (xmax - xmin) / nx as f64;
+                    let y = ymin + j as f64 * (ymax - ymin) / ny as f64;
+                    func(x, y)
+                })
+                .collect()
+        })
+        .collect();
 
-    let val_min = grid.iter().flat_map(|r| r.iter()).cloned().fold(f64::INFINITY, f64::min);
-    let val_max = grid.iter().flat_map(|r| r.iter()).cloned().fold(f64::NEG_INFINITY, f64::max);
+    let val_min = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let val_max = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let range = val_max - val_min;
     if range < 1e-15 {
-        return Ok(svg_with_axes("", width, height, xmin, xmax, ymin, ymax, "", ""));
+        return Ok(svg_with_axes(
+            "", width, height, xmin, xmax, ymin, ymax, "", "",
+        ));
     }
     let num_contours = num_contours.max(3);
     let levels: Vec<f64> = (0..num_contours)
@@ -1007,24 +1221,36 @@ pub fn builtin_contour_plot_eval(
 
     for (li, &level) in levels.iter().enumerate() {
         let color = colors[li % colors.len()];
-        marching_squares(&grid, xmin, xmax, ymin, ymax, level,
-            &mut content, &color, width, height);
+        marching_squares(
+            &grid,
+            xmin,
+            xmax,
+            ymin,
+            ymax,
+            level,
+            &mut content,
+            &color,
+            width,
+            height,
+        );
     }
 
     Ok(svg_with_axes(
-        &content, width, height,
-        xmin, xmax, ymin, ymax,
-        "", "",
+        &content, width, height, xmin, xmax, ymin, ymax, "", "",
     ))
 }
 
 fn marching_squares(
     grid: &[Vec<f64>],
-    xmin: f64, xmax: f64, ymin: f64, ymax: f64,
+    xmin: f64,
+    xmax: f64,
+    ymin: f64,
+    ymax: f64,
     level: f64,
     content: &mut String,
     color: &str,
-    width: f64, height: f64,
+    width: f64,
+    height: f64,
 ) {
     let ny = grid.len() - 1;
     let nx = grid[0].len() - 1;
@@ -1032,7 +1258,9 @@ fn marching_squares(
     let dy = (ymax - ymin) / ny as f64;
 
     let interpolate = |v0: f64, v1: f64, t0: f64, t1: f64| -> f64 {
-        if (v1 - v0).abs() < 1e-15 { t0 } else {
+        if (v1 - v0).abs() < 1e-15 {
+            t0
+        } else {
             t0 + (level - v0) / (v1 - v0) * (t1 - t0)
         }
     };
@@ -1051,10 +1279,18 @@ fn marching_squares(
 
             // Determine which corners are above the level
             let mut above = 0u8;
-            if v00 >= level { above |= 1; }
-            if v10 >= level { above |= 2; }
-            if v11 >= level { above |= 4; }
-            if v01 >= level { above |= 8; }
+            if v00 >= level {
+                above |= 1;
+            }
+            if v10 >= level {
+                above |= 2;
+            }
+            if v11 >= level {
+                above |= 4;
+            }
+            if v01 >= level {
+                above |= 8;
+            }
 
             if above == 0 || above == 15 {
                 continue;
@@ -1076,20 +1312,66 @@ fn marching_squares(
             };
 
             match above {
-                1 => { draw_segment(top, left); draw_segment(left, bottom); }
-                2 => { draw_segment(top, left); draw_segment(top, right); }
-                3 => { draw_segment(left, bottom); draw_segment(top, right); }
-                4 => { draw_segment(right, left); draw_segment(right, bottom); }
-                5 => { draw_segment(top, left); draw_segment(right, bottom); }
-                6 => { draw_segment(left, bottom); draw_segment(right, bottom); draw_segment(top, left); }
-                7 => { draw_segment(top, left); draw_segment(right, left); }
-                8 => { draw_segment(top, right); draw_segment(top, left); }
-                9 => { draw_segment(top, right); draw_segment(bottom, left); }
-                10 => { draw_segment(top, right); draw_segment(left, bottom); draw_segment(right, bottom); }
-                11 => { draw_segment(bottom, left); draw_segment(right, bottom); draw_segment(top, right); }
-                12 => { draw_segment(left, bottom); draw_segment(top, right); draw_segment(right, left); }
-                13 => { draw_segment(top, left); draw_segment(right, left); }
-                14 => { draw_segment(left, bottom); draw_segment(right, left); }
+                1 => {
+                    draw_segment(top, left);
+                    draw_segment(left, bottom);
+                }
+                2 => {
+                    draw_segment(top, left);
+                    draw_segment(top, right);
+                }
+                3 => {
+                    draw_segment(left, bottom);
+                    draw_segment(top, right);
+                }
+                4 => {
+                    draw_segment(right, left);
+                    draw_segment(right, bottom);
+                }
+                5 => {
+                    draw_segment(top, left);
+                    draw_segment(right, bottom);
+                }
+                6 => {
+                    draw_segment(left, bottom);
+                    draw_segment(right, bottom);
+                    draw_segment(top, left);
+                }
+                7 => {
+                    draw_segment(top, left);
+                    draw_segment(right, left);
+                }
+                8 => {
+                    draw_segment(top, right);
+                    draw_segment(top, left);
+                }
+                9 => {
+                    draw_segment(top, right);
+                    draw_segment(bottom, left);
+                }
+                10 => {
+                    draw_segment(top, right);
+                    draw_segment(left, bottom);
+                    draw_segment(right, bottom);
+                }
+                11 => {
+                    draw_segment(bottom, left);
+                    draw_segment(right, bottom);
+                    draw_segment(top, right);
+                }
+                12 => {
+                    draw_segment(left, bottom);
+                    draw_segment(top, right);
+                    draw_segment(right, left);
+                }
+                13 => {
+                    draw_segment(top, left);
+                    draw_segment(right, left);
+                }
+                14 => {
+                    draw_segment(left, bottom);
+                    draw_segment(right, left);
+                }
                 _ => {}
             }
         }
@@ -1105,10 +1387,12 @@ pub fn apply_color_function(color_fn: &Value, t: f64) -> String {
             let r = to_f64(&args[0]).unwrap_or(0.0);
             let g = to_f64(&args[1]).unwrap_or(0.0);
             let b = to_f64(&args[2]).unwrap_or(0.0);
-            format!("#{:02x}{:02x}{:02x}",
+            format!(
+                "#{:02x}{:02x}{:02x}",
                 (r.clamp(0.0, 1.0) * 255.0).round() as u8,
                 (g.clamp(0.0, 1.0) * 255.0).round() as u8,
-                (b.clamp(0.0, 1.0) * 255.0).round() as u8)
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8
+            )
         }
         _ => {
             let t = t.clamp(0.0, 1.0);
@@ -1210,7 +1494,10 @@ mod tests {
         let result = builtin_bar_chart(&[data]).unwrap();
         match &result {
             Value::Str(svg) => {
-                assert!(svg.contains("<rect"), "Expected bars at specified x positions");
+                assert!(
+                    svg.contains("<rect"),
+                    "Expected bars at specified x positions"
+                );
             }
             _ => panic!("Expected string"),
         }
@@ -1232,8 +1519,14 @@ mod tests {
     #[test]
     fn test_histogram_basic() {
         let data = Value::List(vec![
-            int_val(1), int_val(2), int_val(2), int_val(3),
-            int_val(3), int_val(3), int_val(4), int_val(5),
+            int_val(1),
+            int_val(2),
+            int_val(2),
+            int_val(3),
+            int_val(3),
+            int_val(3),
+            int_val(4),
+            int_val(5),
         ]);
         let result = builtin_histogram(&[data]).unwrap();
         match &result {
@@ -1248,8 +1541,12 @@ mod tests {
     #[test]
     fn test_histogram_with_bin_count() {
         let data = Value::List(vec![
-            real_val(1.5), real_val(2.3), real_val(2.7),
-            real_val(3.1), real_val(4.0), real_val(4.5),
+            real_val(1.5),
+            real_val(2.3),
+            real_val(2.7),
+            real_val(3.1),
+            real_val(4.0),
+            real_val(4.5),
         ]);
         let result = builtin_histogram(&[data.clone(), int_val(3)]).unwrap();
         assert!(matches!(&result, Value::Str(svg) if svg.contains("<rect")));
@@ -1258,7 +1555,12 @@ mod tests {
     #[test]
     fn test_histogram_with_custom_edges() {
         let data = Value::List(vec![real_val(1.0), real_val(2.0), real_val(3.0)]);
-        let edges = Value::List(vec![real_val(0.0), real_val(1.5), real_val(3.0), real_val(4.0)]);
+        let edges = Value::List(vec![
+            real_val(0.0),
+            real_val(1.5),
+            real_val(3.0),
+            real_val(4.0),
+        ]);
         let result = builtin_histogram(&[data, edges]).unwrap();
         assert!(matches!(&result, Value::Str(svg) if svg.contains("<rect")));
     }
@@ -1335,9 +1637,7 @@ mod tests {
 
     #[test]
     fn test_waterfall_chart_basic() {
-        let data = Value::List(vec![
-            int_val(10), int_val(5), int_val(-3), int_val(8),
-        ]);
+        let data = Value::List(vec![int_val(10), int_val(5), int_val(-3), int_val(8)]);
         let result = builtin_waterfall_chart(&[data]).unwrap();
         match &result {
             Value::Str(svg) => {
@@ -1363,9 +1663,18 @@ mod tests {
     fn test_region_plot_symbolic() {
         let result = builtin_region_plot(&[
             Value::Symbol("f".to_string()),
-            Value::List(vec![Value::Symbol("x".to_string()), int_val(-1), int_val(1)]),
-            Value::List(vec![Value::Symbol("y".to_string()), int_val(-1), int_val(1)]),
-        ]).unwrap();
+            Value::List(vec![
+                Value::Symbol("x".to_string()),
+                int_val(-1),
+                int_val(1),
+            ]),
+            Value::List(vec![
+                Value::Symbol("y".to_string()),
+                int_val(-1),
+                int_val(1),
+            ]),
+        ])
+        .unwrap();
         assert!(matches!(&result, Value::Call { head, .. } if head == "RegionPlot"));
     }
 
@@ -1373,9 +1682,18 @@ mod tests {
     fn test_contour_plot_symbolic() {
         let result = builtin_contour_plot(&[
             Value::Symbol("f".to_string()),
-            Value::List(vec![Value::Symbol("x".to_string()), int_val(0), int_val(10)]),
-            Value::List(vec![Value::Symbol("y".to_string()), int_val(0), int_val(10)]),
-        ]).unwrap();
+            Value::List(vec![
+                Value::Symbol("x".to_string()),
+                int_val(0),
+                int_val(10),
+            ]),
+            Value::List(vec![
+                Value::Symbol("y".to_string()),
+                int_val(0),
+                int_val(10),
+            ]),
+        ])
+        .unwrap();
         assert!(matches!(&result, Value::Call { head, .. } if head == "ContourPlot"));
     }
 
@@ -1391,8 +1709,9 @@ mod tests {
     #[test]
     fn test_contour_plot_eval() {
         let func = |x: f64, y: f64| -> f64 { (x * x + y * y).sqrt() };
-        let svg = builtin_contour_plot_eval(&func, (0.01, 10.0), (0.01, 10.0), 50, 50, 5, 400.0, 400.0)
-            .unwrap();
+        let svg =
+            builtin_contour_plot_eval(&func, (0.01, 10.0), (0.01, 10.0), 50, 50, 5, 400.0, 400.0)
+                .unwrap();
         assert!(svg.contains("<line"), "Expected contour lines");
         assert!(svg.contains("</svg>"), "Expected SVG wrapper");
     }
@@ -1407,7 +1726,10 @@ mod tests {
     #[test]
     fn test_parse_chart_options() {
         let mut map = HashMap::new();
-        map.insert("ImageSize".to_string(), Value::List(vec![int_val(800), int_val(600)]));
+        map.insert(
+            "ImageSize".to_string(),
+            Value::List(vec![int_val(800), int_val(600)]),
+        );
         let opts = Value::Assoc(map);
         let (w, h, _) = parse_chart_options(&opts);
         assert!((w - 800.0).abs() < 1e-12);
@@ -1426,7 +1748,11 @@ mod tests {
     #[test]
     fn test_apply_color_function_default() {
         let result = apply_color_function(&Value::Symbol("Gradient".to_string()), 0.5);
-        assert!(result.starts_with('#'), "Expected hex color, got {}", result);
+        assert!(
+            result.starts_with('#'),
+            "Expected hex color, got {}",
+            result
+        );
     }
 
     #[test]
@@ -1453,7 +1779,9 @@ mod tests {
 
     #[test]
     fn test_svg_with_axes_labels() {
-        let svg = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "X Label", "Y Label");
+        let svg = svg_with_axes(
+            "", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "X Label", "Y Label",
+        );
         assert!(svg.contains("X Label"), "Expected X axis label");
         assert!(svg.contains("Y Label"), "Expected Y axis label");
     }

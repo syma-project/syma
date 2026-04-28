@@ -33,11 +33,8 @@ fn value_to_expr(v: &Value) -> Expr {
 
 // ── Helper: create env with stored function values ──
 
-fn func_env_with_stored(
-    parent: &Env,
-    values: Rc<Vec<Value>>,
-) -> (Env, Vec<String>) {
-    let mut child = parent.child();
+fn func_env_with_stored(parent: &Env, values: Rc<Vec<Value>>) -> (Env, Vec<String>) {
+    let child = parent.child();
     let mut names = Vec::new();
     for (i, v) in values.iter().enumerate() {
         let name = format!("__op_{}", i);
@@ -73,7 +70,7 @@ pub fn builtin_composition(args: &[Value], env: &Env) -> Result<Value, EvalError
         Ok(args[0].clone())
     } else {
         let funcs: Rc<Vec<Value>> = Rc::new(args.to_vec());
-        let (mut child_env, names) = func_env_with_stored(env, funcs.clone());
+        let (child_env, names) = func_env_with_stored(env, funcs.clone());
 
         let mut names_iter = names.into_iter();
         let first_name = names_iter.next().unwrap();
@@ -132,7 +129,7 @@ pub fn builtin_right_composition(args: &[Value], env: &Env) -> Result<Value, Eva
         Ok(args[0].clone())
     } else {
         let funcs: Rc<Vec<Value>> = Rc::new(args.iter().rev().cloned().collect());
-        let (mut child_env, names) = func_env_with_stored(env, funcs.clone());
+        let (child_env, names) = func_env_with_stored(env, funcs.clone());
 
         let mut names_iter = names.into_iter();
         let first_name = names_iter.next().unwrap();
@@ -189,15 +186,9 @@ pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     let expr = &args[0];
 
-    if let Value::Call { head, args: inner } = expr {
-        if let Value::List(funcs) = head.as_ref() {
-            let mut result = Vec::with_capacity(funcs.len());
-            for f in funcs {
-                let call_args: Vec<Value> = inner.iter().map(|a| (**a).clone()).collect();
-                result.push(apply_function(f, &call_args, env)?);
-            }
-            return Ok(Value::List(result));
-        }
+    if let Value::Call { head: _, args: _inner } = expr {
+        // head is String, not a Value, so we can't extract a list from it
+        // Fall through to the general match below
     }
 
     match expr {
@@ -225,7 +216,9 @@ pub fn builtin_operator_apply(args: &[Value], env: &Env) -> Result<Value, EvalEr
         ));
     }
     match &args[0] {
-        Value::List(items) => apply_function(items.first().unwrap_or(&Value::Null), &items[1..], env),
+        Value::List(items) => {
+            apply_function(items.first().unwrap_or(&Value::Null), &items[1..], env)
+        }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
             got: args[0].type_name().to_string(),
@@ -265,8 +258,8 @@ pub fn builtin_curry(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let mut current = Value::Null;
     for i in (1..=n).rev() {
         let func_name = format!("__curry_func");
-        let collected_so_far = collected.clone();
-        let func_clone = Rc::new(func_rc.clone());
+        let _collected_so_far = collected.clone();
+        let _func_clone = Rc::new(func_rc.clone());
         let remaining = n - i + 1;
 
         let child = env.child();
@@ -374,9 +367,9 @@ pub fn builtin_subset_q(args: &[Value]) -> Result<Value, EvalError> {
     }
     let l1 = get_list(&args[0])?;
     let l2 = get_list(&args[1])?;
-    let result = l1.iter().all(|item| {
-        l2.iter().any(|item2| item.struct_eq(item2))
-    });
+    let result = l1
+        .iter()
+        .all(|item| l2.iter().any(|item2| item.struct_eq(item2)));
     Ok(Value::Bool(result))
 }
 
@@ -538,8 +531,11 @@ fn map_all_inner(f: &Value, val: &Value, env: &Env) -> Result<Value, EvalError> 
                 .collect();
             Ok(Value::List(mapped?))
         }
-        Value::Call { head, args: call_args } => {
-            let mapped_head = map_all_inner(f, head, env)?;
+        Value::Call {
+            head,
+            args: call_args,
+        } => {
+            let mapped_head = map_all_inner(f, &Value::Symbol(head.clone()), env)?;
             let head_name = match &mapped_head {
                 Value::Symbol(s) => s.clone(),
                 _ => mapped_head.to_string(),
@@ -594,7 +590,7 @@ fn curry_inner(func: &Value, n: usize, env: &Env) -> Value {
         return Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("__cf".to_string())),
-                args: vec![Box::new(Expr::Slot(None))],
+                args: vec![Expr::Slot(None)],
             },
             slot_count: 1,
             params: vec![],
@@ -607,7 +603,7 @@ fn curry_inner(func: &Value, n: usize, env: &Env) -> Value {
     Value::PureFunction {
         body: Expr::Call {
             head: Box::new(Expr::Symbol("__cf_inner".to_string())),
-            args: vec![Box::new(Expr::Slot(None))],
+            args: vec![Expr::Slot(None)],
         },
         slot_count: 1,
         params: vec![],
@@ -744,8 +740,7 @@ mod tests {
     #[test]
     fn test_position_first_not_found() {
         let result =
-            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)])
-                .unwrap();
+            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)]).unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -770,8 +765,7 @@ mod tests {
     #[test]
     fn test_position_last_not_found() {
         let result =
-            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)])
-                .unwrap();
+            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)]).unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -796,14 +790,17 @@ mod tests {
             val_int(4),
         ])])
         .unwrap();
-        assert_eq!(result, val_list(vec![val_int(1), val_int(2), val_int(3), val_int(4)]));
+        assert_eq!(
+            result,
+            val_list(vec![val_int(1), val_int(2), val_int(3), val_int(4)])
+        );
     }
 
     #[test]
     fn test_undule_deeply_nested() {
-        let result = builtin_undulate(&[val_list(vec![
-            val_list(vec![val_list(vec![val_list(vec![val_int(1)])])]),
-        ])])
+        let result = builtin_undulate(&[val_list(vec![val_list(vec![val_list(vec![val_list(
+            vec![val_int(1)],
+        )])])])])
         .unwrap();
         assert_eq!(result, val_list(vec![val_int(1)]));
     }
@@ -817,11 +814,9 @@ mod tests {
     #[test]
     fn test_undule_with_strings() {
         let result =
-            builtin_undulate(&[val_list(vec![val_str("a"), val_list(vec![val_str("b")])])]).unwrap();
-        assert_eq!(
-            result,
-            val_list(vec![val_str("a"), val_str("b")])
-        );
+            builtin_undulate(&[val_list(vec![val_str("a"), val_list(vec![val_str("b")])])])
+                .unwrap();
+        assert_eq!(result, val_list(vec![val_str("a"), val_str("b")]));
     }
 
     fn test_env() -> Env {
@@ -836,14 +831,17 @@ mod tests {
         let even_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("EvenQ".to_string())),
-                args: vec![Box::new(Expr::Slot(None))],
+                args: vec![Expr::Slot(None)],
             },
             slot_count: 1,
             params: vec![],
             env: None,
         };
         let result = builtin_select_first(
-            &[val_list(vec![val_int(1), val_int(3), val_int(6), val_int(8)]), even_crit],
+            &[
+                val_list(vec![val_int(1), val_int(3), val_int(6), val_int(8)]),
+                even_crit,
+            ],
             &env,
         )
         .unwrap();
@@ -856,15 +854,20 @@ mod tests {
         let gt_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![Box::new(Expr::Slot(None)), Box::new(Expr::Integer(Integer::from(10)))],
+                args: vec![
+                    Box::new(Expr::Slot(None)),
+                    Box::new(Expr::Integer(Integer::from(10))),
+                ],
             },
             slot_count: 1,
             params: vec![],
             env: None,
         };
-        let result =
-            builtin_select_first(&[val_list(vec![val_int(1), val_int(2), val_int(5)]), gt_crit], &env)
-                .unwrap();
+        let result = builtin_select_first(
+            &[val_list(vec![val_int(1), val_int(2), val_int(5)]), gt_crit],
+            &env,
+        )
+        .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -880,14 +883,17 @@ mod tests {
         let even_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("EvenQ".to_string())),
-                args: vec![Box::new(Expr::Slot(None))],
+                args: vec![Expr::Slot(None)],
             },
             slot_count: 1,
             params: vec![],
             env: None,
         };
         let result = builtin_select_last(
-            &[val_list(vec![val_int(2), val_int(3), val_int(6), val_int(5)]), even_crit],
+            &[
+                val_list(vec![val_int(2), val_int(3), val_int(6), val_int(5)]),
+                even_crit,
+            ],
             &env,
         )
         .unwrap();
@@ -900,7 +906,10 @@ mod tests {
         let big_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![Box::new(Expr::Slot(None)), Box::new(Expr::Integer(Integer::from(100)))],
+                args: vec![
+                    Box::new(Expr::Slot(None)),
+                    Box::new(Expr::Integer(Integer::from(100))),
+                ],
             },
             slot_count: 1,
             params: vec![],
@@ -920,16 +929,14 @@ mod tests {
     #[test]
     fn test_curry_zero() {
         let env = test_env();
-        let result =
-            builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(0)], &env).unwrap();
+        let result = builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(0)], &env).unwrap();
         assert_eq!(result, Value::Symbol("Plus".to_string()));
     }
 
     #[test]
     fn test_curry_returns_pure_function() {
         let env = test_env();
-        let result =
-            builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(2)], &env).unwrap();
+        let result = builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(2)], &env).unwrap();
         assert!(matches!(result, Value::PureFunction { .. }));
     }
 
@@ -957,7 +964,10 @@ mod tests {
     fn test_composition_returns_pure_function() {
         let env = test_env();
         let result = builtin_composition(
-            &[Value::Symbol("Sin".to_string()), Value::Symbol("Cos".to_string())],
+            &[
+                Value::Symbol("Sin".to_string()),
+                Value::Symbol("Cos".to_string()),
+            ],
             &env,
         )
         .unwrap();
@@ -980,8 +990,7 @@ mod tests {
     #[test]
     fn test_right_composition_single() {
         let env = test_env();
-        let result =
-            builtin_right_composition(&[Value::Symbol("Sin".to_string())], &env).unwrap();
+        let result = builtin_right_composition(&[Value::Symbol("Sin".to_string())], &env).unwrap();
         assert_eq!(result, Value::Symbol("Sin".to_string()));
     }
 
@@ -989,7 +998,10 @@ mod tests {
     fn test_right_composition_returns_pure_function() {
         let env = test_env();
         let result = builtin_right_composition(
-            &[Value::Symbol("Sin".to_string()), Value::Symbol("Cos".to_string())],
+            &[
+                Value::Symbol("Sin".to_string()),
+                Value::Symbol("Cos".to_string()),
+            ],
             &env,
         )
         .unwrap();
@@ -1000,9 +1012,7 @@ mod tests {
     fn test_through_basic() {
         let env = test_env();
         let expr = Value::Call {
-            head: Box::new(val_list(vec![
-                Value::Symbol("Abs".to_string()),
-            ])),
+            head: Box::new(val_list(vec![Value::Symbol("Abs".to_string())])),
             args: vec![Box::new(val_int(-5))],
         };
         let result = builtin_through(&[expr], &env).unwrap();
@@ -1042,12 +1052,7 @@ mod tests {
     #[test]
     fn test_operator_apply_basic() {
         let env = test_env();
-        let expr = val_list(vec![
-            val_func("Plus"),
-            val_int(1),
-            val_int(2),
-            val_int(3),
-        ]);
+        let expr = val_list(vec![val_func("Plus"), val_int(1), val_int(2), val_int(3)]);
         let result = builtin_operator_apply(&[expr], &env).unwrap();
         assert_eq!(result, val_int(6));
     }
@@ -1103,9 +1108,11 @@ mod tests {
     #[test]
     fn test_map_all_identity() {
         let env = test_env();
-        let result =
-            builtin_map_all(&[val_func("Identity"), val_list(vec![val_int(1), val_int(2)])], &env)
-                .unwrap();
+        let result = builtin_map_all(
+            &[val_func("Identity"), val_list(vec![val_int(1), val_int(2)])],
+            &env,
+        )
+        .unwrap();
         assert_eq!(result, val_list(vec![val_int(1), val_int(2)]));
     }
 
@@ -1127,8 +1134,7 @@ mod tests {
     #[test]
     fn test_curry_three_args() {
         let env = test_env();
-        let result =
-            builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(3)], &env).unwrap();
+        let result = builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(3)], &env).unwrap();
         assert!(matches!(result, Value::PureFunction { .. }));
     }
 }

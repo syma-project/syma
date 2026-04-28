@@ -20,13 +20,13 @@ pub mod io;
 pub mod linalg;
 pub mod list;
 pub mod localsymbol;
-pub mod operators;
 pub mod logical;
 pub mod math;
 pub mod names;
 pub mod noncommutative;
 pub mod number_theory;
 pub mod numericsolve;
+pub mod operators;
 pub mod parallel;
 pub mod pattern;
 pub mod random;
@@ -820,11 +820,7 @@ pub fn register_builtins(env: &Env) {
         operators::builtin_right_composition,
     );
     register_builtin_env(env, "Through", operators::builtin_through);
-    register_builtin_env(
-        env,
-        "OperatorApply",
-        operators::builtin_operator_apply,
-    );
+    register_builtin_env(env, "OperatorApply", operators::builtin_operator_apply);
     register_builtin_env(env, "Curry", operators::builtin_curry);
     register_builtin_env(env, "UnCurry", operators::builtin_uncurry);
 

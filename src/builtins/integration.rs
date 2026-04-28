@@ -2011,7 +2011,7 @@ fn is_constant_wrt(val: &Value, var: &Value) -> bool {
 fn is_polynomial(val: &Value, var: &str) -> bool {
     match val {
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => true,
-        Value::Symbol(s) => true,
+        Value::Symbol(_s) => true,
         Value::Call { head, args } => match head.as_str() {
             "Plus" | "Times" => args.iter().all(|a| is_polynomial(a, var)),
             "Power" if args.len() == 2 => {

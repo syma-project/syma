@@ -698,7 +698,7 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
                     r_pow * theta_n.sin(),
                 ))
             } else {
-                let abs_exp = Value::Integer((-exp.clone()));
+                let abs_exp = Value::Integer(-exp.clone());
                 let power = builtin_power(&[args[0].clone(), abs_exp])?;
                 builtin_divide(&[Value::Integer(Integer::from(1)), power])
             }

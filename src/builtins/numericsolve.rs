@@ -21,11 +21,17 @@ fn real(v: f64) -> Value {
 fn substitute_numeric(expr: &Value, var: &str, val: f64) -> Value {
     match expr {
         Value::Symbol(s) if s == var => real(val),
-        Value::List(items) => {
-            Value::List(items.iter().map(|a| substitute_numeric(a, var, val)).collect())
-        }
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|a| substitute_numeric(a, var, val))
+                .collect(),
+        ),
         Value::Call { head, args } => {
-            let new_args: Vec<Value> = args.iter().map(|a| substitute_numeric(a, var, val)).collect();
+            let new_args: Vec<Value> = args
+                .iter()
+                .map(|a| substitute_numeric(a, var, val))
+                .collect();
             Value::Call {
                 head: head.clone(),
                 args: new_args,
@@ -47,9 +53,12 @@ fn eval_expr_to_f64(expr: &Value, env: &Env) -> Result<f64, EvalError> {
         Value::Rational(r) => Ok(r.to_f64()),
         Value::Complex { re, im: 0.0 } => Ok(*re),
         _ => {
-            let evaluated = apply_function(&Value::Symbol("Simplify".to_string()), &[expr.clone()], env)
-                .unwrap_or(expr.clone());
-            to_f64(&evaluated).ok_or_else(|| EvalError::Error("Cannot evaluate expression to a real number".to_string()))
+            let evaluated =
+                apply_function(&Value::Symbol("Simplify".to_string()), &[expr.clone()], env)
+                    .unwrap_or(expr.clone());
+            to_f64(&evaluated).ok_or_else(|| {
+                EvalError::Error("Cannot evaluate expression to a real number".to_string())
+            })
         }
     }
 }
@@ -67,7 +76,9 @@ fn newton_method(f: &dyn Fn(f64) -> f64, mut x: f64) -> Result<f64, EvalError> {
         }
         let dfx = numerical_derivative(f, x);
         if dfx.abs() < 1e-15 {
-            return Err(EvalError::Error("Newton's method: derivative near zero".to_string()));
+            return Err(EvalError::Error(
+                "Newton's method: derivative near zero".to_string(),
+            ));
         }
         let x_new = x - fx / dfx;
         if (x_new - x).abs() < 1e-12 {
@@ -75,7 +86,9 @@ fn newton_method(f: &dyn Fn(f64) -> f64, mut x: f64) -> Result<f64, EvalError> {
         }
         x = x_new;
     }
-    Err(EvalError::Error("Newton's method: did not converge in 100 iterations".to_string()))
+    Err(EvalError::Error(
+        "Newton's method: did not converge in 100 iterations".to_string(),
+    ))
 }
 
 fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError> {
@@ -112,11 +125,7 @@ fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError
             let t = fb / fc;
             let num = mid * s * (fc - fb) + a * t * (fb - fa) + c * s * t * (fa - fc);
             let den = (fc - fb) + (fb - fa) + s * t * (fa - fc);
-            if den.abs() < 1e-30 {
-                mid
-            } else {
-                num / den
-            }
+            if den.abs() < 1e-30 { mid } else { num / den }
         } else {
             mid
         };
@@ -226,7 +235,10 @@ fn multi_restart_minimize(
 /// Extract equation args. Returns (expr_clone, rhs_value, eq_is_equal).
 fn parse_equation(arg: &Value) -> Result<(Value, f64), EvalError> {
     match arg {
-        Value::Call { head, args: eq_args } if head == "Equal" && eq_args.len() == 2 => {
+        Value::Call {
+            head,
+            args: eq_args,
+        } if head == "Equal" && eq_args.len() == 2 => {
             let rhs = to_f64(&eq_args[1]).ok_or_else(|| {
                 EvalError::Error("Right-hand side of equation must be a number".to_string())
             })?;
@@ -271,11 +283,9 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let var = extract_var_symbol(&search_spec[0])?;
 
     if search_spec.len() == 2 {
-        let x0 = to_f64(&search_spec[1]).ok_or_else(|| {
-            EvalError::TypeError {
-                expected: "Number".to_string(),
-                got: search_spec[1].type_name().to_string(),
-            }
+        let x0 = to_f64(&search_spec[1]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: search_spec[1].type_name().to_string(),
         })?;
         let var_clone = var.clone();
         let f = move |x: f64| {
@@ -289,17 +299,13 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
             delayed: false,
         })
     } else {
-        let xmin = to_f64(&search_spec[1]).ok_or_else(|| {
-            EvalError::TypeError {
-                expected: "Number".to_string(),
-                got: search_spec[1].type_name().to_string(),
-            }
+        let xmin = to_f64(&search_spec[1]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: search_spec[1].type_name().to_string(),
         })?;
-        let xmax = to_f64(&search_spec[2]).ok_or_else(|| {
-            EvalError::TypeError {
-                expected: "Number".to_string(),
-                got: search_spec[2].type_name().to_string(),
-            }
+        let xmax = to_f64(&search_spec[2]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: search_spec[2].type_name().to_string(),
         })?;
         let var_clone = var.clone();
         let f = move |x: f64| {
@@ -339,17 +345,13 @@ pub fn builtin_find_minimum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -395,17 +397,13 @@ pub fn builtin_find_maximum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -453,17 +451,13 @@ pub fn builtin_nminimize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -509,17 +503,13 @@ pub fn builtin_nmaximize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -567,17 +557,13 @@ pub fn builtin_argmin(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -615,17 +601,13 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[1].type_name().to_string(),
-        }
+    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[1].type_name().to_string(),
     })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| {
-        EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: spec[2].type_name().to_string(),
-        }
+    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: spec[2].type_name().to_string(),
     })?;
 
     let expr = args[0].clone();
@@ -738,7 +720,9 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
 
             let mut coeffs_trimmed = coeffs;
-            while coeffs_trimmed.len() > 1 && coeffs_trimmed.last().map_or(true, |&c| c.abs() < 1e-15) {
+            while coeffs_trimmed.len() > 1
+                && coeffs_trimmed.last().map_or(true, |&c| c.abs() < 1e-15)
+            {
                 coeffs_trimmed.pop();
             }
 
@@ -839,7 +823,8 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
 
             for i in 0..grid_size {
-                let start = search_lo + ((i as f64 + 0.5) / grid_size as f64) * (search_hi - search_lo);
+                let start =
+                    search_lo + ((i as f64 + 0.5) / grid_size as f64) * (search_hi - search_lo);
                 if let Ok(root) = newton_method(&f, start) {
                     if f(root).abs() < 1e-6 {
                         let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
@@ -879,7 +864,7 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
             "Plus" => {
                 let mut coeffs: Vec<f64> = vec![0.0; 1];
                 for arg in args {
-                    if let Some(mut sub) = extract_polynomial_coeffs(arg, var) {
+                    if let Some(sub) = extract_polynomial_coeffs(arg, var) {
                         if sub.len() > coeffs.len() {
                             coeffs.resize(sub.len(), 0.0);
                         }
@@ -908,7 +893,11 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                         } else {
                             return None;
                         }
-                    } else if let Value::Call { head: inner_head, args: inner_args } = arg {
+                    } else if let Value::Call {
+                        head: inner_head,
+                        args: inner_args,
+                    } = arg
+                    {
                         if inner_head == "Power" && inner_args.len() == 2 {
                             match (&inner_args[0], &inner_args[1]) {
                                 (Value::Symbol(s), Value::Integer(exp))
@@ -954,24 +943,16 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                     Some(vec![numeric_factor])
                 }
             }
-            "Power" if args.len() == 2 => {
-                match (&args[0], &args[1]) {
-                    (Value::Symbol(s), Value::Integer(exp))
-                        if s == var && !exp.is_negative() =>
-                    {
-                        let exp_usize = exp.to_usize().unwrap_or(0);
-                        let mut coeffs = vec![0.0; exp_usize + 1];
-                        coeffs[exp_usize] = 1.0;
-                        Some(coeffs)
-                    }
-                    (Value::Symbol(s), _) if s == var => {
-                        None
-                    }
-                    _ => {
-                        to_f64(&args[0]).map(|c| vec![c])
-                    }
+            "Power" if args.len() == 2 => match (&args[0], &args[1]) {
+                (Value::Symbol(s), Value::Integer(exp)) if s == var && !exp.is_negative() => {
+                    let exp_usize = exp.to_usize().unwrap_or(0);
+                    let mut coeffs = vec![0.0; exp_usize + 1];
+                    coeffs[exp_usize] = 1.0;
+                    Some(coeffs)
                 }
-            }
+                (Value::Symbol(s), _) if s == var => None,
+                _ => to_f64(&args[0]).map(|c| vec![c]),
+            },
             "Divide" if args.len() == 2 => {
                 let num_coeffs = extract_polynomial_coeffs(&args[0], var)?;
                 let denom = to_f64(&args[1])?;
@@ -980,9 +961,7 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                 }
                 Some(num_coeffs.iter().map(|&c| c / denom).collect())
             }
-            _ => {
-                None
-            }
+            _ => None,
         },
         _ => None,
     }
@@ -1008,7 +987,7 @@ fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
     let tol = 1e-12;
     let mut converged = vec![false; n];
     let mut eigenvalues: Vec<(f64, f64)> = Vec::new();
-    let mut m = n;
+    let m = n;
 
     for _ in 0..max_iter {
         let mut split = m;
@@ -1065,7 +1044,10 @@ fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
             }
 
             let mut q = identity_matrix(split);
-            let mut r = a[..split].iter().map(|row| row[..split].to_vec()).collect::<Vec<_>>();
+            let mut r = a[..split]
+                .iter()
+                .map(|row| row[..split].to_vec())
+                .collect::<Vec<_>>();
 
             for i in 0..split {
                 r[i][i] -= shift;
@@ -1074,7 +1056,11 @@ fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
             for i in 0..split - 1 {
                 let rr = (r[i][i] * r[i][i] + r[i + 1][i] * r[i + 1][i]).sqrt();
                 let c = if rr.abs() < 1e-30 { 0.0 } else { r[i][i] / rr };
-                let s = if rr.abs() < 1e-30 { 1.0 } else { -r[i + 1][i] / rr };
+                let s = if rr.abs() < 1e-30 {
+                    1.0
+                } else {
+                    -r[i + 1][i] / rr
+                };
 
                 for j in 0..split {
                     let rt = r[i][j] * c + r[i + 1][j] * s;
@@ -1151,7 +1137,11 @@ fn hessenberg(a: &mut Vec<Vec<f64>>, n: usize) {
         }
 
         for j in 0..n {
-            let dot: f64 = col.iter().zip(a.iter().skip(k + 1)).map(|(&c, row)| c * row[j]).sum();
+            let dot: f64 = col
+                .iter()
+                .zip(a.iter().skip(k + 1))
+                .map(|(&c, row)| c * row[j])
+                .sum();
             let factor = dot / hh_norm_sq;
             for i in k + 1..n {
                 a[i][j] -= col[i - k - 1] * factor;
@@ -1179,7 +1169,11 @@ mod tests {
     fn test_golden_section_simple() {
         let f = |x: f64| x * x;
         let (f_min, x_min) = golden_section(f, -1.0, 1.0);
-        assert!((x_min - 0.0).abs() < 1e-10, "Expected x_min near 0, got {}", x_min);
+        assert!(
+            (x_min - 0.0).abs() < 1e-10,
+            "Expected x_min near 0, got {}",
+            x_min
+        );
         assert!(f_min.abs() < 1e-10, "Expected f_min near 0, got {}", f_min);
     }
 
@@ -1187,15 +1181,27 @@ mod tests {
     fn test_golden_section_quadratic() {
         let f = |x: f64| (x - 2.0) * (x - 2.0) + 3.0;
         let (f_min, x_min) = golden_section(f, 0.0, 4.0);
-        assert!((x_min - 2.0).abs() < 1e-10, "Expected x_min near 2, got {}", x_min);
-        assert!((f_min - 3.0).abs() < 1e-10, "Expected f_min near 3, got {}", f_min);
+        assert!(
+            (x_min - 2.0).abs() < 1e-10,
+            "Expected x_min near 2, got {}",
+            x_min
+        );
+        assert!(
+            (f_min - 3.0).abs() < 1e-10,
+            "Expected f_min near 3, got {}",
+            f_min
+        );
     }
 
     #[test]
     fn test_newton_method_simple() {
         let f = |x: f64| x * x - 4.0;
         let root = newton_method(&f, 3.0).unwrap();
-        assert!((root - 2.0).abs() < 1e-10, "Expected root near 2, got {}", root);
+        assert!(
+            (root - 2.0).abs() < 1e-10,
+            "Expected root near 2, got {}",
+            root
+        );
     }
 
     #[test]
@@ -1213,14 +1219,22 @@ mod tests {
     fn test_brent_method_simple() {
         let f = |x: f64| x * x - 4.0;
         let root = brent_method(&f, 1.0, 3.0).unwrap();
-        assert!((root - 2.0).abs() < 1e-10, "Expected root near 2, got {}", root);
+        assert!(
+            (root - 2.0).abs() < 1e-10,
+            "Expected root near 2, got {}",
+            root
+        );
     }
 
     #[test]
     fn test_brent_method_negative_root() {
         let f = |x: f64| x * x - 4.0;
         let root = brent_method(&f, -3.0, -1.0).unwrap();
-        assert!((root + 2.0).abs() < 1e-10, "Expected root near -2, got {}", root);
+        assert!(
+            (root + 2.0).abs() < 1e-10,
+            "Expected root near -2, got {}",
+            root
+        );
     }
 
     #[test]
@@ -1290,7 +1304,10 @@ mod tests {
             args: vec![
                 Value::Call {
                     head: "Times".to_string(),
-                    args: vec![Value::Integer(Integer::from(2)), Value::Symbol("x".to_string())],
+                    args: vec![
+                        Value::Integer(Integer::from(2)),
+                        Value::Symbol("x".to_string()),
+                    ],
                 },
                 Value::Integer(Integer::from(3)),
             ],
@@ -1306,7 +1323,10 @@ mod tests {
             args: vec![
                 Value::Call {
                     head: "Power".to_string(),
-                    args: vec![Value::Symbol("x".to_string()), Value::Integer(Integer::from(2))],
+                    args: vec![
+                        Value::Symbol("x".to_string()),
+                        Value::Integer(Integer::from(2)),
+                    ],
                 },
                 Value::Call {
                     head: "Times".to_string(),
@@ -1353,7 +1373,11 @@ mod tests {
         let evals = qr_eigenvalues(&mut m, 2);
         assert_eq!(evals.len(), 2);
         for (re, im) in &evals {
-            assert!((re.abs() - 1.0).abs() < 1e-8, "Expected eigenvalue 1, got {}", re);
+            assert!(
+                (re.abs() - 1.0).abs() < 1e-8,
+                "Expected eigenvalue 1, got {}",
+                re
+            );
             assert!(im.abs() < 1e-8, "Expected imaginary 0, got {}", im);
         }
     }
