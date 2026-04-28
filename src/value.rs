@@ -787,7 +787,7 @@ impl Value {
     pub fn to_integer(&self) -> Option<i64> {
         match self {
             Value::Formatted { value, .. } => value.to_integer(),
-            Value::Integer(n) => Some(n.to_i64().unwrap_or(0)),
+            Value::Integer(n) => n.to_i64(),
             Value::Real(r) => Some(r.to_f64() as i64),
             Value::Rational(r) => {
                 if *r.denom() == 1 {

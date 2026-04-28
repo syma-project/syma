@@ -39,7 +39,6 @@ fn os_name() -> &'static str {
 fn arch_name() -> String {
     std::env::consts::ARCH
         .replace("x86_64", "x86-64")
-        .replace("aarch64", "aarch64")
 }
 
 /// Get the hostname. Falls back to "Unknown" if not available.

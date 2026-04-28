@@ -369,6 +369,13 @@ pub fn match_pattern(
                 && args.len() == 2
                 && matches!(&args[0], Expr::Integer(n) if *n == -1)
             {
+                // Handle concrete negative integer: -x_ matches Value::Integer(-n)
+                if let Value::Integer(v) = value
+                    && v.is_negative()
+                {
+                    return match_pattern(&args[1], &Value::Integer(-v.clone()), attr_checker);
+                }
+                // Handle structural Times[-1, x]
                 if let Value::Call { head: h, args: a } = value
                     && h == "Times"
                     && a.len() == 2
@@ -708,6 +715,9 @@ fn match_repeated_pattern(
             _ => return MatchResult::NoMatch,
         }
     } else if args.len() == 1 {
+        if items.is_empty() {
+            return MatchResult::NoMatch;
+        }
         items.len() // match all items (1+)
     } else {
         return MatchResult::NoMatch;

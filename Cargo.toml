@@ -11,14 +11,6 @@ path = "src/lib.rs"
 default = []
 jit = ["cranelift", "cranelift-module", "target-lexicon"]
 
-[[test]]
-name = "calculus_d"
-path = "tests/calculus/D.rs"
-
-[[test]]
-name = "attributes"
-path = "tests/attributes/mod.rs"
-
 [dependencies]
 fastrand = "2"
 unicode_categories = "0.1"

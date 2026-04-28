@@ -1010,34 +1010,50 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
         _ => args[0].clone(),
     };
-    let var_name = match &args[1] {
-        Value::Symbol(s) => s.clone(),
-        Value::Pattern(p) => match &crate::pattern::unwrap_expr_to_value(p) {
-            Value::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "Symbol".to_string(),
-                    got: args[1].type_name().to_string(),
-                });
-            }
-        },
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Symbol".to_string(),
-                got: args[1].type_name().to_string(),
-            });
+
+    // Extract variable name and optional bounds for definite integral
+    let second = match &args[1] {
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        _ => args[1].clone(),
+    };
+    let (var_name, bounds) = if let Value::List(ref items) = second {
+        if items.len() == 3 {
+            let vn = match &items[0] {
+                Value::Symbol(s) => s.clone(),
+                _ => return Err(EvalError::TypeError {
+                    expected: "Symbol (variable name)".to_string(),
+                    got: items[0].type_name().to_string(),
+                }),
+            };
+            (Some(vn), Some((items[1].clone(), items[2].clone())))
+        } else {
+            (None, None)
         }
+    } else {
+        (match &second {
+            Value::Symbol(s) => Some(s.clone()),
+            _ => None,
+        }, None)
     };
 
     // Load Rubi rules (lazy, once)
     lazy_load_integrate(env)?;
 
+    let var_name = var_name.ok_or_else(|| EvalError::TypeError {
+        expected: "Symbol (variable name)".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+
+    // Compute indefinite integral first (needed for both indefinite and definite forms)
+    // Unwrap Value::Pattern wrappers (from HoldAll) before matching Rubi rules
+    let var_sym = Value::Symbol(var_name.clone());
+    let indefinite_args = vec![expr.clone(), var_sym.clone()];
+    let mut antideriv = None;
+
     // Dispatch to Integrate function definitions (loaded from .syma files)
     if let Some(Value::Function(func_def)) = env.get("Integrate") {
-        // Try each definition
         for def in &func_def.definitions {
-            if let Some(bindings) = crate::eval::try_match_params(&def.params, &args, env)? {
-                // Evaluate guard if present
+            if let Some(bindings) = crate::eval::try_match_params(&def.params, &indefinite_args, env)? {
                 if let Some(guard_expr) = &def.guard {
                     let guard_env = env.child();
                     for (name, value) in &bindings {
@@ -1047,18 +1063,47 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
                         continue;
                     }
                 }
-                // Evaluate body
                 let child_env = env.child();
                 for (name, value) in &bindings {
                     child_env.set(name.clone(), value.clone());
                 }
-                return crate::eval::eval(&def.body, &child_env);
+                match crate::eval::eval(&def.body, &child_env) {
+                    Ok(result) => { antideriv = Some(result); break; }
+                    Err(_) => continue,
+                }
             }
         }
     }
 
-    // Fallback: hardcoded basic integration
-    Ok(integrate(&expr, &var_name))
+    // Fallback to hardcoded integration if Rubi rules didn't match
+    if antideriv.is_none() {
+        antideriv = Some(integrate(&expr, &var_name));
+    }
+
+    let antideriv = antideriv.unwrap();
+
+    // Check if antiderivative is still an unevaluated Integrate call
+    let is_unevaluated = matches!(&antideriv, Value::Call { head, .. } if head == "Integrate");
+
+    // Indefinite form: Integrate[expr, x]
+    if bounds.is_none() {
+        return Ok(antideriv);
+    }
+
+    // Definite form: Integrate[expr, {x, a, b}] -> F(b) - F(a)
+    // If we couldn't compute the antiderivative, return unevaluated
+    if is_unevaluated {
+        return Ok(Value::Call {
+            head: "Integrate".to_string(),
+            args: vec![expr, second],
+        });
+    }
+
+    let (lower, upper) = bounds.unwrap();
+    let f_upper = substitute_and_eval(&antideriv, &var_name, &upper);
+    let f_lower = substitute_and_eval(&antideriv, &var_name, &lower);
+    let neg_lower = simplify_call("Times", &[Value::Integer(rug::Integer::from(-1)), f_lower]);
+    Ok(simplify_call("Plus", &[f_upper, neg_lower]))
 }
 
 /// Lazy-load Integrate rules from .syma files (like lazy_load_d for D).

@@ -715,10 +715,10 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Call { head, args }
-            if head == "Power" && args.len() == 2 && args[0].struct_eq(&args[1]) =>
+        Value::Call { head, args: power_args }
+            if head == "Power" && power_args.len() == 2 && power_args[0].struct_eq(&args[1]) =>
         {
-            Ok(args[1].clone())
+            Ok(power_args[1].clone())
         }
         _ if args[0].struct_eq(&args[1]) => Ok(Value::Integer(Integer::from(1))),
         _ => Ok(Value::Integer(Integer::from(0))),
@@ -2049,8 +2049,8 @@ fn contains_complex(val: &Value) -> bool {
 
 fn contains_head(val: &Value, head: &str) -> bool {
     match val {
-        Value::Call { head, args } => {
-            if head == head {
+        Value::Call { head: call_head, args } => {
+            if *call_head == head {
                 return true;
             }
             args.iter().any(|a| contains_head(a, head))
