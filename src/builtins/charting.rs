@@ -1446,6 +1446,7 @@ pub const SYMBOLS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rug::Integer;
 
     fn real_val(v: f64) -> Value {
         Value::Real(rug::Float::with_val(crate::value::DEFAULT_PRECISION, v))
@@ -1764,7 +1765,8 @@ mod tests {
 
     #[test]
     fn test_get_list_error() {
-        let result = get_list(&Value::Integer(Integer::from(1)));
+        let val = Value::Integer(Integer::from(1));
+        let result = get_list(&val);
         assert!(result.is_err());
     }
 
