@@ -1245,12 +1245,25 @@ fn eval_args_with_attributes(
         let hold_rest = env.has_attribute(name, "HoldRest");
 
         if hold_all {
-            return Ok(args.iter().map(|a| Value::Pattern(a.clone())).collect());
+            let vals = args.iter().map(|arg| {
+                match arg {
+                    Expr::Symbol(_) => {
+                        // Evaluate to resolve bindings, then wrap as Hold to prevent further eval
+                        eval(arg, env).map(|v| Value::Hold(Box::new(v)))
+                    }
+                    _ => Ok(Value::Pattern(arg.clone())),
+                }
+            }).collect::<Result<Vec<_>, _>>()?;
+            return Ok(vals);
         }
         if hold_first {
             let mut vals = Vec::with_capacity(args.len());
             if let Some(first) = args.first() {
-                vals.push(Value::Pattern(first.clone()));
+                let v = match first {
+                    Expr::Symbol(_) => eval(first, env).map(|v| Value::Hold(Box::new(v))),
+                    _ => Ok(Value::Pattern(first.clone())),
+                };
+                vals.push(v?);
             }
             for rest in &args[1..] {
                 vals.push(eval(rest, env)?);
@@ -1263,7 +1276,11 @@ fn eval_args_with_attributes(
                 vals.push(eval(first, env)?);
             }
             for rest in &args[1..] {
-                vals.push(Value::Pattern(rest.clone()));
+                let v = match rest {
+                    Expr::Symbol(_) => eval(rest, env).map(|v| Value::Hold(Box::new(v))),
+                    _ => Ok(Value::Pattern(rest.clone())),
+                };
+                vals.push(v?);
             }
             return Ok(vals);
         }
@@ -2243,14 +2260,16 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             // Try each definition in order
             let mut found_result: Option<Result<Value, EvalError>> = None;
             for def in &func_def.definitions {
-                if let Some(bindings) = try_match_params(&def.params, args, env)? {
+                let match_result = try_match_params(&def.params, args, env)?;
+                if let Some(bindings) = match_result {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)
                     if let Some(guard_expr) = &def.guard {
                         let guard_env = env.child();
                         for (name, value) in &bindings {
                             guard_env.set(name.clone(), value.clone());
                         }
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                        let guard_val = eval(guard_expr, &guard_env)?;
+                        if !guard_val.to_bool() {
                             continue;
                         }
                     }

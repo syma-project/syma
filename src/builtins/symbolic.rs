@@ -774,12 +774,37 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     lazy_load_d(env)?;
 
-    // Unwrap Value::Pattern to get a concrete Value for inspection.
-    // D has HoldAll, so args come in as Value::Pattern(Expr).
+    // Unwrap Value::Pattern/Value::Hold to get a concrete Value for inspection.
+    // D has HoldAll, so args come in as Value::Pattern(Expr) or Value::Hold(Value).
     let concrete = match &expr {
         Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
         _ => expr.clone(),
     };
+
+    // If the expression is a D call, evaluate the inner D first.
+    // This handles nested derivatives like D[D[f, x], x].
+    if let Value::Call { head: ref h, args: ref args } = concrete {
+        eprintln!("DEBUG eval_d_2: concrete head={}, args.len={}", h, args.len());
+        if h == "D" && !args.is_empty() {
+            eprintln!("DEBUG eval_d_2: inner D call detected, evaluating inner D");
+            // Evaluate the inner D call
+            match crate::eval::apply_function(
+                &Value::Symbol("D".to_string()),
+                args,
+                env,
+            ) {
+                Ok(inner_result) => {
+                    eprintln!("DEBUG eval_d_2: inner D result={}", inner_result);
+                    return eval_d_2(inner_result, var, env);
+                }
+                Err(e) => {
+                    eprintln!("DEBUG eval_d_2: inner D error={}", e);
+                    return Err(e);
+                }
+            }
+        }
+    }
 
     // Flatten nested Plus/Times (parser builds nested, Flat flattens at runtime)
     let flattened = match &concrete {
@@ -831,7 +856,22 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     if let Some(d_func) = env.get("D")
         && let Value::Function(_) = &d_func
     {
-        return crate::eval::apply_function(&d_func, &[expr, var], env);
+        // Evaluate Pattern args in the current environment to resolve symbolic
+        // variable names (u, n, etc.) that come from parent rule bodies.
+        // D has HoldAll, so args come as Value::Pattern(Expr). When the D call
+        // originates from another D rule's body (e.g., D[u, x] from the Power rule),
+        // the Expr contains symbolic variable names. Passing Pattern-wrapped symbols
+        // to the D function definitions causes pattern matching to bind to those
+        // symbolic names. By evaluating the Expr in env, we resolve them to actual values.
+        let concrete_expr = match &expr {
+            Value::Pattern(p) => crate::eval::eval(p, env)?,
+            _ => expr.clone(),
+        };
+        let concrete_var = match &var {
+            Value::Pattern(p) => crate::eval::eval(p, env)?,
+            _ => var.clone(),
+        };
+        return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
     }
     Ok(Value::Call {
         head: "D".to_string(),

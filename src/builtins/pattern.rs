@@ -71,7 +71,55 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             "FreeQ requires exactly 2 arguments".to_string(),
         ));
     }
+    eprintln!("DEBUG FreeQ: args=[{}/{}, {}/{}]", args[0], args[0].type_name(), args[1], args[1].type_name());
     let attr_checker = AttributeChecker::new(env.attributes.clone());
+    fn expr_to_val(e: &Expr) -> Value {
+        match e {
+            Expr::Integer(n) => Value::Integer(n.clone()),
+            Expr::Real(r) => Value::Real(r.clone()),
+            Expr::Bool(b) => Value::Bool(*b),
+            Expr::Str(s) => Value::Str(s.clone()),
+            Expr::Null => Value::Null,
+            Expr::Symbol(s) => Value::Symbol(s.clone()),
+            Expr::Complex { re, im } => Value::Complex { re: *re, im: *im },
+            Expr::List(items) => Value::List(items.iter().map(expr_to_val).collect()),
+            Expr::Call { head, args: a } => Value::Call {
+                head: match head.as_ref() {
+                    Expr::Symbol(s) => s.clone(),
+                    other => other.to_string(),
+                },
+                args: a.iter().map(expr_to_val).collect(),
+            },
+            _ => Value::Pattern(e.clone()),
+        }
+    }
+    fn expr_subvalues(e: &Expr) -> Vec<Value> {
+        let mut result = vec![expr_to_val(e)];
+        match e {
+            Expr::List(items) => {
+                for item in items {
+                    result.extend(expr_subvalues(item));
+                }
+            }
+            Expr::Call { head, args: a } => {
+                result.extend(expr_subvalues(head));
+                for arg in a {
+                    result.extend(expr_subvalues(arg));
+                }
+            }
+            Expr::Assoc(kvs) => {
+                for (_, v) in kvs {
+                    result.extend(expr_subvalues(v));
+                }
+            }
+            Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs } => {
+                result.extend(expr_subvalues(lhs));
+                result.extend(expr_subvalues(rhs));
+            }
+            _ => {}
+        }
+        result
+    }
     fn contains_pattern(value: &Value, pattern: &Value, ac: &AttributeChecker, env: &Env) -> bool {
         if matches_value(value, pattern, Some(ac), Some(env)) {
             return true;
@@ -79,10 +127,18 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         match value {
             Value::List(items) => items.iter().any(|i| contains_pattern(i, pattern, ac, env)),
             Value::Call { args, .. } => args.iter().any(|a| contains_pattern(a, pattern, ac, env)),
+            Value::Pattern(expr) => expr_subvalues(expr)
+                .iter()
+                .any(|v| contains_pattern(v, pattern, ac, env)),
+            Value::Hold(inner) | Value::HoldComplete(inner) => {
+                contains_pattern(inner, pattern, ac, env)
+            }
             _ => false,
         }
     }
-    Ok(Value::Bool(!contains_pattern(&args[0], &args[1], &attr_checker, env)))
+    let result = !contains_pattern(&args[0], &args[1], &attr_checker, env);
+    eprintln!("DEBUG FreeQ: args=[{}/ {:?}, {}/ {:?}], result={}", args[0], args[0].type_name(), args[1], args[1].type_name(), result);
+    Ok(Value::Bool(result))
 }
 
 /// Check if a value matches a pattern.
@@ -94,7 +150,16 @@ fn matches_value(
     attr_checker: Option<&AttributeChecker>,
     env: Option<&Env>,
 ) -> bool {
+    // Unwrap hold wrappers from value
+    let value = match value {
+        Value::Hold(inner) | Value::HoldComplete(inner) => inner.as_ref(),
+        _ => value,
+    };
     match pattern {
+        Value::Hold(inner) | Value::HoldComplete(inner) => {
+            // Unwrap hold wrappers for comparison
+            return matches_value(value, inner, attr_checker, env);
+        }
         Value::Pattern(pat_expr) => {
             // Handle PatternGuard with guard evaluation
             if let Expr::PatternGuard { pattern, condition } = pat_expr {

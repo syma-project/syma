@@ -115,9 +115,15 @@ pub fn match_pattern(
     value: &Value,
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
-    // Unwrap Value::Pattern for HoldAll/HoldAllComplete arguments
+    // Unwrap Value::Pattern/Value::Hold/Value::HoldComplete for HoldAll/HoldAllComplete arguments
     if let Value::Pattern(expr) = value {
         return match_pattern(pattern, &unwrap_expr_to_value(expr), attr_checker);
+    }
+    if let Value::Hold(inner) = value {
+        return match_pattern(pattern, inner, attr_checker);
+    }
+    if let Value::HoldComplete(inner) = value {
+        return match_pattern(pattern, inner, attr_checker);
     }
 
     match pattern {
