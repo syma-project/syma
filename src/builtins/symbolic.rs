@@ -663,6 +663,11 @@ fn binomial(n: i64, k: i64) -> i64 {
 
 /// D[expr, x] — Symbolic differentiation.
 /// Implemented as Syma rules loaded from D.syma on first use.
+///
+/// Loading order (disk → embedded):
+/// 1. Search paths (SYMA_HOME/SystemFiles, current dir, etc.)
+/// 2. Executable-relative SystemFiles/Kernel/Calculus/D.syma
+/// 3. Embedded source (compiled-in fallback for `cargo run` without install)
 pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -688,14 +693,46 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 }
 
 /// Lazily load D.syma differentiation rules into the environment.
-/// Caches the parsed AST, but evals into every env that calls it.
+/// Tries disk first (search_paths, executable-relative), falls back to embedded.
+/// Caches the parsed AST so subsequent calls are cheap.
 fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
     use std::sync::OnceLock;
     static PARSED_AST: OnceLock<Vec<(crate::ast::Expr, bool)>> = OnceLock::new();
 
+    // Relative path within SystemFiles — matches Mathematica convention:
+    // $SYMA_HOME/SystemFiles/Kernel/Calculus/D.syma
+    const REL_PATH: &str = "Kernel/Calculus/D.syma";
+
     let stmts = PARSED_AST.get_or_init(|| {
-        let source = include_str!("D.syma");
-        let tokens = crate::lexer::tokenize(source).unwrap();
+        // Try search_paths first (SYMA_HOME/SystemFiles, current dir, etc.)
+        let paths = env.search_paths.lock().unwrap();
+        for dir in paths.iter() {
+            let candidate = dir.join(REL_PATH);
+            if candidate.exists() {
+                let source = std::fs::read_to_string(&candidate)
+                    .unwrap_or_else(|_| embedded_d_source());
+                let tokens = crate::lexer::tokenize(&source).unwrap();
+                return crate::parser::parse_with_suppress(tokens).unwrap();
+            }
+        }
+
+        // Try executable-relative SystemFiles (installed layout)
+        if let Some(exe_dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        {
+            let candidate = exe_dir.join("../").join("SystemFiles").join(REL_PATH);
+            if candidate.exists() {
+                let source = std::fs::read_to_string(&candidate)
+                    .unwrap_or_else(|_| embedded_d_source());
+                let tokens = crate::lexer::tokenize(&source).unwrap();
+                return crate::parser::parse_with_suppress(tokens).unwrap();
+            }
+        }
+
+        // Fallback: embedded source (for cargo run without install)
+        let source = embedded_d_source();
+        let tokens = crate::lexer::tokenize(&source).unwrap();
         crate::parser::parse_with_suppress(tokens).unwrap()
     });
 
@@ -704,6 +741,12 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
     }
 
     Ok(())
+}
+
+/// Embedded D.syma source — fallback when no disk file is found.
+fn embedded_d_source() -> String {
+    // Keep this in sync with SystemFiles/Kernel/Calculus/D.syma
+    include_str!("../../SystemFiles/Kernel/Calculus/D.syma").to_string()
 }
 
 // ── Integration ──

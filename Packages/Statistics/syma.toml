@@ -1,0 +1,12 @@
+[package]
+name = "Statistics"
+version = "0.1.0"
+description = "Statistical functions: descriptive statistics, distributions, random variates."
+entry = "Statistics.syma"
+
+[exports]
+symbols = ["Mean", "Median", "Variance", "StandardDeviation", "Quantile",
+  "Covariance", "Correlation", "RandomVariate",
+  "NormalDistribution", "UniformDistribution", "PoissonDistribution",
+  "GeometricMean", "HarmonicMean", "Skewness", "Kurtosis",
+  "BinCounts", "HistogramList"]

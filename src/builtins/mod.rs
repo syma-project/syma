@@ -600,17 +600,29 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "Prefix", builtin_prefix);
     register_builtin_env(env, "Postfix", builtin_postfix);
 
-    // ── Add SYMA_HOME/Packages to module search path ───────────────
-    // This enables `Needs["PackageName"]` to find pure-Syma packages.
+    // ── Add SYMA_HOME/Packages and SystemFiles to module search path ──
+    // SystemFiles/Kernel/ allows loading D.syma, Integrate.syma, etc.
+    // from disk (user-overridable, no rebuild needed).
+    // Packages/ allows `Needs["PackageName"]` to find pure-Syma packages.
     if let Some(syma_home) = std::env::var_os("SYMA_HOME") {
-        let packages_dir = std::path::Path::new(&syma_home).join("Packages");
+        let base = std::path::Path::new(&syma_home);
+        let sysfiles = base.join("SystemFiles");
+        if sysfiles.is_dir() {
+            env.add_search_path(sysfiles);
+        }
+        let packages_dir = base.join("Packages");
         if packages_dir.is_dir() {
             env.add_search_path(packages_dir);
         }
     } else {
-        // Fall back to ~/.syma/Packages
+        // Fall back to ~/.syma/
         if let Some(home) = std::env::var_os("HOME") {
-            let packages_dir = std::path::Path::new(&home).join(".syma").join("Packages");
+            let base = std::path::Path::new(&home).join(".syma");
+            let sysfiles = base.join("SystemFiles");
+            if sysfiles.is_dir() {
+                env.add_search_path(sysfiles);
+            }
+            let packages_dir = base.join("Packages");
             if packages_dir.is_dir() {
                 env.add_search_path(packages_dir);
             }

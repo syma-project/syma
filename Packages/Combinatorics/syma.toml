@@ -1,0 +1,12 @@
+[package]
+name = "Combinatorics"
+version = "0.1.0"
+description = "Combinatorial functions: permutations, combinations, subsets, partitions, Stirling numbers, and more."
+entry = "Combinatorics.syma"
+
+[exports]
+symbols = ["Factorial2", "Binomial", "Multinomial", "CatalanNumber",
+  "Subsets", "Combinations", "Permutations", "Tuples",
+  "StirlingS1", "StirlingS2", "BellB",
+  "Fibonacci", "LucasL", "Subfactorial",
+  "HarmonicNumber", "PartitionsP", "IntegerPartitions", "Signature"]

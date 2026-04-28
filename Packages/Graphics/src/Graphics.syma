@@ -1,0 +1,10 @@
+(* Graphics standard library package *)
+(* Loaded via Needs["Graphics"] — symbols are backed by Rust builtins. *)
+
+module Graphics {
+  export Plot, LogPlot, LogLogPlot, LogLinearPlot,
+         ParametricPlot, PolarPlot, DiscretePlot, DensityPlot,
+         ListPlot, ListLinePlot, ExportGraphics, Graphics,
+         Show, GraphicsGrid, Line, Point, Circle, Rectangle,
+         RGBColor, Hue, Thickness, PointSize, Opacity, Directive
+}

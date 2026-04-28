@@ -1,0 +1,173 @@
+module Combinatorics {
+  export Factorial2, Binomial, Multinomial, CatalanNumber,
+         Subsets, Combinations, Permutations, Tuples,
+         StirlingS1, StirlingS2, BellB,
+         Fibonacci, LucasL, Subfactorial,
+         HarmonicNumber, PartitionsP, IntegerPartitions, Signature;
+
+  (* ── Double factorial: n!! ──────────────────────────────────────── *)
+  Factorial2[n_Integer /; n <= 1] := 1;
+  Factorial2[n_Integer] := n * Factorial2[n - 2];
+
+  (* ── Binomial coefficient ────────────────────────────────────────── *)
+  Binomial[n_Integer, 0] := 1;
+  Binomial[n_Integer, k_Integer /; k == n] := 1;
+  Binomial[n_Integer, k_Integer /; k < 0 || k > n] := 0;
+  Binomial[n_Integer, k_Integer /; k > n - k] := Binomial[n, n - k];
+
+  Binomial[n_Integer, k_Integer] := binomialLoop[n, k, 1, 1];
+
+  binomialLoop[n_, k_, i_ /; i <= k, acc_] := binomialLoop[n, k, i + 1, Floor[acc * (n - k + i) / i]];
+  binomialLoop[n_, k_, i_ /; i > k, acc_] := acc;
+
+  (* ── Multinomial coefficient ──────────────────────────────────────── *)
+  Multinomial[args__Integer] := multinomialHelper[{args}, Total[{args}]];
+
+  multinomialHelper[{x_Integer}, _] := 1;
+  multinomialHelper[{x_Integer, y__Integer}, total_] :=
+    Binomial[total, x] * multinomialHelper[{y}, total - x];
+  multinomialHelper[{}, _] := 1;
+
+  (* ── Catalan number ──────────────────────────────────────────────── *)
+  CatalanNumber[n_Integer /; n >= 0] := Binomial[2*n, n] / (n + 1);
+  CatalanNumber[_] := 0;
+
+  (* ── Subsets (power set) ─────────────────────────────────────────── *)
+  Subsets[{}] := {{}};
+  Subsets[{x_, y___}] := Function[{rest},
+    Join[rest, Map[Function[{s}, Join[{x}, s]], rest]]
+  ][Subsets[{y}]];
+
+  (* ── Combinations (k-subsets) ────────────────────────────────────── *)
+  Combinations[_, 0] := {{}};
+  Combinations[{}, _] := {};
+  Combinations[{x_, y___}, k_] := Join[
+    Map[Function[{c}, Join[{x}, c]], Combinations[{y}, k - 1]],
+    Combinations[{y}, k]
+  ];
+
+  (* ── Permutations ────────────────────────────────────────────────── *)
+  insertEverywhere[x_, {}] := {{x}};
+  insertEverywhere[x_, {y_, z___}] := Join[
+    {Join[{x}, {y, z}]},
+    Map[Function[{p}, Join[{y}, p]], insertEverywhere[x, {z}]]
+  ];
+
+  Permutations[{}] := {{}};
+  Permutations[{x_, y___}] := Flatten[
+    Map[Function[{p}, insertEverywhere[x, p]], Permutations[{y}]],
+    1
+  ];
+
+  (* ── Tuples (n-tuples from a set) ────────────────────────────────── *)
+  Tuples[_, 0] := {{}};
+  Tuples[list_, 1] := Map[Function[{x}, {x}], list];
+  Tuples[list_, n_] := Flatten[
+    Map[Function[{t},
+      Map[Function[{x}, Join[t, {x}]], list]
+    ], Tuples[list, n - 1]],
+    1
+  ];
+
+  (* ── Stirling numbers of the 1st kind (unsigned) ──────────────────── *)
+  StirlingS1[0, 0] := 1;
+  StirlingS1[n_Integer /; n > 0, 0] := 0;
+  StirlingS1[0, k_Integer /; k > 0] := 0;
+  StirlingS1[n_Integer, k_Integer /; k > n] := 0;
+  StirlingS1[n_Integer, k_Integer] := StirlingS1[n - 1, k - 1] + (n - 1) * StirlingS1[n - 1, k];
+  StirlingS1[_, _] := 0;
+
+  (* ── Stirling numbers of the 2nd kind ──────────────────────────────── *)
+  StirlingS2[0, 0] := 1;
+  StirlingS2[n_Integer /; n > 0, 0] := 0;
+  StirlingS2[0, k_Integer /; k > 0] := 0;
+  StirlingS2[n_Integer, k_Integer /; k > n] := 0;
+  StirlingS2[n_Integer, k_Integer] := StirlingS2[n - 1, k - 1] + k * StirlingS2[n - 1, k];
+  StirlingS2[_, _] := 0;
+
+  (* ── Bell numbers ────────────────────────────────────────────────── *)
+  range0[n_] := Join[{0}, Range[n]];
+
+  BellB[n_Integer /; n >= 0] := Total[Map[Function[{k}, StirlingS2[n, k]], range0[n]]];
+  BellB[_] := 0;
+
+  (* ── Fibonacci numbers ───────────────────────────────────────────── *)
+  Fibonacci[0] := 0;
+  Fibonacci[1] := 1;
+  Fibonacci[n_Integer /; n >= 2] := fibIter[n, 0, 1];
+  Fibonacci[n_Integer /; n < 0] := Times[Power[-1, n + 1], Fibonacci[-n]];
+
+  fibIter[1, a_, b_] := b;
+  fibIter[n_, a_, b_] := fibIter[n - 1, b, a + b];
+
+  (* ── Lucas numbers ───────────────────────────────────────────────── *)
+  LucasL[0] := 2;
+  LucasL[1] := 1;
+  LucasL[n_Integer /; n >= 2] := lucasIter[n, 2, 1];
+
+  lucasIter[1, a_, b_] := b;
+  lucasIter[n_, a_, b_] := lucasIter[n - 1, b, a + b];
+
+  (* ── Subfactorial (derangements) ─────────────────────────────────── *)
+  (* !n = n * !(n-1) + (-1)^n *)
+  Subfactorial[0] := 1;
+  Subfactorial[1] := 0;
+  Subfactorial[n_Integer /; n >= 2] := (n - 1) * (Subfactorial[n - 1] + Subfactorial[n - 2]);
+
+  (* ── Harmonic numbers ─────────────────────────────────────────────── *)
+  HarmonicNumber[0] := 0;
+  HarmonicNumber[n_Integer /; n > 0] := harmSum[n, 1, 0];
+
+  harmSum[0, _, acc_] := acc;
+  harmSum[n_, k_, acc_] := harmSum[n - 1, k + 1, acc + 1 / k];
+
+  HarmonicNumber[0, _] := 0;
+  HarmonicNumber[n_Integer /; n > 0, r_Integer /; r > 0] := harmSumR[n, 1, 0, r];
+
+  harmSumR[0, _, acc_, _] := acc;
+  harmSumR[n_, k_, acc_, r_] := harmSumR[n - 1, k + 1, acc + Power[k, -r], r];
+
+  (* ── Partition count (Euler pentagonal recurrence) ─────────────────── *)
+  (* p(n) = sum_{k≠0} (-1)^{k+1} p(n - k(3k-1)/2) *)
+  PartitionsP[0] := 1;
+  PartitionsP[n_Integer /; n < 0] := 0;
+  PartitionsP[n_Integer /; n > 0] := pentagonalSum[n, 1];
+
+  (* Sum over generalized pentagonal numbers k = 1, -1, 2, -2, ... *)
+  pentagonalSum[n_, k_] :=
+    If[k*(3*k-1)/2 > n, 0,
+      (If[Mod[k, 2] == 1, 1, -1] * recursiveP[n - k*(3*k-1)/2])
+        + pentagonalSum[n, If[k > 0, -k, -k + 1]]
+    ];
+
+  (* Internal recursive P(n) to avoid cross-reference issues *)
+  recursiveP[0] := 1;
+  recursiveP[n_Integer /; n < 0] := 0;
+  recursiveP[n_Integer /; n > 0] := pentagonalSum[n, 1];
+
+  (* ── Integer Partitions ───────────────────────────────────────────── *)
+  IntegerPartitions[0] := {{}};
+  IntegerPartitions[n_Integer /; n < 0] := {};
+  IntegerPartitions[n_Integer /; n > 0] := partList[n, n];
+
+  partList[0, _] := {{}};
+  partList[_, 0] := {};
+  partList[n_, max_] :=
+    Flatten[Map[
+      Function[{k},
+        Map[Function[{p}, Join[{k}, p]], partList[n - k, k]]],
+      Range[Min[n, max], -1, 1]
+    ], 1];
+
+  (* ── Signature of a permutation ──────────────────────────────────── *)
+  (* Count inversions mod 2: 1 for even, -1 for odd *)
+  Signature[perm_List] := Power[-1, inversionCount[perm]];
+
+  inversionCount[{}] := 0;
+  inversionCount[{_}] := 0;
+  inversionCount[lst_List] := countInv[lst, 0];
+
+  countInv[{x_}, acc_] := acc;
+  countInv[{x_, rest__}, acc_] :=
+    countInv[{rest}, acc + Length[Select[{rest}, Function[{y}, y < x]]]];
+}

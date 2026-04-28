@@ -1,0 +1,10 @@
+(* Statistics standard library package *)
+(* Loaded via Needs["Statistics"] — symbols are backed by Rust builtins. *)
+
+module Statistics {
+  export Mean, Median, Variance, StandardDeviation, Quantile,
+         Covariance, Correlation, RandomVariate,
+         NormalDistribution, UniformDistribution, PoissonDistribution,
+         GeometricMean, HarmonicMean, Skewness, Kurtosis,
+         BinCounts, HistogramList
+}
