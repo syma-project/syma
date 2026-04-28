@@ -2,7 +2,7 @@ use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
 /// Extract a `&str` from a `&Value`, returning TypeError if not a string.
-fn str_of<'a>(v: &'a Value) -> Result<&'a str, EvalError> {
+fn str_of(v: &Value) -> Result<&str, EvalError> {
     match v {
         Value::Str(s) => Ok(s.as_str()),
         _ => Err(EvalError::TypeError {
@@ -13,7 +13,7 @@ fn str_of<'a>(v: &'a Value) -> Result<&'a str, EvalError> {
 }
 
 /// Extract a single string argument from args at the given index.
-fn str_arg<'a>(args: &'a [Value], idx: usize) -> Result<&'a str, EvalError> {
+fn str_arg(args: &[Value], idx: usize) -> Result<&str, EvalError> {
     match args.get(idx) {
         Some(v) => str_of(v),
         None => Err(EvalError::TypeError {
@@ -24,7 +24,7 @@ fn str_arg<'a>(args: &'a [Value], idx: usize) -> Result<&'a str, EvalError> {
 }
 
 /// Extract two string arguments.
-fn str_args<'a>(args: &'a [Value], a: usize, b: usize) -> Result<(&'a str, &'a str), EvalError> {
+fn str_args(args: &[Value], a: usize, b: usize) -> Result<(&str, &str), EvalError> {
     Ok((str_arg(args, a)?, str_arg(args, b)?))
 }
 
@@ -676,13 +676,11 @@ pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::List(codes) = &args[0] {
         let mut s = String::new();
         for code in codes {
-            if let Value::Integer(n) = code {
-                if let Some(val) = n.to_u32() {
-                    if let Some(c) = char::from_u32(val) {
+            if let Value::Integer(n) = code
+                && let Some(val) = n.to_u32()
+                    && let Some(c) = char::from_u32(val) {
                         s.push(c);
                     }
-                }
-            }
         }
         return Ok(Value::Str(s));
     }
@@ -707,18 +705,21 @@ pub fn builtin_edit_distance(args: &[Value]) -> Result<Value, EvalError> {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
-    }
-    for j in 0..=n {
-        dp[0][j] = j;
-    }
-    for i in 1..=m {
-        for j in 1..=n {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            dp[i][j] = (dp[i - 1][j] + 1)
-                .min(dp[i][j - 1] + 1)
-                .min(dp[i - 1][j - 1] + cost);
+    #[allow(clippy::needless_range_loop)]
+    {
+        for i in 0..=m {
+            dp[i][0] = i;
+        }
+        for j in 0..=n {
+            dp[0][j] = j;
+        }
+        for i in 1..=m {
+            for j in 1..=n {
+                let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+                dp[i][j] = (dp[i - 1][j] + 1)
+                    .min(dp[i][j - 1] + 1)
+                    .min(dp[i - 1][j - 1] + cost);
+            }
         }
     }
     Ok(Value::Integer(Integer::from(dp[m][n] as i64)))
@@ -825,7 +826,7 @@ pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
         args: args.to_vec().into(),
     })?;
     let sentences: Vec<&str> = s
-        .split(|c| matches!(c, '.' | '!' | '?'))
+        .split(['.', '!', '?'])
         .filter(|s| !s.trim().is_empty())
         .collect();
     Ok(Value::Integer(Integer::from(sentences.len() as i64)))

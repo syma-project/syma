@@ -293,12 +293,11 @@ pub fn builtin_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
 /// RSolve[{recurrenceEq, initCond}, func, {var, min, max}] — solve recurrence equations.
 /// Handles constant-coefficient linear recurrences of order 1 and 2.
 /// Returns {{func[var] -> closed_form_solution}}.
-
 /// Strip Value::Pattern wrapper (from HoldAll) if present, recursively.
 fn strip_pattern(v: &Value) -> Value {
     match v {
         Value::Pattern(unevaluated) => expr_to_value(unevaluated),
-        Value::List(items) => Value::List(items.iter().map(|item| strip_pattern(item)).collect()),
+        Value::List(items) => Value::List(items.iter().map(strip_pattern).collect()),
         _ => v.clone(),
     }
 }
@@ -315,7 +314,7 @@ pub fn builtin_rsolve(args: &[Value], _env: &crate::env::Env) -> Result<Value, E
 
     // args[0]: List of {equation, initial_conditions}
     let constraints = match &args[0] {
-        Value::List(items) if items.len() >= 1 => items,
+        Value::List(items) if !items.is_empty() => items,
         _ => {
             return Ok(Value::Call {
                 head: "RSolve".to_string(),
@@ -338,7 +337,7 @@ pub fn builtin_rsolve(args: &[Value], _env: &crate::env::Env) -> Result<Value, E
 
     // args[2]: {var, min, max}
     let var_range = match &args[2] {
-        Value::List(items) if items.len() >= 1 => items,
+        Value::List(items) if !items.is_empty() => items,
         _ => {
             return Ok(Value::Call {
                 head: "RSolve".to_string(),
@@ -507,8 +506,8 @@ fn call_to_int(v: &Value) -> Option<i64> {
 
 /// Extract (function_name, offset) from a[n] or a[n+k] form.
 fn parse_func_name_offset(expr: &Value, var_name: &str) -> Option<(String, i64)> {
-    if let Value::Call { head, args } = expr {
-        if args.len() == 1 {
+    if let Value::Call { head, args } = expr
+        && args.len() == 1 {
             let arg_expr = &args[0];
             let offset = match arg_expr {
                 Value::Symbol(s) if s == var_name => Some(0),
@@ -528,7 +527,6 @@ fn parse_func_name_offset(expr: &Value, var_name: &str) -> Option<(String, i64)>
             };
             return offset.map(|o| (head.clone(), o));
         }
-    }
     None
 }
 
@@ -564,8 +562,8 @@ fn parse_term(expr: &Value, var_name: &str) -> Option<(String, i64, Value)> {
     let args_flat = flatten_times(expr);
     let args_clone = args_flat.clone();
     for arg in &args_clone {
-        if let Value::Call { .. } = arg {
-            if let Some((name, offset)) = parse_func_name_offset(arg, var_name) {
+        if let Value::Call { .. } = arg
+            && let Some((name, offset)) = parse_func_name_offset(arg, var_name) {
                 let coeff_values: Vec<Value> = args_flat
                     .into_iter()
                     .filter(|a| !a.struct_eq(arg))
@@ -580,7 +578,6 @@ fn parse_term(expr: &Value, var_name: &str) -> Option<(String, i64, Value)> {
                 };
                 return Some((name, -offset, coeff));
             }
-        }
     }
     None
 }
@@ -602,6 +599,7 @@ fn parse_recurrence_rhs(rhs: &Value, var_name: &str) -> Vec<(String, i64, Value)
 }
 
 /// Given a Times[...] call and one of its arguments, return the product of the rest.
+#[allow(dead_code)]
 fn other_factor_in_times(times_call: &Value, known_arg: &Value) -> Value {
     if let Value::Call { args, .. } = times_call {
         let others: Vec<Value> = args
@@ -627,17 +625,13 @@ fn parse_init_condition(expr: &Value) -> Option<(i64, Value)> {
     if let Value::Call { head, args } = expr
         && head == "Equal"
         && args.len() == 2
-    {
-        if let Value::Call {
+        && let Value::Call {
             args: call_args, ..
         } = &args[0]
             && call_args.len() == 1
-        {
-            if let Value::Integer(k) = &call_args[0] {
+            && let Value::Integer(k) = &call_args[0] {
                 return k.to_i64().map(|k| (k, args[1].clone()));
             }
-        }
-    }
     None
 }
 
@@ -840,11 +834,7 @@ fn simplify_times(mut args: Vec<Value>) -> Value {
         if *a == Value::Integer(Integer::from(-1)) {
             negative = !negative;
             false
-        } else if *a == Value::Integer(Integer::from(1)) {
-            false
-        } else {
-            true
-        }
+        } else { *a != Value::Integer(Integer::from(1)) }
     });
     let result = match args.len() {
         0 => Value::Integer(Integer::from(if negative { -1 } else { 1 })),

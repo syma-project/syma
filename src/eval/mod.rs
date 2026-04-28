@@ -472,7 +472,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
             // Sort definitions so more specific (literal) patterns come first.
             func.definitions
-                .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
+                .sort_by_key(|a| std::cmp::Reverse(specificity(&a.params)));
 
             env.set(name.clone(), Value::Function(Arc::new(func)));
             Ok(Value::Null)
@@ -586,7 +586,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         });
                         // Sort definitions so more specific ones match first
                         func.definitions
-                            .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
+                            .sort_by_key(|a| std::cmp::Reverse(specificity(&a.params)));
                         env.set(name.clone(), Value::Function(Arc::new(func)));
                         return Ok(val);
                     }
@@ -765,6 +765,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let mut fields = Vec::new();
             let mut methods = HashMap::new();
             let mut constructor = None;
+            let mut transforms = Vec::new();
 
             for member in members {
                 match member {
@@ -809,8 +810,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             body: body_expr,
                         });
                     }
-                    crate::ast::MemberDef::Transform { .. } => {
-                        // Transforms are not yet supported
+                    crate::ast::MemberDef::Transform { name: _, rules } => {
+                        transforms.extend(rules.clone());
                     }
                 }
             }
@@ -861,6 +862,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 fields,
                 methods,
                 constructor,
+                transforms,
             };
             let class_val = Value::Class(std::sync::Arc::new(class_def));
             env.set(name.clone(), class_val);
@@ -1995,12 +1997,11 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
 pub(crate) fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
-        if let Value::Call { head, args: inner } = arg {
-            if head == name {
+        if let Value::Call { head, args: inner } = arg
+            && head == name {
                 result.extend(flatten_flat_args(name, inner));
                 continue;
             }
-        }
         result.push(arg.clone());
     }
     result
@@ -2015,8 +2016,7 @@ fn normalize_flat_result(name: &str, result: Value, env: &Env) -> Value {
         ref head,
         args: ref a,
     } = result
-    {
-        if head == name {
+        && head == name {
             let flat = flatten_flat_args(name, a);
             if flat.len() != a.len() || flat.as_slice() != a.as_slice() {
                 return Value::Call {
@@ -2025,7 +2025,6 @@ fn normalize_flat_result(name: &str, result: Value, env: &Env) -> Value {
                 };
             }
         }
-    }
     result
 }
 
@@ -2254,7 +2253,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 
             // Try each definition in order
             let mut found_result: Option<Result<Value, EvalError>> = None;
-            for (_def_idx, def) in func_def.definitions.iter().enumerate() {
+            for def in func_def.definitions.iter() {
                 let match_result = try_match_params(&def.params, args, env)?;
                 if let Some(bindings) = match_result {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)
@@ -2503,7 +2502,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 /// Rank specificity of a function definition's parameter list.
 /// Higher score = more specific (tried first in rule ordering).
 fn specificity(params: &[Expr]) -> usize {
-    params.iter().map(|p| specificity_expr(p)).sum()
+    params.iter().map(specificity_expr).sum()
 }
 
 /// Specificity score for a single pattern expression.

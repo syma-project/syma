@@ -1007,37 +1007,26 @@ impl Parser {
     /// evaluator resolves via the operator table at runtime.
     fn parse_custom_infix_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_mul_expr()?;
-        loop {
-            match self.peek() {
-                Token::Operator(op) => {
-                    let op = op.clone();
-                    self.advance();
-                    let right = self.parse_mul_expr()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol(op)),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while let Token::Operator(op) = self.peek().clone() {
+            self.advance();
+            let right = self.parse_mul_expr()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol(op)),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
 
     fn parse_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pow_expr()?;
-        loop {
-            match self.peek() {
-                Token::StarStar => {
-                    self.advance();
-                    let right = self.parse_pow_expr()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while let Token::StarStar = self.peek() {
+            self.advance();
+            let right = self.parse_pow_expr()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
@@ -2006,37 +1995,26 @@ impl Parser {
     /// Same logic as parse_custom_infix_expr but for patterns.
     fn parse_pattern_custom_infix(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_mul()?;
-        loop {
-            match self.peek() {
-                Token::Operator(op) => {
-                    let op = op.clone();
-                    self.advance();
-                    let right = self.parse_pattern_mul()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol(op)),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while let Token::Operator(op) = self.peek().clone() {
+            self.advance();
+            let right = self.parse_pattern_mul()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol(op)),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
 
     fn parse_pattern_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_pow()?;
-        loop {
-            match self.peek() {
-                Token::StarStar => {
-                    self.advance();
-                    let right = self.parse_pattern_pow()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while let Token::StarStar = self.peek() {
+            self.advance();
+            let right = self.parse_pattern_pow()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }

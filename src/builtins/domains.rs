@@ -61,36 +61,24 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     let result = match dom_name {
-        "Integers" => {
-            if is_concrete(x) {
+        "Integers"
+            if is_concrete(x) => {
                 Value::Symbol(if matches!(x, Value::Integer(_)) {
                     "True".to_string()
                 } else {
                     "False".to_string()
                 })
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
             }
-        }
-        "Rationals" => {
-            if is_concrete(x) {
+        "Rationals"
+            if is_concrete(x) => {
                 Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
                     "True".to_string()
                 } else {
                     "False".to_string()
                 })
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
             }
-        }
-        "Reals" => {
-            if is_concrete(x) {
+        "Reals"
+            if is_concrete(x) => {
                 Value::Symbol(
                     if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
                         "True".to_string()
@@ -98,23 +86,11 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
                         "False".to_string()
                     },
                 )
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
             }
-        }
-        "Complexes" => {
-            if is_concrete(x) {
+        "Complexes"
+            if is_concrete(x) => {
                 Value::Symbol("True".to_string())
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
             }
-        }
         "Booleans" => match x {
             Value::Symbol(s) if s == "True" || s == "False" => Value::Symbol("True".to_string()),
             Value::Bool(_) => Value::Symbol("True".to_string()),
@@ -203,10 +179,9 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
                 head: ph,
                 args: pargs,
             } = &args[0]
-            {
-                if ph == "Power" && pargs.len() == 2 {
-                    if let Value::Integer(e) = &pargs[1] {
-                        if *e == 2 {
+                && ph == "Power" && pargs.len() == 2
+                    && let Value::Integer(e) = &pargs[1]
+                        && *e == 2 {
                             let var = &pargs[0];
                             if implies_positive(var, assum) {
                                 return Ok(var.clone());
@@ -221,9 +196,6 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
                                 });
                             }
                         }
-                    }
-                }
-            }
             // Recurse into argument
             let refined = refine_expr(&args[0], assum)?;
             if refined != args[0] {

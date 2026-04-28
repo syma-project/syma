@@ -108,9 +108,9 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                     let (lhs, rhs) = &rules[idx];
                     if let Value::Pattern(lhs_expr) = lhs
                         && let MatchResult::Match(bindings) =
-                            match_pattern(&lhs_expr, value, Some(&_attr_checker))
+                            match_pattern(lhs_expr, value, Some(&_attr_checker))
                     {
-                        let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
+                        let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
                         let slot_values: Vec<Value> = match value {
                             Value::Call { args, .. } => args.clone(),
                             Value::List(items) => items.clone(),
@@ -151,9 +151,9 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                 'next_rule: for (lhs, rhs) in rules {
                     if let Value::Pattern(lhs_expr) = lhs
                         && let MatchResult::Match(bindings) =
-                            match_pattern(&lhs_expr, value, Some(&_attr_checker))
+                            match_pattern(lhs_expr, value, Some(&_attr_checker))
                     {
-                        let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
+                        let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
                         let slot_values: Vec<Value> = match value {
                             Value::Call { args, .. } => args.clone(),
                             Value::List(items) => items.clone(),

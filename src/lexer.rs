@@ -457,7 +457,7 @@ impl Lexer {
             if self.peek() == Some('I') {
                 // Check that I is not followed by identifier chars (to avoid matching e.g. 3In)
                 let next = self.peek_ahead(1);
-                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
+                if next.is_none_or(|c| !c.is_alphanumeric() && c != '_') {
                     self.advance();
                     return Token::Complex(num_str);
                 }
@@ -469,7 +469,7 @@ impl Lexer {
             if self.peek() == Some('I') {
                 // Check that I is not followed by identifier chars
                 let next = self.peek_ahead(1);
-                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
+                if next.is_none_or(|c| !c.is_alphanumeric() && c != '_') {
                     self.advance();
                     return Token::Complex(num_str);
                 }

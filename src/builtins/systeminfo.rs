@@ -45,11 +45,10 @@ fn arch_name() -> String {
 fn hostname() -> String {
     unsafe {
         let mut buf = [0u8; 256];
-        if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 {
-            if let Some(null_pos) = buf.iter().position(|&b| b == 0) {
+        if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0
+            && let Some(null_pos) = buf.iter().position(|&b| b == 0) {
                 return String::from_utf8_lossy(&buf[..null_pos]).to_string();
             }
-        }
     }
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
@@ -70,11 +69,11 @@ fn timezone_offset() -> f64 {
         use std::time::SystemTime;
 
         let mut tm = std::mem::zeroed::<libc::tm>();
-        let mut now: libc::time_t = SystemTime::now()
+        let now: libc::time_t = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as libc::time_t)
             .unwrap_or(0);
-        libc::localtime_r(&mut now, &mut tm);
+        libc::localtime_r(&now, &mut tm);
         tm.tm_gmtoff as f64 / 3600.0
     }
 }

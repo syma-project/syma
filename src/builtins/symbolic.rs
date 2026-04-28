@@ -167,7 +167,7 @@ fn simplify_times(args: &[Value]) -> Value {
     for arg in args {
         match arg {
             Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
-            Value::Integer(n) if *n == Integer::from(1) => {}
+            Value::Integer(n) if *n == 1 => {}
             Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {
                 return Value::Integer(Integer::from(0));
             }
@@ -244,9 +244,9 @@ fn simplify_times(args: &[Value]) -> Value {
     let mut result: Vec<Value> = Vec::new();
     // Add numeric product unless it's 1 (in any form)
     let is_one = match &numeric_product {
-        Value::Integer(n) => *n == Integer::from(1),
+        Value::Integer(n) => *n == 1,
         Value::Real(r) => *r == Float::with_val(DEFAULT_PRECISION, 1.0),
-        Value::Rational(r) => **r == Rational::from(1_i64),
+        Value::Rational(r) => **r == 1,
         _ => false,
     };
     if !is_one {
@@ -256,7 +256,7 @@ fn simplify_times(args: &[Value]) -> Value {
         if exp.is_zero() {
             continue;
         }
-        if exp == Integer::from(1) {
+        if exp == 1 {
             result.push(base);
         } else {
             result.push(simplify_call("Power", &[base, Value::Integer(exp)]));
@@ -298,6 +298,14 @@ fn simplify_sin(args: &[Value]) -> Value {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(0)),
+        // sin(-x) -> -sin(x)
+        Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
+            if let Value::Integer(n) = &a[0]
+                && *n == -1 && a.len() == 2 {
+                    return simplify_call("Times", &[Value::Integer((-1).into()), call("Sin", vec![a[1].clone()])]);
+                }
+            call_ref("Sin", args)
+        }
         _ => call_ref("Sin", args),
     }
 }
@@ -308,6 +316,14 @@ fn simplify_cos(args: &[Value]) -> Value {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(1)),
+        // cos(-x) -> cos(x)
+        Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
+            if let Value::Integer(n) = &a[0]
+                && *n == -1 && a.len() == 2 {
+                    return call("Cos", vec![a[1].clone()]);
+                }
+            call_ref("Cos", args)
+        }
         _ => call_ref("Cos", args),
     }
 }
@@ -494,7 +510,7 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
     }
 
     // Polynomial long division
-    let mut remainder: Vec<Value> = num_coeffs.iter().map(|v| simplify_value(v)).collect();
+    let mut remainder: Vec<Value> = num_coeffs.iter().map(simplify_value).collect();
     let den_lead_inv = invert_value(den_lead);
 
     let quot_deg = num_deg - den_deg;
@@ -514,11 +530,11 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
         quot_coeffs[i as usize] = q.clone();
 
         // Subtract q * den_coeffs shifted by i from remainder
-        for k in 0..den_coeffs.len() {
+        for (k, den_k) in den_coeffs.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
                 let sub =
-                    expand_value(&simplify_call("Times", &[q.clone(), den_coeffs[k].clone()]));
+                    expand_value(&simplify_call("Times", &[q.clone(), den_k.clone()]));
                 let neg = expand_value(&simplify_call(
                     "Times",
                     &[Value::Integer(Integer::from(-1)), sub],
@@ -534,7 +550,7 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
     }
 
     // Check if all remaining coefficients are zero
-    let all_zero = remainder.iter().all(|v| is_zero_value(v));
+    let all_zero = remainder.iter().all(is_zero_value);
     if !all_zero {
         return None;
     }
@@ -739,8 +755,8 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         .collect();
 
     // Check if second argument is a List {x, n} or {x, n, x0}
-    if let Value::List(items) = &unwrapped[1] {
-        if !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
+    if let Value::List(items) = &unwrapped[1]
+        && !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
             let var = items[0].clone();
             let n = items[1].to_integer().ok_or_else(|| {
                 EvalError::Error("D: order n must be a non-negative integer".to_string())
@@ -779,7 +795,6 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
             return Ok(result);
         }
-    }
 
     // Multi-arg: D[f, x, y, z, ...] — fold left: D[D[D[f, x], y], z]
     if unwrapped.len() > 2 {
@@ -814,17 +829,15 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
         head: ref h,
         ref args,
     } = concrete
-    {
-        if h == "D" && args.len() == 2 {
+        && h == "D" && args.len() == 2 {
             // Call eval_d_2 directly with already-unwrapped args
             let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
             return eval_d_2(inner_result, var, env);
         }
-    }
 
     // Flatten nested Plus/Times (parser builds nested, Flat flattens at runtime)
     let flattened = match &concrete {
-        &Value::Call { ref head, ref args }
+        Value::Call { head, args }
             if (head == "Plus" || head == "Times") && args.len() >= 2 =>
         {
             let flat_args = crate::eval::flatten_flat_args(head, args);
@@ -915,7 +928,7 @@ fn add_times(left: Vec<Value>, right: Vec<Value>) -> Value {
 
 /// Create a Times of values. Returns 0 if any arg is 0.
 fn make_times(items: Vec<Value>) -> Value {
-    if items.iter().any(|v| is_zero(v)) {
+    if items.iter().any(is_zero) {
         return Value::Integer(rug::Integer::from(0));
     }
     match items.len() {
@@ -988,11 +1001,10 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
 
     // After loading, ensure the D function is in the root scope so it's
     // accessible from all child scopes.
-    if let Some(d_func) = env.get("D") {
-        if let Value::Function(_) = &d_func {
+    if let Some(d_func) = env.get("D")
+        && let Value::Function(_) = &d_func {
             env.root_env().set("D".to_string(), d_func);
         }
-    }
 
     Ok(())
 }
@@ -1156,15 +1168,13 @@ fn load_integrate_file(env: &Env, fname: &str) {
         for dir in paths.iter() {
             let candidate = dir.join(REL_PATH).join(fname);
             if candidate.exists() {
-                if let Ok(source) = std::fs::read_to_string(&candidate) {
-                    if let Ok(tokens) = crate::lexer::tokenize(&source) {
-                        if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+                if let Ok(source) = std::fs::read_to_string(&candidate)
+                    && let Ok(tokens) = crate::lexer::tokenize(&source)
+                        && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
                             for (expr, _suppress) in stmts {
                                 let _ = crate::eval::eval(&expr, env);
                             }
                         }
-                    }
-                }
                 return;
             }
         }
@@ -1181,29 +1191,25 @@ fn load_integrate_file(env: &Env, fname: &str) {
             .join(REL_PATH)
             .join(fname);
         if candidate.exists() {
-            if let Ok(source) = std::fs::read_to_string(&candidate) {
-                if let Ok(tokens) = crate::lexer::tokenize(&source) {
-                    if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+            if let Ok(source) = std::fs::read_to_string(&candidate)
+                && let Ok(tokens) = crate::lexer::tokenize(&source)
+                    && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
                         for (expr, _suppress) in stmts {
                             let _ = crate::eval::eval(&expr, env);
                         }
                     }
-                }
-            }
             return;
         }
     }
 
     // Fallback: embedded source
-    if let Some(source) = embedded_integrate_source(fname) {
-        if let Ok(tokens) = crate::lexer::tokenize(&source) {
-            if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+    if let Some(source) = embedded_integrate_source(fname)
+        && let Ok(tokens) = crate::lexer::tokenize(&source)
+            && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
                 for (expr, _suppress) in stmts {
                     let _ = crate::eval::eval(&expr, env);
                 }
             }
-        }
-    }
 }
 
 /// Embedded Integrate rule files — fallback for cargo run.
@@ -1681,7 +1687,7 @@ fn expr_from_coeffs(coeffs: &[Value], var: &str) -> Value {
 fn strip_pattern(v: &Value) -> Value {
     match v {
         Value::Pattern(unevaluated) => expr_to_value(unevaluated),
-        Value::List(items) => Value::List(items.iter().map(|item| strip_pattern(item)).collect()),
+        Value::List(items) => Value::List(items.iter().map(strip_pattern).collect()),
         _ => v.clone(),
     }
 }
@@ -2141,7 +2147,7 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
                 for k in 0..3 {
                     let y = 2.0
                         * (-resolvent_p / 3.0).sqrt()
-                        * ((theta as f64 - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos());
+                        * ((theta - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos());
                     let m = y - 2.0 * p / 3.0;
 
                     if m < 1e-12 {
@@ -2614,13 +2620,11 @@ fn extract_symbol_from(val: &Value) -> Result<String, EvalError> {
         Value::Symbol(s) | Value::Str(s) => Ok(s.clone()),
         Value::Builtin(name, _) => Ok(name.clone()),
         Value::Function(fd) => Ok(fd.name.clone()),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => Ok(s.clone()),
-            _ => Err(EvalError::TypeError {
-                expected: "Symbol or String".to_string(),
-                got: val.type_name().to_string(),
-            }),
-        },
+        Value::Pattern(Expr::Symbol(s)) => Ok(s.clone()),
+        Value::Pattern(_) => Err(EvalError::TypeError {
+            expected: "Symbol or String".to_string(),
+            got: val.type_name().to_string(),
+        }),
         _ => Err(EvalError::TypeError {
             expected: "Symbol or String".to_string(),
             got: val.type_name().to_string(),
@@ -2680,15 +2684,13 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
         Value::Symbol(s) | Value::Str(s) => s.clone(),
         Value::Builtin(name, _) => name.clone(),
         Value::Function(fd) => fd.name.clone(),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "Symbol or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
+        Value::Pattern(Expr::Symbol(s)) => s.clone(),
+        Value::Pattern(_) => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),

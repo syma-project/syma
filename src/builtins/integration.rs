@@ -193,11 +193,11 @@ pub fn builtin_half_integer_q(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Rational(r) => {
             let den = r.denom();
-            if *den == Integer::from(2) && r.numer().is_odd() {
+            if *den == 2 && r.numer().is_odd() {
                 return Ok(Value::Bool(true));
             }
             let num = r.numer();
-            if num.is_even() && *den == Integer::from(1) {
+            if num.is_even() && *den == 1 {
                 return Ok(Value::Bool(false));
             }
             let double = num.clone() / den.clone();
@@ -247,7 +247,7 @@ pub fn builtin_integers_q(args: &[Value]) -> Result<Value, EvalError> {
 
 /// PolyQ[expr, x] — expr is a polynomial in x
 pub fn builtin_poly_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "PolyQ requires 1 or 2 arguments".to_string(),
         ));
@@ -367,7 +367,7 @@ pub fn builtin_known_cotangent_integrand_q(args: &[Value]) -> Result<Value, Eval
 
 /// Simp[expr, x] — simplify (delegate to Simplify)
 pub fn builtin_simp(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "Simp requires at least 1 argument".to_string(),
         ));
@@ -539,7 +539,7 @@ pub fn builtin_nonfree_factors(args: &[Value]) -> Result<Value, EvalError> {
 
 /// ExpandIntegrand[expr, x] — expand integrand (delegate to Expand)
 pub fn builtin_expand_integrand(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "ExpandIntegrand requires at least 1 argument".to_string(),
         ));
@@ -549,7 +549,7 @@ pub fn builtin_expand_integrand(args: &[Value]) -> Result<Value, EvalError> {
 
 /// ExpandToSum[expr, x] — expand to sum (delegate to Expand)
 pub fn builtin_expand_to_sum(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "ExpandToSum requires at least 1 argument".to_string(),
         ));
@@ -593,7 +593,7 @@ pub fn builtin_dist(args: &[Value]) -> Result<Value, EvalError> {
 
 /// RemoveContent[expr, x] — remove constant content (stub: return expr)
 pub fn builtin_remove_content(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "RemoveContent requires at least 1 argument".to_string(),
         ));
@@ -628,7 +628,7 @@ pub fn builtin_linear_q(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
     let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    Ok(Value::Bool(coeffs.len() >= 1 && coeffs.len() <= 2))
+    Ok(Value::Bool(!coeffs.is_empty() && coeffs.len() <= 2))
 }
 
 /// SumQ[expr] — is expr a sum (Plus with multiple args)
@@ -772,38 +772,35 @@ pub fn builtin_with(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap bindings from Pattern(Expr)
     let bindings_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     // Evaluate bindings in child env to get concrete values
     let bindings_val = eval(&bindings_expr, &child_env)?;
-    match &bindings_val {
-        Value::List(pairs) => {
-            for pair in pairs {
-                match pair {
-                    Value::Rule { lhs, rhs, .. } => {
-                        let name = match &**lhs {
-                            Value::Symbol(s) => s.clone(),
-                            _ => lhs.to_string(),
-                        };
-                        child_env.set(name, (**rhs).clone());
-                    }
-                    Value::Call { head, args: a } if head == "Set" && a.len() == 2 => {
-                        let name = match &a[0] {
-                            Value::Symbol(s) => s.clone(),
-                            _ => a[0].to_string(),
-                        };
-                        child_env.set(name, a[1].clone());
-                    }
-                    _ => {}
+    if let Value::List(pairs) = &bindings_val {
+        for pair in pairs {
+            match pair {
+                Value::Rule { lhs, rhs, .. } => {
+                    let name = match &**lhs {
+                        Value::Symbol(s) => s.clone(),
+                        _ => lhs.to_string(),
+                    };
+                    child_env.set(name, (**rhs).clone());
                 }
+                Value::Call { head, args: a } if head == "Set" && a.len() == 2 => {
+                    let name = match &a[0] {
+                        Value::Symbol(s) => s.clone(),
+                        _ => a[0].to_string(),
+                    };
+                    child_env.set(name, a[1].clone());
+                }
+                _ => {}
             }
         }
-        _ => {}
     }
     // Unwrap body from Pattern(Expr) and eval in child env
     let body_expr = match &args[1] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     eval(&body_expr, &child_env)
 }
@@ -819,7 +816,7 @@ pub fn builtin_module(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap vars from Pattern(Expr)
     let vars_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     let vars_val = eval(&vars_expr, &child_env)?;
     if let Value::List(vars) = &vars_val {
@@ -834,7 +831,7 @@ pub fn builtin_module(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap body and eval in child env
     let body_expr = match &args[1] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     eval(&body_expr, &child_env)
 }
@@ -848,20 +845,20 @@ pub fn builtin_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Evaluate condition first
     let cond_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     let cond_val = eval(&cond_expr, env)?;
     let cond = cond_val.to_bool();
     if cond {
         let body_expr = match &args[1] {
             Value::Pattern(e) => e.clone(),
-            ref v => value_to_expr(v),
+            v => value_to_expr(v),
         };
         eval(&body_expr, env)
     } else if args.len() == 3 {
         let body_expr = match &args[2] {
             Value::Pattern(e) => e.clone(),
-            ref v => value_to_expr(v),
+            v => value_to_expr(v),
         };
         eval(&body_expr, env)
     } else {
@@ -1965,11 +1962,10 @@ fn value_to_float(v: &Value) -> Option<Float> {
 fn substitute_value(expr: &Value, old_var: &Value, new_expr: &Value) -> Value {
     match expr {
         Value::Symbol(s) => {
-            if let Value::Symbol(os) = old_var {
-                if s == os {
+            if let Value::Symbol(os) = old_var
+                && s == os {
                     return new_expr.clone();
                 }
-            }
             expr.clone()
         }
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
@@ -2008,23 +2004,20 @@ fn is_constant_wrt(val: &Value, var: &Value) -> bool {
     }
 }
 
-fn is_polynomial(val: &Value, var: &str) -> bool {
+fn is_polynomial(val: &Value, _var: &str) -> bool {
     match val {
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => true,
         Value::Symbol(_s) => true,
         Value::Call { head, args } => match head.as_str() {
-            "Plus" | "Times" => args.iter().all(|a| is_polynomial(a, var)),
+            "Plus" | "Times" => args.iter().all(|a| is_polynomial(a, _var)),
             "Power" if args.len() == 2 => {
-                is_polynomial(&args[0], var)
+                is_polynomial(&args[0], _var)
                     && matches!(&args[1], Value::Integer(n) if !n.is_negative())
             }
-            "Divide" => {
-                if args.len() == 2 {
-                    is_polynomial(&args[0], var) && is_polynomial(&args[1], var)
-                } else {
-                    false
+            "Divide"
+                if args.len() == 2 => {
+                    is_polynomial(&args[0], _var) && is_polynomial(&args[1], _var)
                 }
-            }
             _ => false,
         },
         _ => false,
@@ -2043,8 +2036,8 @@ fn contains_complex(val: &Value) -> bool {
     match val {
         Value::Symbol(s) => s == "I",
         Value::Complex { .. } => true,
-        Value::Call { args, .. } => args.iter().any(|a| contains_complex(a)),
-        Value::List(items) => items.iter().any(|a| contains_complex(a)),
+        Value::Call { args, .. } => args.iter().any(contains_complex),
+        Value::List(items) => items.iter().any(contains_complex),
         _ => false,
     }
 }

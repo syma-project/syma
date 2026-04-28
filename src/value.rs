@@ -451,6 +451,7 @@ pub struct ClassDef {
     pub fields: Vec<ClassField>,
     pub methods: HashMap<String, ClassMethod>,
     pub constructor: Option<ClassConstructor>,
+    pub transforms: Vec<(Expr, Expr)>,
 }
 
 /// A class field with optional type hint and default value.
@@ -1942,8 +1943,8 @@ fn is_value_zero(v: &Value) -> bool {
 /// Check if a value is exactly 1 (for coefficient display in SeriesData).
 fn is_value_one(v: &Value) -> bool {
     match v {
-        Value::Integer(n) => *n == Integer::from(1),
-        Value::Rational(r) => **r == Rational::from(1),
+        Value::Integer(n) => *n == 1,
+        Value::Rational(r) => **r == 1,
         _ => false,
     }
 }

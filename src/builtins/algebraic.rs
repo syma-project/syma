@@ -86,7 +86,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
         let denom = norm[1].clone();
         let result = neg / denom;
         let (num, denom) = result.into_numer_denom();
-        if denom == Integer::from(1) {
+        if denom == 1 {
             return Ok(Value::Integer(num));
         } else {
             return Ok(rational_value(num, denom));
@@ -381,7 +381,7 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
         let two_a: Rational = Rational::from(2_i64) * a.clone();
         let result = neg_b / two_a;
         let (n, d) = result.into_numer_denom();
-        if d == Integer::from(1) {
+        if d == 1 {
             return Ok(Value::Integer(n));
         } else {
             return Ok(rational_value(n, d));
@@ -528,7 +528,7 @@ fn isolating_interval_real(coeffs: &[Rational], approx: f64) -> Result<Value, Ev
 
 fn rat_value(r: &Rational) -> Value {
     let (num, den) = r.clone().into_numer_denom();
-    if den == Integer::from(1) {
+    if den == 1 {
         Value::Integer(num)
     } else {
         rational_value(num, den)

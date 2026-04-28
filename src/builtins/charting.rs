@@ -92,6 +92,7 @@ fn format_tick(v: f64) -> String {
 }
 
 /// Build a complete SVG wrapper with axes for cartesian charts.
+#[allow(clippy::too_many_arguments)]
 fn svg_with_axes(
     content: &str,
     width: f64,
@@ -226,6 +227,7 @@ fn svg_with_axes(
 }
 
 /// Map data coordinates to SVG coordinates.
+#[allow(clippy::too_many_arguments)]
 fn map_to_svg(
     x: f64,
     y: f64,
@@ -250,14 +252,12 @@ fn parse_chart_options(opts: &Value) -> (f64, f64, bool) {
     let mut grid_lines = false;
 
     if let Value::Assoc(map) = opts {
-        if let Some(v) = map.get("ImageSize") {
-            if let Value::List(size) = v {
-                if size.len() >= 2 {
+        if let Some(v) = map.get("ImageSize")
+            && let Value::List(size) = v
+                && size.len() >= 2 {
                     width = to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
                     height = to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
                 }
-            }
-        }
         if let Some(v) = map.get("GridLines") {
             grid_lines = match v {
                 Value::Bool(b) => *b,
@@ -303,11 +303,10 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
         Value::List(pair) if pair.len() >= 2 => {
             let mut result = Vec::new();
             for item in data {
-                if let Value::List(p) = item {
-                    if let (Some(x), Some(y)) = (to_f64(&p[0]), to_f64(&p[1])) {
+                if let Value::List(p) = item
+                    && let (Some(x), Some(y)) = (to_f64(&p[0]), to_f64(&p[1])) {
                         result.push((x, y));
                     }
-                }
             }
             result
         }
@@ -467,7 +466,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
     };
     let (width, height, _) = parse_chart_options(options);
 
-    let nums: Vec<f64> = data.iter().filter_map(|v| to_f64(v)).collect();
+    let nums: Vec<f64> = data.iter().filter_map(to_f64).collect();
     if nums.is_empty() {
         return Err(EvalError::Error("Histogram: no numeric data".to_string()));
     }
@@ -480,7 +479,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
             Value::Integer(n) => n.to_usize().unwrap_or(10).max(1),
             Value::Real(r) => (r.to_f64() as usize).max(1),
             Value::List(edges) => {
-                let edge_vals: Vec<f64> = edges.iter().filter_map(|e| to_f64(e)).collect();
+                let edge_vals: Vec<f64> = edges.iter().filter_map(to_f64).collect();
                 if edge_vals.len() < 2 {
                     return Err(EvalError::Error(
                         "Histogram: need at least 2 bin edges".to_string(),
@@ -975,7 +974,7 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
     };
     let (width, height, _) = parse_chart_options(options);
 
-    let values: Vec<f64> = data.iter().filter_map(|v| to_f64(v)).collect();
+    let values: Vec<f64> = data.iter().filter_map(to_f64).collect();
     if values.is_empty() {
         return Err(EvalError::Error(
             "WaterfallChart: no numeric data".to_string(),
@@ -1169,6 +1168,7 @@ pub fn builtin_contour_plot(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// ContourPlot with evaluation — called from eval.rs.
+#[allow(clippy::too_many_arguments)]
 pub fn builtin_contour_plot_eval(
     func: &dyn Fn(f64, f64) -> f64,
     x_range: (f64, f64),
@@ -1229,7 +1229,7 @@ pub fn builtin_contour_plot_eval(
             ymax,
             level,
             &mut content,
-            &color,
+            color,
             width,
             height,
         );
@@ -1240,6 +1240,7 @@ pub fn builtin_contour_plot_eval(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn marching_squares(
     grid: &[Vec<f64>],
     xmin: f64,

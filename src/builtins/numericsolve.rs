@@ -140,7 +140,7 @@ fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError
         };
 
         let fd = f(d_clamped);
-        m_flag = if fb > fd { true } else { false };
+        m_flag = fb > fd;
 
         if fd * fb < 0.0 {
             a = b;
@@ -215,7 +215,7 @@ fn multi_restart_minimize(
                 best_x = center;
             }
         } else {
-            let (val, x) = golden_section(&f, lo, hi);
+            let (val, x) = golden_section(f, lo, hi);
             if val < best_val {
                 best_val = val;
                 best_x = x;
@@ -223,7 +223,7 @@ fn multi_restart_minimize(
         }
     }
 
-    let (val, x) = golden_section(&f, xmin, xmax);
+    let (val, x) = golden_section(f, xmin, xmax);
     if val < best_val {
         best_val = val;
         best_x = x;
@@ -721,7 +721,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
             let mut coeffs_trimmed = coeffs;
             while coeffs_trimmed.len() > 1
-                && coeffs_trimmed.last().map_or(true, |&c| c.abs() < 1e-15)
+                && coeffs_trimmed.last().is_none_or(|&c| c.abs() < 1e-15)
             {
                 coeffs_trimmed.pop();
             }
@@ -812,27 +812,25 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 let b = a + step;
                 let fa = f(a);
                 let fb = f(b);
-                if fa * fb <= 0.0 {
-                    if let Ok(root) = brent_method(&f, a, b) {
+                if fa * fb <= 0.0
+                    && let Ok(root) = brent_method(&f, a, b) {
                         let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
                         if !is_dup {
                             roots.push(root);
                         }
                     }
-                }
             }
 
             for i in 0..grid_size {
                 let start =
                     search_lo + ((i as f64 + 0.5) / grid_size as f64) * (search_hi - search_lo);
-                if let Ok(root) = newton_method(&f, start) {
-                    if f(root).abs() < 1e-6 {
+                if let Ok(root) = newton_method(&f, start)
+                    && f(root).abs() < 1e-6 {
                         let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
                         if !is_dup {
                             roots.push(root);
                         }
                     }
-                }
             }
 
             roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -875,7 +873,7 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                         return None;
                     }
                 }
-                while coeffs.len() > 1 && coeffs.last().map_or(false, |&c| c.abs() < 1e-15) {
+                while coeffs.len() > 1 && coeffs.last().is_some_and(|&c| c.abs() < 1e-15) {
                     coeffs.pop();
                 }
                 Some(coeffs)
@@ -978,8 +976,9 @@ fn multiply_polys(a: &[f64], b: &[f64]) -> Vec<f64> {
     result
 }
 
-fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
-    let mut a = matrix.clone();
+#[allow(clippy::needless_range_loop)]
+fn qr_eigenvalues(matrix: &mut [Vec<f64>], n: usize) -> Vec<(f64, f64)> {
+    let mut a = matrix.to_vec();
 
     hessenberg(&mut a, n);
 
@@ -1105,6 +1104,7 @@ fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
     eigenvalues
 }
 
+#[allow(clippy::needless_range_loop)]
 fn identity_matrix(n: usize) -> Vec<Vec<f64>> {
     let mut m = vec![vec![0.0; n]; n];
     for i in 0..n {
@@ -1117,7 +1117,8 @@ fn zero_matrix(n: usize) -> Vec<Vec<f64>> {
     vec![vec![0.0; n]; n]
 }
 
-fn hessenberg(a: &mut Vec<Vec<f64>>, n: usize) {
+#[allow(clippy::needless_range_loop)]
+fn hessenberg(a: &mut [Vec<f64>], n: usize) {
     for k in 0..n - 2 {
         let mut col = Vec::new();
         for i in k + 1..n {

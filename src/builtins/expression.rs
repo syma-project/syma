@@ -601,7 +601,6 @@ pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// IntegerQ[val] is already implemented in math.rs; adding ExactNumberQ here.
-
 /// ExactNumberQ[val] — True if val is an exact number (Integer, Rational, or complex with exact parts).
 pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
@@ -618,7 +617,7 @@ pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
 /// VectorQ[list] — True if list is a uniform list of atoms.
 /// VectorQ[list, test] — True if list is a uniform list and all elements pass test.
 pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "VectorQ expects 1 or 2 arguments".to_string(),
         ));
@@ -782,7 +781,7 @@ fn apply_together(val: &Value) -> Value {
         Value::Call { head, args } if head == "Plus" => {
             // Combine all terms over a common denominator
             let fractions: Vec<(Value, Value)> =
-                args.iter().map(|term| term_to_fraction(term)).collect();
+                args.iter().map(term_to_fraction).collect();
 
             if fractions.is_empty() {
                 return val.clone();
@@ -814,11 +813,10 @@ fn apply_together(val: &Value) -> Value {
 
 /// Convert a value to (numerator, denominator).
 fn term_to_fraction(term: &Value) -> (Value, Value) {
-    if let Value::Call { head, args } = term {
-        if head == "Divide" && args.len() == 2 {
+    if let Value::Call { head, args } = term
+        && head == "Divide" && args.len() == 2 {
             return (args[0].clone(), args[1].clone());
         }
-    }
     (term.clone(), Value::Integer(Integer::from(1)))
 }
 
@@ -892,8 +890,8 @@ pub fn builtin_cancel(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn cancel_value(val: &Value) -> Value {
-    if let Value::Call { head, args } = val {
-        if head == "Divide" && args.len() == 2 {
+    if let Value::Call { head, args } = val
+        && head == "Divide" && args.len() == 2 {
             // Factor both numerator and denominator
             let num_factors = factor_value(&args[0]);
             let den_factors = factor_value(&args[1]);
@@ -907,7 +905,6 @@ fn cancel_value(val: &Value) -> Value {
                 args: vec![cancelled_num, cancelled_den],
             };
         }
-    }
     val.clone()
 }
 
@@ -918,8 +915,8 @@ fn factor_value(val: &Value) -> Value {
 
 fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
     // Simple cancellation: if both are Times with matching factors
-    if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den) {
-        if h1 == "Times" && h2 == "Times" {
+    if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den)
+        && h1 == "Times" && h2 == "Times" {
             let mut remaining_num: Vec<Value> = Vec::new();
             let mut remaining_den: Vec<Value> = Vec::new();
             let mut used_den: Vec<bool> = vec![false; a2.len()];
@@ -965,13 +962,12 @@ fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
             };
             return (result_num, result_den);
         }
-    }
     (num.clone(), den.clone())
 }
 
 /// Apart[expr] — partial fraction decomposition.
 pub fn builtin_apart(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "Apart expects 1 or 2 arguments".to_string(),
         ));
@@ -1088,6 +1084,7 @@ fn extract_power_and_coeff(term: &Value, var: &str) -> (i64, Value) {
         }
         Value::Call { head, args } if head == "Times" => {
             let mut power: i64 = 0;
+            #[allow(unused_assignments)]
             let mut coeff = Value::Integer(Integer::from(1));
             let mut other_factors: Vec<Value> = Vec::new();
 
@@ -1139,7 +1136,7 @@ fn sum_values(values: &[Value]) -> Value {
 }
 
 fn is_one(val: &Value) -> bool {
-    matches!(val, Value::Integer(n) if *n == rug::Integer::from(1))
+    matches!(val, Value::Integer(n) if *n == 1)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

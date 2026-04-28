@@ -77,9 +77,9 @@ fn cauchy_bound(coeffs: &[f64]) -> f64 {
         return 1.0;
     }
     let mut sum_neg = 0.0;
-    for i in 0..n - 1 {
-        if coeffs[i] < 0.0 {
-            sum_neg += coeffs[i].abs();
+    for c in &coeffs[..n - 1] {
+        if *c < 0.0 {
+            sum_neg += c.abs();
         }
     }
     1.0 + sum_neg
@@ -243,7 +243,7 @@ pub fn make_monic(coeffs: &[Rational]) -> Vec<Rational> {
     let lead = &coeffs[deg];
     coeffs
         .iter()
-        .map(|c| (c.clone() / lead.clone()).into())
+        .map(|c| c.clone() / lead.clone())
         .collect()
 }
 
@@ -256,7 +256,7 @@ pub fn poly_derivative(coeffs: &[Rational]) -> Vec<Rational> {
     }
     (1..n)
         .map(|i| {
-            let mut c = Rational::from(coeffs[i].clone());
+            let mut c = coeffs[i].clone();
             c *= i;
             c
         })
@@ -334,14 +334,14 @@ pub fn resultant(a: &[Rational], b: &[Rational]) -> Rational {
     let n = poly_degree(b);
     if m == 0 {
         // resultant(constant, b) = constant^n
-        let mut r = Rational::from(a[0].clone());
+        let mut r = a[0].clone();
         for _ in 1..n {
             r *= a[0].clone();
         }
         return r;
     }
     if n == 0 {
-        let mut r = Rational::from(b[0].clone());
+        let mut r = b[0].clone();
         for _ in 1..m {
             r *= b[0].clone();
         }
@@ -354,14 +354,14 @@ pub fn resultant(a: &[Rational], b: &[Rational]) -> Rational {
 
     // First n rows: coefficients of a shifted
     for i in 0..n {
-        for j in 0..=m {
-            matrix[i][i + j] = a[j].clone();
+        for (j, aj) in a.iter().enumerate().take(m + 1) {
+            matrix[i][i + j] = aj.clone();
         }
     }
     // Next m rows: coefficients of b shifted
     for i in 0..m {
-        for j in 0..=n {
-            matrix[n + i][i + j] = b[j].clone();
+        for (j, bj) in b.iter().enumerate().take(n + 1) {
+            matrix[n + i][i + j] = bj.clone();
         }
     }
 
@@ -386,9 +386,9 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
         // Find pivot
         let mut pivot_row = col;
         let mut pivot_exists = false;
-        for row in col..n {
-            if !mat[row][col].is_zero() {
-                pivot_row = row;
+        for (i, mat_row) in mat[col..].iter().enumerate() {
+            if !mat_row[col].is_zero() {
+                pivot_row = col + i;
                 pivot_exists = true;
                 break;
             }
@@ -408,6 +408,7 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
                 continue;
             }
             let factor = mat[row][col].clone() / piv.clone();
+            #[allow(clippy::needless_range_loop)]
             for j in col..n {
                 let col_j = mat[col][j].clone();
                 mat[row][j] -= factor.clone() * col_j;
@@ -435,7 +436,7 @@ pub fn sturm_sequence(coeffs: &[Rational]) -> Vec<Vec<Rational>> {
         let prev = seq[seq.len() - 2].clone();
         let rem = poly_remainder(&prev, &last);
         // Negate the remainder
-        let neg_rem: Vec<Rational> = rem.iter().map(|c| Rational::from(-c.clone())).collect();
+        let neg_rem: Vec<Rational> = rem.iter().map(|c| -c.clone()).collect();
         seq.push(neg_rem);
     }
     seq
@@ -603,8 +604,8 @@ pub fn min_poly_scale_int(p: &[Rational], _root_idx: usize, c: i64) -> Vec<Ratio
     // (px)^n + c1(px)^(n-1)*|c| + ... + cn*|c|^n  where px = x*sign(c)
     let mut result = Vec::with_capacity(deg + 1);
     let sign_c = if c < 0 { -1 } else { 1 };
-    for i in 0..=deg {
-        let mut coef = p[i].clone();
+    for (i, pi) in p.iter().enumerate().take(deg + 1) {
+        let mut coef = pi.clone();
         let power = deg - i;
         for _ in 0..power {
             coef *= abs_c;
@@ -655,11 +656,12 @@ fn min_poly_add_sub(
     let p_sub: Vec<Vec<Rational>> = (0..=n)
         .map(|j| {
             let mut poly_z: Vec<Rational> = vec![Rational::from(0); n + 1];
+            #[allow(clippy::needless_range_loop)]
             for k in j..=n {
                 let binom_kj = binomial(k, j);
                 let z_power = k - j;
                 let sign = if j % 2 == 1 { -1 } else { 1 };
-                let mut coeff = Rational::from(p[k].clone());
+                let mut coeff = p[k].clone();
                 coeff *= binom_kj;
                 if sign < 0 {
                     coeff = Rational::from(-&coeff.clone());
@@ -669,7 +671,7 @@ fn min_poly_add_sub(
                     // p(z + y) = sum p[k] * (z+y)^k
                     // coeff of y^j = sum_{k=j..n} p[k] * binom(k,j) * z^(k-j)
                     // (all positive, no (-1)^j factor, but sign depends on subtract)
-                    if subtract == false {
+                    if !subtract {
                         // already done above for add
                     }
                     // For subtract: alpha = z + beta, p(z+y)
@@ -689,11 +691,12 @@ fn min_poly_add_sub(
         // alpha = z + y where z = alpha - beta, y = beta
         // p(z + y) = sum_{k=0..n} p[k] * (z+y)^k
         let mut p_sub2: Vec<Vec<Rational>> = vec![vec![Rational::from(0); n + 1]; n + 1];
+        #[allow(clippy::needless_range_loop)]
         for j in 0..=n {
             for k in j..=n {
                 let binom_kj = binomial(k, j);
                 let z_power = k - j;
-                let mut coeff = Rational::from(p[k].clone());
+                let mut coeff = p[k].clone();
                 coeff *= binom_kj;
                 p_sub2[j][z_power] += coeff;
             }
@@ -717,8 +720,8 @@ fn min_poly_resultant_z(
 
     // First m rows: coeffs of p(z-y) in y, shifted
     for i in 0..m {
-        for j in 0..=n {
-            matrix[i][i + j] = p_expanded[j].clone();
+        for (j, pe) in p_expanded.iter().enumerate().take(n + 1) {
+            matrix[i][i + j] = pe.clone();
         }
     }
     // Next n rows: coeffs of q in y, shifted
@@ -810,9 +813,9 @@ fn determinant_f64(matrix: &[Vec<f64>]) -> f64 {
     for col in 0..n {
         let mut pivot_row = col;
         let mut pivot_exists = false;
-        for row in col..n {
-            if mat[row][col].abs() > 1e-15 {
-                pivot_row = row;
+        for (i, mat_row) in mat[col..].iter().enumerate() {
+            if mat_row[col].abs() > 1e-15 {
+                pivot_row = col + i;
                 pivot_exists = true;
                 break;
             }
@@ -825,6 +828,7 @@ fn determinant_f64(matrix: &[Vec<f64>]) -> f64 {
             sign = -sign;
         }
         det *= mat[col][col];
+        #[allow(clippy::needless_range_loop)]
         for row in col + 1..n {
             if mat[row][col].abs() < 1e-15 {
                 continue;
@@ -845,14 +849,15 @@ fn interpolate_from_integers(evals: &[(i64, i64)], _max_deg: usize) -> Vec<Ratio
     let mut coeffs = vec![Rational::from(0); n];
 
     // Newton interpolation
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
-        let mut molecule = evals[i].1;
+        let mut _molecule = evals[i].1;
         let _denominator = 1i64;
         for j in 0..n {
             if i == j {
                 continue;
             }
-            molecule *= evals[i].0;
+            _molecule *= evals[i].0;
             // We need the Lagrange form
         }
     }
@@ -992,15 +997,14 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     }
 
     // Compute GCD of all nonzero coefficients
-    let mut gcd_num = Rational::from(1);
+    let mut _gcd_num = Rational::from(1);
     let mut gcd_set = false;
     for c in poly.iter() {
-        if !c.is_zero() {
-            if !gcd_set {
-                gcd_num = c.clone().abs();
+        if !c.is_zero()
+            && !gcd_set {
+                _gcd_num = c.clone().abs();
                 gcd_set = true;
             }
-        }
     }
     if !gcd_set {
         return vec![Rational::from(0)];
@@ -1011,12 +1015,12 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     let lead = poly[deg].clone();
     let mut result: Vec<Rational> = poly
         .iter()
-        .map(|c| (c.clone() / lead.clone()).into())
+        .map(|c| c.clone() / lead.clone())
         .collect();
 
     // Ensure leading coefficient is positive
     if !result[deg].is_zero() && result[deg].is_negative() {
-        result = result.into_iter().map(|c| Rational::from(-c)).collect();
+        result = result.into_iter().map(|c| -c).collect();
     }
 
     // Clear denominators if all coefficients have same denominator
@@ -1036,10 +1040,10 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
         den
     };
 
-    if common_den != Integer::from(1) {
+    if common_den != 1 {
         result = result
             .into_iter()
-            .map(|c| (c * &common_den).into())
+            .map(|c| c * &common_den)
             .collect();
         // Check if all are now integers
         let all_int = result.iter().all(|c| c.denom() == &Integer::from(1));
@@ -1106,7 +1110,7 @@ pub fn coeffs_to_value(coeffs: &[Rational]) -> Value {
                 if c.denom() == &Rational::from(1) {
                     Value::Integer(c.numer().clone())
                 } else {
-                    Value::Rational(Box::new(c.clone().into()))
+                    Value::Rational(Box::new(c.clone()))
                 }
             })
             .collect(),
@@ -1118,7 +1122,7 @@ pub fn rational_to_value(r: &Rational) -> Value {
     if r.denom() == &Rational::from(1) {
         Value::Integer(r.numer().clone())
     } else {
-        Value::Rational(Box::new((r.clone()).into()))
+        Value::Rational(Box::new(r.clone()))
     }
 }
 
@@ -1141,8 +1145,8 @@ pub fn min_poly_scale(p: &[Rational], _root_idx: usize, scale: &Rational) -> Vec
     // Multiply by c^deg to clear denominators:
     // c^deg * p(x/c) = sum p[k] * x^k * c^(deg-k)
     let mut result = Vec::with_capacity(deg + 1);
-    for k in 0..=deg {
-        let mut c = p[k].clone() * scale.clone();
+    for (k, pk) in p.iter().enumerate().take(deg + 1) {
+        let mut c = pk.clone() * scale.clone();
         let power = deg - k;
         for _ in 0..power {
             c *= scale;

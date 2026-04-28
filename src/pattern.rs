@@ -92,12 +92,12 @@ pub fn unwrap_expr_to_value(expr: &Expr) -> Value {
         Expr::List(items) => Value::List(
             items
                 .iter()
-                .map(|item| unwrap_expr_to_value(item))
+                .map(unwrap_expr_to_value)
                 .collect(),
         ),
         Expr::Call { head, args } => {
             let h = unwrap_expr_to_value(head);
-            let a: Vec<Value> = args.iter().map(|arg| unwrap_expr_to_value(arg)).collect();
+            let a: Vec<Value> = args.iter().map(unwrap_expr_to_value).collect();
             match h {
                 Value::Symbol(name) => Value::Call {
                     head: name,
@@ -869,11 +869,8 @@ fn match_call_pattern(
             if let Value::Call { head: vhead, .. } = value {
                 let mut b = HashMap::new();
                 // For NamedBlank, bind the name; for Blank, ignore
-                match head {
-                    Expr::NamedBlank { name, .. } => {
-                        b.insert(name.clone(), Value::Symbol(vhead.clone()));
-                    }
-                    _ => {}
+                if let Expr::NamedBlank { name, .. } = head {
+                    b.insert(name.clone(), Value::Symbol(vhead.clone()));
                 }
                 Some((vhead.clone(), b))
             } else {
@@ -975,14 +972,13 @@ fn match_call_pattern(
         }
         _ => {
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
-            if let Expr::Symbol(s) = head {
-                if args.len() == 1
+            if let Expr::Symbol(s) = head
+                && args.len() == 1
                     && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
                     && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
                 {
                     return MatchResult::Match(b);
                 }
-            }
             MatchResult::NoMatch
         }
     }
