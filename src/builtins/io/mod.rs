@@ -15,7 +15,9 @@ pub use import::builtin_import;
 use crate::env::Env;
 use crate::value::EvalError;
 use crate::value::Value;
+use std::collections::HashMap;
 use std::io::Write as IoWrite;
+use std::process::Command;
 
 pub fn builtin_print(args: &[Value]) -> Result<Value, EvalError> {
     for arg in args {
@@ -260,6 +262,51 @@ pub fn builtin_file_write(args: &[Value]) -> Result<Value, EvalError> {
     std::fs::write(&path, &content)
         .map_err(|e| EvalError::Error(format!("FileWrite failed: {}", e)))?;
     Ok(Value::Null)
+}
+
+// ── RunProcess ─────────────────────────────────────────────────────────────────
+
+/// RunProcess["command"] — Run a shell command and return its output.
+/// RunProcess["command", {"arg1", "arg2"}] — Run with explicit arguments.
+pub fn builtin_run_process(args: &[Value]) -> Result<Value, EvalError> {
+    let (command, cmd_args) = match args {
+        [Value::Str(c)] => (c.clone(), Vec::<String>::new()),
+        [Value::Str(c), Value::List(l)] => {
+            let mut list = Vec::new();
+            for v in l {
+                match v {
+                    Value::Str(s) => list.push(s.clone()),
+                    other => list.push(format!("{}", other)),
+                }
+            }
+            (c.clone(), list)
+        }
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "RunProcess".to_string(),
+                args: args.to_vec().into(),
+            });
+        }
+    };
+    let mut cmd = Command::new(&command);
+    cmd.args(&cmd_args);
+    let output = cmd.output().map_err(|e| {
+        EvalError::Error(format!("RunProcess failed to start '{}': {}", command, e))
+    })?;
+    let mut map: HashMap<String, Value> = HashMap::new();
+    map.insert(
+        "ExitCode".to_string(),
+        Value::Integer(rug::Integer::from(output.status.code().unwrap_or(-1))),
+    );
+    map.insert(
+        "StandardOutput".to_string(),
+        Value::Str(String::from_utf8_lossy(&output.stdout).to_string()),
+    );
+    map.insert(
+        "StandardError".to_string(),
+        Value::Str(String::from_utf8_lossy(&output.stderr).to_string()),
+    );
+    Ok(Value::Assoc(map))
 }
 
 // ── FileExists ─────────────────────────────────────────────────────────────────

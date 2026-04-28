@@ -643,33 +643,6 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     env.set_propagate(var_name, updated);
                     Ok(val)
                 }
-                // Attributes[sym] = {attr1, attr2}  — set attributes
-                Expr::Call {
-                    head,
-                    args: call_args,
-                } if call_args.len() == 1
-                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
-                {
-                    let sym_name = match &call_args[0] {
-                        Expr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Error(
-                                "Attributes assignment requires a symbol name".to_string(),
-                            ));
-                        }
-                    };
-                    if env.has_attribute(&sym_name, "Locked") {
-                        return Ok(Value::Null);
-                    }
-                    let attrs = match &val {
-                        Value::List(items) => {
-                            items.iter().map(|v| v.to_string()).collect()
-                        }
-                        other => vec![other.to_string()],
-                    };
-                    env.set_attributes(&sym_name, attrs);
-                    Ok(val)
-                }
                 _ => Err(EvalError::Error("Invalid assignment target".to_string())),
             }
         }
@@ -2221,9 +2194,17 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     // First time past threshold — try to compile.
                     if prev + 1 == JIT_THRESHOLD + 1 {
                         if let Some(jit_fn) = crate::jit::compile_jit(bc_def) {
-                            bc_def
-                                .jit_fn_ptr
-                                .store(jit_fn.fn_ptr as *mut (), Ordering::Relaxed);
+                            let fn_ptr = jit_fn.fn_ptr as *mut ();
+                            bc_def.jit_fn_ptr.store(fn_ptr, Ordering::Relaxed);
+                            // Track the executable memory allocation so it is
+                            // properly freed when this BytecodeFunctionDef is dropped.
+                            let module = unsafe {
+                                crate::bytecode::JitModule::new(
+                                    jit_fn.fn_ptr as *mut u8,
+                                    jit_fn.alloc_size,
+                                )
+                            };
+                            bc_def.set_jit_module(Some(module));
                         } else {
                             // Compilation failed — set sentinel so we never retry.
                             bc_def
@@ -2246,14 +2227,11 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     &func_def.name,
                 ) {
                     let bc_val = Value::BytecodeFunction(std::sync::Arc::new(
-                        crate::bytecode::BytecodeFunctionDef {
-                            name: func_def.name.clone(),
-                            bytecode: bc,
-                            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                            jit_fn_ptr: std::sync::Arc::new(std::sync::atomic::AtomicPtr::new(
-                                std::ptr::null_mut(),
-                            )),
-                        },
+                        crate::bytecode::BytecodeFunctionDef::new(
+                            func_def.name.clone(),
+                            bc,
+                            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                        ),
                     ));
                     env.set(func_def.name.clone(), bc_val.clone());
                     profiler::Profiler::reset(&func_def.name);

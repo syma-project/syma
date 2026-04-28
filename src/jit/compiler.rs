@@ -202,7 +202,14 @@ impl JitHelpers {
 /// Compile bytecode into a native function pointer.
 ///
 /// Returns a pointer to executable machine code (cast to `*mut ()`).
-pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompileError> {
+/// Compile bytecode to native machine code.
+///
+/// Returns `(function_pointer, allocation_size)` on success.
+/// The allocation_size is needed for proper deallocation via `JitModule`.
+pub fn compile(
+    bc: &CompiledBytecode,
+    _name: &str,
+) -> Result<(*mut (), usize), JitCompileError> {
     // ── Set up target ISA ──────────────────────────────────────────
     let triple = Triple::host();
     let isa = isa::lookup(triple)
@@ -367,7 +374,7 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
     }
 
     // ── Allocate executable memory and copy code ───────────────────
-    let code_base = unsafe { make_executable(code_bytes) };
+    let (code_base, alloc_size) = unsafe { make_executable(code_bytes) };
     if code_base.is_null() {
         return Err(JitCompileError::NoMachineCode);
     }
@@ -390,7 +397,7 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<*mut (), JitCompile
         &name_to_fn,
     );
 
-    Ok(code_base as *mut ())
+    Ok((code_base as *mut (), alloc_size))
 }
 
 /// Build a map of runtime helper names to their function addresses.
@@ -718,37 +725,83 @@ fn apply_relocations(
 
 /// Allocate executable memory and copy code into it.
 ///
-/// Returns a pointer to the executable code, or null on failure.
-unsafe fn make_executable(code: &[u8]) -> *mut u8 {
+/// Returns `(pointer, allocation_size)` on success, or `(null, 0)` on failure.
+/// The allocation_size is the page-aligned size needed for deallocation.
+///
+/// On Unix, uses `mmap` with `PROT_READ | PROT_WRITE | PROT_EXEC`.
+/// On Windows, uses `VirtualAlloc` with `PAGE_EXECUTE_READWRITE`.
+///
+/// # Safety
+/// The returned pointer must be freed via `JitModule::drop()` which uses
+/// `munmap` (Unix) or `VirtualFree` (Windows). Do NOT use `dealloc` or `free`.
+unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
+    let page_size = 4096;
+    let size = if code.is_empty() {
+        page_size
+    } else {
+        code.len().div_ceil(page_size) * page_size
+    };
+
     #[cfg(unix)]
     {
-        use std::alloc::{Layout, alloc};
-        let page_size = 4096;
-        let size = code.len().div_ceil(page_size) * page_size;
-        let layout = Layout::from_size_align(size, page_size).unwrap();
-        // SAFETY: layout is page-aligned and sized correctly.
-        let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() {
-            return std::ptr::null_mut();
+        // SAFETY: size is page-aligned and non-zero, MAP_ANON|MAP_PRIVATE
+        // allocates anonymous memory, PROT_RWX makes it readable/writable/executable.
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+
+        if ptr == libc::MAP_FAILED {
+            return (std::ptr::null_mut(), 0);
         }
-        // SAFETY: ptr points to at least code.len() bytes of allocated memory,
-        // and the source/destination don't overlap.
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
-        }
-        // SAFETY: ptr is page-aligned, size is a multiple of page_size,
-        // and the memory was just allocated so making it executable is safe.
-        unsafe {
-            libc::mprotect(
-                ptr as *mut libc::c_void,
-                size,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            );
-        }
-        ptr
+
+        // SAFETY: ptr points to `size` bytes of valid mapped memory,
+        // and code.len() <= size, so the copy is within bounds.
+        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        (ptr as *mut u8, size)
     }
-    #[cfg(not(unix))]
+
+    #[cfg(windows)]
     {
-        code.to_vec().leak().as_mut_ptr()
+        // SAFETY: VirtualAlloc with MEM_COMMIT|MEM_RESERVE allocates
+        // the requested region with executable permissions.
+        extern "system" {
+            fn VirtualAlloc(
+                lp_address: *mut std::ffi::c_void,
+                dw_size: usize,
+                fl_allocation_type: u32,
+                fl_protect: u32,
+            ) -> *mut std::ffi::c_void;
+        }
+        // MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000
+        // PAGE_EXECUTE_READWRITE = 0x40
+        let ptr = VirtualAlloc(
+            std::ptr::null_mut(),
+            size,
+            0x1000 | 0x2000,
+            0x40,
+        );
+
+        if ptr.is_null() {
+            return (std::ptr::null_mut(), 0);
+        }
+
+        // SAFETY: ptr points to `size` bytes of valid allocated memory.
+        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        (ptr as *mut u8, size)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Fallback for unsupported platforms: leak memory.
+        // This is not ideal but avoids compilation failure.
+        // TODO: add proper support for this platform.
+        let vec = code.to_vec();
+        let ptr = vec.leak().as_mut_ptr();
+        (ptr, code.len())
     }
 }

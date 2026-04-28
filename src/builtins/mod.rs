@@ -403,6 +403,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "ImportString", io::builtin_import_string);
     register_builtin(env, "ExportString", io::builtin_export_string);
     register_builtin(env, "ReadList", io::builtin_read_list);
+    register_builtin(env, "FileRead", io::builtin_file_read);
+    register_builtin(env, "FileWrite", io::builtin_file_write);
+    register_builtin(env, "RunProcess", io::builtin_run_process);
 
     // ── Error handling ──
     register_builtin(env, "Throw", error::builtin_throw);
@@ -531,7 +534,6 @@ pub fn register_builtins(env: &Env) {
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
     env.set("E".to_string(), Value::Symbol("E".to_string()));
     env.set("I".to_string(), Value::Complex { re: 0.0, im: 1.0 });
-    env.set("Alice".to_string(), Value::Symbol("Alice".to_string()));
     // Degree = Pi / 180  (radians per degree)
     env.set(
         "Degree".to_string(),
@@ -1332,7 +1334,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Norm" => "Norm[v] gives the Euclidean norm of a vector or Frobenius norm of a matrix.",
         "Cross" => "Cross[a, b] computes the cross product of two 3D vectors.",
         "LinearSolve" => "LinearSolve[A, b] solves the linear system A·x = b for x.",
-        "Eigenvalues" => "Eigenvalues[m] gives the eigenvalues of matrix m. (Symbolic stub.)",
+        "Eigenvalues" => "Eigenvalues[m] gives the eigenvalues of matrix m via QR iteration.",
         "MatrixPower" => "MatrixPower[m, n] gives the n-th matrix power of m.",
         "ArrayFlatten" => {
             "ArrayFlatten[{{m11, m12}, {m21, m22}}] flattens a matrix of matrices into a single matrix."
@@ -1893,6 +1895,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Sequence --
         "Sequence" => vec!["HoldAll", "Locked", "ReadProtected", "SequenceHold"],
         "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
+        // -- Equation solvers (need HoldAll so equations aren't evaluated before solving) --
+        "Solve" | "RSolve" => vec!["HoldAll", "Locked", "ReadProtected"],
         // -- Constants --
         "Pi" | "E" | "Degree" => vec!["Constant", "Locked", "ReadProtected"],
         // -- Math functions (Listable + NumericFunction) --

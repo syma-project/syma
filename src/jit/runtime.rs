@@ -35,8 +35,11 @@ pub struct JitContext {
 }
 
 // SAFETY: JitContext is only accessed from the thread that created it.
+// It is Send because it may be moved to another thread before use,
+// but it is NOT Sync — concurrent access through shared references is
+// undefined behavior because the register file and env pointer are
+// mutated by JIT-compiled code on a single thread.
 unsafe impl Send for JitContext {}
-unsafe impl Sync for JitContext {}
 
 impl JitContext {
     /// Build a context from bytecode + runtime args.

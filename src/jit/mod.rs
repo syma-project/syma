@@ -32,6 +32,8 @@ pub struct JITFunction {
     pub name: String,
     /// Pointer to the compiled native code.
     pub fn_ptr: usize,
+    /// Size of the executable memory allocation (for JitModule tracking).
+    pub alloc_size: usize,
     /// How many times this function was called.
     pub call_count: Arc<AtomicU64>,
 }
@@ -40,10 +42,11 @@ pub struct JITFunction {
 ///
 /// Returns `None` if compilation fails (e.g. unsupported bytecode).
 pub fn compile_jit(bc_def: &BytecodeFunctionDef) -> Option<JITFunction> {
-    let fn_ptr = compiler::compile(&bc_def.bytecode, &bc_def.name).ok()?;
+    let (fn_ptr, alloc_size) = compiler::compile(&bc_def.bytecode, &bc_def.name).ok()?;
     Some(JITFunction {
         name: bc_def.name.clone(),
         fn_ptr: fn_ptr as usize,
+        alloc_size,
         call_count: bc_def.call_count.clone(),
     })
 }

@@ -125,6 +125,28 @@ fn arg_bits(a: &CArg) -> u64 {
 /// Helper: transmute fn_ptr and call with given raw `u64` arguments.
 /// We standardise on `extern "C" fn(u64, ...) -> u64` for integer-returning functions,
 /// and separately handle float returns.
+///
+/// # ABI Constraint
+///
+/// All arguments are passed as `u64` values in integer registers. This is
+/// sound for integer, pointer, and boolean C types on amd64 and aarch64,
+/// where `extern "C"` passes integer-sized scalars in general-purpose registers.
+///
+/// For **float-typed parameters** (f32, f64), the bits are bitcast to u64
+/// and passed in integer registers. On amd64 SysV ABI, the first 6 integer
+/// args use RDI/RSI/rdx/rcx/r8/r9 and the first 8 float args use XMM0-XMM7.
+/// Because we pass floats in integer registers, the **target C function must
+/// accept its float arguments from integer registers** (i.e., it must have been
+/// compiled to expect `u64` parameters that it reinterprets as floats, or the
+/// compiler must have spilled XMM registers to the same locations as the
+/// integer registers). On most ABIs this means the target function signature
+/// must match `fn(u64, ...)` and perform its own bitcast, or the call will read
+/// garbage from the XMM registers.
+///
+/// In practice, this FFI layer is safe for:
+/// - Pure integer/pointer return and parameter types (the common case)
+/// - Float return types (handled correctly via `raw_call_f64_ret` / `raw_call_f32_ret`)
+/// - Float parameters ONLY when the callee is known to read from integer registers
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn raw_call_int_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
     // All scalar C-ABI arguments fit in 64-bit integer registers on amd64/aarch64.
@@ -176,6 +198,9 @@ unsafe fn raw_call_int_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
     }
 }
 
+/// Call with `f64` return type. Arguments are still passed as u64 in
+/// integer registers — see `raw_call_int_ret` for the ABI constraint on
+/// float parameters.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn raw_call_f64_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
     match raw_args.len() {
@@ -228,6 +253,9 @@ unsafe fn raw_call_f64_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
     }
 }
 
+/// Call with `f32` return type. Arguments are still passed as u64 in
+/// integer registers — see `raw_call_int_ret` for the ABI constraint on
+/// float parameters.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn raw_call_f32_ret(fn_ptr: usize, raw_args: &[u64]) -> u64 {
     match raw_args.len() {

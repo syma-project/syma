@@ -849,6 +849,10 @@ impl Value {
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
+            (Value::Call { head: a_head, args: a_args }, Value::Call { head: b_head, args: b_args }) => {
+                a_head == b_head && a_args.len() == b_args.len()
+                    && a_args.iter().zip(b_args.iter()).all(|(x, y)| x.struct_eq(y))
+            }
             _ => false,
         }
     }

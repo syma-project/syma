@@ -40,6 +40,7 @@ pub struct KernelResult {
 }
 
 /// The Syma kernel — holds evaluation state across requests.
+#[derive(Clone)]
 pub struct SymaKernel {
     env: Env,
 }

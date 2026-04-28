@@ -55,6 +55,8 @@ pub fn simplify_call(head: &str, args: &[Value]) -> Value {
             let canceled = cancel_common_factors(&args[0], &args[1]);
             if matches!(&canceled.1, Value::Integer(n) if *n == 1) {
                 canceled.0
+            } else if let Some(quotient) = try_polynomial_divide(&canceled.0, &canceled.1) {
+                quotient
             } else {
                 call("Divide", vec![canceled.0, canceled.1])
             }
@@ -83,7 +85,77 @@ fn simplify_plus(args: &[Value]) -> Value {
     if terms.len() == 1 {
         return terms.into_iter().next().unwrap();
     }
+    let terms = combine_like_terms(terms);
+    if terms.len() == 1 {
+        return terms.into_iter().next().unwrap();
+    }
     call("Plus", terms)
+}
+
+/// Combine like terms: terms with same base get their coefficients added.
+/// e.g. 3*x^2 + (-5)*x^2 + 2*x^2 → -x^2
+fn combine_like_terms(terms: Vec<Value>) -> Vec<Value> {
+    // (base, coefficient) groups — use linear scan since Value doesn't hash
+    let mut groups: Vec<(Value, Integer)> = Vec::new();
+
+    for term in terms {
+        let (base, coeff) = extract_coeff_and_base(&term);
+        // Find matching group
+        let mut found = false;
+        for g in &mut groups {
+            if g.0.struct_eq(&base) {
+                g.1 += coeff.clone();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            groups.push((base, coeff));
+        }
+    }
+
+    // Rebuild: skip zero coefficients
+    let mut result = Vec::new();
+    let one = Integer::from(1);
+    for (base, coeff) in groups {
+        if coeff.is_zero() {
+            continue;
+        }
+        if base.struct_eq(&Value::Integer(Integer::from(1))) {
+            // pure constant
+            result.push(Value::Integer(coeff));
+        } else if coeff == one {
+            result.push(base);
+        } else {
+            result.push(simplify_call("Times", &[Value::Integer(coeff), base]));
+        }
+    }
+
+    if result.is_empty() {
+        vec![Value::Integer(Integer::from(0))]
+    } else {
+        result
+    }
+}
+
+/// Extract (base, integer_coeff) from a term.
+/// Integer(n) → (1, n)
+/// Times[n, base] where n is Integer → (base, n)
+/// other → (term, 1)
+fn extract_coeff_and_base(term: &Value) -> (Value, Integer) {
+    match term {
+        Value::Integer(n) => (Value::Integer(Integer::from(1)), n.clone()),
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+            match &args[0] {
+                Value::Integer(n) => (args[1].clone(), n.clone()),
+                _ => match &args[1] {
+                    Value::Integer(n) => (args[0].clone(), n.clone()),
+                    _ => (term.clone(), Integer::from(1)),
+                },
+            }
+        }
+        _ => (term.clone(), Integer::from(1)),
+    }
 }
 
 fn simplify_times(args: &[Value]) -> Value {
@@ -297,7 +369,7 @@ fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
     let mut remaining_den: Vec<(Value, Integer)> = Vec::new();
 
     for (nb, ne) in &num_factors {
-        if let Some((db, de)) = den_factors.iter_mut().find(|(b, _)| *b == *nb) {
+        if let Some((_db, de)) = den_factors.iter_mut().find(|(b, _)| *b == *nb) {
             if ne > de {
                 remaining_num.push((nb.clone(), ne.clone() - de.clone()));
             } else if *de > *ne {
@@ -370,6 +442,127 @@ fn rebuild_from_factors(factors: &[(Value, Integer)]) -> Value {
         })
         .collect();
     simplify_call("Times", &terms)
+}
+
+/// Try polynomial long division of `num` by `den`.
+/// Returns Some(quotient) if the division is exact (zero remainder), None otherwise.
+fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
+    // Pick a variable to divide by (prefer the first symbol found in denominator)
+    let var = find_polynomial_var(den)?;
+    if !expr_contains_var(num, &var) {
+        return None;
+    }
+
+    // Extract coefficients: coeffs[i] = coefficient of var^i
+    let num_coeffs = extract_polynomial_coeffs(num, &var);
+    let den_coeffs = extract_polynomial_coeffs(den, &var);
+
+    let num_deg = (num_coeffs.len() - 1) as i64;
+    let den_deg = (den_coeffs.len() - 1) as i64;
+    if num_deg < den_deg {
+        return None;
+    }
+
+    // Leading coefficient of denominator must be a constant (integer or number) for simple division
+    let den_lead = &den_coeffs[den_coeffs.len() - 1];
+    if !is_numeric_scalar(den_lead) {
+        // Try anyway — use symbolic division
+    }
+
+    // Polynomial long division
+    let mut remainder: Vec<Value> = num_coeffs.iter().map(|v| simplify_value(v)).collect();
+    let den_lead_inv = invert_value(den_lead);
+
+    let quot_deg = num_deg - den_deg;
+    let mut quot_coeffs: Vec<Value> = vec![Value::Integer(Integer::from(0)); (quot_deg + 1) as usize];
+
+    for i in (0..=quot_deg).rev() {
+        let j = (i + den_deg) as usize;
+        if j >= remainder.len() {
+            continue;
+        }
+        let r = &remainder[j];
+        if is_zero_value(r) {
+            continue;
+        }
+        let q = simplify_call("Times", &[r.clone(), den_lead_inv.clone()]);
+        quot_coeffs[i as usize] = q.clone();
+
+        // Subtract q * den_coeffs shifted by i from remainder
+        for k in 0..den_coeffs.len() {
+            let idx = (i + k as i64) as usize;
+            if idx < remainder.len() {
+                let sub = expand_value(&simplify_call("Times", &[q.clone(), den_coeffs[k].clone()]));
+                let neg = expand_value(&simplify_call("Times", &[Value::Integer(Integer::from(-1)), sub]));
+                remainder[idx] = expand_value(&simplify_call("Plus", &[remainder[idx].clone(), neg]));
+            }
+        }
+        // Simplify all remainder coefficients after each subtraction step
+        for v in remainder.iter_mut() {
+            *v = simplify_value(v);
+        }
+    }
+
+    // Check if all remaining coefficients are zero
+    let all_zero = remainder.iter().all(|v| is_zero_value(v));
+    if !all_zero {
+        return None;
+    }
+
+    // Reconstruct quotient polynomial
+    Some(rebuild_poly_from_coeffs(&quot_coeffs, &var))
+}
+
+fn invert_value(val: &Value) -> Value {
+    match val {
+        Value::Integer(n) => {
+            if *n == 1 {
+                val.clone()
+            } else {
+                call("Power", vec![val.clone(), Value::Integer(Integer::from(-1))])
+            }
+        }
+        _ => call("Power", vec![val.clone(), Value::Integer(Integer::from(-1))]),
+    }
+}
+
+fn is_zero_value(val: &Value) -> bool {
+    matches!(val, Value::Integer(n) if n.is_zero())
+}
+
+fn is_numeric_scalar(val: &Value) -> bool {
+    matches!(val, Value::Integer(_) | Value::Real(_))
+}
+
+fn expr_contains_var(expr: &Value, var: &str) -> bool {
+    match expr {
+        Value::Symbol(s) => s == var,
+        Value::Call { args, .. } => args.iter().any(|a| expr_contains_var(a, var)),
+        _ => false,
+    }
+}
+
+fn rebuild_poly_from_coeffs(coeffs: &[Value], var: &str) -> Value {
+    let x = Value::Symbol(var.to_string());
+    let mut terms: Vec<Value> = Vec::new();
+    for (i, coeff) in coeffs.iter().enumerate() {
+        if is_zero_value(coeff) {
+            continue;
+        }
+        let term = match i {
+            0 => coeff.clone(),
+            1 => simplify_call("Times", &[coeff.clone(), x.clone()]),
+            _ => simplify_call("Times", &[coeff.clone(), call("Power", vec![x.clone(), Value::Integer(Integer::from(i as i64))])]),
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.into_iter().next().unwrap()
+    } else {
+        call("Plus", terms)
+    }
 }
 
 fn expand_times(args: &[Value]) -> Value {
@@ -1210,8 +1403,46 @@ fn expr_from_coeffs(coeffs: &[Value], var: &str) -> Value {
 
 // ── Solve ──
 
+/// Strip Value::Pattern wrapper (from HoldAll) if present, recursively.
+fn strip_pattern(v: &Value) -> Value {
+    match v {
+        Value::Pattern(unevaluated) => expr_to_value(unevaluated),
+        Value::List(items) => {
+            Value::List(items.iter().map(|item| strip_pattern(item)).collect())
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Convert an AST Expr to a Value without evaluation.
+fn expr_to_value(expr: &crate::ast::Expr) -> Value {
+    match expr {
+        crate::ast::Expr::Integer(n) => Value::Integer(n.clone()),
+        crate::ast::Expr::Real(r) => Value::Real(r.clone()),
+        crate::ast::Expr::Bool(b) => Value::Bool(*b),
+        crate::ast::Expr::Str(s) => Value::Str(s.clone()),
+        crate::ast::Expr::Null => Value::Null,
+        crate::ast::Expr::Symbol(s) => Value::Symbol(s.clone()),
+        crate::ast::Expr::List(items) => {
+            Value::List(items.iter().map(expr_to_value).collect())
+        }
+        crate::ast::Expr::Call { head, args } => {
+            let head_str = match head.as_ref() {
+                crate::ast::Expr::Symbol(s) => s.clone(),
+                _ => String::new(),
+            };
+            Value::Call {
+                head: head_str,
+                args: args.iter().map(expr_to_value).collect(),
+            }
+        }
+        _ => Value::Pattern(expr.clone()),
+    }
+}
+
 /// Solve[equation, x] — Symbolic equation solving.
 pub fn builtin_solve(args: &[Value]) -> Result<Value, EvalError> {
+    let args: Vec<Value> = args.iter().map(strip_pattern).collect();
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Solve requires exactly 2 arguments".to_string(),
@@ -1323,10 +1554,378 @@ fn solve_polynomial(expr: &Value, var: &str) -> Value {
                 ]),
             }
         }
+        4 => solve_cubic(&coeffs, var),
+        5 => solve_quartic(&coeffs, var),
         _ => call("Solve", vec![
             simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
             Value::Symbol(var.to_string()),
         ]),
+    }
+}
+
+/// Build a Rational value from numerator and denominator Integers.
+fn make_rat(num: &Integer, den: &Integer) -> Value {
+    Value::Rational(Box::new(Rational::from((num.clone(), den.clone()))))
+}
+
+/// Solve cubic ax^3 + bx^2 + cx + d = 0 using Cardano's formula.
+/// Returns exact symbolic expressions using Power[..., Rational[1,3]] for cube roots.
+fn solve_cubic(coeffs: &[Value], var: &str) -> Value {
+    let (d, c, b, a) = (&coeffs[0], &coeffs[1], &coeffs[2], &coeffs[3]);
+    match (a, b, c, d) {
+        (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci), Value::Integer(di)) => {
+            if ai.is_zero() {
+                return Value::List(vec![]);
+            }
+
+            // Depress the cubic: x = t - b/(3a) => t^3 + pt + q = 0
+            // p = (3ac - b^2) / (3a^2)
+            // q = (2b^3 - 9abc + 27a^2*d) / (27a^3)
+            let mut three_a = Integer::from(3);
+            three_a *= ai;
+            let mut three_a_sq = three_a.clone();
+            three_a_sq *= ai;
+            let mut p_num = Integer::from(3);
+            p_num *= ai;
+            p_num *= ci;
+            let mut bi_sq = bi.clone();
+            bi_sq *= bi;
+            p_num -= &bi_sq;
+            let p = make_rat(&p_num, &three_a_sq);
+
+            let mut twenty_seven_a_cub = Integer::from(27);
+            twenty_seven_a_cub *= ai;
+            twenty_seven_a_cub *= ai;
+            twenty_seven_a_cub *= ai;
+            let mut q_num = Integer::from(2);
+            q_num *= bi;
+            q_num *= bi;
+            q_num *= bi;
+            let mut term2 = Integer::from(9);
+            term2 *= ai;
+            term2 *= bi;
+            term2 *= ci;
+            q_num -= &term2;
+            let mut term3 = Integer::from(27);
+            term3 *= ai;
+            term3 *= ai;
+            term3 *= di;
+            q_num += &term3;
+            let q = make_rat(&q_num, &twenty_seven_a_cub);
+
+            // Cardano: t = u + v, where
+            // u^3 = -q/2 + sqrt(q^2/4 + p^3/27), v^3 = -q/2 - sqrt(q^2/4 + p^3/27)
+            //
+            // D = q^2/4 + p^3/27
+            //   = (27 * q_num^2 * p_den^3 + 4 * p_num^3 * q_den^2) / (108 * q_den^2 * p_den^3)
+
+            let Value::Rational(p_rat) = &p else { unreachable!() };
+            let Value::Rational(q_rat) = &q else { unreachable!() };
+
+            let p_num_r = p_rat.numer();
+            let p_den_r = p_rat.denom();
+            let q_num_r = q_rat.numer();
+            let q_den_r = q_rat.denom();
+
+            let p_den_cub = p_den_r.clone() * p_den_r.clone() * p_den_r.clone();
+            let q_den_sq = q_den_r.clone() * q_den_r.clone();
+            let p_num_cub = p_num_r.clone() * p_num_r.clone() * p_num_r.clone();
+            let q_num_sq = q_num_r.clone() * q_num_r.clone();
+
+            let disc_num = Integer::from(27) * &q_num_sq * &p_den_cub
+                + Integer::from(4) * &p_num_cub * &q_den_sq;
+            let disc_den = Integer::from(108) * &q_den_sq * &p_den_cub;
+
+            // Build symbolic cube root arguments
+            // neg_q_half = -q_num / (2 * q_den)
+            let mut two_q_den = Integer::from(2);
+            two_q_den *= q_den_r.clone();
+            let neg_q_half = make_rat(&(-q_num_r.clone()), &two_q_den);
+
+            // sqrt_arg = disc_num / disc_den
+            let sqrt_arg = make_rat(&disc_num, &disc_den);
+
+            // u^3 = neg_q_half + Sqrt[D], v^3 = neg_q_half - Sqrt[D]
+            let u_cub = simplify_call(
+                "Plus",
+                &[neg_q_half.clone(), call("Sqrt", vec![sqrt_arg.clone()])],
+            );
+            let v_cub = simplify_call(
+                "Plus",
+                &[
+                    neg_q_half.clone(),
+                    simplify_call(
+                        "Times",
+                        &[
+                            Value::Integer(Integer::from(-1)),
+                            call("Sqrt", vec![sqrt_arg]),
+                        ],
+                    ),
+                ],
+            );
+
+            // Cube roots: Power[u_cub, 1/3] and Power[v_cub, 1/3]
+            let one_third = make_rat(&Integer::from(1), &Integer::from(3));
+            let u_root = call("Power", vec![u_cub, one_third.clone()]);
+            let v_root = call("Power", vec![v_cub, one_third.clone()]);
+
+            // Shift: x = t - b/(3a) => x = t + shift, shift = -b/(3a)
+            let shift = make_rat(&(-bi.clone()), &three_a);
+
+            // Root 1: x1 = shift + u + v
+            let root1 = simplify_call(
+                "Plus",
+                &[shift.clone(), u_root.clone(), v_root.clone()],
+            );
+
+            // Cube roots of unity:
+            // omega = -1/2 + Sqrt[-3]/2
+            // omega^2 = -1/2 - Sqrt[-3]/2
+            let neg_one_half = make_rat(&Integer::from(-1), &Integer::from(2));
+            let sqrt_neg3 = call("Sqrt", vec![Value::Integer(Integer::from(-3))]);
+            let half_inv = call(
+                "Power",
+                vec![
+                    Value::Integer(Integer::from(2)),
+                    make_rat(&Integer::from(-1), &Integer::from(1)),
+                ],
+            );
+            let omega = simplify_call(
+                "Plus",
+                &[
+                    neg_one_half.clone(),
+                    simplify_call("Times", &[half_inv.clone(), sqrt_neg3.clone()]),
+                ],
+            );
+
+            let omega_sq = simplify_call(
+                "Plus",
+                &[
+                    neg_one_half.clone(),
+                    simplify_call(
+                        "Times",
+                        &[
+                            Value::Integer(Integer::from(-1)),
+                            simplify_call("Times", &[half_inv, sqrt_neg3]),
+                        ],
+                    ),
+                ],
+            );
+
+            // Root 2: x2 = shift + u*omega + v*omega^2
+            let root2 = simplify_call(
+                "Plus",
+                &[
+                    shift.clone(),
+                    simplify_call("Times", &[u_root.clone(), omega.clone()]),
+                    simplify_call("Times", &[v_root.clone(), omega_sq.clone()]),
+                ],
+            );
+
+            // Root 3: x3 = shift + u*omega^2 + v*omega
+            let root3 = simplify_call(
+                "Plus",
+                &[
+                    shift,
+                    simplify_call("Times", &[u_root, omega_sq]),
+                    simplify_call("Times", &[v_root, omega]),
+                ],
+            );
+
+            let x_sym = Value::Symbol(var.to_string());
+            Value::List(vec![
+                Value::Rule {
+                    lhs: Box::new(x_sym.clone()),
+                    rhs: Box::new(root1),
+                    delayed: false,
+                },
+                Value::Rule {
+                    lhs: Box::new(x_sym.clone()),
+                    rhs: Box::new(root2),
+                    delayed: false,
+                },
+                Value::Rule {
+                    lhs: Box::new(x_sym),
+                    rhs: Box::new(root3),
+                    delayed: false,
+                },
+            ])
+        }
+        _ => Value::List(vec![]),
+    }
+}
+
+/// Solve quartic ax^4 + bx^3 + cx^2 + dx + e = 0 using Ferrari's method.
+/// Returns numeric results.
+fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
+    let (e, d, c, b, a) = (&coeffs[0], &coeffs[1], &coeffs[2], &coeffs[3], &coeffs[4]);
+    match (a, b, c, d, e) {
+        (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci), Value::Integer(di), Value::Integer(ei)) => {
+            if ai.is_zero() {
+                return Value::List(vec![]);
+            }
+
+            let a = ai.to_f64();
+            let b = bi.to_f64();
+            let c = ci.to_f64();
+            let d = di.to_f64();
+            let e = ei.to_f64();
+
+            // Depress quartic: x = t - b/(4a)
+            // t^4 + p*t^2 + q*t + r = 0
+            let p = c / a - 6.0 * (b / a).powi(2) / 4.0;
+            let q = d / a + 3.0 * (b / a).powi(3) / 8.0 - b * c / (2.0 * a * a);
+            let r = e / a
+                - 3.0 * (b / a).powi(4) / 256.0
+                + (b / a).powi(2) * c / (16.0 * a)
+                - b * d / (8.0 * a * a);
+
+            // Resolvent cubic: m^3 + 2p*m^2 + (p^2 - 4r)*m - q^2 = 0
+            // Substitute m = y - 2p/3 to depress:
+            // y^3 + Py + Q = 0
+            let resolvent_p = p * p / 3.0 - 4.0 * r;
+            let resolvent_q = 2.0 * p * p * p / 27.0 - p * (p * p - 4.0 * r) / 3.0 - q * q;
+
+            // Cardano: resolvent_disc = resolvent_q^2/4 + resolvent_p^3/27
+            let resolvent_disc = resolvent_q * resolvent_q / 4.0 + resolvent_p * resolvent_p * resolvent_p / 27.0;
+
+            if resolvent_disc >= 0.0 {
+                let u_cub = -resolvent_q / 2.0 + resolvent_disc.sqrt();
+                let v_cub = -resolvent_q / 2.0 - resolvent_disc.sqrt();
+                let u = u_cub.copysign(1.0).abs().powf(1.0 / 3.0);
+                let v = v_cub.copysign(1.0).abs().powf(1.0 / 3.0);
+                let y = u + v;
+                let m = y - 2.0 * p / 3.0;
+
+                if m < 0.0 {
+                    return Value::List(vec![]);
+                }
+
+                let sqrt_m = m.sqrt();
+
+                // Two quadratics:
+                // t^2 + sqrt(m)*t + (m/2 + p/sqrt(m)) = 0  [sign chosen to match -q]
+                // t^2 - sqrt(m)*t + (m/2 - p/sqrt(m)) = 0
+                let q_sign = if q >= 0.0 { 1.0 } else { -1.0 };
+                let s1 = q_sign * sqrt_m;
+                let s2 = -q_sign * sqrt_m;
+                let c1 = m / 2.0 + p / sqrt_m;
+                let c2 = m / 2.0 - p / sqrt_m;
+
+                // Quadratic 1: t^2 + s1*t + c1 = 0
+                // Quadratic 2: t^2 + s2*t + c2 = 0
+
+                let mut roots: Vec<Value> = Vec::new();
+
+                for (s, c) in [(s1, c1), (s2, c2)] {
+                    let disc = s * s - 4.0 * c;
+                    if disc >= 0.0 {
+                        let sqrt_disc = disc.sqrt();
+                        let t1 = (-s + sqrt_disc) / 2.0;
+                        let t2 = (-s - sqrt_disc) / 2.0;
+                        let shift = -b / (4.0 * a);
+                        let x1 = t1 + shift;
+                        let x2 = t2 + shift;
+                        if disc > 1e-12 {
+                            roots.push(Value::Real(Float::with_val(
+                                DEFAULT_PRECISION,
+                                x1,
+                            )));
+                            roots.push(Value::Real(Float::with_val(
+                                DEFAULT_PRECISION,
+                                x2,
+                            )));
+                        } else {
+                            roots.push(Value::Real(Float::with_val(
+                                DEFAULT_PRECISION,
+                                x1,
+                            )));
+                        }
+                    }
+                }
+
+                let x_sym = Value::Symbol(var.to_string());
+                Value::List(
+                    roots
+                        .into_iter()
+                        .map(|r| Value::Rule {
+                            lhs: Box::new(x_sym.clone()),
+                            rhs: Box::new(r),
+                            delayed: false,
+                        })
+                        .collect(),
+                )
+            } else {
+                // resolvent_disc < 0: casus irreducibilis for resolvent cubic
+                // Try trigonometric method for the resolvent cubic
+                // y^3 + resolvent_p*y + resolvent_q = 0 with resolvent_disc < 0
+                let mut roots: Vec<Value> = Vec::new();
+                let r_trig = ((-resolvent_q / 2.0) / (-resolvent_p / 3.0).powf(1.5)).abs().min(1.0);
+                let theta = (r_trig).acos();
+
+                for k in 0..3 {
+                    let y = 2.0 * (-resolvent_p / 3.0).sqrt()
+                        * ((theta as f64 - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos());
+                    let m = y - 2.0 * p / 3.0;
+
+                    if m < 1e-12 {
+                        continue;
+                    }
+
+                    let sqrt_m = m.sqrt();
+                    let c1 = m / 2.0 + p / sqrt_m;
+                    let c2 = m / 2.0 - p / sqrt_m;
+                    let q_sign = if q >= 0.0 { 1.0 } else { -1.0 };
+                    let s1 = q_sign * sqrt_m;
+                    let s2 = -q_sign * sqrt_m;
+
+                    for (s, c) in [(s1, c1), (s2, c2)] {
+                        let disc = s * s - 4.0 * c;
+                        if disc >= 0.0 {
+                            let sqrt_disc = disc.sqrt();
+                            let t1 = (-s + sqrt_disc) / 2.0;
+                            let t2 = (-s - sqrt_disc) / 2.0;
+                            let shift = -b / (4.0 * a);
+                            let x1 = t1 + shift;
+                            let x2 = t2 + shift;
+                            if disc > 1e-12 {
+                                roots.push(Value::Real(Float::with_val(
+                                    DEFAULT_PRECISION,
+                                    x1,
+                                )));
+                                roots.push(Value::Real(Float::with_val(
+                                    DEFAULT_PRECISION,
+                                    x2,
+                                )));
+                            } else {
+                                roots.push(Value::Real(Float::with_val(
+                                    DEFAULT_PRECISION,
+                                    x1,
+                                )));
+                            }
+                        }
+                    }
+
+                    // Return first valid factorization found
+                    if !roots.is_empty() {
+                        let x_sym = Value::Symbol(var.to_string());
+                        return Value::List(
+                            roots
+                                .into_iter()
+                                .map(|r| Value::Rule {
+                                    lhs: Box::new(x_sym.clone()),
+                                    rhs: Box::new(r),
+                                    delayed: false,
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+
+                Value::List(vec![])
+            }
+        }
+        _ => Value::List(vec![]),
     }
 }
 
@@ -1731,7 +2330,7 @@ fn try_numerical_eval(head: &str, args: &[Value]) -> Option<Value> {
     }
 }
 
-/// Stub for SetAttributes (evaluator-dependent, handled in eval.rs).
+/// SetAttributes[sym, attr1, attr2, ...] — set attributes on a symbol.
 pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
@@ -2094,6 +2693,81 @@ mod tests {
         let result = builtin_solve(&[eq, sym("x")]).unwrap();
         match &result {
             Value::List(items) if !items.is_empty() => {}
+            _ => panic!("Expected a list of solutions, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_solve_cubic() {
+        // Solve[x^3 - 6*x^2 + 11*x - 6 == 0, x]
+        // Roots are x=1, x=2, x=3
+        let eq = Value::Call {
+            head: "Equal".to_string(),
+            args: vec![
+                simplify_call(
+                    "Plus",
+                    &[
+                        simplify_call("Power", &[sym("x"), int(3)]),
+                        simplify_call(
+                            "Times",
+                            &[int(-6), simplify_call("Power", &[sym("x"), int(2)])],
+                        ),
+                        simplify_call("Times", &[int(11), sym("x")]),
+                        int(-6),
+                    ],
+                ),
+                int(0),
+            ],
+        };
+        let result = builtin_solve(&[eq, sym("x")]).unwrap();
+        match &result {
+            Value::List(items) if items.len() == 3 => {
+                // Each item should be a Rule
+                for item in items {
+                    assert!(
+                        matches!(item, Value::Rule { .. }),
+                        "Expected Rule, got {:?}",
+                        item
+                    );
+                }
+            }
+            _ => panic!("Expected a list of 3 solutions, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_solve_quartic() {
+        // Solve[x^4 - 5*x^2 + 4 == 0, x]
+        // Roots are x=-2, x=-1, x=1, x=2
+        let eq = Value::Call {
+            head: "Equal".to_string(),
+            args: vec![
+                simplify_call(
+                    "Plus",
+                    &[
+                        simplify_call("Power", &[sym("x"), int(4)]),
+                        simplify_call(
+                            "Times",
+                            &[int(-5), simplify_call("Power", &[sym("x"), int(2)])],
+                        ),
+                        int(4),
+                    ],
+                ),
+                int(0),
+            ],
+        };
+        let result = builtin_solve(&[eq, sym("x")]).unwrap();
+        match &result {
+            Value::List(items) if !items.is_empty() => {
+                // Each item should be a Rule
+                for item in items {
+                    assert!(
+                        matches!(item, Value::Rule { .. }),
+                        "Expected Rule, got {:?}",
+                        item
+                    );
+                }
+            }
             _ => panic!("Expected a list of solutions, got {:?}", result),
         }
     }

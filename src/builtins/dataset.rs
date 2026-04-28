@@ -93,22 +93,6 @@ pub fn builtin_dataset_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(matches!(&args[0], Value::Dataset(_))))
 }
 
-/// Normal[Dataset[data]] unwraps the Dataset to its inner data.
-pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Normal requires exactly 1 argument".to_string(),
-        ));
-    }
-    match &args[0] {
-        Value::Dataset(inner) => Ok(inner.as_ref().clone()),
-        _ => Err(EvalError::TypeError {
-            expected: "Dataset".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
-}
-
 // ── Query engine ──
 
 /// Execute a call-syntax query on Dataset inner data.
