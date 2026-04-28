@@ -13,6 +13,7 @@ pub mod format;
 pub mod graphics;
 pub mod image;
 pub mod io;
+pub mod integration;
 pub mod linalg;
 pub mod list;
 pub mod localsymbol;
@@ -207,6 +208,163 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin_env(env, "Series", symbolic::builtin_series);
     register_builtin(env, "Integrate", symbolic::builtin_integrate);
+
+    // ── Integration Helpers (Rubi predicates and functions) ──
+    // Comparison predicates
+    register_builtin(env, "EqQ", integration::builtin_eq_q);
+    register_builtin(env, "NeQ", integration::builtin_ne_q);
+    register_builtin(env, "GtQ", integration::builtin_gt_q);
+    register_builtin(env, "LtQ", integration::builtin_lt_q);
+    register_builtin(env, "GeQ", integration::builtin_ge_q);
+    register_builtin(env, "LeQ", integration::builtin_le_q);
+    register_builtin(env, "IGtQ", integration::builtin_igt_q);
+    register_builtin(env, "ILtQ", integration::builtin_ilt_q);
+    register_builtin(env, "IGeQ", integration::builtin_ige_q);
+    register_builtin(env, "ILeQ", integration::builtin_ile_q);
+    // Sign predicates
+    register_builtin(env, "PosQ", integration::builtin_pos_q);
+    register_builtin(env, "NegQ", integration::builtin_neg_q);
+    // Type predicates
+    register_builtin(env, "TrueQ", integration::builtin_true_q);
+    register_builtin(env, "FalseQ", integration::builtin_false_q);
+    register_builtin(env, "OddQ", integration::builtin_odd_q);
+    register_builtin(env, "HalfIntegerQ", integration::builtin_half_integer_q);
+    register_builtin(env, "RationalQ", integration::builtin_rational_q);
+    register_builtin(env, "IntegersQ", integration::builtin_integers_q);
+    register_builtin(env, "PolyQ", integration::builtin_poly_q);
+    register_builtin(env, "PolynomialQ", integration::builtin_polynomial_q);
+    register_builtin(env, "AtomQ", integration::builtin_atom_q);
+    // Core Rubi helpers
+    register_builtin(env, "Subst", integration::builtin_subst);
+    register_builtin(env, "SubstFor", integration::builtin_subst_for);
+    register_builtin(env, "Unintegrable", integration::builtin_unintegrable);
+    register_builtin(env, "ActivateTrig", integration::builtin_activate_trig);
+    register_builtin(env, "DeactivateTrig", integration::builtin_deactivate_trig);
+    register_builtin(env, "Simp", integration::builtin_simp);
+    register_builtin(env, "Rt", integration::builtin_rt);
+    register_builtin(env, "FracPart", integration::builtin_frac_part);
+    register_builtin(env, "IntPart", integration::builtin_int_part);
+    register_builtin(env, "Coefficient", integration::builtin_coefficient);
+    register_builtin(env, "Coeff", integration::builtin_coeff);
+    register_builtin(env, "FreeFactors", integration::builtin_free_factors);
+    register_builtin(env, "NonfreeFactors", integration::builtin_nonfree_factors);
+    // Expand helpers
+    register_builtin(env, "ExpandIntegrand", integration::builtin_expand_integrand);
+    register_builtin(env, "ExpandToSum", integration::builtin_expand_to_sum);
+    register_builtin(env, "ExpandTrig", integration::builtin_expand_trig);
+    register_builtin(env, "ExpandTrigReduce", integration::builtin_expand_trig_reduce);
+    register_builtin(env, "ExpandTregExpand", integration::builtin_expand_trig_expand);
+    register_builtin(env, "ExpandTrigToExp", integration::builtin_expand_trig_to_exp);
+    register_builtin(env, "ExpandLinearProduct", integration::builtin_expand_linear_product);
+    register_builtin(env, "ExpandExpression", integration::builtin_expand_expression);
+    // Structural helpers
+    register_builtin(env, "Dist", integration::builtin_dist);
+    register_builtin(env, "Distrib", integration::builtin_distrib);
+    register_builtin(env, "RemoveContent", integration::builtin_remove_content);
+    // KnownIntegrand stubs
+    register_builtin(env, "KnownSineIntegrandQ", integration::builtin_known_sine_integrand_q);
+    register_builtin(env, "KnownSecantIntegrandQ", integration::builtin_known_secant_integrand_q);
+    register_builtin(env, "KnownTangentIntegrandQ", integration::builtin_known_tangent_integrand_q);
+    register_builtin(env, "KnownCotangentIntegrandQ", integration::builtin_known_cotangent_integrand_q);
+    // Misc predicates
+    register_builtin(env, "LinearQ", integration::builtin_linear_q);
+    register_builtin(env, "SumQ", integration::builtin_sum_q);
+    register_builtin(env, "NonsumQ", integration::builtin_nonsum_q);
+    register_builtin(env, "Numerator", integration::builtin_numerator);
+    register_builtin(env, "Denominator", integration::builtin_denominator);
+    register_builtin(env, "Numer", integration::builtin_numer);
+    register_builtin(env, "Denom", integration::builtin_denom);
+    register_builtin(env, "Exponent", integration::builtin_exponent);
+    register_builtin(env, "Sign", integration::builtin_sign);
+    register_builtin(env, "PerfectSquareQ", integration::builtin_perfect_square_q);
+    register_builtin(env, "BinomialQ", integration::builtin_binomial_q);
+    register_builtin(env, "IntBinomialQ", integration::builtin_int_binomial_q);
+    register_builtin(env, "QuadraticQ", integration::builtin_quadratic_q);
+    register_builtin(env, "TrinomialQ", integration::builtin_trinomial_q);
+    register_builtin(env, "PowerOfLinearQ", integration::builtin_power_of_linear_q);
+    register_builtin(env, "FunctionOfQ", integration::builtin_function_of_q);
+    register_builtin(env, "TrigQ", integration::builtin_trig_q);
+    register_builtin(env, "HyperbolicQ", integration::builtin_hyperbolic_q);
+    register_builtin(env, "InverseFunctionQ", integration::builtin_inverse_function_q);
+    register_builtin(env, "PowerQ", integration::builtin_power_q);
+    register_builtin(env, "ProductQ", integration::builtin_product_q);
+    register_builtin(env, "RationalFunctionQ", integration::builtin_rational_function_q);
+    register_builtin(env, "ComplexFreeQ", integration::builtin_complex_free_q);
+    register_builtin(env, "CalculusFreeQ", integration::builtin_calculus_free_q);
+    register_builtin(env, "IntegralFreeQ", integration::builtin_integral_free_q);
+    register_builtin(env, "InverseFunctionFreeQ", integration::builtin_inverse_function_free_q);
+    register_builtin(env, "InertTrigQ", integration::builtin_inert_trig_q);
+    register_builtin(env, "InertTrigFreeQ", integration::builtin_inert_trig_free_q);
+    register_builtin(env, "AlgebraicFunctionQ", integration::builtin_algebraic_function_q);
+    register_builtin(env, "IndependentQ", integration::builtin_independent_q);
+    register_builtin(env, "PolynomialInQ", integration::builtin_polynomial_in_q);
+    // Comparison stubs
+    register_builtin(env, "SimplerQ", integration::builtin_simpler_q);
+    register_builtin(env, "SimplerSqrtQ", integration::builtin_simpler_sqrt_q);
+    register_builtin(env, "SumSimplerQ", integration::builtin_sum_simpler_q);
+    register_builtin(env, "NiceSqrtQ", integration::builtin_nice_sqrt_q);
+    register_builtin(env, "DerivativeDivides", integration::builtin_derivative_divides);
+    // With/Module/If
+    register_builtin_env(env, "With", integration::builtin_with);
+    register_builtin_env(env, "Module", integration::builtin_module);
+    register_builtin_env(env, "If", integration::builtin_if);
+    // Additional stubs for Rubi rules
+    register_builtin(env, "Discriminant", integration::builtin_discriminant);
+    register_builtin(env, "LinearMatchQ", integration::builtin_linear_match_q);
+    register_builtin(env, "IntLinearQ", integration::builtin_int_linear_q);
+    register_builtin(env, "IntQuadraticQ", integration::builtin_int_quadratic_q);
+    register_builtin(env, "Expon", integration::builtin_expon);
+    register_builtin(env, "QuadraticMatchQ", integration::builtin_quadratic_match_q);
+    register_builtin(env, "BinomialMatchQ", integration::builtin_binomial_match_q);
+    register_builtin(env, "PowerOfLinearMatchQ", integration::builtin_power_of_linear_match_q);
+    register_builtin(env, "NormalizePowerOfLinear", integration::builtin_normalize_power_of_linear);
+    register_builtin(env, "NormalizeIntegrand", integration::builtin_normalize_integrand);
+    register_builtin(env, "FunctionOfLinear", integration::builtin_function_of_linear);
+    register_builtin(env, "FunctionOfLog", integration::builtin_function_of_log);
+    register_builtin(env, "FunctionOfTrigOfLinearQ", integration::builtin_function_of_trig_of_linear_q);
+    register_builtin(env, "FunctionOfExponentialQ", integration::builtin_function_of_exponential_q);
+    register_builtin(env, "FunctionOfExponential", integration::builtin_function_of_exponential);
+    register_builtin(env, "FunctionExpand", integration::builtin_function_expand);
+    register_builtin(env, "SimplifyIntegrand", integration::builtin_simplify_integrand);
+    register_builtin(env, "Integral", integration::builtin_integral);
+    register_builtin(env, "CannotIntegrate", integration::builtin_cannot_integrate);
+    register_builtin(env, "ShowStep", integration::builtin_show_step);
+    register_builtin(env, "IntHide", integration::builtin_int_hide);
+    register_builtin(env, "PolynomialRemainder", integration::builtin_polynomial_remainder);
+    register_builtin(env, "PolynomialQuotient", integration::builtin_polynomial_quotient);
+    register_builtin(env, "PolynomialDivide", integration::builtin_polynomial_divide);
+    register_builtin(env, "RationalFunctionExpand", integration::builtin_rational_function_expand);
+    register_builtin(env, "GeneralizedTrinomialQ", integration::builtin_generalized_trinomial_q);
+    register_builtin(env, "GeneralizedBinomialQ", integration::builtin_generalized_binomial_q);
+    register_builtin(env, "GeneralizedBinomialMatchQ", integration::builtin_generalized_binomial_match_q);
+    register_builtin(env, "GeneralizedTrinomialMatchQ", integration::builtin_generalized_trinomial_match_q);
+    register_builtin(env, "GeneralizedTrinomialDegree", integration::builtin_generalized_trinomial_degree);
+    register_builtin(env, "BinomialParts", integration::builtin_binomial_parts);
+    register_builtin(env, "BinomialDegree", integration::builtin_binomial_degree);
+    register_builtin(env, "EulerIntegrandQ", integration::builtin_euler_integrand_q);
+    register_builtin(env, "PseudoBinomialPairQ", integration::builtin_pseudo_binomial_pair_q);
+    register_builtin(env, "QuotientOfLinearsQ", integration::builtin_quotient_of_linears_q);
+    register_builtin(env, "QuotientOfLinearsParts", integration::builtin_quotient_of_linears_parts);
+    register_builtin(env, "QuadraticProductQ", integration::builtin_quadratic_product_q);
+    register_builtin(env, "LinearPairQ", integration::builtin_linear_pair_q);
+    register_builtin(env, "SubstForFractionalPowerOfLinear", integration::builtin_subst_for_fractional_power_of_linear);
+    register_builtin(env, "SubstForFractionalPowerQ", integration::builtin_subst_for_fractional_power_q);
+    register_builtin(env, "SubstForFractionalPowerOfQuotientOfLinears", integration::builtin_subst_for_fractional_power_of_quotient_of_linears);
+    register_builtin(env, "SubstForInverseFunction", integration::builtin_subst_for_inverse_function);
+    register_builtin(env, "InverseFunctionOfLinear", integration::builtin_inverse_function_of_linear);
+    register_builtin(env, "FunctionOfSquareRootOfQuadratic", integration::builtin_function_of_sqrt_of_quadratic);
+    register_builtin(env, "FunctionOfLinear", integration::builtin_function_of_linear_fn);
+    register_builtin(env, "TryPureTanSubst", integration::builtin_try_pure_tan_subst);
+    register_builtin(env, "SimplerIntegrandQ", integration::builtin_simpler_integrand_q);
+    register_builtin(env, "NormalizePseudoBinomial", integration::builtin_normalize_pseudo_binomial);
+    register_builtin(env, "PolynomialInSubst", integration::builtin_polynomial_in_subst);
+    register_builtin(env, "MinimumMonomialExponent", integration::builtin_minimum_monomial_exponent);
+    register_builtin(env, "PowerVariableExpn", integration::builtin_power_variable_expn);
+    register_builtin(env, "DistributeDegree", integration::builtin_distribute_degree);
+    register_builtin(env, "IntSum", integration::builtin_int_sum);
+    register_builtin(env, "SplitProduct", integration::builtin_split_product);
+    register_builtin(env, "EveryQ", integration::builtin_every_q);
+    register_builtin(env, "RationalFunctionExponents", integration::builtin_rational_function_exponents);
 
     // ── Discrete Calculus ──
     register_builtin(env, "DiscreteDelta", discrete::builtin_discrete_delta);
@@ -1951,6 +2109,11 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "MessageName" => vec!["HoldFirst", "Locked", "ReadProtected"],
         // -- Sequence --
         "Sequence" => vec!["HoldAll", "Locked", "ReadProtected", "SequenceHold"],
+        // -- Scoping/conditionals (HoldAll so body is not pre-evaluated) --
+        "With" | "Module" | "Block" => vec!["HoldAll", "Locked", "ReadProtected"],
+        "If" => vec!["HoldAll", "Locked", "ReadProtected"],
+        // -- Calculus (HoldAll so expressions are not pre-evaluated) --
+        "Integrate" => vec!["HoldAll", "Locked", "ReadProtected"],
         "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
         // -- Equation solvers (need HoldAll so equations aren't evaluated before solving) --
         "Solve" | "RSolve" => vec!["HoldAll", "Locked", "ReadProtected"],

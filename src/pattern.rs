@@ -81,7 +81,7 @@ fn try_unwrap_one_identity<'a>(
 /// Convert an AST expression to a runtime Value.
 /// Used to unwrap `Value::Pattern(Expr)` for pattern matching
 /// when HoldAll/HoldAllComplete prevents argument evaluation.
-fn expr_to_value(expr: &Expr) -> Value {
+pub fn unwrap_expr_to_value(expr: &Expr) -> Value {
     match expr {
         Expr::Symbol(s) => Value::Symbol(s.clone()),
         Expr::Integer(n) => Value::Integer(n.clone()),
@@ -90,11 +90,11 @@ fn expr_to_value(expr: &Expr) -> Value {
         Expr::Str(s) => Value::Str(s.clone()),
         Expr::Null => Value::Null,
         Expr::List(items) => {
-            Value::List(items.iter().map(|item| expr_to_value(item)).collect())
+            Value::List(items.iter().map(|item| unwrap_expr_to_value(item)).collect())
         }
         Expr::Call { head, args } => {
-            let h = expr_to_value(head);
-            let a: Vec<Value> = args.iter().map(|arg| expr_to_value(arg)).collect();
+            let h = unwrap_expr_to_value(head);
+            let a: Vec<Value> = args.iter().map(|arg| unwrap_expr_to_value(arg)).collect();
             match h {
                 Value::Symbol(name) => Value::Call { head: name, args: a },
                 _ => Value::Call {
@@ -117,7 +117,7 @@ pub fn match_pattern(
 ) -> MatchResult {
     // Unwrap Value::Pattern for HoldAll/HoldAllComplete arguments
     if let Value::Pattern(expr) = value {
-        return match_pattern(pattern, &expr_to_value(expr), attr_checker);
+        return match_pattern(pattern, &unwrap_expr_to_value(expr), attr_checker);
     }
 
     match pattern {

@@ -1,8 +1,5 @@
 (* D.syma — differentiation rules as Syma function definitions *)
 
-(* D[expr, {x, 0}] = expr — zero-th derivative is the expression itself *)
-D[expr_, {x_, 0}] := expr
-
 (* Constants don't change with respect to any variable *)
 D[c_, x_] := 0 /; FreeQ[c, x]
 

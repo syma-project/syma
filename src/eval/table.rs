@@ -9,7 +9,7 @@ use crate::value::*;
 const INFINITY_LIMIT: i64 = 100;
 
 /// Convert a Value back to an Expr for re-processing by special forms.
-pub(super) fn value_to_expr(v: &Value) -> Expr {
+pub(crate) fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::Integer(n.clone()),
         Value::Real(r) => Expr::Real(r.clone()),
@@ -25,6 +25,15 @@ pub(super) fn value_to_expr(v: &Value) -> Expr {
         Value::Sequence(items) => Expr::Call {
             head: Box::new(Expr::Symbol("Sequence".to_string())),
             args: items.iter().map(value_to_expr).collect(),
+        },
+        Value::Pattern(e) => e.clone(),
+        Value::Rule { lhs, rhs, delayed: false } => Expr::Rule {
+            lhs: Box::new(value_to_expr(lhs)),
+            rhs: Box::new(value_to_expr(rhs)),
+        },
+        Value::Rule { lhs, rhs, delayed: true } => Expr::RuleDelayed {
+            lhs: Box::new(value_to_expr(lhs)),
+            rhs: Box::new(value_to_expr(rhs)),
         },
         _ => Expr::Symbol(v.to_string()),
     }

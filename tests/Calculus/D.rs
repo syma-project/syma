@@ -333,10 +333,21 @@ fn test_d_polynomial_terms() {
     contains_all(&out2, &["4", "x"], "D[2*x^2, x]");
 }
 
-// NOTE: Multi-term polynomials (3*x^3 + 2*x^2 + 5*x + 7) and 3-factor
-// products (x*Sin[x]*Exp[x]) inside D[...] are not evaluated due to a
-// parser issue with nested Call expressions containing commas.
-// Tracked for a future parser fix.
+// ── Multi-term and multi-factor expressions ─────────────────────────────────
+
+#[test]
+fn test_d_polynomial_full() {
+    // D[3*x^3 + 2*x^2 + 5*x + 7, x] = 9*x^2 + 4*x + 5
+    let out = eval("D[3*x^3 + 2*x^2 + 5*x + 7, x]");
+    contains_all(&out, &["9", "4", "5"], "D[3*x^3+2*x^2+5*x+7, x]");
+}
+
+#[test]
+fn test_d_triple_product() {
+    // D[x*Sin[x]*Exp[x], x]
+    let out = eval("D[x*Sin[x]*Exp[x], x]");
+    contains_all(&out, &["Sin", "Cos", "Exp"], "D[x*Sin[x]*Exp[x], x]");
+}
 
 #[test]
 fn test_d_nested_power_trig() {
@@ -374,4 +385,85 @@ fn test_d_negative_power() {
         out.contains("2") && (out.contains("Power") || out.contains("^")),
         "D[x^(-2), x] should contain 2 and Power, got: {out}"
     );
+}
+
+// ── n-th order derivatives: D[f, {x, n}] ──────────────────────────────────────
+
+#[test]
+fn test_d_nth_order_0() {
+    // D[f, {x, 0}] = f
+    let out = eval("D[x^3, {x, 0}]");
+    assert!(out.contains("x"), "D[x^3, {{x, 0}}] should be x^3, got: {out}");
+}
+
+#[test]
+fn test_d_nth_order_1() {
+    // D[x^3, {x, 1}] = 3*x^2
+    let out = eval("D[x^3, {x, 1}]");
+    contains_all(&out, &["3", "x"], "D[x^3, {x, 1}]");
+}
+
+#[test]
+fn test_d_nth_order_2() {
+    // D[x^3, {x, 2}] = 6*x
+    let out = eval("D[x^3, {x, 2}]");
+    contains_all(&out, &["6", "x"], "D[x^3, {x, 2}]");
+}
+
+#[test]
+fn test_d_nth_order_3() {
+    // D[x^3, {x, 3}] = 6
+    let out = eval("D[x^3, {x, 3}]");
+    assert!(out.contains("6"), "D[x^3, {{x, 3}}] should be 6, got: {out}");
+}
+
+#[test]
+fn test_d_nth_order_4_x4() {
+    // D[x^4, {x, 4}] = 24
+    let out = eval("D[x^4, {x, 4}]");
+    assert!(out.contains("24"), "D[x^4, {{x, 4}}] should be 24, got: {out}");
+}
+
+#[test]
+fn test_d_nth_order_sin() {
+    // D[Sin[x], {x, 4}] = Sin[x]
+    let out = eval("D[Sin[x], {x, 4}]");
+    assert!(out.contains("Sin"), "D^4[Sin[x], x] should be Sin[x], got: {out}");
+}
+
+#[test]
+fn test_d_nth_order_exp() {
+    // D[Exp[x], {x, 5}] = Exp[x]
+    let out = eval("D[Exp[x], {x, 5}]");
+    assert!(out.contains("Exp"), "D^5[Exp[x], x] should be Exp[x], got: {out}");
+}
+
+// ── Mixed partial derivatives: D[f, x, y] ──────────────────────────────────────
+
+#[test]
+fn test_d_mixed_two_vars() {
+    // D[x^2 * y, x, y] = D[2*x*y, y] = 2*x
+    let out = eval("D[x^2 * y, x, y]");
+    contains_all(&out, &["2", "x"], "D[x^2*y, x, y]");
+}
+
+#[test]
+fn test_d_mixed_reversed() {
+    // D[x^2 * y, y, x] = D[x^2, x] = 2*x
+    let out = eval("D[x^2 * y, y, x]");
+    contains_all(&out, &["2", "x"], "D[x^2*y, y, x]");
+}
+
+#[test]
+fn test_d_mixed_three_vars() {
+    // D[x*y*z, x, y, z] = 1
+    let out = eval("D[x*y*z, x, y, z]");
+    assert!(out.contains("1"), "D[x*y*z, x, y, z] should be 1, got: {out}");
+}
+
+#[test]
+fn test_d_mixed_with_nth() {
+    // D[x^3*y, {x, 2}, y] = D[6*x*y, y] = 6*x
+    let out = eval("D[x^3*y, {x, 2}, y]");
+    contains_all(&out, &["6", "x"], "D[x^3*y, {x, 2}, y]");
 }

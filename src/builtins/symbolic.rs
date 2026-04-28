@@ -664,11 +664,11 @@ fn binomial(n: i64, k: i64) -> i64 {
 /// D[expr, x] — Symbolic differentiation.
 /// D[expr, x, y, ...] — Mixed partial derivatives.
 /// D[expr, {x, n}] — n-th order derivative.
-/// D[expr, {x, n}, y, ...] — n-th derivative w.r.t. x, then y, etc.
+/// D[expr, {x, n, x0}] — n-th order derivative evaluated at x=x0.
+/// D[expr, {x, n}, y, ...] — n-th derivative w.r.t. x, then w.r.t. y, etc.
 ///
-/// Implemented as Syma rules loaded from D.syma on first use.
 /// Multi-arg and n-th-order forms are normalized to D[f, var] (2-arg)
-/// before dispatching to Syma rules.
+/// before dispatching to Syma rules loaded from D.syma.
 ///
 /// Loading order (disk → embedded):
 /// 1. Search paths (SYMA_HOME/SystemFiles, current dir, etc.)
@@ -681,159 +681,194 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    // Normalize multi-arg and n-th-order forms to D[f, var] (2-arg)
-    let normalized = match args.len() {
-        2 => args.to_vec(),
-        3 => {
-            // D[f, {x, n}] — n-th order derivative
-            if let Value::List(items) = &args[1] {
-                if items.is_empty() {
-                    return Err(EvalError::Error(
-                        "D: order spec {x, n} cannot be empty".to_string(),
-                    ));
-                }
-                let var = items[0].clone();
-                if items.len() == 2 {
-                    // D[f, {x, n}]
-                    let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
-                        "D: order n must be a non-negative integer".to_string(),
-                    ))?;
-                    if n < 0 {
-                        return Err(EvalError::Error(
-                            "D: order n must be a non-negative integer".to_string(),
-                        ));
-                    }
-                    let mut expr = args[0].clone();
-                    for _ in 0..n as usize {
-                        expr = Value::Call {
-                            head: "D".to_string(),
-                            args: vec![expr, var.clone()],
-                        };
-                    }
-                    vec![expr, var]
-                } else if items.len() == 3 {
-                    // D[f, {x, n, x0}] — evaluate at x = x0
-                    let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
-                        "D: order n must be a non-negative integer".to_string(),
-                    ))?;
-                    if n < 0 {
-                        return Err(EvalError::Error(
-                            "D: order n must be a non-negative integer".to_string(),
-                        ));
-                    }
-                    let mut expr = args[0].clone();
-                    for _ in 0..n as usize {
-                        expr = Value::Call {
-                            head: "D".to_string(),
-                            args: vec![expr, var.clone()],
-                        };
-                    }
-                    // Substitute x -> x0 via substitute_and_eval
-                    let var_name = match &var {
-                        Value::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Error(
-                                "D: variable in {x, n, x0} must be a symbol".to_string(),
-                            ));
-                        }
-                    };
-                    return Ok(substitute_and_eval(&expr, &var_name, &items[2]));
-                } else {
-                    return Err(EvalError::Error(
-                        "D: order spec must be {x, n} or {x, n, x0}".to_string(),
-                    ));
-                }
-            } else {
-                // D[f, x, y] — two more vars, fold: D[D[f, x], y]
-                vec![
-                    Value::Call {
-                        head: "D".to_string(),
-                        args: vec![args[0].clone(), args[1].clone()],
-                    },
-                    args[2].clone(),
-                ]
-            }
-        }
-        _ => {
-            // D[f, {x, n}, y, z, ...] or D[f, x, y, z, ...]
-            if let Value::List(items) = &args[1] {
-                if items.is_empty() {
-                    return Err(EvalError::Error(
-                        "D: order spec {x, n} cannot be empty".to_string(),
-                    ));
-                }
-                let var = items[0].clone();
-                let n = if items.len() >= 2 {
-                    items[1].to_integer().ok_or_else(|| EvalError::Error(
-                        "D: order n must be a non-negative integer".to_string(),
-                    ))?
-                } else {
-                    return Err(EvalError::Error(
-                        "D: order spec must be {x, n} or {x, n, x0}".to_string(),
-                    ));
-                };
-                if n < 0 {
-                    return Err(EvalError::Error(
-                        "D: order n must be a non-negative integer".to_string(),
-                    ));
-                }
-                let mut expr = args[0].clone();
-                for _ in 0..n as usize {
-                    expr = Value::Call {
-                        head: "D".to_string(),
-                        args: vec![expr, var.clone()],
-                    };
-                }
-                // Fold remaining args: D[expr, a, b, c] -> D[D[D[expr, a], b], c]
-                let mut current = expr;
-                for arg in args[2..].iter().rev() {
-                    current = Value::Call {
-                        head: "D".to_string(),
-                        args: vec![current, arg.clone()],
-                    };
-                }
-                vec![current, var.clone()]
-            } else {
-                // D[f, x, y, z, ...] — fold: D[D[D[f, x], y], z]
-                let mut current = args[0].clone();
-                for arg in args[1..].iter().rev() {
-                    current = Value::Call {
-                        head: "D".to_string(),
-                        args: vec![current, arg.clone()],
-                    };
-                }
-                // The outermost differentiation variable
-                let last_var = args[args.len() - 1].clone();
-                // current is now D[D[...D[f, x], y], z] but we built it reversed.
-                // Actually we need to rebuild properly:
-                // D[f, x, y, z] = D[D[D[f, x], y], z]
-                let mut expr = args[0].clone();
-                for arg in &args[1..args.len()-1] {
-                    expr = Value::Call {
-                        head: "D".to_string(),
-                        args: vec![expr, arg.clone()],
-                    };
-                }
-                vec![expr, last_var]
-            }
-        }
-    };
-
-    // Load D.syma definitions on first use
     lazy_load_d(env)?;
 
-    // After loading, D is defined as Value::Function in env — re-dispatch
-    if let Some(Value::Function(_)) = env.get("D").as_ref()
-        && let Some(d_func) = env.get("D")
-    {
-        return crate::eval::apply_function(&d_func, &normalized, env);
+    // Check if second argument is a List {x, n} or {x, n, x0}
+    if let Value::List(items) = &args[1] {
+        if !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
+            let var = items[0].clone();
+            let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
+                "D: order n must be a non-negative integer".to_string(),
+            ))?;
+            if n < 0 {
+                return Err(EvalError::Error(
+                    "D: order n must be a non-negative integer".to_string(),
+                ));
+            }
+            // Repeatedly differentiate n times w.r.t. var
+            let mut result = args[0].clone();
+            for _ in 0..n as usize {
+                result = eval_d_2(result, var.clone(), env)?;
+            }
+            if items.len() == 3 {
+                // D[f, {x, n, x0}] — evaluate at x = x0
+                let var_name = match &var {
+                    Value::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "D: variable in {x, n, x0} must be a symbol".to_string(),
+                        ));
+                    }
+                };
+                if args.len() > 2 {
+                    // D[f, {x, n, x0}, y, ...] — differentiate w.r.t. remaining vars
+                    // (x is already substituted, so we skip it for remaining vars)
+                    for arg in &args[2..] {
+                        result = eval_d_2(result, arg.clone(), env)?;
+                    }
+                }
+                return Ok(substitute_and_eval(&result, &var_name, &items[2]));
+            }
+            if args.len() > 2 {
+                // D[f, {x, n}, y, z, ...] — fold remaining vars
+                for arg in &args[2..] {
+                    result = eval_d_2(result, arg.clone(), env)?;
+                }
+            }
+            return Ok(result);
+        }
     }
 
-    // Fallback: return unevaluated
+    // Multi-arg: D[f, x, y, z, ...] — fold left: D[D[D[f, x], y], z]
+    if args.len() > 2 {
+        let mut result = args[0].clone();
+        for arg in &args[1..] {
+            result = eval_d_2(result, arg.clone(), env)?;
+        }
+        return Ok(result);
+    }
+
+    // 2-arg case: D[f, x]
+    eval_d_2(args[0].clone(), args[1].clone(), env)
+}
+
+/// Flatten nested Plus/Times: Plus[Plus[a,b], c] → Plus[a,b,c]
+fn flatten_flat_call(name: &str, value: &Value) -> Vec<Value> {
+    match value {
+        Value::Call { head: h, args: a } if h == name => {
+            let mut result = Vec::new();
+            for arg in a {
+                result.append(&mut flatten_flat_call(name, arg));
+            }
+            result
+        }
+        _ => vec![value.clone()],
+    }
+}
+
+/// Evaluate D[expr, var] (2-arg form) by dispatching to Syma function definitions.
+/// Handles multi-arg Times/Plus in Rust because the Flat attribute causes
+/// pattern matching to flatten nested calls, breaking 2-arg patterns.
+fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
+    lazy_load_d(env)?;
+
+    // Unwrap Value::Pattern to get a concrete Value for inspection.
+    // D has HoldAll, so args come in as Value::Pattern(Expr).
+    let concrete = match &expr {
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        _ => expr.clone(),
+    };
+
+    // Flatten nested Plus/Times (parser builds nested, Flat flattens at runtime)
+    let flattened = match &concrete {
+        &Value::Call { ref head, ref args }
+            if (head == "Plus" || head == "Times") && args.len() >= 2 =>
+        {
+            let flat_args = flatten_flat_call(head, &concrete);
+            if flat_args.len() != args.len() {
+                Some(Value::Call {
+                    head: head.clone(),
+                    args: flat_args,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let concrete = flattened.unwrap_or(concrete);
+
+    // Handle multi-arg Times/Plus in Rust
+    if let Value::Call { ref head, ref args } = concrete {
+        let name = head.as_str();
+        if (name == "Times" || name == "Plus") && args.len() > 2 {
+            let n = args.len();
+            let rest = Value::Call {
+                head: name.to_string(),
+                args: args[..n - 1].to_vec(),
+            };
+            let last = args[n - 1].clone();
+
+            if name == "Times" {
+                // Product rule: D[f*g*h, x] = D[f*g, x]*h + f*g*D[h, x]
+                let d_rest = eval_d_2(rest.clone(), var.clone(), env)?;
+                let d_last = eval_d_2(last.clone(), var.clone(), env)?;
+                return Ok(add_times(
+                    vec![d_rest, last.clone()],
+                    vec![rest, d_last],
+                ));
+            } else {
+                // Plus rule: D[f + g + h, x] = D[f + g, x] + D[h, x]
+                let d_rest = eval_d_2(rest, var.clone(), env)?;
+                let d_last = eval_d_2(last, var.clone(), env)?;
+                return Ok(make_plus(vec![d_rest, d_last]));
+            }
+        }
+    }
+
+    if let Some(d_func) = env.get("D")
+        && let Value::Function(_) = &d_func
+    {
+        return crate::eval::apply_function(&d_func, &[expr, var], env);
+    }
     Ok(Value::Call {
         head: "D".to_string(),
-        args: normalized,
+        args: vec![expr, var],
     })
+}
+
+/// Create a Plus of values (single arg → that arg, two args → Plus[a,b])
+fn make_plus(items: Vec<Value>) -> Value {
+    match items.len() {
+        0 => Value::Integer(rug::Integer::from(0)),
+        1 => items.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Plus".to_string(),
+            args: items,
+        },
+    }
+}
+
+/// Create Plus[Times[...], Times[...]]
+fn add_times(left: Vec<Value>, right: Vec<Value>) -> Value {
+    let l = make_times(left);
+    let r = make_times(right);
+    make_plus(vec![l, r])
+}
+
+/// Create a Times of values. Returns 0 if any arg is 0.
+fn make_times(items: Vec<Value>) -> Value {
+    if items.iter().any(|v| is_zero(v)) {
+        return Value::Integer(rug::Integer::from(0));
+    }
+    match items.len() {
+        0 => Value::Integer(rug::Integer::from(1)),
+        1 => items.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Times".to_string(),
+            args: items,
+        },
+    }
+}
+
+/// Check if a Value represents zero.
+fn is_zero(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Rational(r) => r.is_zero(),
+        _ => false,
+    }
 }
 
 /// Lazily load D.syma differentiation rules into the environment.
@@ -902,8 +937,24 @@ pub fn builtin_integrate(args: &[Value]) -> Result<Value, EvalError> {
             "Integrate requires exactly 2 arguments".to_string(),
         ));
     }
+    // Unwrap Value::Pattern (from HoldAll attribute)
+    let expr = match &args[0] {
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        _ => args[0].clone(),
+    };
     let var = match &args[1] {
         Value::Symbol(s) => s.clone(),
+        Value::Pattern(p) => {
+            match &crate::pattern::unwrap_expr_to_value(p) {
+                Value::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Symbol".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
+            }
+        }
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol".to_string(),
@@ -911,7 +962,7 @@ pub fn builtin_integrate(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    Ok(integrate(&args[0], &var))
+    Ok(integrate(&expr, &var))
 }
 
 fn integrate(expr: &Value, var: &str) -> Value {
@@ -1877,7 +1928,7 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
     }
 }
 
-fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Vec<Value> {
+pub fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Vec<Value> {
     let terms = flatten_to_plus_terms(expr);
     let mut max_degree = 0i64;
     let mut coeff_map: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
