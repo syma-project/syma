@@ -145,28 +145,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
         // ── Rules ──
         Expr::Rule { lhs, rhs } => {
-            // If LHS looks like a pattern (symbol ending with _, or blank nodes),
-            // keep it as a Pattern value rather than evaluating it.
-            let lhs_val = if is_pattern_like(lhs) {
-                Value::Pattern(lhs.as_ref().clone())
-            } else {
-                eval(lhs, env)?
-            };
             Ok(Value::Rule {
-                lhs: Box::new(lhs_val),
-                rhs: Box::new(eval(rhs, env)?),
+                lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
+                rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
                 delayed: false,
             })
         }
         Expr::RuleDelayed { lhs, rhs } => {
-            // Delayed: don't evaluate RHS yet
-            let lhs_val = if is_pattern_like(lhs) {
-                Value::Pattern(lhs.as_ref().clone())
-            } else {
-                eval(lhs, env)?
-            };
             Ok(Value::Rule {
-                lhs: Box::new(lhs_val),
+                lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
                 rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
                 delayed: true,
             })
@@ -1146,21 +1133,6 @@ pub(super) fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
     match expr {
         Expr::PatternGuard { pattern, condition } => (pattern.as_ref(), Some(condition.as_ref())),
         _ => (expr, None),
-    }
-}
-
-/// Check if an expression looks like a pattern that should not be evaluated.
-pub(super) fn is_pattern_like(expr: &Expr) -> bool {
-    match expr {
-        Expr::Symbol(s) => s.ends_with('_') || s == "_",
-        Expr::Blank { .. }
-        | Expr::NamedBlank { .. }
-        | Expr::BlankSequence { .. }
-        | Expr::BlankNullSequence { .. }
-        | Expr::OptionalBlank { .. }
-        | Expr::OptionalNamedBlank { .. }
-        | Expr::PatternGuard { .. } => true,
-        _ => false,
     }
 }
 

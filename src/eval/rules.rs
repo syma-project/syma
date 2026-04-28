@@ -1,12 +1,31 @@
 /// Rule application and substitution logic.
 ///
 /// Handles ReplaceAll (/. / //.) and similar rule-based substitution.
-use crate::ast::*;
+use std::collections::HashMap;
+
 use crate::env::Env;
 use crate::pattern::{
     AttributeChecker, Bindings, MatchResult, collect_nested_guards, match_pattern,
 };
 use crate::value::*;
+
+/// Evaluate RHS expression with pattern bindings in a child environment.
+fn apply_rhs_pattern(
+    rhs: &Value,
+    bindings: &Bindings,
+    env: &Env,
+) -> Result<Value, EvalError> {
+    if let Value::Pattern(rhs_expr) = rhs {
+        let child_env = env.child();
+        for (name, val) in bindings {
+            child_env.set(name.clone(), val.clone());
+        }
+        super::eval(rhs_expr, &child_env)
+    } else {
+        // Fallback for non-Pattern RHS (pre-evaluated value from other code)
+        Ok(rhs.clone())
+    }
+}
 
 /// Extract a dispatch key from a runtime Value for use with DispatchedRules lookup.
 fn extract_value_dispatch_key(value: &Value) -> (String, Vec<Option<String>>) {
@@ -36,7 +55,6 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                 if let Value::Pattern(lhs_expr) = lhs
                     && let MatchResult::Match(bindings) =
                         match_pattern(lhs_expr, value, Some(&_attr_checker))
-                    && let Value::Pattern(rhs_expr) = rhs
                 {
                     // Evaluate guards if present
                     let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
@@ -75,7 +93,7 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                             continue 'next_rule;
                         }
                     }
-                    return substitute_value(rhs_expr, &bindings);
+                    return apply_rhs_pattern(rhs, &bindings, env);
                 }
             }
             Ok(value.clone())
@@ -91,7 +109,6 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                     if let Value::Pattern(lhs_expr) = lhs
                         && let MatchResult::Match(bindings) =
                             match_pattern(&lhs_expr, value, Some(&_attr_checker))
-                        && let Value::Pattern(rhs_expr) = rhs
                     {
                         let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
                         let slot_values: Vec<Value> = match value {
@@ -127,7 +144,7 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                                 continue 'next_rule;
                             }
                         }
-                        return substitute_value(&rhs_expr, &bindings);
+                        return apply_rhs_pattern(rhs, &bindings, env);
                     }
                 }
             } else {
@@ -135,7 +152,6 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                     if let Value::Pattern(lhs_expr) = lhs
                         && let MatchResult::Match(bindings) =
                             match_pattern(&lhs_expr, value, Some(&_attr_checker))
-                        && let Value::Pattern(rhs_expr) = rhs
                     {
                         let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
                         let slot_values: Vec<Value> = match value {
@@ -171,7 +187,7 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                                 continue 'next_rule;
                             }
                         }
-                        return substitute_value(&rhs_expr, &bindings);
+                        return apply_rhs_pattern(rhs, &bindings, env);
                     }
                 }
             }
@@ -186,13 +202,23 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
             }
             Ok(value.clone())
         }
-        Value::Rule { lhs, rhs, delayed } => {
-            if let Value::Pattern(lhs_expr) = lhs.as_ref()
-                && let MatchResult::Match(bindings) =
-                    match_pattern(lhs_expr, value, Some(&_attr_checker))
+        Value::Rule { lhs, rhs, delayed: _ } => {
+            // Extract LHS as Pattern, or fall back to structural match
+            let lhs_expr = if let Value::Pattern(ref lhs_expr) = **lhs {
+                lhs_expr.clone()
+            } else {
+                // Non-Pattern LHS: structural match (no bindings)
+                if lhs.struct_eq(value) {
+                    return apply_rhs_pattern(rhs, &HashMap::new(), env);
+                }
+                return Ok(value.clone());
+            };
+
+            if let MatchResult::Match(bindings) =
+                match_pattern(&lhs_expr, value, Some(&_attr_checker))
             {
                 // Evaluate guards if present
-                let (inner_pat, guard) = super::extract_guard_expr(lhs_expr);
+                let (inner_pat, guard) = super::extract_guard_expr(&lhs_expr);
                 // Bind numbered slots for guard evaluation based on value structure
                 let slot_values: Vec<Value> = match value {
                     Value::Call { args, .. } => args.clone(),
@@ -228,61 +254,12 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
                     }
                 }
 
-                if *delayed {
-                    if let Value::Pattern(rhs_expr) = rhs.as_ref() {
-                        return substitute_value(rhs_expr, &bindings);
-                    }
-                } else {
-                    return Ok(rhs.as_ref().clone());
-                }
+                apply_rhs_pattern(rhs, &bindings, env)
+            } else {
+                Ok(value.clone())
             }
-            Ok(value.clone())
         }
         _ => Ok(value.clone()),
-    }
-}
-
-/// Substitute bindings into an expression and evaluate.
-fn substitute_value(expr: &Expr, bindings: &Bindings) -> Result<Value, EvalError> {
-    // Simple substitution: replace symbols with bound values
-    match expr {
-        Expr::Symbol(s) => {
-            if let Some(val) = bindings.get(s) {
-                Ok(val.clone())
-            } else {
-                Ok(Value::Symbol(s.clone()))
-            }
-        }
-        Expr::Integer(n) => Ok(Value::Integer(n.clone())),
-        Expr::Real(r) => Ok(Value::Real(r.clone())),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Str(s) => Ok(Value::Str(s.clone())),
-        Expr::Null => Ok(Value::Null),
-        Expr::List(items) => {
-            let values: Result<Vec<Value>, _> = items
-                .iter()
-                .map(|item| substitute_value(item, bindings))
-                .collect();
-            Ok(Value::List(values?))
-        }
-        Expr::Call { head, args } => {
-            let h = substitute_value(head, bindings)?;
-            let a: Result<Vec<Value>, _> = args
-                .iter()
-                .map(|arg| substitute_value(arg, bindings))
-                .collect();
-            match h {
-                Value::Symbol(name) => Ok(Value::Call {
-                    head: name,
-                    args: a?,
-                }),
-                _ => Ok(Value::Call {
-                    head: h.to_string(),
-                    args: a?,
-                }),
-            }
-        }
-        _ => Ok(Value::Pattern(expr.clone())),
     }
 }
 
