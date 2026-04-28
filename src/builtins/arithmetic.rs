@@ -109,7 +109,7 @@ fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
         // Complex - scalar
         (Value::Complex { re, im }, other) => {
             if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(re - v, im))
+                Ok(normalize_complex(*re - v, *im))
             } else {
                 Ok(Value::Call {
                     head: "Plus".to_string(),
@@ -126,7 +126,7 @@ fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
         // scalar - Complex
         (other, Value::Complex { re, im }) => {
             if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(v - re, -im))
+                Ok(normalize_complex(v - *re, -*im))
             } else {
                 Ok(Value::Call {
                     head: "Plus".to_string(),
@@ -214,7 +214,7 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
         // Complex + scalar
         (Value::Complex { re, im }, other) => {
             if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(re + v, im))
+                Ok(normalize_complex(*re + v, *im))
             } else {
                 Ok(Value::Call {
                     head: "Plus".to_string(),
@@ -225,7 +225,7 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
         // scalar + Complex
         (other, Value::Complex { re, im }) => {
             if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(re + v, im))
+                Ok(normalize_complex(*re + v, *im))
             } else {
                 Ok(Value::Call {
                     head: "Plus".to_string(),

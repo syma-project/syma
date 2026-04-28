@@ -2,7 +2,7 @@
 ///
 /// Provides root finding, resultants, GCD, Sturm sequences, and
 /// minimal-polynomial composition needed by `Value::Root`.
-use rug::Rational;
+use rug::{Integer, Rational};
 use std::cmp::Ordering;
 
 /// Complex number (f64 precision) for internal root-finding.
@@ -400,7 +400,7 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
             mat.swap(col, pivot_row);
             sign = -sign;
         }
-        let piv = &mat[col][col];
+        let piv = mat[col][col].clone();
         det *= piv.clone();
         // Eliminate below
         for row in col + 1..n {
@@ -409,13 +409,15 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
             }
             let factor = mat[row][col].clone() / piv.clone();
             for j in col..n {
-                mat[row][j] -= factor.clone() * mat[col][j].clone();
+                let col_j = mat[col][j].clone();
+                mat[row][j] -= factor.clone() * col_j;
             }
         }
     }
 
     if sign == -1 {
-        det = -&det;
+        let neg: Rational = (-&det).into();
+        det = neg;
     }
     det
 }
@@ -433,7 +435,7 @@ pub fn sturm_sequence(coeffs: &[Rational]) -> Vec<Vec<Rational>> {
         let prev = seq[seq.len() - 2].clone();
         let rem = poly_remainder(&prev, &last);
         // Negate the remainder
-        let neg_rem: Vec<Rational> = rem.iter().map(|c| -c).collect();
+        let neg_rem: Vec<Rational> = rem.iter().map(|c| Rational::from(-c.clone())).collect();
         seq.push(neg_rem);
     }
     seq
@@ -589,9 +591,9 @@ pub fn min_poly_scale_int(p: &[Rational], root_idx: usize, c: i64) -> Vec<Ration
             .enumerate()
             .map(|(i, coef)| {
                 if i % 2 == 1 {
-                    -(&*coef.clone())
+                    Rational::from(-&coef.clone())
                 } else {
-                    (&*coef.clone()).into()
+                    coef.clone()
                 }
             })
             .collect();
@@ -610,8 +612,8 @@ pub fn min_poly_scale_int(p: &[Rational], root_idx: usize, c: i64) -> Vec<Ration
         if sign_c < 0 && i % 2 == 1 && power % 2 == 1 {
             // sign correction
         }
-        if sign_c < 0 && (deg - i) % 2 == 1 {
-            coef = -(&*coef.clone());
+            if sign_c < 0 && (deg - i) % 2 == 1 {
+           coef = Rational::from(-&coef.clone());
         }
         result.push(coef);
     }
@@ -660,7 +662,7 @@ fn min_poly_add_sub(
                 let mut coeff = Rational::from(p[k].clone());
                 coeff *= binom_kj;
                 if sign < 0 {
-                    coeff = -(&*coeff.clone());
+                    coeff = Rational::from(-&coeff.clone());
                 }
                 if subtract {
                     // z = alpha - beta, so alpha = z + beta
@@ -673,7 +675,7 @@ fn min_poly_add_sub(
                     // For subtract: alpha = z + beta, p(z+y)
                     // The coefficients are all positive (no (-1)^j)
                     if j % 2 == 1 {
-                        coeff = -(&*coeff.clone()); // negate back the previous -1^j
+                        coeff = Rational::from(-&coeff.clone()); // negate back the previous -1^j
                     }
                 }
                 poly_z[z_power] += coeff;
@@ -777,7 +779,7 @@ fn poly_matrix_det(matrix: &[Vec<Vec<Rational>>], n: usize, max_deg: usize) -> V
         }
         let det_val = determinant_f64(&num_matrix);
         // Round to nearest integer (resultant is integer for integer polys)
-        evaluations.push((num, det_val.round() as i64));
+        evaluations.push((num as i64, det_val.round() as i64));
     }
 
     // Lagrange interpolation from integer points (0, 1, ..., max_deg)
@@ -894,7 +896,7 @@ fn interpolate_from_integers(evals: &[(i64, i64)], max_deg: usize) -> Vec<Ration
         }
     }
     for c in coeffs.iter_mut() {
-        if c.abs().to_f64() < 1e-6 {
+        if c.clone().abs().to_f64() < 1e-6 {
             *c = Rational::from(0);
         }
     }
@@ -995,7 +997,7 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     for c in poly.iter() {
         if !c.is_zero() {
             if !gcd_set {
-                gcd_num = c.abs();
+                gcd_num = c.clone().abs();
                 gcd_set = true;
             }
         }
@@ -1014,12 +1016,12 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
 
     // Ensure leading coefficient is positive
     if !result[deg].is_zero() && result[deg].is_negative() {
-        result = result.into_iter().map(|c| -c).collect();
+        result = result.into_iter().map(|c| Rational::from(-c)).collect();
     }
 
     // Clear denominators if all coefficients have same denominator
     let common_den = {
-        let mut den = Rational::from(1);
+        let mut den = Integer::from(1);
         let mut den_set = false;
         for c in result.iter() {
             if !c.is_zero() {
@@ -1034,13 +1036,13 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
         den
     };
 
-    if common_den != Rational::from(1) {
+    if common_den != Integer::from(1) {
         result = result
             .into_iter()
-            .map(|c| (c.clone() * common_den.clone()).into())
+            .map(|c| (c * &common_den).into())
             .collect();
         // Check if all are now integers
-        let all_int = result.iter().all(|c| c.denom() == &Rational::from(1));
+        let all_int = result.iter().all(|c| c.denom() == &Integer::from(1));
         if !all_int {
             // denominators differ; keep as-is
         }
@@ -1049,13 +1051,11 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     strip_zeros_poly(&result)
 }
 
-fn lcm_int(a: Rational, b: Rational) -> Rational {
-    let (na, da) = a.into_numer_denom();
-    let (nb, db) = b.into_numer_denom();
+fn lcm_int(a: Integer, b: Integer) -> Integer {
     // lcm(a, b) = |a*b| / gcd(a, b), for integers
-    let prod = na.clone() * nb.clone();
-    let g = na.gcd(&nb);
-    (prod / g)
+    let prod = a.clone() * b.clone();
+    let g = a.gcd(&b);
+    prod / g
 }
 
 fn strip_zeros_poly(coeffs: &[Rational]) -> Vec<Rational> {
@@ -1087,7 +1087,7 @@ pub fn coeffs_from_value(v: &Value) -> Option<Vec<Rational>> {
         for item in items {
             match item {
                 Value::Integer(n) => coeffs.push(Rational::from(n.clone())),
-                Value::Rational(r) => coeffs.push(r.clone()),
+                Value::Rational(r) => coeffs.push((**r).clone()),
                 _ => return None,
             }
         }

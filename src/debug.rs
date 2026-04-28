@@ -339,6 +339,7 @@ fn format_value(val: &Value) -> String {
         Value::SeriesData { coefficients, .. } => {
             format!("<seriesdata {} coefficients>", coefficients.len())
         }
+        Value::Root { .. } => "<root>".to_string(),
     }
 }
 

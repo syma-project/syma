@@ -1,5 +1,7 @@
+pub mod algebraic;
 pub mod arithmetic;
 pub mod association;
+pub mod charting;
 pub mod clearing;
 pub mod comparison;
 pub mod dataset;
@@ -7,6 +9,7 @@ pub mod developer;
 pub mod discrete;
 pub mod domains;
 pub mod error;
+pub mod expression;
 pub mod ffi;
 pub mod filesystem;
 pub mod format;
@@ -17,17 +20,20 @@ pub mod io;
 pub mod linalg;
 pub mod list;
 pub mod localsymbol;
+pub mod operators;
 pub mod logical;
 pub mod math;
 pub mod names;
 pub mod noncommutative;
 pub mod number_theory;
+pub mod numericsolve;
 pub mod parallel;
 pub mod pattern;
 pub mod random;
 pub mod statistics;
 pub mod string;
 pub mod symbolic;
+pub mod symbolicmanip;
 pub mod systeminfo;
 
 use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
@@ -236,6 +242,14 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin_env(env, "Series", symbolic::builtin_series);
     register_builtin_env(env, "Integrate", symbolic::builtin_integrate);
+
+    // ── Symbolic Manipulation ──
+    register_builtin(env, "Limit", symbolicmanip::builtin_limit);
+    register_builtin(env, "Apart", symbolicmanip::builtin_apart);
+    register_builtin(env, "Together", symbolicmanip::builtin_together);
+    register_builtin(env, "Cancel", symbolicmanip::builtin_cancel);
+    register_builtin(env, "Collect", symbolicmanip::builtin_collect);
+    register_builtin(env, "NLimit", symbolicmanip::builtin_nlimit);
 
     // ── Integration Helpers (Rubi predicates and functions) ──
     // Comparison predicates
@@ -797,6 +811,37 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "PadLeft", list::builtin_pad_left);
     register_builtin(env, "PadRight", list::builtin_pad_right);
     register_builtin_env(env, "MapApply", list::builtin_map_apply);
+
+    // ── Functional Operators (operators.rs) ──
+    register_builtin_env(env, "Composition", operators::builtin_composition);
+    register_builtin_env(
+        env,
+        "RightComposition",
+        operators::builtin_right_composition,
+    );
+    register_builtin_env(env, "Through", operators::builtin_through);
+    register_builtin_env(
+        env,
+        "OperatorApply",
+        operators::builtin_operator_apply,
+    );
+    register_builtin_env(env, "Curry", operators::builtin_curry);
+    register_builtin_env(env, "UnCurry", operators::builtin_uncurry);
+
+    // ── Set / List utility (operators.rs) ──
+    register_builtin(env, "SubsetQ", operators::builtin_subset_q);
+    register_builtin(
+        env,
+        "SymmetricDifference",
+        operators::builtin_symmetric_difference,
+    );
+    register_builtin_env(env, "SelectFirst", operators::builtin_select_first);
+    register_builtin_env(env, "SelectLast", operators::builtin_select_last);
+    register_builtin_env(env, "PositionFirst", operators::builtin_position_first);
+    register_builtin_env(env, "PositionLast", operators::builtin_position_last);
+    register_builtin_env(env, "Replace", operators::builtin_replace);
+    register_builtin_env(env, "MapAll", operators::builtin_map_all);
+    register_builtin(env, "Undulate", operators::builtin_undulate);
     register_builtin(env, "MovingAverage", list::builtin_moving_average);
     register_builtin_env(env, "BlockMap", list::builtin_block_map);
     register_builtin(env, "ListConvolve", list::builtin_list_convolve);
@@ -1011,11 +1056,34 @@ pub fn register_builtins(env: &Env) {
         graphics::register,
     );
 
+    // Charting — symbols backed by Rust builtins in charting.rs
+    register_lazy_package(
+        env,
+        charting::SYMBOLS,
+        charting::SYMBOLS,
+        "Charting",
+        charting::register,
+    );
+
     // -- Developer context --
     developer::register(env);
 
     // -- System information --
     systeminfo::register(env);
+
+    // -- Algebraic Numbers --
+    algebraic::register(env);
+
+    // -- Numeric Solve / Optimization --
+    register_builtin_env(env, "FindRoot", numericsolve::builtin_find_root);
+    register_builtin_env(env, "FindMinimum", numericsolve::builtin_find_minimum);
+    register_builtin_env(env, "FindMaximum", numericsolve::builtin_find_maximum);
+    register_builtin_env(env, "NMinimize", numericsolve::builtin_nminimize);
+    register_builtin_env(env, "NMaximize", numericsolve::builtin_nmaximize);
+    register_builtin_env(env, "ArgMin", numericsolve::builtin_argmin);
+    register_builtin_env(env, "ArgMax", numericsolve::builtin_argmax);
+    register_builtin_env(env, "FindInstance", numericsolve::builtin_find_instance);
+    register_builtin_env(env, "NSolve", numericsolve::builtin_nsolve);
 
     // -- Custom Notation --
     register_builtin_env(env, "Infix", builtin_infix);
@@ -1341,6 +1409,19 @@ fn builtin_needs(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 locals: std::collections::HashMap::new(),
             };
             env.register_module("Graphics".to_string(), module);
+        }
+        "Charting" => {
+            crate::builtins::charting::register(env);
+            let exports: HashMap<String, Value> = crate::builtins::charting::SYMBOLS
+                .iter()
+                .filter_map(|&sym| env.get(sym).map(|v| (sym.to_string(), v)))
+                .collect();
+            let module = Value::Module {
+                name: "Charting".to_string(),
+                exports,
+                locals: std::collections::HashMap::new(),
+            };
+            env.register_module("Charting".to_string(), module);
         }
         "Developer" => {
             // Already registered eagerly during startup; just register the module.

@@ -179,8 +179,8 @@ fn to_float(v: &Value, prec_bits: u32) -> Option<Float> {
         }
         Value::Root { coeffs, index } => {
             let roots = crate::polynomial::find_polynomial_roots(coeffs);
-            if *index > 0 && *index <= roots.len() {
-                let (re, im) = roots[*index - 1];
+            if index > 0 && index <= roots.len() {
+                let (re, im) = roots[index - 1];
                 if im.abs() < 1e-14 {
                     Some(Float::with_val(prec_bits, re))
                 } else {
@@ -228,8 +228,8 @@ fn coerce_to_float(v: Value, prec_bits: u32) -> Result<Value, EvalError> {
         Value::Complex { re, im: 0.0 } => Ok(Value::Real(Float::with_val(prec_bits, re))),
         Value::Root { coeffs, index } => {
             let roots = crate::polynomial::find_polynomial_roots(coeffs);
-            if *index > 0 && *index <= roots.len() {
-                let (re, im) = roots[*index - 1];
+            if index > 0 && index <= roots.len() {
+                let (re, im) = roots[index - 1];
                 if im.abs() < 1e-14 {
                     Ok(Value::Real(Float::with_val(prec_bits, re)))
                 } else {

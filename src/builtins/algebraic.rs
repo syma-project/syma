@@ -1,7 +1,8 @@
 use crate::env::Env;
 use crate::polynomial;
-use crate::value::{BuiltinFn, EvalError, Value, DEFAULT_PRECISION, rational_value};
-use rug::{Integer, Rational};
+use crate::value::{EvalError, Value, DEFAULT_PRECISION, rational_value};
+use rug::{Float, Integer, Rational};
+use rug::ops::Pow;
 
 // ── Root constructor ────────────────────────────────────────────────────────────────────────────
 
@@ -18,9 +19,12 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
             for item in items {
                 match item {
                     Value::Integer(n) => c.push(Rational::from(n.clone())),
-                    Value::Rational(r) => c.push(r.clone()),
-                    Value::Real(r) => c.push(Rational::from_f64(r.to_f64())
-                        .unwrap_or(Rational::from(0))),
+                    Value::Rational(r) => c.push((**r).clone()),
+                    Value::Real(r) => {
+                        let f = r.to_f64();
+                        // Best-effort: convert to string and parse as Rational
+                        c.push(Rational::parse(f.to_string()));
+                    }
                     _ => {
                         return Err(EvalError::TypeError {
                             expected: "Number".to_string(),
@@ -72,17 +76,18 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
 
     // Make monic and canonical (positive leading coefficient)
     let mut norm = polynomial::make_monic(&coeffs);
-    let lead = &norm[deg];
+    let lead = norm[deg].clone();
     if lead.is_negative() {
         for c in norm.iter_mut() {
-            *c = -c;
+            *c = -(c.clone());
         }
     }
 
     // If linear, return exact rational
     if deg == 1 {
-        let neg = -&norm[0];
-        let result: Rational = (neg.clone() / norm[1].clone()).into();
+        let neg = -norm[0].clone();
+        let denom = norm[1].clone();
+        let result = neg / denom;
         let (num, denom) = result.into_numer_denom();
         if denom == Integer::from(1) {
             return Ok(Value::Integer(num));
@@ -119,17 +124,17 @@ pub fn builtin_minimal_polynomial(
             Ok(polynomial::coeffs_to_value(coeffs))
         }
         Value::Integer(n) => {
-            // Minimal polynomial of integer n: x - n → {−n, 1}
+            // Minimal polynomial of integer n: x - n \u{2192} {−n, 1}
             Ok(Value::List(vec![
-                Value::Integer((-n).clone()),
+                Value::Integer(-n.clone()),
                 Value::Integer(Integer::from(1)),
             ]))
         }
         Value::Rational(r) => {
             let (num, den) = r.clone().into_numer_denom();
             Ok(Value::List(vec![
-                Value::Integer((-&num).clone()),
-                Value::Integer(den.clone()),
+                Value::Integer(-num),
+                Value::Integer(den),
             ]))
         }
         _ => Ok(Value::Call {
@@ -204,13 +209,13 @@ fn root_or_numeric_to_root(v: &Value) -> Result<Value, EvalError> {
     match v {
         Value::Root { .. } => Ok(v.clone()),
         Value::Integer(n) => Ok(Value::Root {
-            coeffs: vec![Rational::from(-n), Rational::from(1)],
+            coeffs: vec![Rational::from(-n.clone()), Rational::from(Integer::from(1))],
             index: 1,
         }),
         Value::Rational(r) => {
-            let (num, den) = r.into_numer_denom();
+            let (num, den) = r.clone().into_numer_denom();
             Ok(Value::Root {
-                coeffs: vec![Rational::from(-num.clone()), Rational::from(den.clone())],
+                coeffs: vec![Rational::from(-num), Rational::from(den)],
                 index: 1,
             })
         }
@@ -330,11 +335,11 @@ fn find_root_index(root_list: &[(f64, f64)], target: f64) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &(re, im)) in root_list.iter().enumerate() {
         let dist = ((re - target).powi(2) + im.powi(2)).sqrt();
-        if best.is_none() || dist < best.unwrap().1 {
+        if best.is_none() || dist < best.as_ref().unwrap().1 {
             best = Some((i + 1, dist));
         }
     }
-    best
+    best.map(|(idx, _)| idx)
 }
 
 // ── ToRadicals ──────────────────────────────────────────────────────────────────
@@ -378,27 +383,26 @@ fn to_radicals_value(v: &Value) -> Result<Value, EvalError> {
     }
 }
 
-// ax² + bx + c with coeffs = [c, b, a]
-// roots: (-b ± sqrt(b²-4ac)) / (2a)
+// ax\u{00b2} + bx + c with coeffs = [c, b, a]
+// roots: (-b \u00b1 sqrt(b\u{00b2}-4ac)) / (2a)
 fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, EvalError> {
-    // coeffs = [c, b, a] for ax² + bx + c
+    // coeffs = [c, b, a] for ax\u{00b2} + bx + c
     let c = &coeffs[0];
     let b = &coeffs[1];
     let a = &coeffs[2];
 
-    // discriminant = b² - 4ac
-    let disc = b * b - Rational::from(4) * a * c;
+    // discriminant = b\u{00b2} - 4ac
+    let b_sq: Rational = b.clone() * b.clone();
+    let four: Rational = Rational::from(4_i64);
+    let four_ac: Rational = four * a.clone() * c.clone();
+    let disc: Rational = b_sq - four_ac;
 
     if disc.is_zero() {
         // Single root: -b / (2a)
-        let result_num = -b;
-        let result_den = Rational::from(2) * a;
-        let result: Rational =
-            ((result_num.clone() / result_den.clone()) * a.clone()) / a.clone();
-        // Simplify: (-b) / (2a)
-        let num = -b;
-        let den = Rational::from(2) * a;
-        let (n, d) = ((num / den)).into_numer_denom();
+        let neg_b = -b.clone();
+        let two_a: Rational = Rational::from(2_i64) * a.clone();
+        let result = neg_b / two_a;
+        let (n, d) = result.into_numer_denom();
         if d == Integer::from(1) {
             return Ok(Value::Integer(n));
         } else {
@@ -406,17 +410,17 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
         }
     }
 
-    // Build Power[a, Rational[1/2]] for sqrt
+    // Build Sqrt[disc] for the radical part
     let sqrt_disc = Value::Call {
         head: "Sqrt".to_string(),
-        args: vec![polynomial::coeffs_to_value_from_rational(&disc)],
+        args: vec![polynomial::rational_to_value(&disc)],
     };
 
     // root1 = (-b - sqrt(disc)) / (2*a), root2 = (-b + sqrt(disc)) / (2*a)
     // index 1 is the smaller root (more negative real part)
 
     if disc.is_negative() {
-        // Complex roots — return as-is for now
+        // Complex roots \u2014 return as-is
         return Ok(Value::Call {
             head: "Root".to_string(),
             args: vec![
@@ -426,17 +430,13 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
         });
     }
 
-    let two_a = Rational::from(2) * a;
-    // For index 1 (smaller root): (-b - sqrt(disc), but ordered by real part)
-    // If disc > 0, root1 < root2, so index 1 → (-b - sqrt(disc)) / (2a)
-
     // Build numerator as expression: -b + sign * Sqrt[disc]
     let sign = if index == 1 { -1 } else { 1 };
     let neg_b = Value::Call {
         head: "Times".to_string(),
         args: vec![
             Value::Integer(Integer::from(-1)),
-            polynomial::coeffs_to_value_from_rational(b),
+            polynomial::rational_to_value(b),
         ],
     };
     let sqrt_term = if sign < 0 {
@@ -453,10 +453,7 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
     };
     let denominator = Value::Call {
         head: "Times".to_string(),
-        args: vec![
-            Value::Integer(Integer::from(2)),
-            polynomial::coeffs_to_value_from_rational(a),
-        ],
+        args: vec![Value::Integer(Integer::from(2)), polynomial::rational_to_value(a)],
     };
 
     Ok(Value::Call {
@@ -466,7 +463,7 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
 }
 
 fn cubic_to_radicals(_coeffs: &[Rational], _index: usize) -> Result<Value, EvalError> {
-    // Cardano formula — complex; placeholder for now
+    // Cardano formula \u2014 complex; placeholder for now
     Err(EvalError::Error(
         "ToRadicals for cubic: not yet implemented".to_string(),
     ))
@@ -517,27 +514,29 @@ pub fn builtin_isolating_interval(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn isolating_interval_real(coeffs: &[Rational], approx: f64) -> Result<Value, EvalError> {
-    let mut lo: Rational = Rational::from(-1).pow(Integer::from(6));
-    let mut hi: Rational = Rational::from(1).pow(Integer::from(6));
+    let mut lo: Rational = Rational::from(-1_000_000_i64);
+    let mut hi: Rational = Rational::from(1_000_000_i64);
 
     // Ensure the root is in [lo, hi]
     while lo.to_f64() > approx - 1.0 {
-        lo = lo.clone() * Rational::from(10);
+        lo *= Rational::from(10_i64);
     }
     while hi.to_f64() < approx + 1.0 {
-        hi = hi.clone() * Rational::from(10);
+        hi *= Rational::from(10_i64);
     }
 
     // Bisection
     for _ in 0..200 {
-        let mid = (lo.clone() + hi.clone()) / Rational::from(2);
-        let count = polynomial::count_real_roots_in(&coeffs, &lo, &mid);
+        let lo_clone = lo.clone();
+        let hi_clone = hi.clone();
+        let mid: Rational = (lo_clone + hi_clone) / Rational::from(2_i64);
+        let count = polynomial::count_real_roots_in(coeffs, &lo, &mid);
         if count == 1 {
             hi = mid;
         } else {
             lo = mid;
         }
-        let diff = &hi - &lo;
+        let diff: Rational = hi.clone() - lo.clone();
         if diff.to_f64() < 1e-15 {
             break;
         }

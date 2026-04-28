@@ -2042,6 +2042,7 @@ fn is_polynomial_any(val: &Value) -> bool {
 fn contains_complex(val: &Value) -> bool {
     match val {
         Value::Symbol(s) => s == "I",
+        Value::Complex { .. } => true,
         Value::Call { args, .. } => args.iter().any(|a| contains_complex(a)),
         Value::List(items) => items.iter().any(|a| contains_complex(a)),
         _ => false,
