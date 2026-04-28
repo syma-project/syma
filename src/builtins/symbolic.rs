@@ -742,20 +742,6 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     eval_d_2(args[0].clone(), args[1].clone(), env)
 }
 
-/// Flatten nested Plus/Times: Plus[Plus[a,b], c] → Plus[a,b,c]
-fn flatten_flat_call(name: &str, value: &Value) -> Vec<Value> {
-    match value {
-        Value::Call { head: h, args: a } if h == name => {
-            let mut result = Vec::new();
-            for arg in a {
-                result.append(&mut flatten_flat_call(name, arg));
-            }
-            result
-        }
-        _ => vec![value.clone()],
-    }
-}
-
 /// Evaluate D[expr, var] (2-arg form) by dispatching to Syma function definitions.
 /// Handles multi-arg Times/Plus in Rust because the Flat attribute causes
 /// pattern matching to flatten nested calls, breaking 2-arg patterns.
@@ -774,7 +760,7 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
         &Value::Call { ref head, ref args }
             if (head == "Plus" || head == "Times") && args.len() >= 2 =>
         {
-            let flat_args = flatten_flat_call(head, &concrete);
+            let flat_args = crate::eval::flatten_flat_args(head, args);
             if flat_args.len() != args.len() {
                 Some(Value::Call {
                     head: head.clone(),

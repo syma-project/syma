@@ -1987,7 +1987,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
 }
 
 /// Recursively flatten nested calls with same head for Flat attribute.
-fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
+pub(crate) fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
         if let Value::Call { head, args: inner } = arg {
@@ -1997,6 +1997,22 @@ fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
             }
         }
         result.push(arg.clone());
+    }
+    result
+}
+
+/// If the result is a Call with the same Flat head, flatten nested calls.
+fn normalize_flat_result(name: &str, result: Value, env: &Env) -> Value {
+    if !env.has_attribute(name, "Flat") {
+        return result;
+    }
+    if let Value::Call { ref head, args: ref a } = result {
+        if head == name {
+            let flat = flatten_flat_args(name, a);
+            if flat.len() != a.len() || flat.as_slice() != a.as_slice() {
+                return Value::Call { head: head.clone(), args: flat };
+            }
+        }
     }
     result
 }
@@ -2097,7 +2113,8 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                                     }
                                 })
                                 .collect();
-                            result.push(apply_function(func, &thread_args, env)?);
+                            let v = apply_function(func, &thread_args, env)?;
+                            result.push(normalize_flat_result(name, v, env));
                         }
                         return Ok(Value::List(result));
                     }
@@ -2110,7 +2127,8 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     for elem in items {
                         let mut thread_args: Vec<Value> = args.to_vec();
                         thread_args[list_idx] = elem.clone();
-                        result.push(apply_function(func, &thread_args, env)?);
+                        let v = apply_function(func, &thread_args, env)?;
+                        result.push(normalize_flat_result(name, v, env));
                     }
                     return Ok(Value::List(result));
                 }
@@ -2118,7 +2136,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         }
     }
 
-    match func {
+    let result = match func {
         Value::Builtin(name, f) => match f {
             BuiltinFn::Pure(f) => {
                 // Extension-registered builtin: trampoline through ext registry
@@ -2223,6 +2241,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             let _guard = RecursionGuard::new(env, &func_def.name)?;
 
             // Try each definition in order
+            let mut found_result: Option<Result<Value, EvalError>> = None;
             for def in &func_def.definitions {
                 if let Some(bindings) = try_match_params(&def.params, args, env)? {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)
@@ -2241,22 +2260,24 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     }
                     // Catch Return[expr] and unwrap it as the function result.
                     // Catch NoMatch and return unevaluated Call (symbolic form).
-                    match eval(&def.body, &child_env) {
-                        Ok(v) => return Ok(v),
-                        Err(EvalError::Return(v)) => return Ok(*v),
-                        Err(EvalError::NoMatch { head, args }) => {
-                            return Ok(Value::Call {
-                                head,
-                                args: *args,
-                            });
+                    found_result = Some(match eval(&def.body, &child_env) {
+                        Ok(v) => Ok(v),
+                        Err(EvalError::Return(v)) => Ok(*v),
+                        Err(EvalError::NoMatch { head, args: a }) => {
+                            Ok(Value::Call { head, args: *a })
                         }
-                        Err(e) => return Err(e),
-                    }
+                        Err(e) => Err(e),
+                    });
+                    break;
                 }
             }
-            Err(EvalError::NoMatch {
-                head: func_def.name.clone(),
-                args: Box::new(args.to_vec()),
+            Ok(if let Some(r) = found_result {
+                r?
+            } else {
+                return Err(EvalError::NoMatch {
+                    head: func_def.name.clone(),
+                    args: Box::new(args.to_vec()),
+                });
             })
         }
 
@@ -2456,6 +2477,12 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 args: args.to_vec(),
             })
         }
+    };
+
+    // ── Normalize Flat results ──
+    match (func_name, result) {
+        (Some(name), Ok(v)) => Ok(normalize_flat_result(name, v, env)),
+        (_, r) => r,
     }
 }
 

@@ -544,3 +544,65 @@ fn test_run_oop_example() {
     );
 }
 
+// ── Flat attribute result normalization tests ──────────────────────
+
+#[test]
+fn test_flat_plus_result_normalization() {
+    // Plus[Plus[a,b], c] should be flattened to Plus[a, b, c]
+    let out = syma_eval("Plus[Plus[a, b], c]");
+    assert!(
+        !out.contains("Plus[Plus"),
+        "Plus result should be flattened, got: {out}"
+    );
+}
+
+#[test]
+fn test_flat_times_result_normalization() {
+    // Times[Times[a,b], c] should be flattened
+    let out = syma_eval("Times[Times[a, b], c]");
+    assert!(
+        !out.contains("Times[Times"),
+        "Times result should be flattened, got: {out}"
+    );
+}
+
+#[test]
+fn test_flat_user_defined_result() {
+    // User-defined Flat function should flatten results
+    let out = syma_eval("SetAttributes[f, Flat]; f[a, f[b, c]]");
+    assert!(
+        !out.contains("f[f"),
+        "User Flat function result should be flattened, got: {out}"
+    );
+}
+
+#[test]
+fn test_flat_and_result_normalization() {
+    // And[And[a, b], c] should be flattened
+    let out = syma_eval("And[And[a, b], c]");
+    assert!(
+        !out.contains("And[And"),
+        "And result should be flattened, got: {out}"
+    );
+}
+
+#[test]
+fn test_flat_or_result_normalization() {
+    // Or[Or[a, b], c] should be flattened
+    let out = syma_eval("Or[Or[a, b], c]");
+    assert!(
+        !out.contains("Or[Or"),
+        "Or result should be flattened, got: {out}"
+    );
+}
+
+#[test]
+fn test_flat_deeply_nested() {
+    // Deeply nested Plus should be fully flattened
+    let out = syma_eval("Plus[Plus[Plus[a, b], c], d]");
+    assert!(
+        !out.contains("Plus[Plus"),
+        "Deeply nested Plus should be fully flattened, got: {out}"
+    );
+}
+
