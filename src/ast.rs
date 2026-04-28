@@ -194,6 +194,7 @@ pub enum Expr {
         params: Vec<Expr>,
         body: Box<Expr>,
         delayed: bool,
+        guard: Option<Box<Expr>>,
     },
 
     /// x = value — assignment
@@ -523,14 +524,16 @@ impl PartialEq for Expr {
                     params: p1,
                     body: b1,
                     delayed: d1,
+                    guard: g1,
                 },
                 Expr::FuncDef {
                     name: n2,
                     params: p2,
                     body: b2,
                     delayed: d2,
+                    guard: g2,
                 },
-            ) => n1 == n2 && p1 == p2 && b1 == b2 && d1 == d2,
+            ) => n1 == n2 && p1 == p2 && b1 == b2 && d1 == d2 && g1 == g2,
             (Expr::Assign { lhs: l1, rhs: r1 }, Expr::Assign { lhs: l2, rhs: r2 }) => {
                 l1 == l2 && r1 == r2
             }
@@ -897,6 +900,7 @@ impl fmt::Display for Expr {
                 params,
                 body,
                 delayed,
+                guard,
             } => {
                 let op = if *delayed { ":=" } else { "=" };
                 write!(f, "{}[", name)?;
@@ -906,7 +910,11 @@ impl fmt::Display for Expr {
                     }
                     write!(f, "{}", p)?;
                 }
-                write!(f, "] {} {}", op, body)
+                if let Some(g) = guard {
+                    write!(f, "] {} {} /; {}", op, body, g)
+                } else {
+                    write!(f, "] {} {}", op, body)
+                }
             }
             Expr::Assign { lhs, rhs } => write!(f, "{} = {}", lhs, rhs),
             Expr::DestructAssign { patterns, rhs } => {

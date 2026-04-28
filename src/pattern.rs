@@ -78,6 +78,35 @@ fn try_unwrap_one_identity<'a>(
 
 /// Try to match a value against a pattern.
 ///
+/// Convert an AST expression to a runtime Value.
+/// Used to unwrap `Value::Pattern(Expr)` for pattern matching
+/// when HoldAll/HoldAllComplete prevents argument evaluation.
+fn expr_to_value(expr: &Expr) -> Value {
+    match expr {
+        Expr::Symbol(s) => Value::Symbol(s.clone()),
+        Expr::Integer(n) => Value::Integer(n.clone()),
+        Expr::Real(r) => Value::Real(r.clone()),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::Str(s) => Value::Str(s.clone()),
+        Expr::Null => Value::Null,
+        Expr::List(items) => {
+            Value::List(items.iter().map(|item| expr_to_value(item)).collect())
+        }
+        Expr::Call { head, args } => {
+            let h = expr_to_value(head);
+            let a: Vec<Value> = args.iter().map(|arg| expr_to_value(arg)).collect();
+            match h {
+                Value::Symbol(name) => Value::Call { head: name, args: a },
+                _ => Value::Call {
+                    head: h.to_string(),
+                    args: a,
+                },
+            }
+        }
+        _ => Value::Pattern(expr.clone()),
+    }
+}
+
 /// Returns Match(bindings) on success, NoMatch on failure.
 /// `attr_checker` provides access to symbol attributes (Flat, Orderless, OneIdentity)
 /// for call pattern matching. Pass `None` to skip attribute-based matching.
@@ -86,6 +115,11 @@ pub fn match_pattern(
     value: &Value,
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
+    // Unwrap Value::Pattern for HoldAll/HoldAllComplete arguments
+    if let Value::Pattern(expr) = value {
+        return match_pattern(pattern, &expr_to_value(expr), attr_checker);
+    }
+
     match pattern {
         // ── Blank patterns ──
         Expr::Blank { type_constraint } => {
@@ -804,10 +838,26 @@ fn match_call_pattern(
     value: &Value,
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
-    // Extract head name for attribute checks
-    let head_name = match head {
-        Expr::Symbol(s) => s.clone(),
-        _ => return MatchResult::NoMatch,
+    // Match pattern head against value head.
+    // The head can be a Symbol ("Plus"), a NamedBlank ("f_"), or a Blank ("_").
+    let head_match: Option<(String, Bindings)> = match head {
+        Expr::Symbol(s) => Some((s.clone(), HashMap::new())),
+        _ => {
+            // Pattern head (e.g., f_ or _) — match against any call's head symbol
+            if let Value::Call { head: vhead, .. } = value {
+                let mut b = HashMap::new();
+                // For NamedBlank, bind the name; for Blank, ignore
+                match head {
+                    Expr::NamedBlank { name, .. } => {
+                        b.insert(name.clone(), Value::Symbol(vhead.clone()));
+                    }
+                    _ => {}
+                }
+                Some((vhead.clone(), b))
+            } else {
+                None
+            }
+        }
     };
 
     match value {
@@ -815,10 +865,14 @@ fn match_call_pattern(
             head: vhead,
             args: vargs,
         } => {
-            // Head must match
-            if head_name != *vhead {
-                // OneIdentity: if head has OneIdentity and 1 pattern arg,
-                // try matching the inner pattern directly against the value.
+            let (head_name, mut head_bindings) = match head_match {
+                Some(hm) => hm,
+                None => return MatchResult::NoMatch,
+            };
+
+            // For Symbol heads (not patterns), verify head matches value head
+            if matches!(head, Expr::Symbol(_)) && head_name != *vhead {
+                // OneIdentity fallback: try matching inner pattern directly
                 if args.len() == 1
                     && attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"))
                     && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
@@ -854,14 +908,17 @@ fn match_call_pattern(
 
             if has_sequences {
                 // Use recursive backtracking sequence matcher for __ and ___
-                let mut bindings = Bindings::new();
+                let mut bindings = head_bindings;
                 return match_sequence_pattern(
                     &pat_args, &val_args, 0, 0, &mut bindings, attr_checker,
                 );
             }
 
             // 1. Try direct ordered match
-            if let MatchResult::Match(b) = try_ordered_match(&pat_args, &val_args, attr_checker) {
+            if let MatchResult::Match(mut b) =
+                try_ordered_match(&pat_args, &val_args, attr_checker)
+            {
+                b.extend(head_bindings);
                 return MatchResult::Match(b);
             }
 
@@ -870,9 +927,10 @@ fn match_call_pattern(
                 && pat_args.len() == val_args.len()
                 && val_args.len() <= 6
                 && val_args.len() >= 2
-                && let MatchResult::Match(b) =
+                && let MatchResult::Match(mut b) =
                     try_orderless_match(&pat_args, &val_args, attr_checker)
             {
+                b.extend(head_bindings);
                 return MatchResult::Match(b);
             }
 
@@ -889,11 +947,13 @@ fn match_call_pattern(
         }
         _ => {
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
-            if args.len() == 1
-                && attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"))
-                && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
-            {
-                return MatchResult::Match(b);
+            if let Expr::Symbol(s) = head {
+                if args.len() == 1
+                    && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
+                    && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+                {
+                    return MatchResult::Match(b);
+                }
             }
             MatchResult::NoMatch
         }

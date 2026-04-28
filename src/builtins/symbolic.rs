@@ -662,287 +662,48 @@ fn binomial(n: i64, k: i64) -> i64 {
 // ── Differentiation ──
 
 /// D[expr, x] — Symbolic differentiation.
+/// Implemented as Syma rules loaded from D.syma on first use.
 pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "D requires exactly 2 arguments".to_string(),
         ));
     }
-    let var = match &args[1] {
-        Value::Symbol(s) => s.clone(),
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Symbol".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
-    Ok(differentiate(&args[0], &var, env))
+
+    // Load D.syma definitions on first use
+    lazy_load_d(env)?;
+
+    // After loading, D is defined as Value::Function in env — re-dispatch
+    if let Some(Value::Function(_)) = env.get("D").as_ref()
+        && let Some(d_func) = env.get("D")
+    {
+        return crate::eval::apply_function(&d_func, args, env);
+    }
+
+    // Fallback: return unevaluated
+    Ok(Value::Call {
+        head: "D".to_string(),
+        args: args.to_vec(),
+    })
 }
 
-#[allow(clippy::only_used_in_recursion)]
-pub fn differentiate(expr: &Value, var: &str, env: &Env) -> Value {
-    match expr {
-        Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
-            Value::Integer(Integer::from(0))
-        }
-        Value::Symbol(s) => {
-            if s == var {
-                Value::Integer(Integer::from(1))
-            } else {
-                Value::Integer(Integer::from(0))
-            }
-        }
-        Value::Call { head, args } => match head.as_str() {
-            "Plus" => {
-                let terms: Vec<Value> = args
-                    .iter()
-                    .map(|arg| differentiate(arg, var, env))
-                    .collect();
-                simplify_call("Plus", &terms)
-            }
-            "Times" => {
-                if args.len() == 2 {
-                    let (u, v) = (&args[0], &args[1]);
-                    let du = differentiate(u, var, env);
-                    let dv = differentiate(v, var, env);
-                    simplify_call(
-                        "Plus",
-                        &[
-                            simplify_call("Times", &[du, v.clone()]),
-                            simplify_call("Times", &[u.clone(), dv]),
-                        ],
-                    )
-                } else if args.len() == 1 {
-                    differentiate(&args[0], var, env)
-                } else {
-                    let mut terms = Vec::new();
-                    for i in 0..args.len() {
-                        let mut factors = args.to_vec();
-                        factors[i] = differentiate(&factors[i], var, env);
-                        terms.push(simplify_call("Times", &factors));
-                    }
-                    simplify_call("Plus", &terms)
-                }
-            }
-            "Power" if args.len() == 2 => {
-                let (base, exp) = (&args[0], &args[1]);
-                let dbase = differentiate(base, var, env);
-                match exp {
-                    Value::Integer(n) => simplify_call(
-                        "Times",
-                        &[
-                            Value::Integer(n.clone()),
-                            simplify_call(
-                                "Power",
-                                &[base.clone(), Value::Integer(n - Integer::from(1))],
-                            ),
-                            dbase,
-                        ],
-                    ),
-                    Value::Real(n) => {
-                        let n_minus_1 = n.clone() - 1.0;
-                        simplify_call(
-                            "Times",
-                            &[
-                                Value::Real(n.clone()),
-                                simplify_call("Power", &[base.clone(), Value::Real(n_minus_1)]),
-                                dbase,
-                            ],
-                        )
-                    }
-                    _ => {
-                        let dexp = differentiate(exp, var, env);
-                        simplify_call(
-                            "Times",
-                            &[
-                                expr.clone(),
-                                simplify_call(
-                                    "Plus",
-                                    &[
-                                        simplify_call(
-                                            "Times",
-                                            &[dexp, simplify_call("Log", &[base.clone()])],
-                                        ),
-                                        simplify_call(
-                                            "Times",
-                                            &[
-                                                exp.clone(),
-                                                simplify_call(
-                                                    "Times",
-                                                    &[
-                                                        dbase,
-                                                        simplify_call(
-                                                            "Power",
-                                                            &[
-                                                                base.clone(),
-                                                                Value::Integer(Integer::from(-1)),
-                                                            ],
-                                                        ),
-                                                    ],
-                                                ),
-                                            ],
-                                        ),
-                                    ],
-                                ),
-                            ],
-                        )
-                    }
-                }
-            }
-            "Sin" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    simplify_call("Cos", &[args[0].clone()]),
-                    differentiate(&args[0], var, env),
-                ],
-            ),
-            "Cos" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    Value::Integer(Integer::from(-1)),
-                    simplify_call("Sin", &[args[0].clone()]),
-                    differentiate(&args[0], var, env),
-                ],
-            ),
-            "Tan" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[
-                            simplify_call("Cos", &[args[0].clone()]),
-                            Value::Integer(Integer::from(-2)),
-                        ],
-                    ),
-                ],
-            ),
-            "Exp" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    simplify_call("Exp", &[args[0].clone()]),
-                    differentiate(&args[0], var, env),
-                ],
-            ),
-            "Log" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[args[0].clone(), Value::Integer(Integer::from(-1))],
-                    ),
-                ],
-            ),
-            "Sqrt" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[
-                            simplify_call(
-                                "Times",
-                                &[
-                                    Value::Integer(Integer::from(2)),
-                                    simplify_call("Sqrt", &[args[0].clone()]),
-                                ],
-                            ),
-                            Value::Integer(Integer::from(-1)),
-                        ],
-                    ),
-                ],
-            ),
-            "ArcSin" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[
-                            simplify_call(
-                                "Plus",
-                                &[
-                                    Value::Integer(Integer::from(1)),
-                                    simplify_call(
-                                        "Times",
-                                        &[
-                                            Value::Integer(Integer::from(-1)),
-                                            simplify_call(
-                                                "Power",
-                                                &[
-                                                    args[0].clone(),
-                                                    Value::Integer(Integer::from(2)),
-                                                ],
-                                            ),
-                                        ],
-                                    ),
-                                ],
-                            ),
-                            Value::Real(Float::with_val(DEFAULT_PRECISION, -0.5)),
-                        ],
-                    ),
-                ],
-            ),
-            "ArcCos" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    Value::Integer(Integer::from(-1)),
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[
-                            simplify_call(
-                                "Plus",
-                                &[
-                                    Value::Integer(Integer::from(1)),
-                                    simplify_call(
-                                        "Times",
-                                        &[
-                                            Value::Integer(Integer::from(-1)),
-                                            simplify_call(
-                                                "Power",
-                                                &[
-                                                    args[0].clone(),
-                                                    Value::Integer(Integer::from(2)),
-                                                ],
-                                            ),
-                                        ],
-                                    ),
-                                ],
-                            ),
-                            Value::Real(Float::with_val(DEFAULT_PRECISION, -0.5)),
-                        ],
-                    ),
-                ],
-            ),
-            "ArcTan" if args.len() == 1 => simplify_call(
-                "Times",
-                &[
-                    differentiate(&args[0], var, env),
-                    simplify_call(
-                        "Power",
-                        &[
-                            simplify_call(
-                                "Plus",
-                                &[
-                                    Value::Integer(Integer::from(1)),
-                                    simplify_call(
-                                        "Power",
-                                        &[args[0].clone(), Value::Integer(Integer::from(2))],
-                                    ),
-                                ],
-                            ),
-                            Value::Integer(Integer::from(-1)),
-                        ],
-                    ),
-                ],
-            ),
-            _ => call("D", vec![expr.clone(), Value::Symbol(var.to_string())]),
-        },
-        _ => call("D", vec![expr.clone(), Value::Symbol(var.to_string())]),
+/// Lazily load D.syma differentiation rules into the environment.
+/// Caches the parsed AST, but evals into every env that calls it.
+fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
+    use std::sync::OnceLock;
+    static PARSED_AST: OnceLock<Vec<(crate::ast::Expr, bool)>> = OnceLock::new();
+
+    let stmts = PARSED_AST.get_or_init(|| {
+        let source = include_str!("D.syma");
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        crate::parser::parse_with_suppress(tokens).unwrap()
+    });
+
+    for (expr, _suppress) in stmts {
+        crate::eval::eval(expr, env).map_err(|e| EvalError::Error(e.to_string()))?;
     }
+
+    Ok(())
 }
 
 // ── Integration ──
@@ -2071,7 +1832,18 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         };
         let coeff = combine_plus_terms(coeff);
         coefficients.push(coeff);
-        derivative = differentiate(&derivative, &var, env);
+        derivative = crate::eval::apply_function(
+            &Value::Builtin(
+                "D".to_string(),
+                crate::value::BuiltinFn::Env(builtin_d),
+            ),
+            &[derivative.clone(), Value::Symbol(var.clone())],
+            env,
+        )
+        .unwrap_or(Value::Call {
+            head: "D".to_string(),
+            args: vec![derivative.clone(), Value::Symbol(var.clone())],
+        });
     }
 
     Ok(Value::SeriesData {
@@ -2425,7 +2197,9 @@ mod tests {
     }
 
     fn env() -> crate::env::Env {
-        crate::env::Env::new()
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        env
     }
 
     #[test]

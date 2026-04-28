@@ -122,24 +122,56 @@ impl Parser {
                     Token::Assign => {
                         self.advance();
                         let rhs = self.parse_expression()?;
+                        // Check for guard: f[x_] = body /; condition
+                        let guard = if self.at(&Token::ColonSlashSemicolon) {
+                            self.advance();
+                            let condition = self.parse_expression()?;
+                            Some(Box::new(condition))
+                        } else {
+                            None
+                        };
+                        // If LHS is a Call with symbol head and guard, make FuncDef
+                        if let Some(g) = guard
+                            && let Expr::Call { ref head, ref args } = expr
+                            && let Expr::Symbol(ref name) = **head
+                        {
+                            let params: Vec<Expr> =
+                                args.iter().cloned().map(Self::convert_pattern).collect();
+                            return Ok(Expr::FuncDef {
+                                name: name.clone(),
+                                params,
+                                body: Box::new(rhs),
+                                delayed: false,
+                                guard: Some(g),
+                            });
+                        }
                         Ok(Expr::Assign {
                             lhs: Box::new(expr),
                             rhs: Box::new(rhs),
                         })
                     }
                     Token::DelayedAssign => {
-                        // f[x_] := body — function definition
+                        // f[x_] := body [/; guard] — function definition
                         self.advance(); // consume :=
                         if let Expr::Call { head, args } = expr {
                             if let Expr::Symbol(name) = *head {
                                 let params: Vec<Expr> =
                                     args.into_iter().map(Self::convert_pattern).collect();
                                 let body = self.parse_expression()?;
+                                // Check for guard: body /; condition
+                                let guard = if self.at(&Token::ColonSlashSemicolon) {
+                                    self.advance();
+                                    let condition = self.parse_expression()?;
+                                    Some(Box::new(condition))
+                                } else {
+                                    None
+                                };
                                 Ok(Expr::FuncDef {
                                     name,
                                     params,
                                     body: Box::new(body),
                                     delayed: true,
+                                    guard,
                                 })
                             } else {
                                 Err(ParseError {
@@ -634,6 +666,7 @@ impl Parser {
                 params,
                 body: Box::new(body),
                 delayed: false,
+                guard: None,
             })
         } else if self.at(&Token::DelayedAssign) {
             // def f(x) := expr — delayed
@@ -644,6 +677,7 @@ impl Parser {
                 params,
                 body: Box::new(body),
                 delayed: true,
+                guard: None,
             })
         } else if self.at(&Token::LBrace) {
             // def f(x) { stmts } — delayed with block body
@@ -653,6 +687,7 @@ impl Parser {
                 params,
                 body: Box::new(body),
                 delayed: true,
+                guard: None,
             })
         } else {
             Err(ParseError {
@@ -3122,10 +3157,12 @@ mod tests {
                 params,
                 body,
                 delayed,
+                guard,
             } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
                 assert!(delayed);
+                assert!(guard.is_none());
                 match *body {
                     Expr::Call { head, .. } => {
                         assert_eq!(*head, Expr::Symbol("Power".to_string()));
@@ -3676,7 +3713,7 @@ mod tests {
     fn test_def_simple() {
         let expr = parse_one("def f(x) = x + 1");
         match expr {
-            Expr::FuncDef { name, params, body, delayed } => {
+            Expr::FuncDef { name, params, body, delayed, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: None });
@@ -3734,7 +3771,7 @@ mod tests {
     fn test_def_delayed() {
         let expr = parse_one("def f(x) := x^2");
         match expr {
-            Expr::FuncDef { name, params: _, body, delayed } => {
+            Expr::FuncDef { name, params: _, body, delayed, .. } => {
                 assert_eq!(name, "f");
                 assert!(delayed);
                 match *body {
@@ -3750,7 +3787,7 @@ mod tests {
     fn test_def_block() {
         let expr = parse_one("def f(x, y) { a; b; c }");
         match expr {
-            Expr::FuncDef { name, params, body, delayed } => {
+            Expr::FuncDef { name, params, body, delayed, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 2);
                 assert!(delayed);
@@ -3767,7 +3804,7 @@ mod tests {
     fn test_def_no_params() {
         let expr = parse_one("def f() = 42");
         match expr {
-            Expr::FuncDef { name, params, body, delayed } => {
+            Expr::FuncDef { name, params, body, delayed, .. } => {
                 assert_eq!(name, "f");
                 assert!(params.is_empty());
                 assert!(!delayed);

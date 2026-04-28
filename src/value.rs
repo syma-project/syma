@@ -432,6 +432,7 @@ pub struct FunctionDefinition {
     pub params: Vec<Expr>,
     pub body: Expr,
     pub delayed: bool,
+    pub guard: Option<Expr>,
 }
 
 /// A class definition with fields, methods, constructor, and inheritance info.

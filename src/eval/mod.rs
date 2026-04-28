@@ -447,6 +447,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             params,
             body,
             delayed,
+            guard,
         } => {
             // Check if symbol is protected
             if env.has_attribute(name, "Protected") && env.get(name).is_some() {
@@ -470,6 +471,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 params: params.clone(),
                 body: body.as_ref().clone(),
                 delayed: *delayed,
+                guard: guard.as_ref().map(|g| g.as_ref().clone()),
             });
 
             // Sort definitions so more specific (literal) patterns come first.
@@ -587,6 +589,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             params: call_args.clone(),
                             body: body_expr,
                             delayed: false,
+                            guard: None,
                         });
                         // Sort definitions so more specific ones match first
                         func.definitions.sort_by(|a, b| {
@@ -1457,11 +1460,13 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             params,
             body,
             delayed,
+            guard,
         } => Expr::FuncDef {
             name: name.clone(),
             params: params.clone(),
             body: Box::new(substitute_in_expr(body, subs)),
             delayed: *delayed,
+            guard: guard.as_ref().map(|g| Box::new(substitute_in_expr(g, subs))),
         },
         Expr::Assign { lhs, rhs } => Expr::Assign {
             lhs: Box::new(substitute_in_expr(lhs, subs)),
@@ -1614,6 +1619,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                                 params: call_args.clone(),
                                 body: body_expr,
                                 delayed: s == "SetDelayed",
+                                guard: None,
                             });
                             // Sort definitions so more specific ones match first
                             func.definitions.sort_by(|a, b| {
@@ -2219,6 +2225,16 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             // Try each definition in order
             for def in &func_def.definitions {
                 if let Some(bindings) = try_match_params(&def.params, args, env)? {
+                    // Evaluate function-level guard if present (f[x_] := body /; condition)
+                    if let Some(guard_expr) = &def.guard {
+                        let guard_env = env.child();
+                        for (name, value) in &bindings {
+                            guard_env.set(name.clone(), value.clone());
+                        }
+                        if !eval(guard_expr, &guard_env)?.to_bool() {
+                            continue;
+                        }
+                    }
                     let child_env = env.child();
                     for (name, value) in &bindings {
                         child_env.set(name.clone(), value.clone());
@@ -2461,7 +2477,20 @@ fn specificity_expr(p: &Expr) -> usize {
         Expr::Blank { .. } | Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. } => 0,
         // PatternGuard: score based on inner pattern + bonus for having a condition
         Expr::PatternGuard { pattern, .. } => specificity_expr(pattern) + 1,
-        // Other patterns (call patterns, list patterns, alternatives): default
+        // Call patterns: score based on head specificity + sum of arg specificities
+        Expr::Call { head, args } => {
+            let head_score = match head.as_ref() {
+                // Literal head (e.g., Sin[x_]) is more specific than blank head (f_[x_])
+                Expr::Symbol(_) => 2,
+                Expr::Integer(_) | Expr::Real(_) | Expr::Str(_) | Expr::Bool(_) => 3,
+                _ => 0,
+            };
+            let arg_scores: usize = args.iter().map(specificity_expr).sum();
+            head_score + arg_scores
+        }
+        // List patterns: score based on sum of item specificities
+        Expr::List(items) => items.iter().map(specificity_expr).sum(),
+        // Default: zero
         _ => 0,
     }
 }
