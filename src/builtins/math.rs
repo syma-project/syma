@@ -5,6 +5,17 @@ use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
 
+/// Normalize a complex result: if imaginary part is zero, return as Real.
+fn norm_complex(re: f64, im: f64) -> Value {
+    if im == 0.0 {
+        Value::Real(Float::with_val(DEFAULT_PRECISION, re))
+    } else if re == 0.0 {
+        Value::Complex { re: 0.0, im }
+    } else {
+        Value::Complex { re, im }
+    }
+}
+
 // ── Pi-multiple detection for exact trig results ──
 
 /// Known special angle as (numerator, denominator) in [0, 2π) range.
@@ -259,6 +270,14 @@ pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::Real(r.clone().sin()))
         }
+        Value::Complex { re, im } => {
+            // Sin[x + i*y] = Sin[x]*Cosh[y] + i*Cos[x]*Sinh[y]
+            let sin_re = re.sin();
+            let cos_re = re.cos();
+            let cosh_im = im.cosh();
+            let sinh_im = im.sinh();
+            Ok(norm_complex(sin_re * cosh_im, cos_re * sinh_im))
+        }
         _ => Ok(Value::Call {
             head: "Sin".to_string(),
             args: args.to_vec(),
@@ -301,6 +320,14 @@ pub fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::Real(r.clone().cos()))
         }
+        Value::Complex { re, im } => {
+            // Cos[x + i*y] = Cos[x]*Cosh[y] - i*Sin[x]*Sinh[y]
+            let cos_re = re.cos();
+            let sin_re = re.sin();
+            let cosh_im = im.cosh();
+            let sinh_im = im.sinh();
+            Ok(norm_complex(cos_re * cosh_im, -sin_re * sinh_im))
+        }
         _ => Ok(Value::Call {
             head: "Cos".to_string(),
             args: args.to_vec(),
@@ -342,6 +369,22 @@ pub fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
                 });
             }
             Ok(Value::Real(r.clone().tan()))
+        }
+        Value::Complex { re, im } => {
+            // Tan[x + i*y] = Sin[2x] / (Cos[2x] + Cosh[2y])
+            //             + i * Sinh[2y] / (Cos[2x] + Cosh[2y])
+            let sin_2x = (2.0 * re).sin();
+            let cos_2x = (2.0 * re).cos();
+            let sinh_2y = (2.0 * im).sinh();
+            let cosh_2y = (2.0 * im).cosh();
+            let denom = cos_2x + cosh_2y;
+            if denom.abs() < 1e-15 {
+                return Ok(Value::Call {
+                    head: "Tan".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+            Ok(norm_complex(sin_2x / denom, sinh_2y / denom))
         }
         _ => Ok(Value::Call {
             head: "Tan".to_string(),
@@ -1049,6 +1092,15 @@ fn log_natural(v: &Value) -> Result<Value, EvalError> {
                 Ok(Value::Real(Float::with_val(prec, r).ln()))
             }
         }
+        // Complex: principal-log = ln|z| + i*Arg(z)
+        Value::Complex { re, im } => {
+            let abs = (re * re + im * im).sqrt();
+            if abs < 1e-300 {
+                return Err(EvalError::Error("Log of zero".to_string()));
+            }
+            let arg_val = im.atan2(*re);
+            Ok(norm_complex(abs.ln(), arg_val))
+        }
         _ => Ok(Value::Call {
             head: "Log".to_string(),
             args: vec![v.clone()],
@@ -1105,6 +1157,11 @@ pub fn builtin_exp(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
         Value::Real(r) => Ok(Value::Real(r.clone().exp())),
+        Value::Complex { re, im } => {
+            // Exp[x + i*y] = Exp[x] * (Cos[y] + i*Sin[y])
+            let exp_re = re.exp();
+            Ok(norm_complex(exp_re * im.cos(), exp_re * im.sin()))
+        }
         _ => Ok(Value::Call {
             head: "Exp".to_string(),
             args: args.to_vec(),
@@ -1301,6 +1358,19 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                     ],
                 })
             }
+        }
+        Value::Complex { re, im } => {
+            // Sqrt of complex in polar form: sqrt(r) * exp(i*theta/2)
+            let r = (re * re + im * im).sqrt();
+            if r < 1e-300 {
+                return Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)));
+            }
+            let theta = im.atan2(*re);
+            let sqrt_r = r.sqrt();
+            Ok(norm_complex(
+                sqrt_r * (theta / 2.0).cos(),
+                sqrt_r * (theta / 2.0).sin(),
+            ))
         }
         _ => Ok(Value::Call {
             head: "Sqrt".to_string(),

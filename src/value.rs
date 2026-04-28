@@ -215,6 +215,13 @@ pub enum Value {
         re: f64,
         im: f64,
     },
+    /// An algebraic number as an index into the roots of a polynomial.
+    /// `coeffs` = {c0, c1, …, cn} representing c0 + c1·x + … + cn·xⁿ.
+    /// `index` is 1-based; roots ordered by (real asc, then imag asc).
+    Root {
+        coeffs: Vec<Rational>,
+        index: usize,
+    },
     Str(String),
     Bool(bool),
     Null,
@@ -541,6 +548,10 @@ impl PartialEq for Value {
             (Value::Complex { re: a1, im: a2 }, Value::Complex { re: b1, im: b2 }) => {
                 a1 == b1 && a2 == b2
             }
+            (
+                Value::Root { coeffs: ca, index: ia },
+                Value::Root { coeffs: cb, index: ib },
+            ) => ca == cb && ia == ib,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -684,6 +695,7 @@ impl Value {
             Value::Real(_) => "Real",
             Value::Rational(_) => "Rational",
             Value::Complex { .. } => "Complex",
+            Value::Root { .. } => "Root",
             Value::Str(_) => "String",
             Value::Bool(_) => "Boolean",
             Value::Null => "Null",
@@ -733,12 +745,13 @@ impl Value {
         match type_name {
             "Number" => matches!(
                 self,
-                Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. }
+                Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. } | Value::Root { .. }
             ),
             "Integer" => matches!(self, Value::Integer(_)),
             "Real" => matches!(self, Value::Real(_)),
             "Rational" => matches!(self, Value::Rational(_)),
             "Complex" => matches!(self, Value::Complex { .. }),
+            "Root" => matches!(self, Value::Root { .. }),
             "String" => matches!(self, Value::Str(_)),
             "Boolean" => matches!(self, Value::Bool(_)),
             "Symbol" => matches!(self, Value::Symbol(_)),
@@ -1187,6 +1200,20 @@ impl fmt::Display for Value {
                 } else {
                     write!(f, "{}{}I", re, im)
                 }
+            }
+            Value::Root { coeffs, index } => {
+                write!(f, "Root[{{")?;
+                for (i, c) in coeffs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if c.denom() == &rug::Rational::from(1) {
+                        write!(f, "{}", c.numer())?;
+                    } else {
+                        write!(f, "{}", c)?;
+                    }
+                }
+                write!(f, "}}, {}]", index)
             }
             Value::Str(s) => write!(f, "\"{}\"", s),
             Value::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),

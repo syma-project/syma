@@ -1078,6 +1078,7 @@ impl Parser {
                 // Exclude +, - so `x - y` remains subtraction not Times[x, -y].
                 Token::Integer(_)
                 | Token::Real(_)
+                | Token::Complex(_)
                 | Token::Str(_)
                 | Token::True
                 | Token::False
@@ -1403,6 +1404,16 @@ impl Parser {
                         span,
                     })?;
                 Ok(Expr::Real(val))
+            }
+            Token::Complex(c) => {
+                let span = self.peek_span();
+                self.advance();
+                let im_val: f64 = c.parse().map_err(|_| ParseError {
+                    message: format!("Invalid complex literal: {}I", c),
+                    token: None,
+                    span,
+                })?;
+                Ok(Expr::Complex { re: 0.0, im: im_val })
             }
             Token::Str(s) => {
                 self.advance();
@@ -2058,6 +2069,7 @@ impl Parser {
                 // Implicit multiplication (juxtaposition) in patterns
                 Token::Integer(_)
                 | Token::Real(_)
+                | Token::Complex(_)
                 | Token::Str(_)
                 | Token::True
                 | Token::False

@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod messages;
 pub mod parser;
 pub mod pattern;
+pub mod polynomial;
 pub mod profiler;
 pub mod value;
 

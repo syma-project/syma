@@ -45,6 +45,15 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Divide", arithmetic::builtin_divide);
     register_builtin(env, "Minus", arithmetic::builtin_minus);
     register_builtin(env, "Abs", arithmetic::builtin_abs);
+    register_builtin(env, "Re", arithmetic::builtin_re);
+    register_builtin(env, "Im", arithmetic::builtin_im);
+    register_builtin(env, "ReIm", arithmetic::builtin_reim);
+    register_builtin(env, "Conjugate", arithmetic::builtin_conjugate);
+    register_builtin(env, "Arg", arithmetic::builtin_arg);
+    register_builtin(env, "Sign", arithmetic::builtin_sign);
+    register_builtin(env, "AbsArg", arithmetic::builtin_abs_arg);
+    register_builtin(env, "Complex", arithmetic::builtin_complex);
+    register_builtin(env, "ComplexQ", arithmetic::builtin_complex_q);
 
     // ── Noncommutative Algebra ──
     register_builtin(

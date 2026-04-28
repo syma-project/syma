@@ -27,6 +27,7 @@ pub enum Token {
     // ── Literals ──
     Integer(String),
     Real(String),
+    Complex(String), // Complex literal: 3I, 2.5I, etc.
     Str(String),
     True,
     False,
@@ -154,6 +155,7 @@ impl fmt::Display for Token {
         match self {
             Token::Integer(s) => write!(f, "{}", s),
             Token::Real(s) => write!(f, "{}", s),
+            Token::Complex(s) => write!(f, "{}I", s),
             Token::Str(s) => write!(f, "\"{}\"", s),
             Token::True => write!(f, "True"),
             Token::False => write!(f, "False"),
@@ -453,17 +455,24 @@ impl Lexer {
 
             // Check for complex (I suffix)
             if self.peek() == Some('I') {
-                self.advance();
-                // Simplified: treat as real for now
+                // Check that I is not followed by identifier chars (to avoid matching e.g. 3In)
+                let next = self.peek_ahead(1);
+                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
+                    self.advance();
+                    return Token::Complex(num_str);
+                }
             }
 
             Token::Real(num_str)
         } else {
             // Check for complex (I suffix on integer)
             if self.peek() == Some('I') {
-                self.advance();
-                // Simplified: treat as real for now
-                return Token::Real(num_str);
+                // Check that I is not followed by identifier chars
+                let next = self.peek_ahead(1);
+                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
+                    self.advance();
+                    return Token::Complex(num_str);
+                }
             }
 
             Token::Integer(num_str)

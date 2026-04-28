@@ -364,9 +364,21 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                         }
                     }
                 }
+                Value::Symbol(name) => {
+                    if index == 0 {
+                        current = Value::Symbol("Symbol".to_string());
+                    } else if index == 1 {
+                        current = Value::Str(name.clone());
+                    } else {
+                        return Err(EvalError::IndexOutOfBounds {
+                            index,
+                            length: 1,
+                        });
+                    }
+                }
                 _ => {
                     return Err(EvalError::TypeError {
-                        expected: "List or Call".to_string(),
+                        expected: "List or Call or String".to_string(),
                         got: current.type_name().to_string(),
                     });
                 }
@@ -442,6 +454,27 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                         length: call_args.len(),
                     })
                 }
+            }
+        }
+        Value::Symbol(name) => {
+            let index = match &args[1] {
+                Value::Integer(n) => n.to_i64().unwrap_or(0),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
+            };
+            if index == 0 {
+                Ok(Value::Symbol("Symbol".to_string()))
+            } else if index == 1 {
+                Ok(Value::Str(name.clone()))
+            } else {
+                Err(EvalError::IndexOutOfBounds {
+                    index,
+                    length: 1,
+                })
             }
         }
         _ => Err(EvalError::TypeError {

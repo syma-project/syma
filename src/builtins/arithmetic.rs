@@ -678,6 +678,56 @@ pub fn builtin_power(args: &[Value]) -> Result<Value, EvalError> {
             let e = Float::with_val(DEFAULT_PRECISION, exp);
             Ok(Value::Real(base.clone().pow(e)))
         }
+        // Complex ^ Integer >= 0
+        (Value::Complex { re, im }, Value::Integer(exp)) => {
+            if !exp.is_negative() {
+                let n = exp.to_usize().unwrap_or(0);
+                let r = (re * re + im * im).sqrt();
+                if r < 1e-300 {
+                    return if n == 0 {
+                        Ok(Value::Integer(Integer::from(1)))
+                    } else {
+                        Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+                    };
+                }
+                let theta = im.atan2(*re);
+                let r_pow = r.powi(n as i32);
+                let theta_n = theta * (n as f64);
+                Ok(normalize_complex(r_pow * theta_n.cos(), r_pow * theta_n.sin()))
+            } else {
+                let abs_exp = Value::Integer((-exp.clone()));
+                let power = builtin_power(&[args[0].clone(), abs_exp])?;
+                builtin_divide(&[Value::Integer(Integer::from(1)), power])
+            }
+        }
+        // Complex ^ Real
+        (Value::Complex { re, im }, Value::Real(exp)) => {
+            let r = (re * re + im * im).sqrt();
+            if r < 1e-300 {
+                return Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)));
+            }
+            let theta = im.atan2(*re);
+            let exp_val = exp.to_f64();
+            let r_pow = r.powf(exp_val);
+            let angle = exp_val * theta;
+            Ok(normalize_complex(r_pow * angle.cos(), r_pow * angle.sin()))
+        }
+        // Complex ^ Complex
+        (Value::Complex { re, im }, Value::Complex { re: wr, im: wi }) => {
+            let r = (re * re + im * im).sqrt();
+            if r < 1e-300 {
+                return Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)));
+            }
+            let theta = im.atan2(*re);
+            let ln_r = r.ln();
+            let real_part = wr * ln_r - wi * theta;
+            let imag_part = wr * theta + wi * ln_r;
+            let exp_real = real_part.exp();
+            Ok(normalize_complex(
+                exp_real * imag_part.cos(),
+                exp_real * imag_part.sin(),
+            ))
+        }
         // (a^n)^m → a^(n*m) when exponents are numeric
         (Value::Call { head, args: inner }, Value::Integer(outer_exp))
             if head == "Power" && inner.len() == 2 =>
@@ -867,6 +917,9 @@ pub fn builtin_minus(args: &[Value]) -> Result<Value, EvalError> {
                 let (num, den) = neg.into_numer_denom();
                 Ok(rational_value(num, den))
             }
+            Value::Complex { re, im } => {
+                Ok(normalize_complex(-re, -im))
+            }
             _ => Ok(Value::Call {
                 head: "Times".to_string(),
                 args: vec![Value::Integer(Integer::from(-1)), args[0].clone()],
@@ -926,6 +979,10 @@ pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
             let (num, den) = abs.into_numer_denom();
             Ok(rational_value(num, den))
         }
+        Value::Complex { re, im } => {
+            let abs = (re * re + im * im).sqrt();
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, abs)))
+        }
         other => {
             // Try numeric resolution for symbolic forms like Abs[3 - Pi]
             if let Some(f) = symbolic_to_f64(other) {
@@ -945,6 +1002,184 @@ pub fn builtin_abs(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     }
+}
+
+// ── Complex number functions ──
+
+pub fn builtin_re(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Re requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Complex { re, .. } => Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, *re))),
+        Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Real(r) => Ok(Value::Real(r.clone())),
+        Value::Rational(_) => Ok(args[0].clone()),
+        _ => Ok(Value::Call {
+            head: "Re".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+pub fn builtin_im(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Im requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Complex { im, .. } => Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, *im))),
+        Value::Integer(_) => Ok(Value::Integer(Integer::from(0))),
+        Value::Real(r) if r.is_zero() => Ok(Value::Real(r.clone())),
+        _ => Ok(Value::Call {
+            head: "Im".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+pub fn builtin_reim(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("ReIm requires exactly 1 argument".to_string()));
+    }
+    let re_val = builtin_re(args)?;
+    let im_val = builtin_im(args)?;
+    Ok(Value::List(vec![re_val, im_val]))
+}
+
+pub fn builtin_conjugate(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Conjugate requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Complex { re, im } => Ok(normalize_complex(*re, -im)),
+        Value::Integer(_) | Value::Real(_) | Value::Rational(_) => Ok(args[0].clone()),
+        _ => Ok(Value::Call {
+            head: "Conjugate".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Arg requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Complex { re, im } => {
+            let angle = im.atan2(*re);
+            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, angle)))
+        }
+        Value::Integer(n) => {
+            if n.is_zero() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+            } else if n.is_positive() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+            } else {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, std::f64::consts::PI)))
+            }
+        }
+        Value::Real(r) => {
+            if r.is_zero() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+            } else if r.is_sign_positive() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+            } else {
+                let pi = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi);
+                Ok(Value::Real(pi))
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "Arg".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("Sign requires exactly 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Complex { re, im } => {
+            let abs = (re * re + im * im).sqrt();
+            if abs < 1e-300 {
+                Ok(Value::Integer(Integer::from(0)))
+            } else {
+                Ok(normalize_complex(re / abs, im / abs))
+            }
+        }
+        Value::Integer(n) => {
+            if n.is_zero() {
+                Ok(Value::Integer(Integer::from(0)))
+            } else if n.is_positive() {
+                Ok(Value::Integer(Integer::from(1)))
+            } else {
+                Ok(Value::Integer(Integer::from(-1)))
+            }
+        }
+        Value::Real(r) => {
+            if r.is_zero() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
+            } else if r.is_sign_positive() {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)))
+            } else {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, -1.0)))
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "Sign".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+pub fn builtin_abs_arg(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error("AbsArg requires exactly 1 argument".to_string()));
+    }
+    let abs_val = builtin_abs(args)?;
+    let arg_val = builtin_arg(args)?;
+    Ok(Value::List(vec![abs_val, arg_val]))
+}
+
+pub fn builtin_complex(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Complex requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let re_val = match &args[0] {
+        Value::Integer(n) => n.to_f64(),
+        Value::Real(r) => r.to_f64(),
+        Value::Rational(r) => r.as_ref().to_f64(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let im_val = match &args[1] {
+        Value::Integer(n) => n.to_f64(),
+        Value::Real(r) => r.to_f64(),
+        Value::Rational(r) => r.as_ref().to_f64(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    Ok(normalize_complex(re_val, im_val))
+}
+
+pub fn builtin_complex_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ComplexQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Bool(matches!(&args[0], Value::Complex { .. })))
 }
 
 #[cfg(test)]
