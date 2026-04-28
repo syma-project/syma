@@ -2537,7 +2537,7 @@ fn specificity_expr(p: &Expr) -> usize {
 ///   f[x__] := Total[x]             — sequence of 1+ elements
 ///   f[x___] := {x}                 — sequence of 0+ elements
 ///   f[a_, b__, c_] := {a, b, c}    — mixed fixed and sequence parameters
-fn try_match_params(
+pub(crate) fn try_match_params(
     params: &[Expr],
     args: &[Value],
     env: &Env,

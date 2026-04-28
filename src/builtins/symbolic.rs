@@ -916,8 +916,8 @@ fn embedded_d_source() -> String {
 
 // ── Integration ──
 
-/// Integrate[expr, x] — Symbolic integration.
-pub fn builtin_integrate(args: &[Value]) -> Result<Value, EvalError> {
+/// Integrate[expr, x] — Symbolic integration via Rubi rules + hardcoded fallback.
+pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Integrate requires exactly 2 arguments".to_string(),
@@ -928,7 +928,7 @@ pub fn builtin_integrate(args: &[Value]) -> Result<Value, EvalError> {
         Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
         _ => args[0].clone(),
     };
-    let var = match &args[1] {
+    let var_name = match &args[1] {
         Value::Symbol(s) => s.clone(),
         Value::Pattern(p) => {
             match &crate::pattern::unwrap_expr_to_value(p) {
@@ -948,7 +948,132 @@ pub fn builtin_integrate(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    Ok(integrate(&expr, &var))
+
+    // Load Rubi rules (lazy, once)
+    lazy_load_integrate(env)?;
+
+    // Dispatch to Integrate function definitions (loaded from .syma files)
+    if let Some(Value::Function(func_def)) = env.get("Integrate") {
+        // Try each definition
+        for def in &func_def.definitions {
+            if let Some(bindings) = crate::eval::try_match_params(&def.params, &args, env)? {
+                // Evaluate guard if present
+                if let Some(guard_expr) = &def.guard {
+                    let guard_env = env.child();
+                    for (name, value) in &bindings {
+                        guard_env.set(name.clone(), value.clone());
+                    }
+                    if !crate::eval::eval(guard_expr, &guard_env)?.to_bool() {
+                        continue;
+                    }
+                }
+                // Evaluate body
+                let child_env = env.child();
+                for (name, value) in &bindings {
+                    child_env.set(name.clone(), value.clone());
+                }
+                return crate::eval::eval(&def.body, &child_env);
+            }
+        }
+    }
+
+    // Fallback: hardcoded basic integration
+    Ok(integrate(&expr, &var_name))
+}
+
+/// Lazy-load Integrate rules from .syma files (like lazy_load_d for D).
+fn lazy_load_integrate(env: &Env) -> Result<(), EvalError> {
+    use std::sync::OnceLock;
+    static LOADED: OnceLock<()> = OnceLock::new();
+    LOADED.get_or_init(|| {
+        let files = [
+            "1-algebraic.syma",
+            "2-exponentials.syma",
+            "3-logarithms.syma",
+            "4-trig.syma",
+            "5-inverse-trig.syma",
+            "6-hyperbolic.syma",
+            "7-inverse-hyperbolic.syma",
+            "8-special.syma",
+            "9-miscellaneous.syma",
+        ];
+        for fname in &files {
+            load_integrate_file(env, fname);
+        }
+    });
+    Ok(())
+}
+
+/// Load a single Integrate rule file.
+fn load_integrate_file(env: &Env, fname: &str) {
+    const REL_PATH: &str = "Kernel/Calculus/";
+
+    // Try search_paths first
+    {
+        let paths = env.search_paths.lock().unwrap();
+        for dir in paths.iter() {
+            let candidate = dir.join(REL_PATH).join(fname);
+            if candidate.exists() {
+                if let Ok(source) = std::fs::read_to_string(&candidate) {
+                    if let Ok(tokens) = crate::lexer::tokenize(&source) {
+                        if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+                            for (expr, _suppress) in stmts {
+                                let _ = crate::eval::eval(&expr, env);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    // Try exe-relative SystemFiles
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    {
+        let candidate = exe_dir.join("../").join("SystemFiles").join(REL_PATH).join(fname);
+        if candidate.exists() {
+            if let Ok(source) = std::fs::read_to_string(&candidate) {
+                if let Ok(tokens) = crate::lexer::tokenize(&source) {
+                    if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+                        for (expr, _suppress) in stmts {
+                            let _ = crate::eval::eval(&expr, env);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    // Fallback: embedded source
+    if let Some(source) = embedded_integrate_source(fname) {
+        if let Ok(tokens) = crate::lexer::tokenize(&source) {
+            if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
+                for (expr, _suppress) in stmts {
+                    let _ = crate::eval::eval(&expr, env);
+                }
+            }
+        }
+    }
+}
+
+/// Embedded Integrate rule files — fallback for cargo run.
+fn embedded_integrate_source(fname: &str) -> Option<String> {
+    match fname {
+        "1-algebraic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/1-algebraic.syma").to_string()),
+        "2-exponentials.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/2-exponentials.syma").to_string()),
+        "3-logarithms.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/3-logarithms.syma").to_string()),
+        "4-trig.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/4-trig.syma").to_string()),
+        "5-inverse-trig.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/5-inverse-trig.syma").to_string()),
+        "6-hyperbolic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/6-hyperbolic.syma").to_string()),
+        "7-inverse-hyperbolic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/7-inverse-hyperbolic.syma").to_string()),
+        "8-special.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/8-special.syma").to_string()),
+        "9-miscellaneous.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/9-miscellaneous.syma").to_string()),
+        _ => None,
+    }
 }
 
 fn integrate(expr: &Value, var: &str) -> Value {
@@ -2524,8 +2649,10 @@ mod tests {
     #[test]
     fn test_integrate_power() {
         // Integrate[x^2, x] = x^3/3 (stored as Times[Power[x,3], Power[3,-1]])
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
         let expr = simplify_call("Power", &[sym("x"), int(2)]);
-        let result = builtin_integrate(&[expr, sym("x")]).unwrap();
+        let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
         match &result {
             Value::Call { head, args } if head == "Times" => {
                 // Contains Power[x, 3]
@@ -2545,8 +2672,10 @@ mod tests {
     #[test]
     fn test_integrate_sin() {
         // Integrate[Sin[x], x] = -Cos[x]
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
         let expr = simplify_call("Sin", &[sym("x")]);
-        let result = builtin_integrate(&[expr, sym("x")]).unwrap();
+        let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
         match &result {
             Value::Call { head, args } if head == "Times" => {
                 // Should contain Cos[x]
@@ -2563,7 +2692,9 @@ mod tests {
     #[test]
     fn test_integrate_constant() {
         // Integrate[5, x] = 5x
-        let result = builtin_integrate(&[int(5), sym("x")]).unwrap();
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        let result = builtin_integrate(&[int(5), sym("x")], &env).unwrap();
         match &result {
             Value::Call { head, .. } if head == "Times" => {}
             _ => panic!("Expected Times (5*x), got {:?}", result),

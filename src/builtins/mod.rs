@@ -207,7 +207,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Factor", symbolic::builtin_factor);
     register_builtin(env, "Solve", symbolic::builtin_solve);
     register_builtin_env(env, "Series", symbolic::builtin_series);
-    register_builtin(env, "Integrate", symbolic::builtin_integrate);
+    register_builtin_env(env, "Integrate", symbolic::builtin_integrate);
 
     // ── Integration Helpers (Rubi predicates and functions) ──
     // Comparison predicates

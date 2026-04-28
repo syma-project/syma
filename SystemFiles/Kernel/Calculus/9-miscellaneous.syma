@@ -1,0 +1,420 @@
+(* Integrate rules: 9 Miscellaneous *)
+(* Source: Rubi-4.16.1.0, 144 rules from 4 files *)
+
+Integrate[u_*(a_+b_*x_^n_.)^p_.,x_] := Integrate[u*(b*x^n)^p,x] /;
+FreeQ[{a,b,n,p},x] && EqQ[a,0]
+
+Integrate[u_*(a_.+b_*x_^n_.)^p_.,x_] := Integrate[u*a^p,x] /;
+FreeQ[{a,b,n,p},x] && EqQ[b,0]
+
+Integrate[u_*(a_+b_*x_^n_.+c_*x_^j_.)^p_.,x_] := Integrate[u*(b*x^n+c*x^(2*n))^p,x] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[j,2*n] && EqQ[a,0]
+
+Integrate[u_*(a_.+b_*x_^n_.+c_*x_^j_.)^p_.,x_] := Integrate[u*(a+c*x^(2*n))^p,x] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[j,2*n] && EqQ[b,0]
+
+Integrate[u_*(a_.+b_*x_^n_.+c_*x_^j_.)^p_.,x_] := Integrate[u*(a+b*x^n)^p,x] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[j,2*n] && EqQ[c,0]
+
+Integrate[u_*(a_*v_+b_*v_+w_.)^p_.,x_] := Integrate[u*((a+b)*v+w)^p,x] /;
+FreeQ[{a,b},x] && Not[FreeQ[v,x]]
+
+Integrate[u_*Px_^p_,x_] := Integrate[u*Px^Simplify[p],x] /;
+PolyQ[Px,x] && Not[RationalQ[p]] && FreeQ[p,x] && RationalQ[Simplify[p]]
+
+Integrate[a_,x_] := a*x /;
+FreeQ[a,x]
+
+Integrate[a_*(b_+c_*x_),x_] := a*(b+c*x)^2/(2*c) /;
+FreeQ[{a,b,c},x]
+
+Integrate[-u_,x_] := Identity[-1]*Integrate[u,x]
+
+Integrate[Complex[0,a_]*u_,x_] := Complex[Identity[0],a]*Integrate[u,x] /;
+FreeQ[a,x] && EqQ[a^2,1]
+
+Integrate[a_*u_,x_] := a*Integrate[u,x] /;
+FreeQ[a,x] && Not[MatchQ[u, b_*v_ /; FreeQ[b,x]]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := ShowStep["\<\>","\<Integrate[a*u + b*v + CenterEllipsis,x]\>","\<a*Integrate[u,x] + b*Integrate[v,x] + CenterEllipsis\>",Hold[ IntSum[u,x]]] /;
+SimplifyFlag && SumQ[u],
+
+Integrate[u_,x_] := IntSum[u,x] /;
+SumQ[u]]
+
+Integrate[(c_*x_)^m_*u_,x_] := Integrate[ExpandIntegrand[(c*x)^m*u,x],x] /;
+FreeQ[{c,m},x] && SumQ[u] && Not[LinearQ[u,x]] && Not[MatchQ[u,a_+b_*v_ /; FreeQ[{a,b},x] && InverseFunctionQ[v]]]
+
+Integrate[u_*(a_*x_^n_)^m_,x_] := a^IntPart[m]*(a*x^n)^FracPart[m]/x^(n*FracPart[m])*Integrate[u*x^(m*n),x] /;
+FreeQ[{a,m,n},x] && Not[IntegerQ[m]]
+
+Integrate[u_*v_^m_*(b_*v_)^n_,x_] := 1/b^m*Integrate[u*(b*v)^(m+n),x] /;
+FreeQ[{b,n},x] && IntegerQ[m]
+
+Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := a^(m+1/2)*b^(n-1/2)*Sqrt[b*v]/Sqrt[a*v]*Integrate[u*v^(m+n),x] /;
+FreeQ[{a,b,m},x] && Not[IntegerQ[m]] && IGtQ[n+1/2,0] && IntegerQ[m+n] (* Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := b^(n-1/2)*Sqrt[b*v]/(a^(n-1/2)*Sqrt[a*v])*Integrate[u*(a*v)^(m+n),x] /; FreeQ[{a,b,m},x] && Not[IntegerQ[m]] && IGtQ[n+1/2,0] && Not[IntegerQ[m+n]] *)
+
+Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := a^(m-1/2)*b^(n+1/2)*Sqrt[a*v]/Sqrt[b*v]*Integrate[u*v^(m+n),x] /;
+FreeQ[{a,b,m},x] && Not[IntegerQ[m]] && ILtQ[n-1/2,0] && IntegerQ[m+n] (* Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := b^(n+1/2)*Sqrt[a*v]/(a^(n+1/2)*Sqrt[b*v])*Integrate[u*(a*v)^(m+n),x] /; FreeQ[{a,b,m},x] && Not[IntegerQ[m]] && ILtQ[n-1/2,0] && Not[IntegerQ[m+n]] *)
+
+Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := a^(m+n)*(b*v)^n/(a*v)^n*Integrate[u*v^(m+n),x] /;
+FreeQ[{a,b,m,n},x] && Not[IntegerQ[m]] && Not[IntegerQ[n]] && IntegerQ[m+n]
+
+Integrate[u_*(a_*v_)^m_*(b_*v_)^n_,x_] := b^IntPart[n]*(b*v)^FracPart[n]/(a^IntPart[n]*(a*v)^FracPart[n])*Integrate[u*(a*v)^(m+n),x] /;
+FreeQ[{a,b,m,n},x] && Not[IntegerQ[m]] && Not[IntegerQ[n]] && Not[IntegerQ[m+n]]
+
+Integrate[u_*(a_+b_*v_)^m_*(c_+d_*v_)^n_.,x_] := (b/d)^m*Integrate[u*(c+d*v)^(m+n),x] /;
+FreeQ[{a,b,c,d,n},x] && EqQ[b*c-a*d,0] && IntegerQ[m] && (Not[IntegerQ[n]] || SimplerQ[c+d*x,a+b*x])
+
+Integrate[u_*(a_+b_*v_)^m_*(c_+d_*v_)^n_,x_] := (b/d)^m*Integrate[u*(c+d*v)^(m+n),x] /;
+FreeQ[{a,b,c,d,m,n},x] && EqQ[b*c-a*d,0] && GtQ[b/d,0] && Not[IntegerQ[m] || IntegerQ[n]]
+
+Integrate[u_*(a_+b_*v_)^m_*(c_+d_*v_)^n_,x_] := (a+b*v)^m/(c+d*v)^m*Integrate[u*(c+d*v)^(m+n),x] /;
+FreeQ[{a,b,c,d,m,n},x] && EqQ[b*c-a*d,0] && Not[IntegerQ[m] || IntegerQ[n] || GtQ[b/d,0]] (* Integrate[u_*(a_*v_)^m_*(b_*v_+c_*v_^2),x_] := 1/a*Integrate[u*(a*v)^(m+1)*(b+c*v),x] /; FreeQ[{a,b,c},x] && LeQ[m,-1] *)
+
+Integrate[u_*(a_+b_*v_)^m_*(A_.+B_*v_+C_*v_^2),x_] := 1/b^2*Integrate[u*(a+b*v)^(m+1)*Simp[b*B-a*C+b*C*v,x],x] /;
+FreeQ[{a,b,A,B,C},x] && EqQ[A*b^2-a*b*B+a^2*C,0] && LeQ[m,-1]
+
+Integrate[u_*(a_+b_*x_^n_.)^m_*(c_+d_*x_^q_.)^p_.,x_] := (d/a)^p*Integrate[u*(a+b*x^n)^(m+p)/x^(n*p),x] /;
+FreeQ[{a,b,c,d,m,n},x] && EqQ[q,-n] && IntegerQ[p] && EqQ[a*c-b*d,0] && Not[IntegerQ[m] && NegQ[n]]
+
+Integrate[u_*(a_+b_*x_^n_.)^m_*(c_+d_*x_^j_)^p_.,x_] := (-b^2/d)^m*Integrate[u*(a-b*x^n)^(-m),x] /;
+FreeQ[{a,b,c,d,m,n,p},x] && EqQ[j,2*n] && EqQ[p,-m] && EqQ[b^2*c+a^2*d,0] && GtQ[a,0] && LtQ[d,0]
+
+Integrate[u_*(a_+b_*x_+c_*x_^2)^p_.,x_] := Integrate[u*Cancel[(b/2+c*x)^(2*p)/c^p],x] /;
+FreeQ[{a,b,c},x] && EqQ[b^2-4*a*c,0] && IntegerQ[p]
+
+Integrate[u_*(a_+b_*x_^n_+c_*x_^n2_.)^p_.,x_] := 1/c^p*Integrate[u*(b/2+c*x^n)^(2*p),x] /;
+FreeQ[{a,b,c,n},x] && EqQ[n2,2*n] && EqQ[b^2-4*a*c,0] && IntegerQ[p]
+
+Integrate[Derivative[n_][f_][x_],x_] := Derivative[n-1][f][x] /;
+FreeQ[{f,n},x]
+
+Integrate[(c_*F_^(a_.+b_*x_))^p_*Derivative[n_][f_][x_],x_] := (c*F^(a+b*x))^p*Derivative[n-1][f][x] - b*p*Log[F]*Integrate[(c*F^(a+b*x))^p*Derivative[n-1][f][x],x] /;
+FreeQ[{a,b,c,f,F,p},x] && IGtQ[n,0]
+
+Integrate[(c_*F_^(a_.+b_*x_))^p_*Derivative[n_][f_][x_],x_] := (c*F^(a+b*x))^p*Derivative[n][f][x]/(b*p*Log[F]) - 1/(b*p*Log[F])*Integrate[(c*F^(a+b*x))^p*Derivative[n+1][f][x],x] /;
+FreeQ[{a,b,c,f,F,p},x] && ILtQ[n,0]
+
+Integrate[Sin[a_.+b_*x_]*Derivative[n_][f_][x_],x_] := Sin[a+b*x]*Derivative[n-1][f][x] - b*Integrate[Cos[a+b*x]*Derivative[n-1][f][x],x] /;
+FreeQ[{a,b,f},x] && IGtQ[n,0]
+
+Integrate[Cos[a_.+b_*x_]*Derivative[n_][f_][x_],x_] := Cos[a+b*x]*Derivative[n-1][f][x] + b*Integrate[Sin[a+b*x]*Derivative[n-1][f][x],x] /;
+FreeQ[{a,b,f},x] && IGtQ[n,0]
+
+Integrate[Sin[a_.+b_*x_]*Derivative[n_][f_][x_],x_] := -Cos[a+b*x]*Derivative[n][f][x]/b + 1/b*Integrate[Cos[a+b*x]*Derivative[n+1][f][x],x] /;
+FreeQ[{a,b,f},x] && ILtQ[n,0]
+
+Integrate[Cos[a_.+b_*x_]*Derivative[n_][f_][x_],x_] := Sin[a+b*x]*Derivative[n][f][x]/b - 1/b*Integrate[Sin[a+b*x]*Derivative[n+1][f][x],x] /;
+FreeQ[{a,b,f},x] && ILtQ[n,0]
+
+Integrate[u_*Derivative[n_][f_][x_],x_] := Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[n-1][f][x],u,x],x],x],x,Derivative[n-1][f][x]] /;
+FreeQ[{f,n},x] && FunctionOfQ[Derivative[n-1][f][x],u,x]
+
+Integrate[u_*(a_*Derivative[1][f_][x_]*g_[x_]+a_*f_[x_]*Derivative[1][g_][x_]),x_] := a*Subst[Integrate[SimplifyIntegrand[SubstFor[f[x]*g[x],u,x],x],x],x,f[x]*g[x]] /;
+FreeQ[{a,f,g},x] && FunctionOfQ[f[x]*g[x],u,x]
+
+Integrate[u_*(a_*Derivative[m_][f_][x_]*g_[x_]+a_*Derivative[m1_][f_][x_]*Derivative[1][g_][x_]),x_] := a*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]*g[x],u,x],x],x],x,Derivative[m-1][f][x]*g[x]] /;
+FreeQ[{a,f,g,m},x] && EqQ[m1,m-1] && FunctionOfQ[Derivative[m-1][f][x]*g[x],u,x]
+
+Integrate[u_*(a_*Derivative[m_][f_][x_]*Derivative[n1_][g_][x_]+a_*Derivative[m1_][f_][x_]*Derivative[n_][g_][x_]),x_] := a*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]*Derivative[n-1][g][x],u,x],x],x],x,Derivative[m-1][f][x]*Derivative[n-1][g][x]] /;
+FreeQ[{a,f,g,m,n},x] && EqQ[m1,m-1] && EqQ[n1,n-1] && FunctionOfQ[Derivative[m-1][f][x]*Derivative[n-1][g][x],u,x]
+
+Integrate[u_*f_[x_]^p_*(a_*Derivative[1][f_][x_]*g_[x_]+b_*f_[x_]*Derivative[1][g_][x_]),x_] := b*Subst[Integrate[SimplifyIntegrand[SubstFor[f[x]^(p+1)*g[x],u,x],x],x],x,f[x]^(p+1)*g[x]] /;
+FreeQ[{a,b,f,g,p},x] && EqQ[a,b*(p+1)] && FunctionOfQ[f[x]^(p+1)*g[x],u,x]
+
+Integrate[u_*Derivative[m1_][f_][x_]^p_* (a_*Derivative[m_][f_][x_]*g_[x_]+b_*Derivative[m1_][f_][x_]*Derivative[1][g_][x_]),x_] := b*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]^(p+1)*g[x],u,x],x],x],x, Derivative[m-1][f][x]^(p+1)*g[x]] /;
+FreeQ[{a,b,f,g,m,p},x] && EqQ[m1,m-1] && EqQ[a,b*(p+1)] && FunctionOfQ[Derivative[m-1][f][x]^(p+1)*g[x],u,x]
+
+Integrate[u_*g_[x_]^q_* (a_*Derivative[m_][f_][x_]*g_[x_]+b_*Derivative[m1_][f_][x_]*Derivative[1][g_][x_]),x_] := a*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]*g[x]^(q+1),u,x],x],x],x, Derivative[m-1][f][x]*g[x]^(q+1)] /;
+FreeQ[{a,b,f,g,m,q},x] && EqQ[m1,m-1] && EqQ[a*(q+1),b] && FunctionOfQ[Derivative[m-1][f][x]*g[x]^(q+1),u,x]
+
+Integrate[u_*Derivative[m1_][f_][x_]^p_* (a_*Derivative[m_][f_][x_]*Derivative[n1_][g_][x_]+b_*Derivative[m1_][f_][x_]*Derivative[n_][g_][x_]),x_] := b*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x],u,x],x],x],x, Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x]] /;
+FreeQ[{a,b,f,g,m,n,p},x] && EqQ[m1,m-1] && EqQ[n1,n-1] && EqQ[a,b*(p+1)] && FunctionOfQ[Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x],u,x]
+
+Integrate[u_*f_[x_]^p_*g_[x_]^q_*(a_*Derivative[1][f_][x_]*g_[x_]+b_*f_[x_]*Derivative[1][g_][x_]),x_] := a/(p+1)*Subst[Integrate[SimplifyIntegrand[SubstFor[f[x]^(p+1)*g[x]^(q+1),u,x],x],x],x,f[x]^(p+1)*g[x]^(q+1)] /;
+FreeQ[{a,b,f,g,p,q},x] && EqQ[a*(q+1),b*(p+1)] && FunctionOfQ[f[x]^(p+1)*g[x]^(q+1),u,x]
+
+Integrate[u_*Derivative[m1_][f_][x_]^p_*g_[x_]^q_* (a_*Derivative[m_][f_][x_]*g_[x_]+b_*Derivative[m1_][f_][x_]*Derivative[1][g_][x_]),x_] := a/(p+1)*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]^(p+1)*g[x]^(q+1),u,x],x],x],x, Derivative[m-1][f][x]^(p+1)*g[x]^(q+1)] /;
+FreeQ[{a,b,f,g,m,p,q},x] && EqQ[m1,m-1] && EqQ[a*(q+1),b*(p+1)] && FunctionOfQ[Derivative[m-1][f][x]^(p+1)*g[x]^(q+1),u,x]
+
+Integrate[u_*Derivative[m1_][f_][x_]^p_*Derivative[n1_][g_][x_]^q_* (a_*Derivative[m_][f_][x_]*Derivative[n1_][g_][x_]+b_*Derivative[m1_][f_][x_]*Derivative[n_][g_][x_]),x_] := a/(p+1)*Subst[Integrate[SimplifyIntegrand[SubstFor[Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x]^(q+1),u,x],x],x],x, Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x]^(q+1)] /;
+FreeQ[{a,b,f,g,m,n,p,q},x] && EqQ[m1,m-1] && EqQ[n1,n-1] && EqQ[a*(q+1),b*(p+1)] && FunctionOfQ[Derivative[m-1][f][x]^(p+1)*Derivative[n-1][g][x]^(q+1),u,x]
+
+Integrate[f_'[x_]*g_[x_] + f_[x_]*g_'[x_],x_] := f[x]*g[x] /;
+FreeQ[{f,g},x]
+
+Integrate[(f_'[x_]*g_[x_] - f_[x_]*g_'[x_])/g_[x_]^2,x_] := f[x]/g[x] /;
+FreeQ[{f,g},x]
+
+Integrate[(f_'[x_]*g_[x_] - f_[x_]*g_'[x_])/(f_[x_]*g_[x_]),x_] := Log[f[x]/g[x]] /;
+FreeQ[{f,g},x]
+
+Integrate[u_^m_.,x_] := With[{c=Simplify[D[u,x]]}, 1/c*Subst[Integrate[x^m,x],x,u]] /;
+FreeQ[m,x] && PiecewiseLinearQ[u,x]
+
+Integrate[v_/u_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, b*x/a - (b*u-a*v)/a*Integrate[1/u,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[v_^n_/u_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, v^n/(a*n) - (b*u-a*v)/a*Integrate[v^(n-1)/u,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && GtQ[n,0] && NeQ[n,1]
+
+Integrate[1/(u_*v_),x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, b/(b*u-a*v)*Integrate[1/v,x] - a/(b*u-a*v)*Integrate[1/u,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[1/(u_*Sqrt[v_]),x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, 2*ArcTan[Sqrt[v]/Rt[(b*u-a*v)/a,2]]/(a*Rt[(b*u-a*v)/a,2]) /; NeQ[b*u-a*v,0] && PosQ[(b*u-a*v)/a]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[1/(u_*Sqrt[v_]),x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, -2*ArcTanh[Sqrt[v]/Rt[-(b*u-a*v)/a,2]]/(a*Rt[-(b*u-a*v)/a,2]) /; NeQ[b*u-a*v,0] && NegQ[(b*u-a*v)/a]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[v_^n_/u_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, v^(n+1)/((n+1)*(b*u-a*v)) -    a*(n+1)/((n+1)*(b*u-a*v))*Integrate[v^(n+1)/u,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && LtQ[n,-1]
+
+Integrate[v_^n_/u_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, v^(n+1)/((n+1)*(b*u-a*v))*Hypergeometric2F1[1,n+1,n+2,-a*v/(b*u-a*v)] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && Not[IntegerQ[n]]
+
+Integrate[1/(Sqrt[u_]*Sqrt[v_]),x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, 2/Rt[a*b,2]*ArcTanh[Rt[a*b,2]*Sqrt[u]/(a*Sqrt[v])] /; NeQ[b*u-a*v,0] && PosQ[a*b]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[1/(Sqrt[u_]*Sqrt[v_]),x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, 2/Rt[-a*b,2]*ArcTan[Rt[-a*b,2]*Sqrt[u]/(a*Sqrt[v])] /; NeQ[b*u-a*v,0] && NegQ[a*b]] /;
+PiecewiseLinearQ[u,v,x]
+
+Integrate[u_^m_*v_^n_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, -u^(m+1)*v^(n+1)/((m+1)*(b*u-a*v)) /; NeQ[b*u-a*v,0]] /;
+FreeQ[{m,n},x] && PiecewiseLinearQ[u,v,x] && EqQ[m+n+2,0] && NeQ[m,-1]
+
+Integrate[u_^m_*v_^n_.,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, u^(m+1)*v^n/(a*(m+1)) -    b*n/(a*(m+1))*Integrate[u^(m+1)*v^(n-1),x] /; NeQ[b*u-a*v,0]] /;
+FreeQ[{m,n},x] && PiecewiseLinearQ[u,v,x]  && NeQ[m,-1] && ( LtQ[m,-1] && GtQ[n,0] && Not[ILtQ[m+n,-2] && (FractionQ[m] || GeQ[2*n+m+1,0])] || IGtQ[n,0] && IGtQ[m,0] && LeQ[n,m] || IGtQ[n,0] && Not[IntegerQ[m]] || ILtQ[m,0] && Not[IntegerQ[n]])
+
+Integrate[u_^m_*v_^n_.,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, u^(m+1)*v^n/(a*(m+n+1)) -    n*(b*u-a*v)/(a*(m+n+1))*Integrate[u^m*v^(n-1),x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && NeQ[m+n+2,0] && GtQ[n,0] && NeQ[m+n+1,0] && Not[IGtQ[m,0] && (Not[IntegerQ[n]] || LtQ[0,m,n])] && Not[ILtQ[m+n,-2]]
+
+Integrate[u_^m_*v_^n_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, u^(m+1)*v^n/(a*(m+n+1)) -    n*(b*u-a*v)/(a*(m+n+1))*Integrate[u^m*v^Simplify[n-1],x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && NeQ[m+n+1,0] && Not[RationalQ[n]] && SumSimplerQ[n,-1]
+
+Integrate[u_^m_*v_^n_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, -u^(m+1)*v^(n+1)/((m+1)*(b*u-a*v)) +    b*(m+n+2)/((m+1)*(b*u-a*v))*Integrate[u^(m+1)*v^n,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && NeQ[m+n+2,0] && LtQ[m,-1]
+
+Integrate[u_^m_*v_^n_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, -u^(m+1)*v^(n+1)/((m+1)*(b*u-a*v)) +    b*(m+n+2)/((m+1)*(b*u-a*v))*Integrate[u^Simplify[m+1]*v^n,x] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && Not[RationalQ[m]] && SumSimplerQ[m,1]
+
+Integrate[u_^m_*v_^n_,x_] := With[{a=Simplify[D[u,x]],b=Simplify[D[v,x]]}, u^m*v^(n+1)/(b*(n+1)*(b*u/(b*u-a*v))^m)*Hypergeometric2F1[-m,n+1,n+2,-a*v/(b*u-a*v)] /; NeQ[b*u-a*v,0]] /;
+PiecewiseLinearQ[u,v,x] && Not[IntegerQ[m]] && Not[IntegerQ[n]]
+
+Integrate[u_^n_*Log[a_.+b_*x_],x_] := With[{c=Simplify[D[u,x]]}, u^n*(a+b*x)*Log[a+b*x]/b - Integrate[u^n,x] - c*n/b*Integrate[u^(n-1)*(a+b*x)*Log[a+b*x],x]] /;
+FreeQ[{a,b},x] && PiecewiseLinearQ[u,x] && Not[LinearQ[u,x]] && GtQ[n,0] (* Integrate[u_^n_*Log[a_.+b_*x_]/(a_.+b_*x_),x_] := With[{c=Simplify[D[u,x]]}, u^n*Log[a+b*x]^2/(2*b) - c*n/(2*b)*Integrate[u^(n-1)*Log[a+b*x]^2,x]] /; FreeQ[{a,b},x] && PiecewiseLinearQ[u,x] && GtQ[n,0] *)
+
+Integrate[u_^n_*(a_.+b_*x_)^m_*Log[a_.+b_*x_],x_] := With[{c=Simplify[D[u,x]]}, u^n*(a+b*x)^(m+1)*Log[a+b*x]/(b*(m+1)) - 1/(m+1)*Integrate[u^n*(a+b*x)^m,x] - c*n/(b*(m+1))*Integrate[u^(n-1)*(a+b*x)^(m+1)*Log[a+b*x],x]] /;
+FreeQ[{a,b,m},x] && PiecewiseLinearQ[u,x] && Not[LinearQ[u,x]] && GtQ[n,0] && NeQ[m,-1]
+
+Integrate[(a_.+b_*F_[c_*Sqrt[d_.+e_*x_]/Sqrt[f_.+g_*x_]])^n_./(A_.+B_*x_+C_*x_^2),x_] := 2*e*g/(C*(e*f-d*g))*Subst[Integrate[(a+b*F[c*x])^n/x,x],x,Sqrt[d+e*x]/Sqrt[f+g*x]] /;
+FreeQ[{a,b,c,d,e,f,g,A,B,C,F},x] && EqQ[C*d*f-A*e*g,0] && EqQ[B*e*g-C*(e*f+d*g),0] && IGtQ[n,0]
+
+Integrate[(a_.+b_*F_[c_*Sqrt[d_.+e_*x_]/Sqrt[f_.+g_*x_]])^n_./(A_.+C_*x_^2),x_] := 2*e*g/(C*(e*f-d*g))*Subst[Integrate[(a+b*F[c*x])^n/x,x],x,Sqrt[d+e*x]/Sqrt[f+g*x]] /;
+FreeQ[{a,b,c,d,e,f,g,A,C,F},x] && EqQ[C*d*f-A*e*g,0] && EqQ[e*f+d*g,0] && IGtQ[n,0]
+
+Integrate[(a_.+b_*F_[c_*Sqrt[d_.+e_*x_]/Sqrt[f_.+g_*x_]])^n_/(A_.+B_*x_+C_*x_^2),x_] := Unintegrable[(a+b*F[c*Sqrt[d+e*x]/Sqrt[f+g*x]])^n/(A+B*x+C*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g,A,B,C,F,n},x] && EqQ[C*d*f-A*e*g,0] && EqQ[B*e*g-C*(e*f+d*g),0] && Not[IGtQ[n,0]]
+
+Integrate[(a_.+b_*F_[c_*Sqrt[d_.+e_*x_]/Sqrt[f_.+g_*x_]])^n_/(A_+C_*x_^2),x_] := Unintegrable[(a+b*F[c*Sqrt[d+e*x]/Sqrt[f+g*x]])^n/(A+C*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g,A,C,F,n},x] && EqQ[C*d*f-A*e*g,0] && EqQ[e*f+d*g,0] && Not[IGtQ[n,0]]
+
+Integrate[u_/y_,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Log[RemoveContent[y,x]] /; Not[FalseQ[q]]]
+
+Integrate[u_/(y_*w_),x_] := With[{q=DerivativeDivides[y*w,u,x]}, q*Log[RemoveContent[y*w,x]] /; Not[FalseQ[q]]]
+
+Integrate[u_*y_^m_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*y^(m+1)/(m+1) /; Not[FalseQ[q]]] /;
+FreeQ[m,x] && NeQ[m,-1]
+
+Integrate[u_*y_^m_*z_^n_.,x_] := With[{q=DerivativeDivides[y*z,u*z^(n-m),x]}, q*y^(m+1)*z^(m+1)/(m+1) /; Not[FalseQ[q]]] /;
+FreeQ[{m,n},x] && NeQ[m,-1]
+
+Integrate[u_,x_] := With[{v=SimplifyIntegrand[u,x]}, Integrate[v,x] /; SimplerIntegrandQ[v,u,x]]
+
+Integrate[u_*(e_*Sqrt[a_.+b_*x_^n_.]+f_*Sqrt[c_.+d_*x_^n_.])^m_,x_] := (a*e^2-c*f^2)^m*Integrate[ExpandIntegrand[u*(e*Sqrt[a+b*x^n]-f*Sqrt[c+d*x^n])^(-m),x],x] /;
+FreeQ[{a,b,c,d,e,f,n},x] && ILtQ[m,0] && EqQ[b*e^2-d*f^2,0]
+
+Integrate[u_*(e_*Sqrt[a_.+b_*x_^n_.]+f_*Sqrt[c_.+d_*x_^n_.])^m_,x_] := (b*e^2-d*f^2)^m*Integrate[ExpandIntegrand[u*x^(m*n)*(e*Sqrt[a+b*x^n]-f*Sqrt[c+d*x^n])^(-m),x],x] /;
+FreeQ[{a,b,c,d,e,f,n},x] && ILtQ[m,0] && EqQ[a*e^2-c*f^2,0]
+
+Integrate[u_^m_*(a_*u_^n_+v_)^p_*w_,x_] := Integrate[u^(m+n*p)*(a+u^(-n)*v)^p*w,x] /;
+FreeQ[{a,m,n},x] && IntegerQ[p] && Not[GtQ[n,0]] && Not[FreeQ[v,x]]
+
+Integrate[u_*(a_.+b_*y_)^m_*(c_.+d_*v_)^n_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(a+b*x)^m*(c+d*x)^n,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,c,d,m,n},x] && EqQ[v,y]
+
+Integrate[u_*(a_.+b_*y_)^m_*(c_.+d_*v_)^n_*(e_.+f_*w_)^p_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(a+b*x)^m*(c+d*x)^n*(e+f*x)^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,c,d,e,f,m,n,p},x] && EqQ[v,y] && EqQ[w,y]
+
+Integrate[u_*(a_.+b_*y_)^m_*(c_.+d_*v_)^n_*(e_.+f_*w_)^p_*(g_.+h_*z_)^q_.,x_] := With[{r=DerivativeDivides[y,u,x]}, r*Subst[Integrate[(a+b*x)^m*(c+d*x)^n*(e+f*x)^p*(g+h*x)^q,x],x,y] /; Not[FalseQ[r]]] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n,p,q},x] && EqQ[v,y] && EqQ[w,y] && EqQ[z,y]
+
+Integrate[u_*(a_+b_*y_^n_),x_] := With[{q=DerivativeDivides[y,u,x]}, a*Integrate[u,x] + b*q*Subst[Integrate[x^n,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,n},x]
+
+Integrate[u_*(a_.+b_*y_^n_)^p_,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(a+b*x^n)^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,n,p},x]
+
+Integrate[u_*v_^m_*(a_.+b_*y_^n_)^p_.,x_] := Module[{q,r}, q*r*Subst[Integrate[x^m*(a+b*x^n)^p,x],x,y] /; Not[FalseQ[r=Divides[y^m,v^m,x]]] && Not[FalseQ[q=DerivativeDivides[y,u,x]]]] /;
+FreeQ[{a,b,m,n,p},x]
+
+Integrate[u_*(a_.+b_*y_^n_+c_*v_^n2_.)^p_,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(a+b*x^n+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[n2,2*n] && EqQ[v,y]
+
+Integrate[u_*(A_+B_*y_^n_)(a_.+b_*v_^n_+c_*w_^n2_.)^p_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(A+B*x^n)*(a+b*x^n+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,c,A,B,n,p},x] && EqQ[n2,2*n] && EqQ[v,y] && EqQ[w,y]
+
+Integrate[u_*(A_+B_*y_^n_)(a_.+c_*w_^n2_.)^p_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(A+B*x^n)*(a+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,c,A,B,n,p},x] && EqQ[n2,2*n] && EqQ[w,y]
+
+Integrate[u_*v_^m_*(a_.+b_*y_^n_+c_*w_^n2_.)^p_.,x_] := Module[{q,r}, q*r*Subst[Integrate[x^m*(a+b*x^n+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[r=Divides[y^m,v^m,x]]] && Not[FalseQ[q=DerivativeDivides[y,u,x]]]] /;
+FreeQ[{a,b,c,m,n,p},x] && EqQ[n2,2*n] && EqQ[w,y]
+
+Integrate[u_*z_^m_*(A_+B_*y_^n_)*(a_.+b_*v_^n_+c_*w_^n2_.)^p_.,x_] := Module[{q,r}, q*r*Subst[Integrate[x^m*(A+B*x^n)*(a+b*x^n+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[r=Divides[y^m,z^m,x]]] && Not[FalseQ[q=DerivativeDivides[y,u,x]]]] /;
+FreeQ[{a,b,c,A,B,m,n,p},x] && EqQ[n2,2*n] && EqQ[v,y] && EqQ[w,y]
+
+Integrate[u_*z_^m_*(A_+B_*y_^n_)*(a_.+c_*w_^n2_.)^p_.,x_] := Module[{q,r}, q*r*Subst[Integrate[x^m*(A+B*x^n)*(a+c*x^(2*n))^p,x],x,y] /; Not[FalseQ[r=Divides[y^m,z^m,x]]] && Not[FalseQ[q=DerivativeDivides[y,u,x]]]] /;
+FreeQ[{a,c,A,B,m,n,p},x] && EqQ[n2,2*n] && EqQ[w,y]
+
+Integrate[u_*(a_.+b_*y_^n_)^m_*(c_.+d_*v_^n_)^p_.,x_] := With[{q=DerivativeDivides[y,u,x]}, q*Subst[Integrate[(a+b*x^n)^m*(c+d*x^n)^p,x],x,y] /; Not[FalseQ[q]]] /;
+FreeQ[{a,b,c,d,m,n,p},x] && EqQ[v,y]
+
+Integrate[u_*(a_.+b_*y_^n_)^m_*(c_.+d_*v_^n_)^p_*(e_.+f_*w_^n_)^q_.,x_] := With[{r=DerivativeDivides[y,u,x]}, r*Subst[Integrate[(a+b*x^n)^m*(c+d*x^n)^p*(e+f*x^n)^q,x],x,y] /; Not[FalseQ[r]]] /;
+FreeQ[{a,b,c,d,e,f,m,n,p,q},x] && EqQ[v,y] && EqQ[w,y]
+
+Integrate[u_*F_^v_,x_] := With[{q=DerivativeDivides[v,u,x]}, q*F^v/Log[F] /; Not[FalseQ[q]]] /;
+FreeQ[F,x]
+
+Integrate[u_*w_^m_*F_^v_,x_] := With[{q=DerivativeDivides[v,u,x]}, q*Subst[Integrate[x^m*F^x,x],x,v] /; Not[FalseQ[q]]] /;
+FreeQ[{F,m},x] && EqQ[w,v]
+
+Integrate[u_*(a_+b_*v_^p_*w_^p_.)^m_.,x_] := With[{c=Simplify[u/(w*D[v,x]+v*D[w,x])]}, c*Subst[Integrate[(a+b*x^p)^m,x],x,v*w] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p},x] && IntegerQ[p]
+
+Integrate[u_*(a_+b_*v_^p_*w_^q_.)^m_*v_^r_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]+q*v*D[w,x])]}, c*p/(r+1)*Subst[Integrate[(a+b*x^(p/(r+1)))^m,x],x,v^(r+1)*w] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q,r},x] && EqQ[p,q*(r+1)] && NeQ[r,-1] && IntegerQ[p/(r+1)]
+
+Integrate[u_*(a_+b_*v_^p_*w_^q_.)^m_*v_^r_*w_^s_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]+q*v*D[w,x])]}, c*p/(r+1)*Subst[Integrate[(a+b*x^(p/(r+1)))^m,x],x,v^(r+1)*w^(s+1)] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q,r,s},x] && EqQ[p*(s+1),q*(r+1)] && NeQ[r,-1] && IntegerQ[p/(r+1)]
+
+Integrate[u_*(a_*v_^p_.+b_*w_^q_.)^m_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]-q*v*D[w,x])]}, c*p*Subst[Integrate[(b+a*x^p)^m,x],x,v*w^(m*q+1)] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q},x] && EqQ[p+q*(m*p+1),0] && IntegerQ[p] && IntegerQ[m] (* Integrate[u_*(a_*v_^p_.+b_*w_^q_.)^m_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]-q*v*D[w,x])]}, -c*q*Subst[Integrate[(a+b*x^q)^m,x],x,v^(m*p+1)*w] /; FreeQ[c,x]] /; FreeQ[{a,b,m,p,q},x] && EqQ[p+q*(m*p+1),0] && IntegerQ[q] && IntegerQ[m] *)
+
+Integrate[u_*(a_*v_^p_.+b_*w_^q_.)^m_*v_^r_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]-q*v*D[w,x])]}, -c*q*Subst[Integrate[(a+b*x^q)^m,x],x,v^(m*p+r+1)*w] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q,r},x] && EqQ[p+q*(m*p+r+1),0] && IntegerQ[q] && IntegerQ[m]
+
+Integrate[u_*(a_*v_^p_.+b_*w_^q_.)^m_*w_^s_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]-q*v*D[w,x])]}, -c*q/(s+1)*Subst[Integrate[(a+b*x^(q/(s+1)))^m,x],x,v^(m*p+1)*w^(s+1)] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q,s},x] && EqQ[p*(s+1)+q*(m*p+1),0] && NeQ[s,-1] && IntegerQ[q/(s+1)] && IntegerQ[m]
+
+Integrate[u_*(a_*v_^p_.+b_*w_^q_.)^m_*v_^r_*w_^s_.,x_] := With[{c=Simplify[u/(p*w*D[v,x]-q*v*D[w,x])]}, -c*q/(s+1)*Subst[Integrate[(a+b*x^(q/(s+1)))^m,x],x,v^(m*p+r+1)*w^(s+1)] /; FreeQ[c,x]] /;
+FreeQ[{a,b,m,p,q,r,s},x] && EqQ[p*(s+1)+q*(m*p+r+1),0] && NeQ[s,-1] && IntegerQ[q/(s+1)] && IntegerQ[m]
+
+Integrate[u_*x_^m_.,x_] := 1/(m+1)*Subst[Integrate[SubstFor[x^(m+1),u,x],x],x,x^(m+1)] /;
+FreeQ[m,x] && NeQ[m,-1] && FunctionOfQ[x^(m+1),u,x] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfLinear[u,x]}, ShowStep["\<\>","\<Integrate[F[(a+b*x)^(1/n),x],x]\>", "\<n/b*Subst[Integrate[x^(n-1)*F[x,-a/b+x^n/b],x],x,(a+b*x)^(1/n)]\>",Hold[ lst[[2]]*lst[[4]]*Subst[Integrate[lst[[1]],x],x,lst[[3]]^(1/lst[[2]])]]] /; Not[FalseQ[lst]] && SubstForFractionalPowerQ[u,lst[[3]],x]] /;
+SimplifyFlag,
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfLinear[u,x]}, lst[[2]]*lst[[4]]*Subst[Integrate[lst[[1]],x],x,lst[[3]]^(1/lst[[2]])] /; Not[FalseQ[lst]] && SubstForFractionalPowerQ[u,lst[[3]],x]]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfQuotientOfLinears[u,x]}, ShowStep["\<\>","\<Integrate[F[((a+b*x)/(c+d*x))^(1/n),x],x]\>",
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfQuotientOfLinears[u,x]}, lst[[2]]*lst[[4]]*Subst[Integrate[lst[[1]],x],x,lst[[3]]^(1/lst[[2]])] /; Not[FalseQ[lst]]]]
+
+Integrate[u_*(a_*v_^m_*w_^n_*z_^q_.)^p_,x_] := a^IntPart[p]*(a*v^m*w^n*z^q)^FracPart[p]/(v^(m*FracPart[p])*w^(n*FracPart[p])*z^(q*FracPart[p]))*Integrate[u*v^(m*p)*w^(n*p)*z^(p*q),x] /;
+FreeQ[{a,m,n,p,q},x] && Not[IntegerQ[p]] && Not[FreeQ[v,x]] && Not[FreeQ[w,x]] && Not[FreeQ[z,x]]
+
+Integrate[u_*(a_*v_^m_*w_^n_.)^p_,x_] := a^IntPart[p]*(a*v^m*w^n)^FracPart[p]/(v^(m*FracPart[p])*w^(n*FracPart[p]))*Integrate[u*v^(m*p)*w^(n*p),x] /;
+FreeQ[{a,m,n,p},x] && Not[IntegerQ[p]] && Not[FreeQ[v,x]] && Not[FreeQ[w,x]]
+
+Integrate[u_*(a_*v_^m_.)^p_,x_] := a^IntPart[p]*(a*v^m)^FracPart[p]/v^(m*FracPart[p])*Integrate[u*v^(m*p),x] /;
+FreeQ[{a,m,p},x] && Not[IntegerQ[p]] && Not[FreeQ[v,x]] && Not[EqQ[a,1] && EqQ[m,1]] && Not[EqQ[v,x] && EqQ[m,1]]
+
+Integrate[u_*(a_.+b_*x_^n_)^p_,x_] := b^IntPart[p]*(a+b*x^n)^FracPart[p]/(x^(n*FracPart[p])*(1+a*x^(-n)/b)^FracPart[p])*Integrate[u*x^(n*p)*(1+a*x^(-n)/b)^p,x] /;
+FreeQ[{a,b,p},x] && Not[IntegerQ[p]] && ILtQ[n,0] && Not[RationalFunctionQ[u,x]] && IntegerQ[p+1/2]
+
+Integrate[u_*(a_.+b_*v_^n_)^p_,x_] := (a+b*v^n)^FracPart[p]/(v^(n*FracPart[p])*(b+a*v^(-n))^FracPart[p])*Integrate[u*v^(n*p)*(b+a*v^(-n))^p,x] /;
+FreeQ[{a,b,p},x] && Not[IntegerQ[p]] && ILtQ[n,0] && BinomialQ[v,x] && Not[LinearQ[v,x]]
+
+Integrate[u_*(a_.+b_*x_^m_*v_^n_)^p_,x_] := (a+b*x^m*v^n)^FracPart[p]/(v^(n*FracPart[p])*(b*x^m+a*v^(-n))^FracPart[p])*Integrate[u*v^(n*p)*(b*x^m+a*v^(-n))^p,x] /;
+FreeQ[{a,b,m,p},x] && Not[IntegerQ[p]] && ILtQ[n,0] && BinomialQ[v,x]
+
+Integrate[u_*(a_*x_^r_.+b_*x_^s_.)^m_,x_] := With[{v=(a*x^r+b*x^s)^FracPart[m]/(x^(r*FracPart[m])*(a+b*x^(s-r))^FracPart[m])}, v*Integrate[u*x^(m*r)*(a+b*x^(s-r))^m,x] /; NeQ[Simplify[v],1]] /;
+FreeQ[{a,b,m,r,s},x] && Not[IntegerQ[m]] && PosQ[s-r]
+
+Integrate[u_/(a_+b_*x_^n_),x_] := With[{v=RationalFunctionExpand[u/(a+b*x^n),x]}, Integrate[v,x] /; SumQ[v]] /;
+FreeQ[{a,b},x] && IGtQ[n,0]
+
+Integrate[u_*(a_.+b_*x_^n_.+c_*x_^n2_.)^p_.,x_] := 1/(4^p*c^p)*Integrate[u*(b+2*c*x^n)^(2*p),x] /;
+FreeQ[{a,b,c,n},x] && EqQ[n2,2*n] && EqQ[b^2-4*a*c,0] && IntegerQ[p] && Not[AlgebraicFunctionQ[u,x]]
+
+Integrate[u_*(a_.+b_*x_^n_.+c_*x_^n2_.)^p_,x_] := (a+b*x^n+c*x^(2*n))^p/(b+2*c*x^n)^(2*p)*Integrate[u*(b+2*c*x^n)^(2*p),x] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[n2,2*n] && EqQ[b^2-4*a*c,0] && Not[IntegerQ[p]] && Not[AlgebraicFunctionQ[u,x]]
+
+Integrate[u_/(a_.+b_*x_^n_.+c_*x_^n2_.),x_] := With[{v=RationalFunctionExpand[u/(a+b*x^n+c*x^(2*n)),x]}, Integrate[v,x] /; SumQ[v]] /;
+FreeQ[{a,b,c},x] && EqQ[n2,2*n] && IGtQ[n,0]
+
+Integrate[u_./(a_*x_^m_.+b_*Sqrt[c_*x_^n_]),x_] := Integrate[u*(a*x^m-b*Sqrt[c*x^n])/(a^2*x^(2*m)-b^2*c*x^n),x] /;
+FreeQ[{a,b,c,m,n},x] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=FunctionOfLinear[u,x]}, ShowStep["\<\>","\<Integrate[F[a+b*x],x]\>","\<Subst[Integrate[F[x],x],x,a+b*x]/b\>",Hold[ Dist[1/lst[[3]],Subst[Integrate[lst[[1]],x],x,lst[[2]]+lst[[3]]*x],x]]] /; Not[FalseQ[lst]]] /;
+SimplifyFlag,
+
+Integrate[u_,x_] := With[{lst=FunctionOfLinear[u,x]}, Dist[1/lst[[3]],Subst[Integrate[lst[[1]],x],x,lst[[2]]+lst[[3]]*x],x] /; Not[FalseQ[lst]]]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_/x_,x_] := With[{lst=PowerVariableExpn[u,0,x]}, ShowStep["\<\>","\<Integrate[F[(c*x)^n]/x,x]\>","\<Subst[Integrate[F[x]/x,x],x,(c*x)^n]/n\>",Hold[ 1/lst[[2]]*Subst[Integrate[NormalizeIntegrand[Simplify[lst[[1]]/x],x],x],x,(lst[[3]]*x)^lst[[2]]]]] /; Not[FalseQ[lst]] && NeQ[lst[[2]],0]] /;
+SimplifyFlag && NonsumQ[u] && Not[RationalFunctionQ[u,x]],
+
+Integrate[u_/x_,x_] := With[{lst=PowerVariableExpn[u,0,x]}, 1/lst[[2]]*Subst[Integrate[NormalizeIntegrand[Simplify[lst[[1]]/x],x],x],x,(lst[[3]]*x)^lst[[2]]] /; Not[FalseQ[lst]] && NeQ[lst[[2]],0]] /;
+NonsumQ[u] && Not[RationalFunctionQ[u,x]]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_*x_^m_.,x_] := With[{lst=PowerVariableExpn[u,m+1,x]}, ShowStep["\<If g=GCD[m+1,n]>1,\>","\<Integrate[x^m*F[x^n],x]\>", "\<1/g*Subst[Integrate[x^((m+1)/g-1)*F[x^(n/g)],x],x,x^g]\>",Hold[ 1/lst[[2]]*Subst[Integrate[NormalizeIntegrand[Simplify[lst[[1]]/x],x],x],x,(lst[[3]]*x)^lst[[2]]]]] /; Not[FalseQ[lst]] && NeQ[lst[[2]],m+1]] /;
+SimplifyFlag && IntegerQ[m] && NeQ[m,-1] && NonsumQ[u] && (GtQ[m,0] || Not[AlgebraicFunctionQ[u,x]]),
+
+Integrate[u_*x_^m_.,x_] := With[{lst=PowerVariableExpn[u,m+1,x]}, 1/lst[[2]]*Subst[Integrate[NormalizeIntegrand[Simplify[lst[[1]]/x],x],x],x,(lst[[3]]*x)^lst[[2]]] /; Not[FalseQ[lst]] && NeQ[lst[[2]],m+1]] /;
+IntegerQ[m] && NeQ[m,-1] && NonsumQ[u] && (GtQ[m,0] || Not[AlgebraicFunctionQ[u,x]])]
+
+Integrate[x_^m_*u_,x_] := With[{k=Denominator[m]}, k*Subst[Integrate[x^(k*(m+1)-1)*ReplaceAll[u,xRulex^k],x],x,x^(1/k)]] /;
+FractionQ[m] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, ShowStep["\<\>","\<Integrate[F[Sqrt[a+b*x+c*x^2],x],x]\>", "\<2*Subst[Integrate[F[(c*Sqrt[a]-b*x+Sqrt[a]*x^2)/(c-x^2),(-b+2*Sqrt[a]\
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, 2*Subst[Integrate[lst[[1]],x],x,lst[[2]]] /; Not[FalseQ[lst]] && EqQ[lst[[3]],1]] /;
+EulerIntegrandQ[u,x]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, ShowStep["\<\>","\<Integrate[F[Sqrt[a+b*x+c*x^2],x],x]\>", "\<2*Subst[Integrate[F[(a*Sqrt[c]+b*x+Sqrt[c]*x^2)/(b+2*Sqrt[c]*x),(-a+\
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, 2*Subst[Integrate[lst[[1]],x],x,lst[[2]]] /; Not[FalseQ[lst]] && EqQ[lst[[3]],2]] /;
+EulerIntegrandQ[u,x]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, ShowStep["\<\>","\<Integrate[F[Sqrt[a+b*x+c*x^2],x],x]\>", "\<-2*Sqrt[b^2-4*a*c]*Subst[Integrate[F[-Sqrt[b^2-4*a*c]*x/(c-x^2), \ (b*c+c*Sqrt[b^2-4*a*c]+(-b+Sqrt[b^2-4*a*c])*x^2)/(-2*c*(c-x^2))]*x/(c-x^\
+
+Integrate[u_,x_] := With[{lst=FunctionOfSquareRootOfQuadratic[u,x]}, 2*Subst[Integrate[lst[[1]],x],x,lst[[2]]] /; Not[FalseQ[lst]] && EqQ[lst[[3]],3]] /;
+EulerIntegrandQ[u,x]]
+
+Integrate[1/(a_+b_*v_^n_),x_] := Dist[2/(a*n),Sum[Integrate[Together[1/(1-v^2/((-1)^(4*k/n)*Rt[-a/b,n/2]))],x],{k,1,n/2}],x] /;
+FreeQ[{a,b},x] && IGtQ[n/2,1]
+
+Integrate[1/(a_+b_*v_^n_),x_] := Dist[1/(a*n),Sum[Integrate[Together[1/(1-v/((-1)^(2*k/n)*Rt[-a/b,n]))],x],{k,1,n}],x] /;
+FreeQ[{a,b},x] && IGtQ[(n-1)/2,0]
+
+Integrate[v_/(a_+b_*u_^n_.),x_] := Integrate[ReplaceAll[ExpandIntegrand[PolynomialInSubst[v,u,x]/(a+b*x^n),x],xRuleu],x] /;
+FreeQ[{a,b},x] && IGtQ[n,0] && PolynomialInQ[v,u,x]
+
+Integrate[u_,x_] := With[{v=NormalizeIntegrand[u,x]}, Integrate[v,x] /; v=!=u]
+
+Integrate[u_,x_] := With[{v=ExpandIntegrand[u,x]}, Integrate[v,x] /; SumQ[v]]
+
+Integrate[u_*(a_.+b_*x_^m_.)^p_*(c_.+d_*x_^n_.)^q_., x_] := (a+b*x^m)^p*(c+d*x^n)^q/x^(m*p)*Integrate[u*x^(m*p),x] /;
+FreeQ[{a,b,c,d,m,n,p,q},x] && EqQ[a+d,0] && EqQ[b+c,0] && EqQ[m+n,0] && EqQ[p+q,0]
+
+Integrate[u_*(a_+b_*x_^n_.+c_*x_^n2_.)^p_, x_] := Sqrt[a+b*x^n+c*x^(2*n)]/((4*c)^(p-1/2)*(b+2*c*x^n))*Integrate[u*(b+2*c*x^n)^(2*p),x] /;
+FreeQ[{a,b,c,n,p},x] && EqQ[n2,2*n] && EqQ[b^2-4*a*c,0] && IntegerQ[p-1/2] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfLinear[u,x]}, ShowStep["\<\>","\<Integrate[F[(a+b*x)^(1/n),x],x]\>", "\<n/b*Subst[Integrate[x^(n-1)*F[x,-a/b+x^n/b],x],x,(a+b*x)^(1/n)]\>",Hold[ lst[[2]]*lst[[4]]*Subst[Integrate[lst[[1]],x],x,lst[[3]]^(1/lst[[2]])]]] /; Not[FalseQ[lst]]] /;
+SimplifyFlag,
+
+Integrate[u_,x_] := With[{lst=SubstForFractionalPowerOfLinear[u,x]}, lst[[2]]*lst[[4]]*Subst[Integrate[lst[[1]],x],x,lst[[3]]^(1/lst[[2]])] /; Not[FalseQ[lst]]]]
+
+Integrate[u_,x_] := CannotIntegrate[u,x]
+

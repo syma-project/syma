@@ -1,0 +1,2010 @@
+(* Integrate rules: 5 Inverse trig functions *)
+(* Source: Rubi-4.16.1.0, 669 rules from 15 files *)
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_.,x_] := x*(a+b*ArcSin[c*x])^n -    b*c*n*Integrate[x*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && GtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_.,x_] := x*(a+b*ArcCos[c*x])^n +    b*c*n*Integrate[x*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && GtQ[n,0]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_,x_] := Sqrt[1-c^2*x^2]*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) + c/(b*(n+1))*Integrate[x*(a+b*ArcSin[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && LtQ[n,-1]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_,x_] := -Sqrt[1-c^2*x^2]*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) - c/(b*(n+1))*Integrate[x*(a+b*ArcCos[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && LtQ[n,-1]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_,x_] := 1/(b*c)*Subst[Integrate[x^n*Cos[-a/b+x/b],x],x,a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_,x_] := -1/(b*c)*Subst[Integrate[x^n*Sin[-a/b+x/b],x],x,a+b*ArcCos[c*x]] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./x_,x_] := Subst[Integrate[(a+b*x)^n*Cot[x],x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c},x] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./x_,x_] := -Subst[Integrate[(a+b*x)^n*Tan[x],x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c},x] && IGtQ[n,0]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (d*x)^(m+1)*(a+b*ArcSin[c*x])^n/(d*(m+1)) -    b*c*n/(d*(m+1))*Integrate[(d*x)^(m+1)*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,m},x] && IGtQ[n,0] && NeQ[m,-1]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (d*x)^(m+1)*(a+b*ArcCos[c*x])^n/(d*(m+1)) +    b*c*n/(d*(m+1))*Integrate[(d*x)^(m+1)*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,m},x] && IGtQ[n,0] && NeQ[m,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := x^(m+1)*(a+b*ArcSin[c*x])^n/(m+1) -    b*c*n/(m+1)*Integrate[x^(m+1)*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && GtQ[n,0]
+
+Integrate[x_^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := x^(m+1)*(a+b*ArcCos[c*x])^n/(m+1) +    b*c*n/(m+1)*Integrate[x^(m+1)*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && GtQ[n,0]
+
+Integrate[x_^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := x^m*Sqrt[1-c^2*x^2]*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) - 1/(b^2*c^(m+1)*(n+1))*Subst[Integrate[ExpandTrigReduce[x^(n+1),Sin[-a/b+x/b]^(m-1)*(m-(m+1)*Sin[-a/b+x/b]^2),x],x],x,a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && GeQ[n,-2] && LtQ[n,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -x^m*Sqrt[1-c^2*x^2]*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) - 1/(b^2*c^(m+1)*(n+1))*Subst[Integrate[ExpandTrigReduce[x^(n+1),Cos[-a/b+x/b]^(m-1)*(m-(m+1)*Cos[-a/b+x/b]^2),x],x],x,a+b*ArcCos[c*x]] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && GeQ[n,-2] && LtQ[n,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := x^m*Sqrt[1-c^2*x^2]*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) - m/(b*c*(n+1))*Integrate[x^(m-1)*(a+b*ArcSin[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] + c*(m+1)/(b*(n+1))*Integrate[x^(m+1)*(a+b*ArcSin[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && LtQ[n,-2]
+
+Integrate[x_^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -x^m*Sqrt[1-c^2*x^2]*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) + m/(b*c*(n+1))*Integrate[x^(m-1)*(a+b*ArcCos[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] - c*(m+1)/(b*(n+1))*Integrate[x^(m+1)*(a+b*ArcCos[c*x])^(n+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c},x] && IGtQ[m,0] && LtQ[n,-2]
+
+Integrate[x_^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := 1/(b*c^(m+1))*Subst[Integrate[x^n*Sin[-a/b+x/b]^m*Cos[-a/b+x/b],x],x,a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c,n},x] && IGtQ[m,0]
+
+Integrate[x_^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -1/(b*c^(m+1))*Subst[Integrate[x^n*Cos[-a/b+x/b]^m*Sin[-a/b+x/b],x],x,a+b*ArcCos[c*x]] /;
+FreeQ[{a,b,c,n},x] && IGtQ[m,0]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Unintegrable[(d*x)^m*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,m,n},x]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Unintegrable[(d*x)^m*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,m,n},x]
+
+Integrate[1/(Sqrt[d_+e_*x_^2]*(a_.+b_*ArcSin[c_*x_])),x_] := 1/(b*c)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Log[a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0]
+
+Integrate[1/(Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCos[c_*x_])),x_] := -1/(b*c)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Log[a+b*ArcCos[c*x]]/(b*c*Sqrt[d]) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := 1/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*(a+b*ArcSin[c*x])^(n+1) /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && NeQ[n,-1]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := -1/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*(a+b*ArcCos[c*x])^(n+1) /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && NeQ[n,-1]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[Sqrt[d_+e_*x_^2]*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := x*Sqrt[d+e*x^2]*(a+b*ArcSin[c*x])^n/2 -    b*c*n/2*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[x*(a+b*ArcSin[c*x])^(n-1),x] +    1/2*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(a+b*ArcSin[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0]
+
+Integrate[Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := x*Sqrt[d+e*x^2]*(a+b*ArcCos[c*x])^n/2 +    b*c*n/2*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[x*(a+b*ArcCos[c*x])^(n-1),x] +    1/2*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(a+b*ArcCos[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := x*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n/(2*p+1) + 2*d*p/(2*p+1)*Integrate[(d+e*x^2)^(p-1)*(a+b*ArcSin[c*x])^n,x] -    b*c*n/(2*p+1)*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := x*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n/(2*p+1) + 2*d*p/(2*p+1)*Integrate[(d+e*x^2)^(p-1)*(a+b*ArcCos[c*x])^n,x] +    b*c*n/(2*p+1)*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./(d_+e_*x_^2)^(3/2),x_] := x*(a+b*ArcSin[c*x])^n/(d*Sqrt[d+e*x^2]) -    b*c*n/d*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[x*(a+b*ArcSin[c*x])^(n-1)/(1-c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./(d_+e_*x_^2)^(3/2),x_] := x*(a+b*ArcCos[c*x])^n/(d*Sqrt[d+e*x^2]) +    b*c*n/d*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[x*(a+b*ArcCos[c*x])^(n-1)/(1-c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := -x*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(2*d*(p+1)) + (2*p+3)/(2*d*(p+1))*Integrate[(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n,x] +    b*c*n/(2*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && NeQ[p,-3/2]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -x*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(2*d*(p+1)) + (2*p+3)/(2*d*(p+1))*Integrate[(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n,x] -    b*c*n/(2*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && NeQ[p,-3/2]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./(d_+e_*x_^2),x_] := 1/(c*d)*Subst[Integrate[(a+b*x)^n*Sec[x],x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./(d_+e_*x_^2),x_] := -1/(c*d)*Subst[Integrate[(a+b*x)^n*Csc[x],x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0] (* Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := d^p*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) + c*d^p*(2*p+1)/(b*(n+1))*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] /; FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && (IntegerQ[p] || GtQ[d,0]) *) (* Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -d^p*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) - c*d^p*(2*p+1)/(b*(n+1))*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] /; FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && (IntegerQ[p] || GtQ[d,0]) *)
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) + c*(2*p+1)/(b*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) - c*(2*p+1)/(b*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[x*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := 1/(b*c)*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Subst[Integrate[x^n*Cos[-a/b+x/b]^(2*p+1),x],x,a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && IGtQ[2*p,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -1/(b*c)*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Subst[Integrate[x^n*Sin[-a/b+x/b]^(2*p+1),x],x,a+b*ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && IGtQ[2*p,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d+e,0] && (IGtQ[p,0] || ILtQ[p+1/2,0])
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d+e,0] && (IGtQ[p,0] || ILtQ[p+1/2,0])
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcSin[c*x])^n,(d+e*x^2)^p,x],x] /;
+FreeQ[{a,b,c,d,e,n},x] && NeQ[c^2*d+e,0] && IntegerQ[p] && (GtQ[p,0] || IGtQ[n,0])
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCos[c*x])^n,(d+e*x^2)^p,x],x] /;
+FreeQ[{a,b,c,d,e,n},x] && NeQ[c^2*d+e,0] && IntegerQ[p] && (GtQ[p,0] || IGtQ[n,0])
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Unintegrable[(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,n,p},x]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Unintegrable[(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,n,p},x]
+
+Integrate[(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (-d^2*g/e)^q*Integrate[(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0] && GtQ[d,0] && LtQ[g/e,0]
+
+Integrate[(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (-d^2*g/e)^q*Integrate[(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0] && GtQ[d,0] && LtQ[g/e,0]
+
+Integrate[(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (d+e*x)^q*(f+g*x)^q/(1-c^2*x^2)^q*Integrate[(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0]
+
+Integrate[(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (d+e*x)^q*(f+g*x)^q/(1-c^2*x^2)^q*Integrate[(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0]
+
+Integrate[x_*(a_.+b_*ArcSin[c_*x_])^n_./(d_+e_*x_^2),x_] := -1/e*Subst[Integrate[(a+b*x)^n*Tan[x],x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0]
+
+Integrate[x_*(a_.+b_*ArcCos[c_*x_])^n_./(d_+e_*x_^2),x_] := 1/e*Subst[Integrate[(a+b*x)^n*Cot[x],x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0]
+
+Integrate[x_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(2*e*(p+1)) +    b*n/(2*c*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && NeQ[p,-1]
+
+Integrate[x_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(2*e*(p+1)) -    b*n/(2*c*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && NeQ[p,-1]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./(x_*(d_+e_*x_^2)),x_] := 1/d*Subst[Integrate[(a+b*x)^n/(Cos[x]*Sin[x]),x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./(x_*(d_+e_*x_^2)),x_] := -1/d*Subst[Integrate[(a+b*x)^n/(Cos[x]*Sin[x]),x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(d*f*(m+1)) -    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && EqQ[m+2*p+3,0] && NeQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(d*f*(m+1)) +    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && EqQ[m+2*p+3,0] && NeQ[m,-1]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])/x_,x_] := (d+e*x^2)^p*(a+b*ArcSin[c*x])/(2*p) - b*c*d^p/(2*p)*Integrate[(1-c^2*x^2)^(p-1/2),x] + d*Integrate[(d+e*x^2)^(p-1)*(a+b*ArcSin[c*x])/x,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])/x_,x_] := (d+e*x^2)^p*(a+b*ArcCos[c*x])/(2*p) + b*c*d^p/(2*p)*Integrate[(1-c^2*x^2)^(p-1/2),x] + d*Integrate[(d+e*x^2)^(p-1)*(a+b*ArcCos[c*x])/x,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcSin[c*x])/(f*(m+1)) -    b*c*d^p/(f*(m+1))*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2),x] - 2*e*p/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^(p-1)*(a+b*ArcSin[c*x]),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && IGtQ[p,0] && ILtQ[(m+1)/2,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcCos[c*x])/(f*(m+1)) +    b*c*d^p/(f*(m+1))*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2),x] - 2*e*p/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^(p-1)*(a+b*ArcCos[c*x]),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && IGtQ[p,0] && ILtQ[(m+1)/2,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && IGtQ[p,0]
+
+Integrate[x_^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[x^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[SimplifyIntegrand[u/Sqrt[d+e*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2] && NeQ[p,-1/2] && (IGtQ[(m+1)/2,0] || ILtQ[(m+2*p+3)/2,0])
+
+Integrate[x_^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[x^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[SimplifyIntegrand[u/Sqrt[d+e*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2] && NeQ[p,-1/2] && (IGtQ[(m+1)/2,0] || ILtQ[(m+2*p+3)/2,0])
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcSin[c*x])^n/(f*(m+1)) - b*c*n/(f*(m+1))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+1)*(a+b*ArcSin[c*x])^(n-1),x] + c^2/(f^2*(m+1))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+2)*(a+b*ArcSin[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcCos[c*x])^n/(f*(m+1)) + b*c*n/(f*(m+1))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+1)*(a+b*ArcCos[c*x])^(n-1),x] + c^2/(f^2*(m+1))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+2)*(a+b*ArcCos[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcSin[c*x])^n/(f*(m+2)) - b*c*n/(f*(m+2))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+1)*(a+b*ArcSin[c*x])^(n-1),x] + 1/(m+2)*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^m*(a+b*ArcSin[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && (IGtQ[m,-2] || EqQ[n,1])
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcCos[c*x])^n/(f*(m+2)) + b*c*n/(f*(m+2))*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^(m+1)*(a+b*ArcCos[c*x])^(n-1),x] + 1/(m+2)*Simp[Sqrt[d+e*x^2]/Sqrt[1-c^2*x^2]]*Integrate[(f*x)^m*(a+b*ArcCos[c*x])^n/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && (IGtQ[m,-2] || EqQ[n,1])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n/(f*(m+1)) - 2*e*p/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^(p-1)*(a+b*ArcSin[c*x])^n,x] -    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n/(f*(m+1)) - 2*e*p/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^(p-1)*(a+b*ArcCos[c*x])^n,x] +    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n/(f*(m+2*p+1)) + 2*d*p/(m+2*p+1)*Integrate[(f*x)^m*(d+e*x^2)^(p-1)*(a+b*ArcSin[c*x])^n,x] -    b*c*n/(f*(m+2*p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0] && Not[LtQ[m,-1]]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n/(f*(m+2*p+1)) + 2*d*p/(m+2*p+1)*Integrate[(f*x)^m*(d+e*x^2)^(p-1)*(a+b*ArcCos[c*x])^n,x] +    b*c*n/(f*(m+2*p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && GtQ[p,0] && Not[LtQ[m,-1]]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(d*f*(m+1)) + c^2*(m+2*p+3)/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,x] -    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && ILtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(d*f*(m+1)) + c^2*(m+2*p+3)/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,x] +    b*c*n/(f*(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && ILtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := f*(f*x)^(m-1)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(2*e*(p+1)) - f^2*(m-1)/(2*e*(p+1))*Integrate[(f*x)^(m-2)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n,x] + b*f*n/(2*c*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && IGtQ[m,1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := f*(f*x)^(m-1)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(2*e*(p+1)) - f^2*(m-1)/(2*e*(p+1))*Integrate[(f*x)^(m-2)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n,x] - b*f*n/(2*c*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && IGtQ[m,1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := -(f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(2*d*f*(p+1)) + (m+2*p+3)/(2*d*(p+1))*Integrate[(f*x)^m*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n,x] + b*c*n/(2*f*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && Not[GtQ[m,1]] && (IntegerQ[m] || IntegerQ[p] || EqQ[n,1])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -(f*x)^(m+1)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(2*d*f*(p+1)) + (m+2*p+3)/(2*d*(p+1))*Integrate[(f*x)^m*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n,x] - b*c*n/(2*f*(p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && LtQ[p,-1] && Not[GtQ[m,1]] && (IntegerQ[m] || IntegerQ[p] || EqQ[n,1])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := f*(f*x)^(m-1)*(d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])^n/(e*(m+2*p+1)) + f^2*(m-1)/(c^2*(m+2*p+1))*Integrate[(f*x)^(m-2)*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,x] + b*f*n/(c*(m+2*p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && IGtQ[m,1] && NeQ[m+2*p+1,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := f*(f*x)^(m-1)*(d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])^n/(e*(m+2*p+1)) + f^2*(m-1)/(c^2*(m+2*p+1))*Integrate[(f*x)^(m-2)*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,x] - b*f*n/(c*(m+2*p+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n-1),x] /;
+FreeQ[{a,b,c,d,e,f,p},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && IGtQ[m,1] && NeQ[m+2*p+1,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := (f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) - f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && EqQ[m+2*p+1,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -(f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) + f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && EqQ[m+2*p+1,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := (f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) - f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] + c*(m+2*p+1)/(b*f*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && IGtQ[2*p,0] && NeQ[m+2*p+1,0] && IGtQ[m,-3]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -(f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) + f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] - c*(m+2*p+1)/(b*f*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && IGtQ[2*p,0] && NeQ[m+2*p+1,0] && IGtQ[m,-3] (* Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := (f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcSin[c*x])^(n+1)/(b*c*(n+1)) - f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n+1),x] + c*(2*p+1)/(b*f*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcSin[c*x])^(n+1),x] /; FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && IntegerQ[2*p] && NeQ[p,-1/2] && IGtQ[m,-3] *) (* Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -(f*x)^m*Sqrt[1-c^2*x^2]*(d+e*x^2)^p*(a+b*ArcCos[c*x])^(n+1)/(b*c*(n+1)) + f*m/(b*c*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m-1)*(1-c^2*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n+1),x] - c*(2*p+1)/(b*f*(n+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f*x)^(m+1)*(1-c^2*x^2)^(p-1/2)*(a+b*ArcCos[c*x])^(n+1),x] /; FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && LtQ[n,-1] && IntegerQ[2*p] && NeQ[p,-1/2] && IGtQ[m,-3] *)
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := f*(f*x)^(m-1)*Sqrt[d+e*x^2]*(a+b*ArcSin[c*x])^n/(e*m) +    b*f*n/(c*m)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[(f*x)^(m-1)*(a+b*ArcSin[c*x])^(n-1),x] +    f^2*(m-1)/(c^2*m)*Integrate[((f*x)^(m-2)*(a+b*ArcSin[c*x])^n)/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && IGtQ[m,1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := f*(f*x)^(m-1)*Sqrt[d+e*x^2]*(a+b*ArcCos[c*x])^n/(e*m) -    b*f*n/(c*m)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[(f*x)^(m-1)*(a+b*ArcCos[c*x])^(n-1),x] +    f^2*(m-1)/(c^2*m)*Integrate[((f*x)^(m-2)*(a+b*ArcCos[c*x])^n)/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[c^2*d+e,0] && GtQ[n,0] && IGtQ[m,1]
+
+Integrate[x_^m_*(a_.+b_*ArcSin[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := 1/c^(m+1)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Subst[Integrate[(a+b*x)^n*Sin[x]^m,x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[x_^m_*(a_.+b_*ArcCos[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := -1/c^(m+1)*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Subst[Integrate[(a+b*x)^n*Cos[x]^m,x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[c^2*d+e,0] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcSin[c_*x_])/Sqrt[d_+e_*x_^2],x_] := (f*x)^(m+1)/(f*(m+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*(a+b*ArcSin[c*x])* Hypergeometric2F1[1/2,(1+m)/2,(3+m)/2,c^2*x^2] - b*c*(f*x)^(m+2)/(f^2*(m+1)*(m+2))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]* HypergeometricPFQ[{1,1+m/2,1+m/2},{3/2+m/2,2+m/2},c^2*x^2] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && Not[IntegerQ[m]]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCos[c_*x_])/Sqrt[d_+e_*x_^2],x_] := (f*x)^(m+1)/(f*(m+1))*(a+b*ArcCos[c*x])*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]* Hypergeometric2F1[1/2,(1+m)/2,(3+m)/2,c^2*x^2] + b*c*(f*x)^(m+2)/(f^2*(m+1)*(m+2))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]* HypergeometricPFQ[{1,1+m/2,1+m/2},{3/2+m/2,2+m/2},c^2*x^2] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && Not[IntegerQ[m]]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_/Sqrt[d_+e_*x_^2],x_] := (f*x)^m/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*(a+b*ArcSin[c*x])^(n+1) - f*m/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[(f*x)^(m-1)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && LtQ[n,-1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_/Sqrt[d_+e_*x_^2],x_] := -(f*x)^m/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*(a+b*ArcCos[c*x])^(n+1) + f*m/(b*c*(n+1))*Simp[Sqrt[1-c^2*x^2]/Sqrt[d+e*x^2]]*Integrate[(f*x)^(m-1)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[c^2*d+e,0] && LtQ[n,-1]
+
+Integrate[x_^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := 1/(b*c^(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Subst[Integrate[x^n*Sin[-a/b+x/b]^m*Cos[-a/b+x/b]^(2*p+1),x],x,a+b*ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && IGtQ[2*p+2,0] && IGtQ[m,0]
+
+Integrate[x_^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -1/(b*c^(m+1))*Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]* Subst[Integrate[x^n*Cos[-a/b+x/b]^m*Sin[-a/b+x/b]^(2*p+1),x],x,a+b*ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && EqQ[c^2*d+e,0] && IGtQ[2*p+2,0] && IGtQ[m,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcSin[c*x])^n/Sqrt[d+e*x^2],(f*x)^m*(d+e*x^2)^(p+1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,m,n},x] && EqQ[c^2*d+e,0] && IGtQ[p+1/2,0] && Not[IGtQ[(m+1)/2,0]] && (EqQ[m,-1] || EqQ[m,-2])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCos[c*x])^n/Sqrt[d+e*x^2],(f*x)^m*(d+e*x^2)^(p+1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,m,n},x] && EqQ[c^2*d+e,0] && IGtQ[p+1/2,0] && Not[IGtQ[(m+1)/2,0]] && (EqQ[m,-1] || EqQ[m,-2])
+
+Integrate[x_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := (d+e*x^2)^(p+1)*(a+b*ArcSin[c*x])/(2*e*(p+1)) - b*c/(2*e*(p+1))*Integrate[(d+e*x^2)^(p+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,p},x] && NeQ[c^2*d+e,0] && NeQ[p,-1]
+
+Integrate[x_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := (d+e*x^2)^(p+1)*(a+b*ArcCos[c*x])/(2*e*(p+1)) + b*c/(2*e*(p+1))*Integrate[(d+e*x^2)^(p+1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,p},x] && NeQ[c^2*d+e,0] && NeQ[p,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && NeQ[c^2*d+e,0] && IntegerQ[p] && (GtQ[p,0] || IGtQ[(m-1)/2,0] && LeQ[m+p,0])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && NeQ[c^2*d+e,0] && IntegerQ[p] && (GtQ[p,0] || IGtQ[(m-1)/2,0] && LeQ[m+p,0])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcSin[c*x])^n,(f*x)^m*(d+e*x^2)^p,x],x] /;
+FreeQ[{a,b,c,d,e,f},x] && NeQ[c^2*d+e,0] && IGtQ[n,0] && IntegerQ[p] && IntegerQ[m]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCos[c*x])^n,(f*x)^m*(d+e*x^2)^p,x],x] /;
+FreeQ[{a,b,c,d,e,f},x] && NeQ[c^2*d+e,0] && IGtQ[n,0] && IntegerQ[p] && IntegerQ[m]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Unintegrable[(f*x)^m*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,m,n,p},x]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Unintegrable[(f*x)^m*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,m,n,p},x]
+
+Integrate[(h_*x_)^m_*(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (-d^2*g/e)^q*Integrate[(h*x)^m*(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0] && GtQ[d,0] && LtQ[g/e,0]
+
+Integrate[(h_*x_)^m_*(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (-d^2*g/e)^q*Integrate[(h*x)^m*(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0] && GtQ[d,0] && LtQ[g/e,0]
+
+Integrate[(h_*x_)^m_*(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (-d^2*g/e)^IntPart[q]*(d+e*x)^FracPart[q]*(f+g*x)^FracPart[q]/(1-c^2*x^2)^FracPart[q]* Integrate[(h*x)^m*(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0]
+
+Integrate[(h_*x_)^m_*(d_+e_*x_)^p_*(f_+g_*x_)^q_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (-d^2*g/e)^IntPart[q]*(d+e*x)^FracPart[q]*(f+g*x)^FracPart[q]/(1-c^2*x^2)^FracPart[q]* Integrate[(h*x)^m*(d+e*x)^(p-q)*(1-c^2*x^2)^q*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[e*f+d*g,0] && EqQ[c^2*d^2-e^2,0] && HalfIntegerQ[p,q] && GeQ[p-q,0]
+
+Integrate[(a_.+b_*ArcSin[c_*x_])^n_./(d_+e_*x_),x_] := Subst[Integrate[(a+b*x)^n*Cos[x]/(c*d+e*Sin[x]),x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCos[c_*x_])^n_./(d_+e_*x_),x_] := -Subst[Integrate[(a+b*x)^n*Sin[x]/(c*d+e*Cos[x]),x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[n,0]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (d+e*x)^(m+1)*(a+b*ArcSin[c*x])^n/(e*(m+1)) -    b*c*n/(e*(m+1))*Integrate[(d+e*x)^(m+1)*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,m},x] && IGtQ[n,0] && NeQ[m,-1]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := (d+e*x)^(m+1)*(a+b*ArcCos[c*x])^n/(e*(m+1)) +    b*c*n/(e*(m+1))*Integrate[(d+e*x)^(m+1)*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e,m},x] && IGtQ[n,0] && NeQ[m,-1]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[(d+e*x)^m*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[m,0] && LtQ[n,-1]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[(d+e*x)^m*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[m,0] && LtQ[n,-1]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := 1/c^(m+1)*Subst[Integrate[(a+b*x)^n*Cos[x]*(c*d+e*Sin[x])^m,x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[m,0]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := -1/c^(m+1)*Subst[Integrate[(a+b*x)^n*Sin[x]*(c*d+e*Cos[x])^m,x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[m,0]
+
+Integrate[Px_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[ExpandExpression[Px,x],x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c},x] && PolynomialQ[Px,x]
+
+Integrate[Px_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[ExpandExpression[Px,x],x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c},x] && PolynomialQ[Px,x] (* Integrate[Px_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := With[{u=IntHide[Px,x]}, Dist[(a+b*ArcSin[c*x])^n,u,x] - b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /; FreeQ[{a,b,c},x] && PolynomialQ[Px,x] && IGtQ[n,0] *) (* Integrate[Px_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := With[{u=IntHide[Px,x]}, Dist[(a+b*ArcCos[c*x])^n,u,x] + b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /; FreeQ[{a,b,c},x] && PolynomialQ[Px,x] && IGtQ[n,0] *)
+
+Integrate[Px_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[Px*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c,n},x] && PolynomialQ[Px,x]
+
+Integrate[Px_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[Px*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c,n},x] && PolynomialQ[Px,x]
+
+Integrate[Px_*(d_.+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[Px*(d+e*x)^m,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,m},x] && PolynomialQ[Px,x]
+
+Integrate[Px_*(d_.+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[Px*(d+e*x)^m,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,m},x] && PolynomialQ[Px,x]
+
+Integrate[(f_.+g_*x_)^p_*(d_+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := With[{u=IntHide[(f+g*x)^p*(d+e*x)^m,x]}, Dist[(a+b*ArcSin[c*x])^n,u,x] - b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[n,0] && IGtQ[p,0] && ILtQ[m,0] && LtQ[m+p+1,0]
+
+Integrate[(f_.+g_*x_)^p_*(d_+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := With[{u=IntHide[(f+g*x)^p*(d+e*x)^m,x]}, Dist[(a+b*ArcCos[c*x])^n,u,x] + b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[n,0] && IGtQ[p,0] && ILtQ[m,0] && LtQ[m+p+1,0]
+
+Integrate[(f_.+g_*x_+h_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_/(d_+e_*x_)^2,x_] := With[{u=IntHide[(f+g*x+h*x^2)^p/(d+e*x)^2,x]}, Dist[(a+b*ArcSin[c*x])^n,u,x] - b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcSin[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,g,h},x] && IGtQ[n,0] && IGtQ[p,0] && EqQ[e*g-2*d*h,0]
+
+Integrate[(f_.+g_*x_+h_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_/(d_+e_*x_)^2,x_] := With[{u=IntHide[(f+g*x+h*x^2)^p/(d+e*x)^2,x]}, Dist[(a+b*ArcCos[c*x])^n,u,x] + b*c*n*Integrate[SimplifyIntegrand[u*(a+b*ArcCos[c*x])^(n-1)/Sqrt[1-c^2*x^2],x],x]] /;
+FreeQ[{a,b,c,d,e,f,g,h},x] && IGtQ[n,0] && IGtQ[p,0] && EqQ[e*g-2*d*h,0]
+
+Integrate[Px_*(d_+e_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[Px*(d+e*x)^m*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && PolynomialQ[Px,x] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[Px_*(d_+e_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_,x_] := Integrate[ExpandIntegrand[Px*(d+e*x)^m*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && PolynomialQ[Px,x] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(f+g*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[Dist[1/Sqrt[1-c^2*x^2],u,x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && ILtQ[p+1/2,0] && GtQ[d,0] && (LtQ[m,-2*p-1] || GtQ[m,3])
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(f+g*x)^m*(d+e*x^2)^p,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[Dist[1/Sqrt[1-c^2*x^2],u,x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && ILtQ[p+1/2,0] && GtQ[d,0] && (LtQ[m,-2*p-1] || GtQ[m,3])
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,(f+g*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && IntegerQ[p+1/2] && GtQ[d,0] && IGtQ[n,0] && (mEqual1 || p>0 || nEqual1 && p>-1 || mEqual2 && p<-2)
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,(f+g*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && IntegerQ[p+1/2] && GtQ[d,0] && IGtQ[n,0] && (mEqual1 || p>0 || nEqual1 && p>-1 || mEqual2 && p<-2)
+
+Integrate[(f_+g_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f+g*x)^m*(d+e*x^2)*(a+b*ArcSin[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) - 1/(b*c*Sqrt[d]*(n+1))*Integrate[(d*g*m+2*e*f*x+e*g*(m+2)*x^2)*(f+g*x)^(m-1)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && ILtQ[m,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -(f+g*x)^m*(d+e*x^2)*(a+b*ArcCos[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) + 1/(b*c*Sqrt[d]*(n+1))*Integrate[(d*g*m+2*e*f*x+e*g*(m+2)*x^2)*(f+g*x)^(m-1)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && ILtQ[m,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[Sqrt[d+e*x^2]*(a+b*ArcSin[c*x])^n,(f+g*x)^m*(d+e*x^2)^(p-1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && IGtQ[p+1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[Sqrt[d+e*x^2]*(a+b*ArcCos[c*x])^n,(f+g*x)^m*(d+e*x^2)^(p-1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && IGtQ[p+1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := (f+g*x)^m*(d+e*x^2)^(p+1/2)*(a+b*ArcSin[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) - 1/(b*c*Sqrt[d]*(n+1))* Integrate[ExpandIntegrand[(f+g*x)^(m-1)*(a+b*ArcSin[c*x])^(n+1),(d*g*m+e*f*(2*p+1)*x+e*g*(m+2*p+1)*x^2)*(d+e*x^2)^(p-1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && ILtQ[m,0] && IGtQ[p-1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := -(f+g*x)^m*(d+e*x^2)^(p+1/2)*(a+b*ArcCos[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) + 1/(b*c*Sqrt[d]*(n+1))* Integrate[ExpandIntegrand[(f+g*x)^(m-1)*(a+b*ArcCos[c*x])^(n+1),(d*g*m+e*f*(2*p+1)*x+e*g*(m+2*p+1)*x^2)*(d+e*x^2)^(p-1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && ILtQ[m,0] && IGtQ[p-1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_/Sqrt[d_+e_*x_^2],x_] := (f+g*x)^m*(a+b*ArcSin[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) - g*m/(b*c*Sqrt[d]*(n+1))*Integrate[(f+g*x)^(m-1)*(a+b*ArcSin[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && GtQ[d,0] && LtQ[n,-1]
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_/Sqrt[d_+e_*x_^2],x_] := -(f+g*x)^m*(a+b*ArcCos[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) + g*m/(b*c*Sqrt[d]*(n+1))*Integrate[(f+g*x)^(m-1)*(a+b*ArcCos[c*x])^(n+1),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IGtQ[m,0] && GtQ[d,0] && LtQ[n,-1]
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := 1/(c^(m+1)*Sqrt[d])*Subst[Integrate[(a+b*x)^n*(c*f+g*Sin[x])^m,x],x,ArcSin[c*x]] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && GtQ[d,0] && (GtQ[m,0] || IGtQ[n,0])
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := -1/(c^(m+1)*Sqrt[d])*Subst[Integrate[(a+b*x)^n*(c*f+g*Cos[x])^m,x],x,ArcCos[c*x]] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && GtQ[d,0] && (GtQ[m,0] || IGtQ[n,0])
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcSin[c*x])^n/Sqrt[d+e*x^2],(f+g*x)^m*(d+e*x^2)^(p+1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && ILtQ[p+1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCos[c*x])^n/Sqrt[d+e*x^2],(f+g*x)^m*(d+e*x^2)^(p+1/2),x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && ILtQ[p+1/2,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f+g*x)^m*(1-c^2*x^2)^p*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p-1/2] && Not[GtQ[d,0]]
+
+Integrate[(f_+g_*x_)^m_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[(f+g*x)^m*(1-c^2*x^2)^p*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p-1/2] && Not[GtQ[d,0]]
+
+Integrate[Log[h_*(f_.+g_*x_)^m_.]*(a_.+b_*ArcSin[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := Log[h*(f+g*x)^m]*(a+b*ArcSin[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) - g*m/(b*c*Sqrt[d]*(n+1))*Integrate[(a+b*ArcSin[c*x])^(n+1)/(f+g*x),x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m},x] && EqQ[c^2*d+e,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[Log[h_*(f_.+g_*x_)^m_.]*(a_.+b_*ArcCos[c_*x_])^n_./Sqrt[d_+e_*x_^2],x_] := -Log[h*(f+g*x)^m]*(a+b*ArcCos[c*x])^(n+1)/(b*c*Sqrt[d]*(n+1)) + g*m/(b*c*Sqrt[d]*(n+1))*Integrate[(a+b*ArcCos[c*x])^(n+1)/(f+g*x),x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m},x] && EqQ[c^2*d+e,0] && GtQ[d,0] && IGtQ[n,0]
+
+Integrate[Log[h_*(f_.+g_*x_)^m_.]*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[Log[h*(f+g*x)^m]*(1-c^2*x^2)^p*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2] && Not[GtQ[d,0]]
+
+Integrate[Log[h_*(f_.+g_*x_)^m_.]*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Simp[(d+e*x^2)^p/(1-c^2*x^2)^p]*Integrate[Log[h*(f+g*x)^m]*(1-c^2*x^2)^p*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,d,e,f,g,h,m,n},x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2] && Not[GtQ[d,0]]
+
+Integrate[(d_+e_*x_)^m_*(f_+g_*x_)^m_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{u=IntHide[(d+e*x)^m*(f+g*x)^m,x]}, Dist[a+b*ArcSin[c*x],u,x] - b*c*Integrate[Dist[1/Sqrt[1-c^2*x^2],u,x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && ILtQ[m+1/2,0]
+
+Integrate[(d_+e_*x_)^m_*(f_+g_*x_)^m_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{u=IntHide[(d+e*x)^m*(f+g*x)^m,x]}, Dist[a+b*ArcCos[c*x],u,x] + b*c*Integrate[Dist[1/Sqrt[1-c^2*x^2],u,x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && ILtQ[m+1/2,0]
+
+Integrate[(d_+e_*x_)^m_*(f_+g_*x_)^m_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x)^m*(f+g*x)^m*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && IntegerQ[m]
+
+Integrate[(d_+e_*x_)^m_*(f_+g_*x_)^m_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x)^m*(f+g*x)^m*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e,f,g,n},x] && IntegerQ[m]
+
+Integrate[u_*(a_.+b_*ArcSin[c_*x_]),x_] := With[{v=IntHide[u,x]}, Dist[a+b*ArcSin[c*x],v,x] - b*c*Integrate[SimplifyIntegrand[v/Sqrt[1-c^2*x^2],x],x] /; InverseFunctionFreeQ[v,x]] /;
+FreeQ[{a,b,c},x]
+
+Integrate[u_*(a_.+b_*ArcCos[c_*x_]),x_] := With[{v=IntHide[u,x]}, Dist[a+b*ArcCos[c*x],v,x] + b*c*Integrate[SimplifyIntegrand[v/Sqrt[1-c^2*x^2],x],x] /; InverseFunctionFreeQ[v,x]] /;
+FreeQ[{a,b,c},x]
+
+Integrate[Px_*(d_+e_*x_^2)^p_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := With[{u=ExpandIntegrand[Px*(d+e*x^2)^p*(a+b*ArcSin[c*x])^n,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,n},x] && PolynomialQ[Px,x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[Px_*(d_+e_*x_^2)^p_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := With[{u=ExpandIntegrand[Px*(d+e*x^2)^p*(a+b*ArcCos[c*x])^n,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,n},x] && PolynomialQ[Px,x] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[Px_*(f_+g_*(d_+e_*x_^2)^p_)^m_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := With[{u=ExpandIntegrand[Px*(f+g*(d+e*x^2)^p)^m*(a+b*ArcSin[c*x])^n,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && PolynomialQ[Px,x] && EqQ[c^2*d+e,0] && IGtQ[p+1/2,0] && IntegersQ[m,n]
+
+Integrate[Px_*(f_+g_*(d_+e_*x_^2)^p_)^m_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := With[{u=ExpandIntegrand[Px*(f+g*(d+e*x^2)^p)^m*(a+b*ArcCos[c*x])^n,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && PolynomialQ[Px,x] && EqQ[c^2*d+e,0] && IGtQ[p+1/2,0] && IntegersQ[m,n]
+
+Integrate[RFx_*ArcSin[c_*x_]^n_.,x_] := With[{u=ExpandIntegrand[ArcSin[c*x]^n,RFx,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[c,x] && RationalFunctionQ[RFx,x] && IGtQ[n,0]
+
+Integrate[RFx_*ArcCos[c_*x_]^n_.,x_] := With[{u=ExpandIntegrand[ArcCos[c*x]^n,RFx,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[c,x] && RationalFunctionQ[RFx,x] && IGtQ[n,0]
+
+Integrate[RFx_*(a_+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[RFx*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0]
+
+Integrate[RFx_*(a_+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[RFx*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0]
+
+Integrate[RFx_*(d_+e_*x_^2)^p_*ArcSin[c_*x_]^n_.,x_] := With[{u=ExpandIntegrand[(d+e*x^2)^p*ArcSin[c*x]^n,RFx,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{c,d,e},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[RFx_*(d_+e_*x_^2)^p_*ArcCos[c_*x_]^n_.,x_] := With[{u=ExpandIntegrand[(d+e*x^2)^p*ArcCos[c*x]^n,RFx,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{c,d,e},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[RFx_*(d_+e_*x_^2)^p_*(a_+b_*ArcSin[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x^2)^p,RFx*(a+b*ArcSin[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[RFx_*(d_+e_*x_^2)^p_*(a_+b_*ArcCos[c_*x_])^n_.,x_] := Integrate[ExpandIntegrand[(d+e*x^2)^p,RFx*(a+b*ArcCos[c*x])^n,x],x] /;
+FreeQ[{a,b,c,d,e},x] && RationalFunctionQ[RFx,x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p-1/2]
+
+Integrate[u_*(a_.+b_*ArcSin[c_*x_])^n_.,x_] := Unintegrable[u*(a+b*ArcSin[c*x])^n,x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[u_*(a_.+b_*ArcCos[c_*x_])^n_.,x_] := Unintegrable[u*(a+b*ArcCos[c*x])^n,x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[(a_.+b_*ArcSin[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[(a+b*ArcSin[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,n},x]
+
+Integrate[(a_.+b_*ArcCos[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[(a+b*ArcCos[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,n},x]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcSin[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcSin[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m,n},x]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCos[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcCos[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m,n},x]
+
+Integrate[(A_.+B_*x_+C_*x_^2)^p_*(a_.+b_*ArcSin[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[(-C/d^2+C/d^2*x^2)^p*(a+b*ArcSin[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,A,B,C,n,p},x] && EqQ[B*(1-c^2)+2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(A_.+B_*x_+C_*x_^2)^p_*(a_.+b_*ArcCos[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[(-C/d^2+C/d^2*x^2)^p*(a+b*ArcCos[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,A,B,C,n,p},x] && EqQ[B*(1-c^2)+2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(e_.+f_*x_)^m_*(A_.+B_*x_+C_*x_^2)^p_*(a_.+b_*ArcSin[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(-C/d^2+C/d^2*x^2)^p*(a+b*ArcSin[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,A,B,C,m,n,p},x] && EqQ[B*(1-c^2)+2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(e_.+f_*x_)^m_*(A_.+B_*x_+C_*x_^2)^p_*(a_.+b_*ArcCos[c_+d_*x_])^n_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(-C/d^2+C/d^2*x^2)^p*(a+b*ArcCos[x])^n,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,A,B,C,m,n,p},x] && EqQ[B*(1-c^2)+2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[Sqrt[a_.+b_*ArcSin[c_+d_*x_^2]],x_] := x*Sqrt[a+b*ArcSin[c+d*x^2]] - Sqrt[Pi]*x*(Cos[a/(2*b)]+c*Sin[a/(2*b)])*FresnelC[Sqrt[c/(Pi*b)]*Sqrt[a+b*ArcSin[c+d*x^2]]]/     (Sqrt[c/b]*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) +    Sqrt[Pi]*x*(Cos[a/(2*b)]-c*Sin[a/(2*b)])*FresnelS[Sqrt[c/(Pi*b)]*Sqrt[a+b*ArcSin[c+d*x^2]]]/     (Sqrt[c/b]*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1]
+
+Integrate[Sqrt[a_.+b_*ArcCos[1+d_*x_^2]],x_] := -2*Sqrt[a+b*ArcCos[1+d*x^2]]*Sin[ArcCos[1+d*x^2]/2]^2/(d*x) -    2*Sqrt[Pi]*Sin[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(Sqrt[1/b]*d*x) + 2*Sqrt[Pi]*Cos[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(Sqrt[1/b]*d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[Sqrt[a_.+b_*ArcCos[-1+d_*x_^2]],x_] := 2*Sqrt[a+b*ArcCos[-1+d*x^2]]*Cos[(1/2)*ArcCos[-1+d*x^2]]^2/(d*x) - 2*Sqrt[Pi]*Cos[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(Sqrt[1/b]*d*x) -    2*Sqrt[Pi]*Sin[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(Sqrt[1/b]*d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[(a_.+b_*ArcSin[c_+d_*x_^2])^n_,x_] := x*(a+b*ArcSin[c+d*x^2])^n +    2*b*n*Sqrt[-2*c*d*x^2-d^2*x^4]*(a+b*ArcSin[c+d*x^2])^(n-1)/(d*x) - 4*b^2*n*(n-1)*Integrate[(a+b*ArcSin[c+d*x^2])^(n-2),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1] && GtQ[n,1]
+
+Integrate[(a_.+b_*ArcCos[c_+d_*x_^2])^n_,x_] := x*(a+b*ArcCos[c+d*x^2])^n -    2*b*n*Sqrt[-2*c*d*x^2-d^2*x^4]*(a+b*ArcCos[c+d*x^2])^(n-1)/(d*x) - 4*b^2*n*(n-1)*Integrate[(a+b*ArcCos[c+d*x^2])^(n-2),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1] && GtQ[n,1]
+
+Integrate[1/(a_.+b_*ArcSin[c_+d_*x_^2]),x_] := -x*(c*Cos[a/(2*b)]-Sin[a/(2*b)])*CosIntegral[(c/(2*b))*(a+b*ArcSin[c+d*x^2])]/ (2*b*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) - x*(c*Cos[a/(2*b)]+Sin[a/(2*b)])*SinIntegral[(c/(2*b))*(a+b*ArcSin[c+d*x^2])]/ (2*b*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1]
+
+Integrate[1/(a_.+b_*ArcCos[1+d_*x_^2]),x_] := x*Cos[a/(2*b)]*CosIntegral[(a+b*ArcCos[1+d*x^2])/(2*b)]/(Sqrt[2]*b*Sqrt[-d*x^2]) + x*Sin[a/(2*b)]*SinIntegral[(a+b*ArcCos[1+d*x^2])/(2*b)]/(Sqrt[2]*b*Sqrt[-d*x^2]) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/(a_.+b_*ArcCos[-1+d_*x_^2]),x_] := x*Sin[a/(2*b)]*CosIntegral[(a+b*ArcCos[-1+d*x^2])/(2*b)]/(Sqrt[2]*b*Sqrt[d*x^2]) - x*Cos[a/(2*b)]*SinIntegral[(a+b*ArcCos[-1+d*x^2])/(2*b)]/(Sqrt[2]*b*Sqrt[d*x^2]) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/Sqrt[a_.+b_*ArcSin[c_+d_*x_^2]],x_] := -Sqrt[Pi]*x*(Cos[a/(2*b)]-c*Sin[a/(2*b)])*FresnelC[1/(Sqrt[b*c]*Sqrt[Pi])*Sqrt[a+b*ArcSin[c+d*x^2]]]/ (Sqrt[b*c]*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) - Sqrt[Pi]*x*(Cos[a/(2*b)]+c*Sin[a/(2*b)])*FresnelS[(1/(Sqrt[b*c]*Sqrt[Pi]))*Sqrt[a+b*ArcSin[c+d*x^2]]]/ (Sqrt[b*c]*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1]
+
+Integrate[1/Sqrt[a_.+b_*ArcCos[1+d_*x_^2]],x_] := -2*Sqrt[Pi/b]*Cos[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(d*x) - 2*Sqrt[Pi/b]*Sin[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/Sqrt[a_.+b_*ArcCos[-1+d_*x_^2]],x_] := 2*Sqrt[Pi/b]*Sin[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(d*x) - 2*Sqrt[Pi/b]*Cos[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/(a_.+b_*ArcSin[c_+d_*x_^2])^(3/2),x_] := -Sqrt[-2*c*d*x^2-d^2*x^4]/(b*d*x*Sqrt[a+b*ArcSin[c+d*x^2]]) - (c/b)^(3/2)*Sqrt[Pi]*x*(Cos[a/(2*b)]+c*Sin[a/(2*b)])*FresnelC[Sqrt[c/(Pi*b)]*Sqrt[a+b*ArcSin[c+d*x^2]]]/ (Cos[(1/2)*ArcSin[c+d*x^2]]-c*Sin[ArcSin[c+d*x^2]/2]) + (c/b)^(3/2)*Sqrt[Pi]*x*(Cos[a/(2*b)]-c*Sin[a/(2*b)])*FresnelS[Sqrt[c/(Pi*b)]*Sqrt[a+b*ArcSin[c+d*x^2]]]/ (Cos[(1/2)*ArcSin[c+d*x^2]]-c*Sin[ArcSin[c+d*x^2]/2]) /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1]
+
+Integrate[1/(a_.+b_*ArcCos[1+d_*x_^2])^(3/2),x_] := Sqrt[-2*d*x^2-d^2*x^4]/(b*d*x*Sqrt[a+b*ArcCos[1+d*x^2]]) - 2*(1/b)^(3/2)*Sqrt[Pi]*Sin[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(d*x) + 2*(1/b)^(3/2)*Sqrt[Pi]*Cos[a/(2*b)]*Sin[ArcCos[1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[1+d*x^2]]]/(d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/(a_.+b_*ArcCos[-1+d_*x_^2])^(3/2),x_] := Sqrt[2*d*x^2-d^2*x^4]/(b*d*x*Sqrt[a+b*ArcCos[-1+d*x^2]]) - 2*(1/b)^(3/2)*Sqrt[Pi]*Cos[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelC[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(d*x) - 2*(1/b)^(3/2)*Sqrt[Pi]*Sin[a/(2*b)]*Cos[ArcCos[-1+d*x^2]/2]*FresnelS[Sqrt[1/(Pi*b)]*Sqrt[a+b*ArcCos[-1+d*x^2]]]/(d*x) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/(a_.+b_*ArcSin[c_+d_*x_^2])^2,x_] := -Sqrt[-2*c*d*x^2-d^2*x^4]/(2*b*d*x*(a+b*ArcSin[c+d*x^2])) - x*(Cos[a/(2*b)]+c*Sin[a/(2*b)])*CosIntegral[(c/(2*b))*(a+b*ArcSin[c+d*x^2])]/ (4*b^2*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) + x*(Cos[a/(2*b)]-c*Sin[a/(2*b)])*SinIntegral[(c/(2*b))*(a+b*ArcSin[c+d*x^2])]/ (4*b^2*(Cos[ArcSin[c+d*x^2]/2]-c*Sin[ArcSin[c+d*x^2]/2])) /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1]
+
+Integrate[1/(a_.+b_*ArcCos[1+d_*x_^2])^2,x_] := Sqrt[-2*d*x^2-d^2*x^4]/(2*b*d*x*(a+b*ArcCos[1+d*x^2])) + x*Sin[a/(2*b)]*CosIntegral[(a+b*ArcCos[1+d*x^2])/(2*b)]/(2*Sqrt[2]*b^2*Sqrt[(-d)*x^2]) - x*Cos[a/(2*b)]*SinIntegral[(a+b*ArcCos[1+d*x^2])/(2*b)]/(2*Sqrt[2]*b^2*Sqrt[(-d)*x^2]) /;
+FreeQ[{a,b,d},x]
+
+Integrate[1/(a_.+b_*ArcCos[-1+d_*x_^2])^2,x_] := Sqrt[2*d*x^2-d^2*x^4]/(2*b*d*x*(a+b*ArcCos[-1+d*x^2])) - x*Cos[a/(2*b)]*CosIntegral[(a+b*ArcCos[-1+d*x^2])/(2*b)]/(2*Sqrt[2]*b^2*Sqrt[d*x^2]) - x*Sin[a/(2*b)]*SinIntegral[(a+b*ArcCos[-1+d*x^2])/(2*b)]/(2*Sqrt[2]*b^2*Sqrt[d*x^2]) /;
+FreeQ[{a,b,d},x]
+
+Integrate[(a_.+b_*ArcSin[c_+d_*x_^2])^n_,x_] := x*(a+b*ArcSin[c+d*x^2])^(n+2)/(4*b^2*(n+1)*(n+2)) + Sqrt[-2*c*d*x^2-d^2*x^4]*(a+b*ArcSin[c+d*x^2])^(n+1)/(2*b*d*(n+1)*x) - 1/(4*b^2*(n+1)*(n+2))*Integrate[(a+b*ArcSin[c+d*x^2])^(n+2),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1] && LtQ[n,-1] && NeQ[n,-2]
+
+Integrate[(a_.+b_*ArcCos[c_+d_*x_^2])^n_,x_] := x*(a+b*ArcCos[c+d*x^2])^(n+2)/(4*b^2*(n+1)*(n+2)) - Sqrt[-2*c*d*x^2-d^2*x^4]*(a+b*ArcCos[c+d*x^2])^(n+1)/(2*b*d*(n+1)*x) - 1/(4*b^2*(n+1)*(n+2))*Integrate[(a+b*ArcCos[c+d*x^2])^(n+2),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[c^2,1] && LtQ[n,-1] && NeQ[n,-2]
+
+Integrate[ArcSin[a_*x_^p_]^n_./x_,x_] := 1/p*Subst[Integrate[x^n*Cot[x],x],x,ArcSin[a*x^p]] /;
+FreeQ[{a,p},x] && IGtQ[n,0]
+
+Integrate[ArcCos[a_*x_^p_]^n_./x_,x_] := -1/p*Subst[Integrate[x^n*Tan[x],x],x,ArcCos[a*x^p]] /;
+FreeQ[{a,p},x] && IGtQ[n,0]
+
+Integrate[u_*ArcSin[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcCsc[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[u_*ArcCos[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcSec[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[ArcSin[Sqrt[1+b_*x_^2]]^n_./Sqrt[1+b_*x_^2],x_] := Sqrt[-b*x^2]/(b*x)*Subst[Integrate[ArcSin[x]^n/Sqrt[1-x^2],x],x,Sqrt[1+b*x^2]] /;
+FreeQ[{b,n},x]
+
+Integrate[ArcCos[Sqrt[1+b_*x_^2]]^n_./Sqrt[1+b_*x_^2],x_] := Sqrt[-b*x^2]/(b*x)*Subst[Integrate[ArcCos[x]^n/Sqrt[1-x^2],x],x,Sqrt[1+b*x^2]] /;
+FreeQ[{b,n},x]
+
+Integrate[u_*f_^(c_*ArcSin[a_.+b_*x_]^n_.),x_] := 1/b*Subst[Integrate[ReplaceAll[u,xRule-a/b+Sin[x]/b]*f^(c*x^n)*Cos[x],x],x,ArcSin[a+b*x]] /;
+FreeQ[{a,b,c,f},x] && IGtQ[n,0]
+
+Integrate[u_*f_^(c_*ArcCos[a_.+b_*x_]^n_.),x_] := -1/b*Subst[Integrate[ReplaceAll[u,xRule-a/b+Cos[x]/b]*f^(c*x^n)*Sin[x],x],x,ArcCos[a+b*x]] /;
+FreeQ[{a,b,c,f},x] && IGtQ[n,0]
+
+Integrate[ArcSin[a_*x_^2+b_*Sqrt[c_+d_*x_^2]],x_] := x*ArcSin[a*x^2+b*Sqrt[c+d*x^2]] -    x*Sqrt[b^2*d+a^2*x^2+2*a*b*Sqrt[c+d*x^2]]/Sqrt[(-x^2)*(b^2*d+a^2*x^2+2*a*b*Sqrt[c+d*x^2])]* Integrate[x*(b*d+2*a*Sqrt[c+d*x^2])/(Sqrt[c+d*x^2]*Sqrt[b^2*d +a^2*x^2+2*a*b*Sqrt[c+d*x^2]]),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[b^2*c,1]
+
+Integrate[ArcCos[a_*x_^2+b_*Sqrt[c_+d_*x_^2]],x_] := x*ArcCos[a*x^2+b*Sqrt[c+d*x^2]] +    x*Sqrt[b^2*d+a^2*x^2+2*a*b*Sqrt[c+d*x^2]]/Sqrt[(-x^2)*(b^2*d+a^2*x^2+2*a*b*Sqrt[c+d*x^2])]* Integrate[x*(b*d+2*a*Sqrt[c+d*x^2])/(Sqrt[c+d*x^2]*Sqrt[b^2*d+a^2*x^2+2*a*b*Sqrt[c+d*x^2]]),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[b^2*c,1]
+
+Integrate[ArcSin[u_],x_] := x*ArcSin[u] - Integrate[SimplifyIntegrand[x*D[u,x]/Sqrt[1-u^2],x],x] /;
+InverseFunctionFreeQ[u,x] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[ArcCos[u_],x_] := x*ArcCos[u] + Integrate[SimplifyIntegrand[x*D[u,x]/Sqrt[1-u^2],x],x] /;
+InverseFunctionFreeQ[u,x] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcSin[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcSin[u])/(d*(m+1)) - b/(d*(m+1))*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/Sqrt[1-u^2],x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcCos[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcCos[u])/(d*(m+1)) + b/(d*(m+1))*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/Sqrt[1-u^2],x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[v_*(a_.+b_*ArcSin[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcSin[u]),w,x] - b*Integrate[SimplifyIntegrand[w*D[u,x]/Sqrt[1-u^2],x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]]
+
+Integrate[v_*(a_.+b_*ArcCos[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcCos[u]),w,x] + b*Integrate[SimplifyIntegrand[w*D[u,x]/Sqrt[1-u^2],x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_.])^p_.,x_] := x*(a+b*ArcTan[c*x^n])^p - b*c*n*p*Integrate[x^n*(a+b*ArcTan[c*x^n])^(p-1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,n},x] && IGtQ[p,0] && (EqQ[n,1] || EqQ[p,1])
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_.])^p_.,x_] := x*(a+b*ArcCot[c*x^n])^p + b*c*n*p*Integrate[x^n*(a+b*ArcCot[c*x^n])^(p-1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,n},x] && IGtQ[p,0] && (EqQ[n,1] || EqQ[p,1])
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[(a+(I*b*Log[1-I*c*x^n])/2-(I*b*Log[1+I*c*x^n])/2)^p,x],x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[(a+(I*b*Log[1-I*x^(-n)/c])/2-(I*b*Log[1+I*x^(-n)/c])/2)^p,x],x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := Integrate[(a+b*ArcCot[x^(-n)/c])^p,x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && ILtQ[n,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := Integrate[(a+b*ArcTan[x^(-n)/c])^p,x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && ILtQ[n,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k-1)*(a+b*ArcTan[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && FractionQ[n]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k-1)*(a+b*ArcCot[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && FractionQ[n]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_.])^p_,x_] := Unintegrable[(a+b*ArcTan[c*x^n])^p,x] /;
+FreeQ[{a,b,c,n,p},x]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_.])^p_,x_] := Unintegrable[(a+b*ArcCot[c*x^n])^p,x] /;
+FreeQ[{a,b,c,n,p},x]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])/x_,x_] := a*Log[x] + I*b/2*Integrate[Log[1-I*c*x]/x,x] - I*b/2*Integrate[Log[1+I*c*x]/x,x] /;
+FreeQ[{a,b,c},x]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])/x_,x_] := a*Log[x] + I*b/2*Integrate[Log[1-I/(c*x)]/x,x] - I*b/2*Integrate[Log[1+I/(c*x)]/x,x] /;
+FreeQ[{a,b,c},x]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_/x_,x_] := 2*(a+b*ArcTan[c*x])^p*ArcTanh[1-2/(1+I*c*x)] - 2*b*c*p*Integrate[(a+b*ArcTan[c*x])^(p-1)*ArcTanh[1-2/(1+I*c*x)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_/x_,x_] := 2*(a+b*ArcCot[c*x])^p*ArcCoth[1-2/(1+I*c*x)] + 2*b*c*p*Integrate[(a+b*ArcCot[c*x])^(p-1)*ArcCoth[1-2/(1+I*c*x)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])^p_./x_,x_] := 1/n*Subst[Integrate[(a+b*ArcTan[c*x])^p/x,x],x,x^n] /;
+FreeQ[{a,b,c,n},x] && IGtQ[p,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])^p_./x_,x_] := 1/n*Subst[Integrate[(a+b*ArcCot[c*x])^p/x,x],x,x^n] /;
+FreeQ[{a,b,c,n},x] && IGtQ[p,0]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_.])^p_.,x_] := x^(m+1)*(a+b*ArcTan[c*x^n])^p/(m+1) -    b*c*n*p/(m+1)*Integrate[x^(m+n)*(a+b*ArcTan[c*x^n])^(p-1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,m,n},x] && IGtQ[p,0] && (EqQ[p,1] || EqQ[n,1] && IntegerQ[m])  && NeQ[m,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_.])^p_.,x_] := x^(m+1)*(a+b*ArcCot[c*x^n])^p/(m+1) +    b*c*n*p/(m+1)*Integrate[x^(m+n)*(a+b*ArcCot[c*x^n])^(p-1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,m,n},x] && IGtQ[p,0] && (EqQ[p,1] || EqQ[n,1] && IntegerQ[m])  && NeQ[m,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_.,x_] := 1/n*Subst[Integrate[x^(Simplify[(m+1)/n]-1)*(a+b*ArcTan[c*x])^p,x],x,x^n] /;
+FreeQ[{a,b,c,m,n},x] && IGtQ[p,1] && IntegerQ[Simplify[(m+1)/n]]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_.,x_] := 1/n*Subst[Integrate[x^(Simplify[(m+1)/n]-1)*(a+b*ArcCot[c*x])^p,x],x,x^n] /;
+FreeQ[{a,b,c,m,n},x] && IGtQ[p,1] && IntegerQ[Simplify[(m+1)/n]]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[x^m*(a+(I*b*Log[1-I*c*x^n])/2-(I*b*Log[1+I*c*x^n])/2)^p,x],x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[x^m*(a+(I*b*Log[1-I*x^(-n)/c])/2-(I*b*Log[1+I*x^(-n)/c])/2)^p,x],x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0] && IntegerQ[m]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := With[{k=Denominator[m]}, k*Subst[Integrate[x^(k*(m+1)-1)*(a+b*ArcTan[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0] && FractionQ[m]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := With[{k=Denominator[m]}, k*Subst[Integrate[x^(k*(m+1)-1)*(a+b*ArcCot[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && IGtQ[n,0] && FractionQ[m]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := Integrate[x^m*(a+b*ArcCot[x^(-n)/c])^p,x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && ILtQ[n,0]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := Integrate[x^m*(a+b*ArcTan[x^(-n)/c])^p,x] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && ILtQ[n,0]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k*(m+1)-1)*(a+b*ArcTan[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && FractionQ[n]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k*(m+1)-1)*(a+b*ArcCot[c*x^(k*n)])^p,x],x,x^(1/k)]] /;
+FreeQ[{a,b,c},x] && IGtQ[p,1] && FractionQ[n]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_.]),x_] := (d*x)^(m+1)*(a+b*ArcTan[c*x^n])/(d*(m+1)) -    b*c*n/(d^n*(m+1))*Integrate[(d*x)^(m+n)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,m,n},x] && IntegerQ[n] && NeQ[m,-1]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_.]),x_] := (d*x)^(m+1)*(a+b*ArcCot[c*x^n])/(d*(m+1)) +    b*c*n/(d^n*(m+1))*Integrate[(d*x)^(m+n)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,m,n},x] && IntegerQ[n] && NeQ[m,-1]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_.,x_] := d^IntPart[m]*(d*x)^FracPart[m]/x^FracPart[m]*Integrate[x^m*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,m,n},x] && IGtQ[p,0] && (EqQ[p,1] || RationalQ[m,n])
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_.,x_] := d^IntPart[m]*(d*x)^FracPart[m]/x^FracPart[m]*Integrate[x^m*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,d,m,n},x] && IGtQ[p,0] && (EqQ[p,1] || RationalQ[m,n])
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_.])^p_.,x_] := Unintegrable[(d*x)^m*(a+b*ArcTan[c*x^n])^p,x] /;
+FreeQ[{a,b,c,d,m,n,p},x]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_.])^p_.,x_] := Unintegrable[(d*x)^m*(a+b*ArcCot[c*x^n])^p,x] /;
+FreeQ[{a,b,c,d,m,n,p},x]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_),x_] := -(a+b*ArcTan[c*x])^p*Log[2/(1+e*x/d)]/e + b*c*p/e*Integrate[(a+b*ArcTan[c*x])^(p-1)*Log[2/(1+e*x/d)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_),x_] := -(a+b*ArcCot[c*x])^p*Log[2/(1+e*x/d)]/e - b*c*p/e*Integrate[(a+b*ArcCot[c*x])^(p-1)*Log[2/(1+e*x/d)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])/(d_+e_*x_),x_] := -(a+b*ArcTan[c*x])*Log[2/(1-I*c*x)]/e +    b*c/e*Integrate[Log[2/(1-I*c*x)]/(1+c^2*x^2),x] + (a+b*ArcTan[c*x])*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e - b*c/e*Integrate[Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])/(d_+e_*x_),x_] := -(a+b*ArcCot[c*x])*Log[2/(1-I*c*x)]/e -    b*c/e*Integrate[Log[2/(1-I*c*x)]/(1+c^2*x^2),x] + (a+b*ArcCot[c*x])*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e + b*c/e*Integrate[Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^2/(d_+e_*x_),x_] := -(a+b*ArcTan[c*x])^2*Log[2/(1-I*c*x)]/e + I*b*(a+b*ArcTan[c*x])*PolyLog[2,1-2/(1-I*c*x)]/e - b^2*PolyLog[3,1-2/(1-I*c*x)]/(2*e) +    (a+b*ArcTan[c*x])^2*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e - I*b*(a+b*ArcTan[c*x])*PolyLog[2,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e + b^2*PolyLog[3,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^2/(d_+e_*x_),x_] := -(a+b*ArcCot[c*x])^2*Log[2/(1-I*c*x)]/e - I*b*(a+b*ArcCot[c*x])*PolyLog[2,1-2/(1-I*c*x)]/e - b^2*PolyLog[3,1-2/(1-I*c*x)]/(2*e) +    (a+b*ArcCot[c*x])^2*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e + I*b*(a+b*ArcCot[c*x])*PolyLog[2,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e + b^2*PolyLog[3,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^3/(d_+e_*x_),x_] := -(a+b*ArcTan[c*x])^3*Log[2/(1-I*c*x)]/e +    3*I*b*(a+b*ArcTan[c*x])^2*PolyLog[2,1-2/(1-I*c*x)]/(2*e) - 3*b^2*(a+b*ArcTan[c*x])*PolyLog[3,1-2/(1-I*c*x)]/(2*e) -    3*I*b^3*PolyLog[4,1-2/(1-I*c*x)]/(4*e) + (a+b*ArcTan[c*x])^3*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e - 3*I*b*(a+b*ArcTan[c*x])^2*PolyLog[2,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) + 3*b^2*(a+b*ArcTan[c*x])*PolyLog[3,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) + 3*I*b^3*PolyLog[4,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(4*e) /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^3/(d_+e_*x_),x_] := -(a+b*ArcCot[c*x])^3*Log[2/(1-I*c*x)]/e -    3*I*b*(a+b*ArcCot[c*x])^2*PolyLog[2,1-2/(1-I*c*x)]/(2*e) - 3*b^2*(a+b*ArcCot[c*x])*PolyLog[3,1-2/(1-I*c*x)]/(2*e) +    3*I*b^3*PolyLog[4,1-2/(1-I*c*x)]/(4*e) + (a+b*ArcCot[c*x])^3*Log[2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/e + 3*I*b*(a+b*ArcCot[c*x])^2*PolyLog[2,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) + 3*b^2*(a+b*ArcCot[c*x])*PolyLog[3,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(2*e) - 3*I*b^3*PolyLog[4,1-2*c*(d+e*x)/((c*d+I*e)*(1-I*c*x))]/(4*e) /;
+FreeQ[{a,b,c,d,e},x] && NeQ[c^2*d^2+e^2,0]
+
+Integrate[(d_+e_*x_)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := (d+e*x)^(q+1)*(a+b*ArcTan[c*x])/(e*(q+1)) -    b*c/(e*(q+1))*Integrate[(d+e*x)^(q+1)/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,q},x] && NeQ[q,-1]
+
+Integrate[(d_+e_*x_)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := (d+e*x)^(q+1)*(a+b*ArcCot[c*x])/(e*(q+1)) +    b*c/(e*(q+1))*Integrate[(d+e*x)^(q+1)/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,q},x] && NeQ[q,-1]
+
+Integrate[(d_+e_*x_)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := (d+e*x)^(q+1)*(a+b*ArcTan[c*x])^p/(e*(q+1)) -    b*c*p/(e*(q+1))*Integrate[ExpandIntegrand[(a+b*ArcTan[c*x])^(p-1),(d+e*x)^(q+1)/(1+c^2*x^2),x],x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,1] && IntegerQ[q] && NeQ[q,-1]
+
+Integrate[(d_+e_*x_)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := (d+e*x)^(q+1)*(a+b*ArcCot[c*x])^p/(e*(q+1)) +    b*c*p/(e*(q+1))*Integrate[ExpandIntegrand[(a+b*ArcCot[c*x])^(p-1),(d+e*x)^(q+1)/(1+c^2*x^2),x],x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,1] && IntegerQ[q] && NeQ[q,-1]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])/(d_+e_*x_),x_] := Log[d+e*x]*(a+b*ArcTan[c*x^n])/e - b*c*n/e*Integrate[x^(n-1)*Log[d+e*x]/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,e,n},x] && IntegerQ[n]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])/(d_+e_*x_),x_] := Log[d+e*x]*(a+b*ArcCot[c*x^n])/e + b*c*n/e*Integrate[x^(n-1)*Log[d+e*x]/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,e,n},x] && IntegerQ[n]
+
+Integrate[(a_.+b_*ArcTan[c_*x_^n_])/(d_+e_*x_),x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k-1)*(a+b*ArcTan[c*x^(k*n)])/(d+e*x^k),x],x,x^(1/k)]] /;
+FreeQ[{a,b,c,d,e},x] && FractionQ[n]
+
+Integrate[(a_.+b_*ArcCot[c_*x_^n_])/(d_+e_*x_),x_] := With[{k=Denominator[n]}, k*Subst[Integrate[x^(k-1)*(a+b*ArcCot[c*x^(k*n)])/(d+e*x^k),x],x,x^(1/k)]] /;
+FreeQ[{a,b,c,d,e},x] && FractionQ[n]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_]),x_] := (d+e*x)^(m+1)*(a+b*ArcTan[c*x^n])/(e*(m+1)) -    b*c*n/(e*(m+1))*Integrate[x^(n-1)*(d+e*x)^(m+1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,e,m,n},x] && NeQ[m,-1]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_]),x_] := (d+e*x)^(m+1)*(a+b*ArcCot[c*x^n])/(e*(m+1)) +    b*c*n/(e*(m+1))*Integrate[x^(n-1)*(d+e*x)^(m+1)/(1+c^2*x^(2*n)),x] /;
+FreeQ[{a,b,c,d,e,m,n},x] && NeQ[m,-1]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[(a+b*ArcTan[c*x^n])^p,(d+e*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[p,1] && IGtQ[m,0]
+
+Integrate[(d_+e_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_,x_] := Integrate[ExpandIntegrand[(a+b*ArcCot[c*x^n])^p,(d+e*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[p,1] && IGtQ[m,0]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcTan[c_*x_^n_])^p_.,x_] := Unintegrable[(d+e*x)^m*(a+b*ArcTan[c*x^n])^p,x] /;
+FreeQ[{a,b,c,d,e,m,n,p},x]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcCot[c_*x_^n_])^p_.,x_] := Unintegrable[(d+e*x)^m*(a+b*ArcCot[c*x^n])^p,x] /;
+FreeQ[{a,b,c,d,e,m,n,p},x]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_),x_] := f/e*Integrate[(f*x)^(m-1)*(a+b*ArcTan[c*x])^p,x] - d*f/e*Integrate[(f*x)^(m-1)*(a+b*ArcTan[c*x])^p/(d+e*x),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0] && GtQ[m,0]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_),x_] := f/e*Integrate[(f*x)^(m-1)*(a+b*ArcCot[c*x])^p,x] - d*f/e*Integrate[(f*x)^(m-1)*(a+b*ArcCot[c*x])^p/(d+e*x),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0] && GtQ[m,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(x_*(d_+e_*x_)),x_] := (a+b*ArcTan[c*x])^p*Log[2-2/(1+e*x/d)]/d - b*c*p/d*Integrate[(a+b*ArcTan[c*x])^(p-1)*Log[2-2/(1+e*x/d)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(x_*(d_+e_*x_)),x_] := (a+b*ArcCot[c*x])^p*Log[2-2/(1+e*x/d)]/d + b*c*p/d*Integrate[(a+b*ArcCot[c*x])^(p-1)*Log[2-2/(1+e*x/d)]/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_),x_] := 1/d*Integrate[(f*x)^m*(a+b*ArcTan[c*x])^p,x] - e/(d*f)*Integrate[(f*x)^(m+1)*(a+b*ArcTan[c*x])^p/(d+e*x),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_),x_] := 1/d*Integrate[(f*x)^m*(a+b*ArcCot[c*x])^p,x] - e/(d*f)*Integrate[(f*x)^(m+1)*(a+b*ArcCot[c*x])^p/(d+e*x),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && EqQ[c^2*d^2+e^2,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x)^q,x]}, Dist[(a+b*ArcTan[c*x]),u] - b*c*Integrate[SimplifyIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,q},x] && NeQ[q,-1] && IntegerQ[2*m] && (IGtQ[m,0] && IGtQ[q,0] || ILtQ[m+q+1,0] && LtQ[m*q,0])
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x)^q,x]}, Dist[(a+b*ArcCot[c*x]),u] + b*c*Integrate[SimplifyIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,q},x] && NeQ[q,-1] && IntegerQ[2*m] && (IGtQ[m,0] && IGtQ[q,0] || ILtQ[m+q+1,0] && LtQ[m*q,0])
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := With[{u=IntHide[(f*x)^m*(d+e*x)^q,x]}, Dist[(a+b*ArcTan[c*x])^p,u] - b*c*p*Integrate[ExpandIntegrand[(a+b*ArcTan[c*x])^(p-1),u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,q},x] && IGtQ[p,1] && EqQ[c^2*d^2+e^2,0] && IntegersQ[m,q] && NeQ[m,-1] && NeQ[q,-1] && ILtQ[m+q+1,0] && LtQ[m*q,0]
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := With[{u=IntHide[(f*x)^m*(d+e*x)^q,x]}, Dist[(a+b*ArcCot[c*x])^p,u] + b*c*p*Integrate[ExpandIntegrand[(a+b*ArcCot[c*x])^(p-1),u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,q},x] && IGtQ[p,1] && EqQ[c^2*d^2+e^2,0] && IntegersQ[m,q] && NeQ[m,-1] && NeQ[q,-1] && ILtQ[m+q+1,0] && LtQ[m*q,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcTan[c*x])^p,(f*x)^m*(d+e*x)^q,x],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IGtQ[p,0] && IntegerQ[q] && (GtQ[q,0] || NeQ[a,0] || IntegerQ[m])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCot[c*x])^p,(f*x)^m*(d+e*x)^q,x],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IGtQ[p,0] && IntegerQ[q] && (GtQ[q,0] || NeQ[a,0] || IntegerQ[m])
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := -b*(d+e*x^2)^q/(2*c*q*(2*q+1)) + x*(d+e*x^2)^q*(a+b*ArcTan[c*x])/(2*q+1) + 2*d*q/(2*q+1)*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcTan[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[q,0]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := b*(d+e*x^2)^q/(2*c*q*(2*q+1)) + x*(d+e*x^2)^q*(a+b*ArcCot[c*x])/(2*q+1) + 2*d*q/(2*q+1)*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcCot[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[q,0]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := -b*p*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p-1)/(2*c*q*(2*q+1)) +    x*(d+e*x^2)^q*(a+b*ArcTan[c*x])^p/(2*q+1) + 2*d*q/(2*q+1)*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcTan[c*x])^p,x] + b^2*d*p*(p-1)/(2*q*(2*q+1))*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcTan[c*x])^(p-2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[q,0] && GtQ[p,1]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := b*p*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p-1)/(2*c*q*(2*q+1)) +    x*(d+e*x^2)^q*(a+b*ArcCot[c*x])^p/(2*q+1) + 2*d*q/(2*q+1)*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcCot[c*x])^p,x] + b^2*d*p*(p-1)/(2*q*(2*q+1))*Integrate[(d+e*x^2)^(q-1)*(a+b*ArcCot[c*x])^(p-2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[q,0] && GtQ[p,1] (* Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/(c*d)*Subst[Integrate[(a+b*x)^p,x],x,ArcTan[c*x]] /; FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] *) (* Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := -1/(c*d)*Subst[Integrate[(a+b*x)^p,x],x,ArcCot[c*x]] /; FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] *)
+
+Integrate[1/((d_+e_*x_^2)*(a_.+b_*ArcTan[c_*x_])),x_] := Log[RemoveContent[a+b*ArcTan[c*x],x]]/(b*c*d) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d]
+
+Integrate[1/((d_+e_*x_^2)*(a_.+b_*ArcCot[c_*x_])),x_] := -Log[RemoveContent[a+b*ArcCot[c*x],x]]/(b*c*d) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := (a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && NeQ[p,-1]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := -(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && NeQ[p,-1]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])/Sqrt[d_+e_*x_^2],x_] := -2*I*(a+b*ArcTan[c*x])*ArcTan[Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) + I*b*PolyLog[2,-I*Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) - I*b*PolyLog[2,I*Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])/Sqrt[d_+e_*x_^2],x_] := -2*I*(a+b*ArcCot[c*x])*ArcTan[Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) - I*b*PolyLog[2,-I*Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) + I*b*PolyLog[2,I*Sqrt[1+I*c*x]/Sqrt[1-I*c*x]]/(c*Sqrt[d]) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := 1/(c*Sqrt[d])*Subst[Integrate[(a+b*x)^p*Sec[x],x],x,ArcTan[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := -x*Sqrt[1+1/(c^2*x^2)]/Sqrt[d+e*x^2]*Subst[Integrate[(a+b*x)^p*Csc[x],x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[(a+b*ArcTan[c*x])^p/Sqrt[1+c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && Not[GtQ[d,0]]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[(a+b*ArcCot[c*x])^p/Sqrt[1+c^2*x^2],x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && Not[GtQ[d,0]]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := x*(a+b*ArcTan[c*x])^p/(2*d*(d+e*x^2)) +    (a+b*ArcTan[c*x])^(p+1)/(2*b*c*d^2*(p+1)) - b*c*p/2*Integrate[x*(a+b*ArcTan[c*x])^(p-1)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := x*(a+b*ArcCot[c*x])^p/(2*d*(d+e*x^2)) -    (a+b*ArcCot[c*x])^(p+1)/(2*b*c*d^2*(p+1)) + b*c*p/2*Integrate[x*(a+b*ArcCot[c*x])^(p-1)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])/(d_+e_*x_^2)^(3/2),x_] := b/(c*d*Sqrt[d+e*x^2]) + x*(a+b*ArcTan[c*x])/(d*Sqrt[d+e*x^2]) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])/(d_+e_*x_^2)^(3/2),x_] := -b/(c*d*Sqrt[d+e*x^2]) + x*(a+b*ArcCot[c*x])/(d*Sqrt[d+e*x^2]) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := b*(d+e*x^2)^(q+1)/(4*c*d*(q+1)^2) - x*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])/(2*d*(q+1)) + (2*q+3)/(2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && NeQ[q,-3/2]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := -b*(d+e*x^2)^(q+1)/(4*c*d*(q+1)^2) - x*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])/(2*d*(q+1)) + (2*q+3)/(2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && NeQ[q,-3/2]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_/(d_+e_*x_^2)^(3/2),x_] := b*p*(a+b*ArcTan[c*x])^(p-1)/(c*d*Sqrt[d+e*x^2]) + x*(a+b*ArcTan[c*x])^p/(d*Sqrt[d+e*x^2]) - b^2*p*(p-1)*Integrate[(a+b*ArcTan[c*x])^(p-2)/(d+e*x^2)^(3/2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,1]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_/(d_+e_*x_^2)^(3/2),x_] := -b*p*(a+b*ArcCot[c*x])^(p-1)/(c*d*Sqrt[d+e*x^2]) + x*(a+b*ArcCot[c*x])^p/(d*Sqrt[d+e*x^2]) - b^2*p*(p-1)*Integrate[(a+b*ArcCot[c*x])^(p-2)/(d+e*x^2)^(3/2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,1]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := b*p*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^(p-1)/(4*c*d*(q+1)^2) - x*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p/(2*d*(q+1)) + (2*q+3)/(2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p,x] - b^2*p*(p-1)/(4*(q+1)^2)*Integrate[(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p-2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && GtQ[p,1] && NeQ[q,-3/2]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := -b*p*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^(p-1)/(4*c*d*(q+1)^2) - x*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p/(2*d*(q+1)) + (2*q+3)/(2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p,x] - b^2*p*(p-1)/(4*(q+1)^2)*Integrate[(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p-2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && GtQ[p,1] && NeQ[q,-3/2]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := (d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) - 2*c*(q+1)/(b*(p+1))*Integrate[x*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && LtQ[p,-1]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := -(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) + 2*c*(q+1)/(b*(p+1))*Integrate[x*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && LtQ[p,-1]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := d^q/c*Subst[Integrate[(a+b*x)^p/Cos[x]^(2*(q+1)),x],x,ArcTan[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && ILtQ[2*(q+1),0] && (IntegerQ[q] || GtQ[d,0])
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := d^(q+1/2)*Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[(1+c^2*x^2)^q*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && ILtQ[2*(q+1),0] && Not[IntegerQ[q] || GtQ[d,0]]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := -d^q/c*Subst[Integrate[(a+b*x)^p/Sin[x]^(2*(q+1)),x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && ILtQ[2*(q+1),0] && IntegerQ[q]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := -d^(q+1/2)*x*Sqrt[(1+c^2*x^2)/(c^2*x^2)]/Sqrt[d+e*x^2]*Subst[Integrate[(a+b*x)^p/Sin[x]^(2*(q+1)),x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && ILtQ[2*(q+1),0] && Not[IntegerQ[q]]
+
+Integrate[ArcTan[c_*x_]/(d_.+e_*x_^2),x_] := I/2*Integrate[Log[1-I*c*x]/(d+e*x^2),x] - I/2*Integrate[Log[1+I*c*x]/(d+e*x^2),x] /;
+FreeQ[{c,d,e},x]
+
+Integrate[ArcCot[c_*x_]/(d_.+e_*x_^2),x_] := I/2*Integrate[Log[1-I/(c*x)]/(d+e*x^2),x] - I/2*Integrate[Log[1+I/(c*x)]/(d+e*x^2),x] /;
+FreeQ[{c,d,e},x]
+
+Integrate[(a_+b_*ArcTan[c_*x_])/(d_.+e_*x_^2),x_] := a*Integrate[1/(d+e*x^2),x] + b*Integrate[ArcTan[c*x]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x]
+
+Integrate[(a_+b_*ArcCot[c_*x_])/(d_.+e_*x_^2),x_] := a*Integrate[1/(d+e*x^2),x] + b*Integrate[ArcCot[c*x]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x]
+
+Integrate[(d_.+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^q,x]}, Dist[a+b*ArcTan[c*x],u,x] - b*c*Integrate[u/(1+c^2*x^2),x]] /;
+FreeQ[{a,b,c,d,e},x] && (IntegerQ[q] || ILtQ[q+1/2,0])
+
+Integrate[(d_.+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^q,x]}, Dist[a+b*ArcCot[c*x],u,x] + b*c*Integrate[u/(1+c^2*x^2),x]] /;
+FreeQ[{a,b,c,d,e},x] && (IntegerQ[q] || ILtQ[q+1/2,0])
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcTan[c*x])^p,(d+e*x^2)^q,x],x] /;
+FreeQ[{a,b,c,d,e},x] && IntegerQ[q] && IGtQ[p,0]
+
+Integrate[(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(a+b*ArcCot[c*x])^p,(d+e*x^2)^q,x],x] /;
+FreeQ[{a,b,c,d,e},x] && IntegerQ[q] && IGtQ[p,0]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := f^2/e*Integrate[(f*x)^(m-2)*(a+b*ArcTan[c*x])^p,x] - d*f^2/e*Integrate[(f*x)^(m-2)*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && GtQ[p,0] && GtQ[m,1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := f^2/e*Integrate[(f*x)^(m-2)*(a+b*ArcCot[c*x])^p,x] - d*f^2/e*Integrate[(f*x)^(m-2)*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && GtQ[p,0] && GtQ[m,1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/d*Integrate[(f*x)^m*(a+b*ArcTan[c*x])^p,x] - e/(d*f^2)*Integrate[(f*x)^(m+2)*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && GtQ[p,0] && LtQ[m,-1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/d*Integrate[(f*x)^m*(a+b*ArcCot[c*x])^p,x] - e/(d*f^2)*Integrate[(f*x)^(m+2)*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && GtQ[p,0] && LtQ[m,-1]
+
+Integrate[x_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := -I*(a+b*ArcTan[c*x])^(p+1)/(b*e*(p+1)) - 1/(c*d)*Integrate[(a+b*ArcTan[c*x])^p/(I-c*x),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0]
+
+Integrate[x_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := I*(a+b*ArcCot[c*x])^(p+1)/(b*e*(p+1)) - 1/(c*d)*Integrate[(a+b*ArcCot[c*x])^p/(I-c*x),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0]
+
+Integrate[x_*(a_.+b_*ArcTan[c_*x_])^p_/(d_+e_*x_^2),x_] := x*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) -    1/(b*c*d*(p+1))*Integrate[(a+b*ArcTan[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && Not[IGtQ[p,0]] && NeQ[p,-1]
+
+Integrate[x_*(a_.+b_*ArcCot[c_*x_])^p_/(d_+e_*x_^2),x_] := -x*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) +    1/(b*c*d*(p+1))*Integrate[(a+b*ArcCot[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && Not[IGtQ[p,0]] && NeQ[p,-1]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(x_*(d_+e_*x_^2)),x_] := -I*(a+b*ArcTan[c*x])^(p+1)/(b*d*(p+1)) + I/d*Integrate[(a+b*ArcTan[c*x])^p/(x*(I+c*x)),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(x_*(d_+e_*x_^2)),x_] := I*(a+b*ArcCot[c*x])^(p+1)/(b*d*(p+1)) + I/d*Integrate[(a+b*ArcCot[c*x])^p/(x*(I+c*x)),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_/(d_+e_*x_^2),x_] := (f*x)^m*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) -    f*m/(b*c*d*(p+1))*Integrate[(f*x)^(m-1)*(a+b*ArcTan[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && LtQ[p,-1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_/(d_+e_*x_^2),x_] := -(f*x)^m*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) +    f*m/(b*c*d*(p+1))*Integrate[(f*x)^(m-1)*(a+b*ArcCot[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && LtQ[p,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcTan[c_*x_])/(d_+e_*x_^2),x_] := Integrate[ExpandIntegrand[(a+b*ArcTan[c*x]),x^m/(d+e*x^2),x],x] /;
+FreeQ[{a,b,c,d,e},x] && IntegerQ[m] && Not[EqQ[m,1] && NeQ[a,0]]
+
+Integrate[x_^m_*(a_.+b_*ArcCot[c_*x_])/(d_+e_*x_^2),x_] := Integrate[ExpandIntegrand[(a+b*ArcCot[c*x]),x^m/(d+e*x^2),x],x] /;
+FreeQ[{a,b,c,d,e},x] && IntegerQ[m] && Not[EqQ[m,1] && NeQ[a,0]]
+
+Integrate[x_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := (d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p/(2*e*(q+1)) - b*p/(2*c*(q+1))*Integrate[(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p-1),x] /;
+FreeQ[{a,b,c,d,e,q},x] && EqQ[e,c^2*d] && GtQ[p,0] && NeQ[q,-1]
+
+Integrate[x_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := (d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p/(2*e*(q+1)) + b*p/(2*c*(q+1))*Integrate[(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p-1),x] /;
+FreeQ[{a,b,c,d,e,q},x] && EqQ[e,c^2*d] && GtQ[p,0] && NeQ[q,-1]
+
+Integrate[x_*(a_.+b_*ArcTan[c_*x_])^p_/(d_+e_*x_^2)^2,x_] := x*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)*(d+e*x^2)) -   (1-c^2*x^2)*(a+b*ArcTan[c*x])^(p+2)/(b^2*e*(p+1)*(p+2)*(d+e*x^2)) -   4/(b^2*(p+1)*(p+2))*Integrate[x*(a+b*ArcTan[c*x])^(p+2)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[p,-1] && NeQ[p,-2]
+
+Integrate[x_*(a_.+b_*ArcCot[c_*x_])^p_/(d_+e_*x_^2)^2,x_] := -x*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)*(d+e*x^2)) -   (1-c^2*x^2)*(a+b*ArcCot[c*x])^(p+2)/(b^2*e*(p+1)*(p+2)*(d+e*x^2)) -   4/(b^2*(p+1)*(p+2))*Integrate[x*(a+b*ArcCot[c*x])^(p+2)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[p,-1] && NeQ[p,-2]
+
+Integrate[x_^2*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := -b*(d+e*x^2)^(q+1)/(4*c^3*d*(q+1)^2) +    x*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])/(2*c^2*d*(q+1)) - 1/(2*c^2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && NeQ[q,-5/2]
+
+Integrate[x_^2*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := b*(d+e*x^2)^(q+1)/(4*c^3*d*(q+1)^2) +    x*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])/(2*c^2*d*(q+1)) - 1/(2*c^2*d*(q+1))*Integrate[(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && LtQ[q,-1] && NeQ[q,-5/2]
+
+Integrate[x_^2*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := (a+b*ArcTan[c*x])^(p+1)/(2*b*c^3*d^2*(p+1)) -    x*(a+b*ArcTan[c*x])^p/(2*c^2*d*(d+e*x^2)) + b*p/(2*c)*Integrate[x*(a+b*ArcTan[c*x])^(p-1)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[x_^2*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := -(a+b*ArcCot[c*x])^(p+1)/(2*b*c^3*d^2*(p+1)) -    x*(a+b*ArcCot[c*x])^p/(2*c^2*d*(d+e*x^2)) - b*p/(2*c)*Integrate[x*(a+b*ArcCot[c*x])^(p-1)/(d+e*x^2)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := b*(f*x)^m*(d+e*x^2)^(q+1)/(c*d*m^2) -    f*(f*x)^(m-1)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])/(c^2*d*m) + f^2*(m-1)/(c^2*d*m)*Integrate[(f*x)^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x]),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[q,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := -b*(f*x)^m*(d+e*x^2)^(q+1)/(c*d*m^2) -    f*(f*x)^(m-1)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])/(c^2*d*m) + f^2*(m-1)/(c^2*d*m)*Integrate[(f*x)^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x]),x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[q,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := b*p*(f*x)^m*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^(p-1)/(c*d*m^2) -    f*(f*x)^(m-1)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p/(c^2*d*m) - b^2*p*(p-1)/m^2*Integrate[(f*x)^m*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p-2),x] + f^2*(m-1)/(c^2*d*m)*Integrate[(f*x)^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[q,-1] && GtQ[p,1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := -b*p*(f*x)^m*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^(p-1)/(c*d*m^2) -    f*(f*x)^(m-1)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p/(c^2*d*m) - b^2*p*(p-1)/m^2*Integrate[(f*x)^m*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p-2),x] + f^2*(m-1)/(c^2*d*m)*Integrate[(f*x)^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[q,-1] && GtQ[p,1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_,x_] := (f*x)^m*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) - f*m/(b*c*(p+1))*Integrate[(f*x)^(m-1)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[p,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_,x_] := -(f*x)^m*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) + f*m/(b*c*(p+1))*Integrate[(f*x)^(m-1)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && EqQ[e,c^2*d] && EqQ[m+2*q+2,0] && LtQ[p,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p/(d*f*(m+1)) - b*c*p/(f*(m+1))*Integrate[(f*x)^(m+1)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p-1),x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && EqQ[e,c^2*d] && EqQ[m+2*q+3,0] && GtQ[p,0] && NeQ[m,-1]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := (f*x)^(m+1)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p/(d*f*(m+1)) + b*c*p/(f*(m+1))*Integrate[(f*x)^(m+1)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p-1),x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && EqQ[e,c^2*d] && EqQ[m+2*q+3,0] && GtQ[p,0] && NeQ[m,-1]
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcTan[c_*x_]),x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcTan[c*x])/(f*(m+2)) -    b*c*d/(f*(m+2))*Integrate[(f*x)^(m+1)/Sqrt[d+e*x^2],x] +    d/(m+2)*Integrate[(f*x)^m*(a+b*ArcTan[c*x])/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && NeQ[m,-2]
+
+Integrate[(f_*x_)^m_*Sqrt[d_+e_*x_^2]*(a_.+b_*ArcCot[c_*x_]),x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcCot[c*x])/(f*(m+2)) +    b*c*d/(f*(m+2))*Integrate[(f*x)^(m+1)/Sqrt[d+e*x^2],x] +    d/(m+2)*Integrate[(f*x)^m*(a+b*ArcCot[c*x])/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && NeQ[m,-2]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(f*x)^m*(d+e*x^2)^q*(a+b*ArcTan[c*x])^p,x],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && IGtQ[p,0] && IGtQ[q,1] && (EqQ[p,1] || IntegerQ[m])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := Integrate[ExpandIntegrand[(f*x)^m*(d+e*x^2)^q*(a+b*ArcCot[c*x])^p,x],x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && IGtQ[p,0] && IGtQ[q,1] && (EqQ[p,1] || IntegerQ[m])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := d*Integrate[(f*x)^m*(d+e*x^2)^(q-1)*(a+b*ArcTan[c*x])^p,x] +    c^2*d/f^2*Integrate[(f*x)^(m+2)*(d+e*x^2)^(q-1)*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && GtQ[q,0] && IGtQ[p,0] && (RationalQ[m] || EqQ[p,1] && IntegerQ[q])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := d*Integrate[(f*x)^m*(d+e*x^2)^(q-1)*(a+b*ArcCot[c*x])^p,x] +    c^2*d/f^2*Integrate[(f*x)^(m+2)*(d+e*x^2)^(q-1)*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[e,c^2*d] && GtQ[q,0] && IGtQ[p,0] && (RationalQ[m] || EqQ[p,1] && IntegerQ[q])
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := f*(f*x)^(m-1)*Sqrt[d+e*x^2]*(a+b*ArcTan[c*x])^p/(c^2*d*m) - b*f*p/(c*m)*Integrate[(f*x)^(m-1)*(a+b*ArcTan[c*x])^(p-1)/Sqrt[d+e*x^2],x] - f^2*(m-1)/(c^2*m)*Integrate[(f*x)^(m-2)*(a+b*ArcTan[c*x])^p/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && GtQ[p,0] && GtQ[m,1]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := f*(f*x)^(m-1)*Sqrt[d+e*x^2]*(a+b*ArcCot[c*x])^p/(c^2*d*m) + b*f*p/(c*m)*Integrate[(f*x)^(m-1)*(a+b*ArcCot[c*x])^(p-1)/Sqrt[d+e*x^2],x] - f^2*(m-1)/(c^2*m)*Integrate[(f*x)^(m-2)*(a+b*ArcCot[c*x])^p/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && GtQ[p,0] && GtQ[m,1]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])/(x_*Sqrt[d_+e_*x_^2]),x_] := -2/Sqrt[d]*(a+b*ArcTan[c*x])*ArcTanh[Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] + I*b/Sqrt[d]*PolyLog[2,-Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] - I*b/Sqrt[d]*PolyLog[2,Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])/(x_*Sqrt[d_+e_*x_^2]),x_] := -2/Sqrt[d]*(a+b*ArcCot[c*x])*ArcTanh[Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] - I*b/Sqrt[d]*PolyLog[2,-Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] + I*b/Sqrt[d]*PolyLog[2,Sqrt[1+I*c*x]/Sqrt[1-I*c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_/(x_*Sqrt[d_+e_*x_^2]),x_] := 1/Sqrt[d]*Subst[Integrate[(a+b*x)^p*Csc[x],x],x,ArcTan[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_/(x_*Sqrt[d_+e_*x_^2]),x_] := -c*x*Sqrt[1+1/(c^2*x^2)]/Sqrt[d+e*x^2]*Subst[Integrate[(a+b*x)^p*Sec[x],x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && GtQ[d,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(x_*Sqrt[d_+e_*x_^2]),x_] := Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[(a+b*ArcTan[c*x])^p/(x*Sqrt[1+c^2*x^2]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && Not[GtQ[d,0]]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(x_*Sqrt[d_+e_*x_^2]),x_] := Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[(a+b*ArcCot[c*x])^p/(x*Sqrt[1+c^2*x^2]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && Not[GtQ[d,0]]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_./(x_^2*Sqrt[d_+e_*x_^2]),x_] := -Sqrt[d+e*x^2]*(a+b*ArcTan[c*x])^p/(d*x) +    b*c*p*Integrate[(a+b*ArcTan[c*x])^(p-1)/(x*Sqrt[d+e*x^2]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_./(x_^2*Sqrt[d_+e_*x_^2]),x_] := -Sqrt[d+e*x^2]*(a+b*ArcCot[c*x])^p/(d*x) -    b*c*p*Integrate[(a+b*ArcCot[c*x])^(p-1)/(x*Sqrt[d+e*x^2]),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && GtQ[p,0]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcTan[c*x])^p/(d*f*(m+1)) - b*c*p/(f*(m+1))*Integrate[(f*x)^(m+1)*(a+b*ArcTan[c*x])^(p-1)/Sqrt[d+e*x^2],x] - c^2*(m+2)/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(a+b*ArcTan[c*x])^p/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && GtQ[p,0] && LtQ[m,-1] && NeQ[m,-2]
+
+Integrate[(f_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./Sqrt[d_+e_*x_^2],x_] := (f*x)^(m+1)*Sqrt[d+e*x^2]*(a+b*ArcCot[c*x])^p/(d*f*(m+1)) + b*c*p/(f*(m+1))*Integrate[(f*x)^(m+1)*(a+b*ArcCot[c*x])^(p-1)/Sqrt[d+e*x^2],x] - c^2*(m+2)/(f^2*(m+1))*Integrate[(f*x)^(m+2)*(a+b*ArcCot[c*x])^p/Sqrt[d+e*x^2],x] /;
+FreeQ[{a,b,c,d,e,f},x] && EqQ[e,c^2*d] && GtQ[p,0] && LtQ[m,-1] && NeQ[m,-2]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := 1/e*Integrate[x^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p,x] - d/e*Integrate[x^(m-2)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IntegersQ[p,2*q] && LtQ[q,-1] && IGtQ[m,1] && NeQ[p,-1]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := 1/e*Integrate[x^(m-2)*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p,x] - d/e*Integrate[x^(m-2)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IntegersQ[p,2*q] && LtQ[q,-1] && IGtQ[m,1] && NeQ[p,-1]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := 1/d*Integrate[x^m*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^p,x] - e/d*Integrate[x^(m+2)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IntegersQ[p,2*q] && LtQ[q,-1] && ILtQ[m,0] && NeQ[p,-1]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := 1/d*Integrate[x^m*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^p,x] - e/d*Integrate[x^(m+2)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IntegersQ[p,2*q] && LtQ[q,-1] && ILtQ[m,0] && NeQ[p,-1]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := x^m*(d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])^(p+1)/(b*c*d*(p+1)) - m/(b*c*(p+1))*Integrate[x^(m-1)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p+1),x] - c*(m+2*q+2)/(b*(p+1))*Integrate[x^(m+1)*(d+e*x^2)^q*(a+b*ArcTan[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,m},x] && EqQ[e,c^2*d] && IntegerQ[m] && LtQ[q,-1] && LtQ[p,-1] && NeQ[m+2*q+2,0]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := -x^m*(d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])^(p+1)/(b*c*d*(p+1)) + m/(b*c*(p+1))*Integrate[x^(m-1)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p+1),x] + c*(m+2*q+2)/(b*(p+1))*Integrate[x^(m+1)*(d+e*x^2)^q*(a+b*ArcCot[c*x])^(p+1),x] /;
+FreeQ[{a,b,c,d,e,m},x] && EqQ[e,c^2*d] && IntegerQ[m] && LtQ[q,-1] && LtQ[p,-1] && NeQ[m+2*q+2,0]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := d^q/c^(m+1)*Subst[Integrate[(a+b*x)^p*Sin[x]^m/Cos[x]^(m+2*(q+1)),x],x,ArcTan[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && IGtQ[m,0] && ILtQ[m+2*q+1,0] && (IntegerQ[q] || GtQ[d,0])
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := d^(q+1/2)*Sqrt[1+c^2*x^2]/Sqrt[d+e*x^2]*Integrate[x^m*(1+c^2*x^2)^q*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && IGtQ[m,0] && ILtQ[m+2*q+1,0] && Not[IntegerQ[q] || GtQ[d,0]]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := -d^q/c^(m+1)*Subst[Integrate[(a+b*x)^p*Cos[x]^m/Sin[x]^(m+2*(q+1)),x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && IGtQ[m,0] && ILtQ[m+2*q+1,0] && IntegerQ[q]
+
+Integrate[x_^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := -d^(q+1/2)*x*Sqrt[(1+c^2*x^2)/(c^2*x^2)]/(c^m*Sqrt[d+e*x^2])*Subst[Integrate[(a+b*x)^p*Cos[x]^m/Sin[x]^(m+2*(q+1)),x],x,ArcCot[c*x]] /;
+FreeQ[{a,b,c,d,e,p},x] && EqQ[e,c^2*d] && IGtQ[m,0] && ILtQ[m+2*q+1,0] && Not[IntegerQ[q]]
+
+Integrate[x_*(d_.+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := (d+e*x^2)^(q+1)*(a+b*ArcTan[c*x])/(2*e*(q+1)) -    b*c/(2*e*(q+1))*Integrate[(d+e*x^2)^(q+1)/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,q},x] && NeQ[q,-1]
+
+Integrate[x_*(d_.+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := (d+e*x^2)^(q+1)*(a+b*ArcCot[c*x])/(2*e*(q+1)) +    b*c/(2*e*(q+1))*Integrate[(d+e*x^2)^(q+1)/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,q},x] && NeQ[q,-1]
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^q,x]}, Dist[a+b*ArcTan[c*x],u,x] - b*c*Integrate[SimplifyIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && ( IGtQ[q,0] && Not[ILtQ[(m-1)/2,0] && GtQ[m+2*q+3,0]] || IGtQ[(m+1)/2,0] && Not[ILtQ[q,0] && GtQ[m+2*q+3,0]] || ILtQ[(m+2*q+1)/2,0] && Not[ILtQ[(m-1)/2,0]] )
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^q,x]}, Dist[a+b*ArcCot[c*x],u,x] + b*c*Integrate[SimplifyIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,m,q},x] && ( IGtQ[q,0] && Not[ILtQ[(m-1)/2,0] && GtQ[m+2*q+3,0]] || IGtQ[(m+1)/2,0] && Not[ILtQ[q,0] && GtQ[m+2*q+3,0]] || ILtQ[(m+2*q+1)/2,0] && Not[ILtQ[(m-1)/2,0]] )
+
+Integrate[x_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := 1/(4*d^2*Rt[-e/d,2])*Integrate[(a+b*ArcTan[c*x])^p/(1-Rt[-e/d,2]*x)^2,x] - 1/(4*d^2*Rt[-e/d,2])*Integrate[(a+b*ArcTan[c*x])^p/(1+Rt[-e/d,2]*x)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0]
+
+Integrate[x_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2)^2,x_] := 1/(4*d^2*Rt[-e/d,2])*Integrate[(a+b*ArcCot[c*x])^p/(1-Rt[-e/d,2]*x)^2,x] - 1/(4*d^2*Rt[-e/d,2])*Integrate[(a+b*ArcCot[c*x])^p/(1+Rt[-e/d,2]*x)^2,x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := With[{u=ExpandIntegrand[(a+b*ArcTan[c*x])^p,(f*x)^m*(d+e*x^2)^q,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IntegerQ[q] && IGtQ[p,0] && (EqQ[p,1] && GtQ[q,0] || IntegerQ[m])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := With[{u=ExpandIntegrand[(a+b*ArcCot[c*x])^p,(f*x)^m*(d+e*x^2)^q,x]}, Integrate[u,x] /; SumQ[u]] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IntegerQ[q] && IGtQ[p,0] && (EqQ[p,1] && GtQ[q,0] || IntegerQ[m])
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_+b_*ArcTan[c_*x_]),x_] := a*Integrate[(f*x)^m*(d+e*x^2)^q,x] + b*Integrate[(f*x)^m*(d+e*x^2)^q*ArcTan[c*x],x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x]
+
+Integrate[(f_*x_)^m_*(d_+e_*x_^2)^q_*(a_+b_*ArcCot[c_*x_]),x_] := a*Integrate[(f*x)^m*(d+e*x^2)^q,x] + b*Integrate[(f*x)^m*(d+e*x^2)^q*ArcCot[c*x],x] /;
+FreeQ[{a,b,c,d,e,f,m,q},x]
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := Integrate[ExpandIntegrand[(a+b*ArcTan[c*x])^p/(d+e*x^2),(f+g*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[p,0] && EqQ[e,c^2*d] && IGtQ[m,0]
+
+Integrate[(f_+g_*x_)^m_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := Integrate[ExpandIntegrand[(a+b*ArcCot[c*x])^p/(d+e*x^2),(f+g*x)^m,x],x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[p,0] && EqQ[e,c^2*d] && IGtQ[m,0]
+
+Integrate[ArcTanh[u_]*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/2*Integrate[Log[1+u]*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] - 1/2*Integrate[Log[1-u]*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[ArcCoth[u_]*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/2*Integrate[Log[SimplifyIntegrand[1+1/u,x]]*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] - 1/2*Integrate[Log[SimplifyIntegrand[1-1/u,x]]*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[ArcTanh[u_]*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/2*Integrate[Log[1+u]*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] - 1/2*Integrate[Log[1-u]*(a+b*ArcTan[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[ArcCoth[u_]*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := 1/2*Integrate[Log[SimplifyIntegrand[1+1/u,x]]*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] - 1/2*Integrate[Log[SimplifyIntegrand[1-1/u,x]]*(a+b*ArcCot[c*x])^p/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_*Log[f_+g_*x_]/(d_+e_*x_^2),x_] := (a+b*ArcTan[c*x])^(p+1)*Log[f+g*x]/(b*c*d*(p+1)) - g/(b*c*d*(p+1))*Integrate[(a+b*ArcTan[c*x])^(p+1)/(f+g*x),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[c^2*f^2+g^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_*Log[f_+g_*x_]/(d_+e_*x_^2),x_] := (a+b*ArcCot[c*x])^(p+1)*Log[f+g*x]/(b*c*d*(p+1)) - g/(b*c*d*(p+1))*Integrate[(a+b*ArcCot[c*x])^(p+1)/(f+g*x),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[c^2*f^2+g^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_*Log[u_]/(d_+e_*x_^2),x_] := I*(a+b*ArcTan[c*x])^p*PolyLog[2,1-u]/(2*c*d) - b*p*I/2*Integrate[(a+b*ArcTan[c*x])^(p-1)*PolyLog[2,1-u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[(1-u)^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_*Log[u_]/(d_+e_*x_^2),x_] := I*(a+b*ArcCot[c*x])^p*PolyLog[2,1-u]/(2*c*d) + b*p*I/2*Integrate[(a+b*ArcCot[c*x])^(p-1)*PolyLog[2,1-u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[(1-u)^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_*Log[u_]/(d_+e_*x_^2),x_] := -I*(a+b*ArcTan[c*x])^p*PolyLog[2,1-u]/(2*c*d) + b*p*I/2*Integrate[(a+b*ArcTan[c*x])^(p-1)*PolyLog[2,1-u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[(1-u)^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_*Log[u_]/(d_+e_*x_^2),x_] := -I*(a+b*ArcCot[c*x])^p*PolyLog[2,1-u]/(2*c*d) - b*p*I/2*Integrate[(a+b*ArcCot[c*x])^(p-1)*PolyLog[2,1-u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[(1-u)^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_*PolyLog[k_,u_]/(d_+e_*x_^2),x_] := -I*(a+b*ArcTan[c*x])^p*PolyLog[k+1,u]/(2*c*d) + b*p*I/2*Integrate[(a+b*ArcTan[c*x])^(p-1)*PolyLog[k+1,u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,k},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_*PolyLog[k_,u_]/(d_+e_*x_^2),x_] := -I*(a+b*ArcCot[c*x])^p*PolyLog[k+1,u]/(2*c*d) - b*p*I/2*Integrate[(a+b*ArcCot[c*x])^(p-1)*PolyLog[k+1,u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,k},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I+c*x))^2,0]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^p_*PolyLog[k_,u_]/(d_+e_*x_^2),x_] := I*(a+b*ArcTan[c*x])^p*PolyLog[k+1,u]/(2*c*d) - b*p*I/2*Integrate[(a+b*ArcTan[c*x])^(p-1)*PolyLog[k+1,u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,k},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^p_*PolyLog[k_,u_]/(d_+e_*x_^2),x_] := I*(a+b*ArcCot[c*x])^p*PolyLog[k+1,u]/(2*c*d) + b*p*I/2*Integrate[(a+b*ArcCot[c*x])^(p-1)*PolyLog[k+1,u]/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e,k},x] && IGtQ[p,0] && EqQ[e,c^2*d] && EqQ[u^2-(1-2*I/(I-c*x))^2,0]
+
+Integrate[1/((d_+e_*x_^2)*(a_.+b_*ArcCot[c_*x_])*(a_.+b_*ArcTan[c_*x_])),x_] := (-Log[a+b*ArcCot[c*x]]+Log[a+b*ArcTan[c*x]])/(b*c*d*(2*a+b*ArcCot[c*x]+b*ArcTan[c*x])) /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d]
+
+Integrate[(a_.+b_*ArcCot[c_*x_])^q_*(a_.+b_*ArcTan[c_*x_])^p_./(d_+e_*x_^2),x_] := -(a+b*ArcCot[c*x])^(q+1)*(a+b*ArcTan[c*x])^p/(b*c*d*(q+1)) + p/(q+1)*Integrate[(a+b*ArcCot[c*x])^(q+1)*(a+b*ArcTan[c*x])^(p-1)/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && IGeQ[q,p]
+
+Integrate[(a_.+b_*ArcTan[c_*x_])^q_*(a_.+b_*ArcCot[c_*x_])^p_./(d_+e_*x_^2),x_] := (a+b*ArcTan[c*x])^(q+1)*(a+b*ArcCot[c*x])^p/(b*c*d*(q+1)) + p/(q+1)*Integrate[(a+b*ArcTan[c*x])^(q+1)*(a+b*ArcCot[c*x])^(p-1)/(d+e*x^2),x] /;
+FreeQ[{a,b,c,d,e},x] && EqQ[e,c^2*d] && IGtQ[p,0] && IGeQ[q,p]
+
+Integrate[ArcTan[a_*x_]/(c_+d_*x_^n_.),x_] := I/2*Integrate[Log[1-I*a*x]/(c+d*x^n),x] - I/2*Integrate[Log[1+I*a*x]/(c+d*x^n),x] /;
+FreeQ[{a,c,d},x] && IntegerQ[n] && Not[EqQ[n,2] && EqQ[d,a^2*c]]
+
+Integrate[ArcCot[a_*x_]/(c_+d_*x_^n_.),x_] := I/2*Integrate[Log[1-I/(a*x)]/(c+d*x^n),x] - I/2*Integrate[Log[1+I/(a*x)]/(c+d*x^n),x] /;
+FreeQ[{a,c,d},x] && IntegerQ[n] && Not[EqQ[n,2] && EqQ[d,a^2*c]]
+
+Integrate[Log[d_*x_^m_.]*ArcTan[c_*x_^n_.]/x_,x_] := I/2*Integrate[Log[d*x^m]*Log[1-I*c*x^n]/x,x] - I/2*Integrate[Log[d*x^m]*Log[1+I*c*x^n]/x,x] /;
+FreeQ[{c,d,m,n},x]
+
+Integrate[Log[d_*x_^m_.]*ArcCot[c_*x_^n_.]/x_,x_] := I/2*Integrate[Log[d*x^m]*Log[1-I/(c*x^n)]/x,x] - I/2*Integrate[Log[d*x^m]*Log[1+I/(c*x^n)]/x,x] /;
+FreeQ[{c,d,m,n},x]
+
+Integrate[Log[d_*x_^m_.]*(a_+b_*ArcTan[c_*x_^n_.])/x_,x_] := a*Integrate[Log[d*x^m]/x,x] + b*Integrate[(Log[d*x^m]*ArcTan[c*x^n])/x,x] /;
+FreeQ[{a,b,c,d,m,n},x]
+
+Integrate[Log[d_*x_^m_.]*(a_+b_*ArcCot[c_*x_^n_.])/x_,x_] := a*Integrate[Log[d*x^m]/x,x] + b*Integrate[(Log[d*x^m]*ArcCot[c*x^n])/x,x] /;
+FreeQ[{a,b,c,d,m,n},x]
+
+Integrate[(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcTan[c_*x_]),x_] := x*(d+e*Log[f+g*x^2])*(a+b*ArcTan[c*x]) - 2*e*g*Integrate[x^2*(a+b*ArcTan[c*x])/(f+g*x^2),x] - b*c*Integrate[x*(d+e*Log[f+g*x^2])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x]
+
+Integrate[(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcCot[c_*x_]),x_] := x*(d+e*Log[f+g*x^2])*(a+b*ArcCot[c*x]) - 2*e*g*Integrate[x^2*(a+b*ArcCot[c*x])/(f+g*x^2),x] + b*c*Integrate[x*(d+e*Log[f+g*x^2])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x]
+
+Integrate[Log[f_.+g_*x_^2]*ArcTan[c_*x_]/x_,x_] := (Log[f+g*x^2]-Log[1-I*c*x]-Log[1+I*c*x])*Integrate[ArcTan[c*x]/x,x] + I/2*Integrate[Log[1-I*c*x]^2/x,x] - I/2*Integrate[Log[1+I*c*x]^2/x,x] /;
+FreeQ[{c,f,g},x] && EqQ[g,c^2*f]
+
+Integrate[Log[f_.+g_*x_^2]*ArcCot[c_*x_]/x_,x_] := (Log[f+g*x^2]-Log[c^2*x^2]-Log[1-I/(c*x)]-Log[1+I/(c*x)])*Integrate[ArcCot[c*x]/x,x] + Integrate[Log[c^2*x^2]*ArcCot[c*x]/x,x] + I/2*Integrate[Log[1-I/(c*x)]^2/x,x] - I/2*Integrate[Log[1+I/(c*x)]^2/x,x] /;
+FreeQ[{c,f,g},x] && EqQ[g,c^2*f]
+
+Integrate[Log[f_.+g_*x_^2]*(a_+b_*ArcTan[c_*x_])/x_,x_] := a*Integrate[Log[f+g*x^2]/x,x] + b*Integrate[Log[f+g*x^2]*ArcTan[c*x]/x,x] /;
+FreeQ[{a,b,c,f,g},x]
+
+Integrate[Log[f_.+g_*x_^2]*(a_+b_*ArcCot[c_*x_])/x_,x_] := a*Integrate[Log[f+g*x^2]/x,x] + b*Integrate[Log[f+g*x^2]*ArcCot[c*x]/x,x] /;
+FreeQ[{a,b,c,f,g},x]
+
+Integrate[(d_+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcTan[c_*x_])/x_,x_] := d*Integrate[(a+b*ArcTan[c*x])/x,x] + e*Integrate[Log[f+g*x^2]*(a+b*ArcTan[c*x])/x,x] /;
+FreeQ[{a,b,c,d,e,f,g},x]
+
+Integrate[(d_+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcCot[c_*x_])/x_,x_] := d*Integrate[(a+b*ArcCot[c*x])/x,x] + e*Integrate[Log[f+g*x^2]*(a+b*ArcCot[c*x])/x,x] /;
+FreeQ[{a,b,c,d,e,f,g},x]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcTan[c_*x_]),x_] := x^(m+1)*(d+e*Log[f+g*x^2])*(a+b*ArcTan[c*x])/(m+1) - 2*e*g/(m+1)*Integrate[x^(m+2)*(a+b*ArcTan[c*x])/(f+g*x^2),x] - b*c/(m+1)*Integrate[x^(m+1)*(d+e*Log[f+g*x^2])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && ILtQ[m/2,0]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcCot[c_*x_]),x_] := x^(m+1)*(d+e*Log[f+g*x^2])*(a+b*ArcCot[c*x])/(m+1) - 2*e*g/(m+1)*Integrate[x^(m+2)*(a+b*ArcCot[c*x])/(f+g*x^2),x] + b*c/(m+1)*Integrate[x^(m+1)*(d+e*Log[f+g*x^2])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && ILtQ[m/2,0]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcTan[c_*x_]),x_] := With[{u=IntHide[x^m*(d+e*Log[f+g*x^2]),x]}, Dist[a+b*ArcTan[c*x],u,x] - b*c*Integrate[ExpandIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[(m+1)/2,0]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcCot[c_*x_]),x_] := With[{u=IntHide[x^m*(d+e*Log[f+g*x^2]),x]}, Dist[a+b*ArcCot[c*x],u,x] + b*c*Integrate[ExpandIntegrand[u/(1+c^2*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IGtQ[(m+1)/2,0]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcTan[c_*x_]),x_] := With[{u=IntHide[x^m*(a+b*ArcTan[c*x]),x]}, Dist[d+e*Log[f+g*x^2],u,x] - 2*e*g*Integrate[ExpandIntegrand[x*u/(f+g*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IntegerQ[m] && NeQ[m,-1]
+
+Integrate[x_^m_*(d_.+e_*Log[f_.+g_*x_^2])*(a_.+b_*ArcCot[c_*x_]),x_] := With[{u=IntHide[x^m*(a+b*ArcCot[c*x]),x]}, Dist[d+e*Log[f+g*x^2],u,x] - 2*e*g*Integrate[ExpandIntegrand[x*u/(f+g*x^2),x],x]] /;
+FreeQ[{a,b,c,d,e,f,g},x] && IntegerQ[m] && NeQ[m,-1]
+
+Integrate[x_*(d_.+e_*Log[f_+g_*x_^2])*(a_.+b_*ArcTan[c_*x_])^2,x_] := (f+g*x^2)*(d+e*Log[f+g*x^2])*(a+b*ArcTan[c*x])^2/(2*g) -    e*x^2*(a+b*ArcTan[c*x])^2/2 - b/c*Integrate[(d+e*Log[f+g*x^2])*(a+b*ArcTan[c*x]),x] + b*c*e*Integrate[x^2*(a+b*ArcTan[c*x])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[g,c^2*f]
+
+Integrate[x_*(d_.+e_*Log[f_+g_*x_^2])*(a_.+b_*ArcCot[c_*x_])^2,x_] := (f+g*x^2)*(d+e*Log[f+g*x^2])*(a+b*ArcCot[c*x])^2/(2*g) -    e*x^2*(a+b*ArcCot[c*x])^2/2 + b/c*Integrate[(d+e*Log[f+g*x^2])*(a+b*ArcCot[c*x]),x] - b*c*e*Integrate[x^2*(a+b*ArcCot[c*x])/(1+c^2*x^2),x] /;
+FreeQ[{a,b,c,d,e,f,g},x] && EqQ[g,c^2*f]
+
+Integrate[u_*(a_.+b_*ArcTan[c_*x_])^p_.,x_] := Unintegrable[u*(a+b*ArcTan[c*x])^p,x] /;
+FreeQ[{a,b,c,p},x] && (EqQ[u,1] || MatchQ[u,(d_.+e_*x)^q_./; FreeQ[{d,e,q},x]] || MatchQ[u,(f_*x)^m_*(d_.+e_*x)^q_./; FreeQ[{d,e,f,m,q},x]] || MatchQ[u,(d_.+e_*x^2)^q_./; FreeQ[{d,e,q},x]] || MatchQ[u,(f_*x)^m_*(d_.+e_*x^2)^q_./; FreeQ[{d,e,f,m,q},x]])
+
+Integrate[u_*(a_.+b_*ArcCot[c_*x_])^p_.,x_] := Unintegrable[u*(a+b*ArcCot[c*x])^p,x] /;
+FreeQ[{a,b,c,p},x] && (EqQ[u,1] || MatchQ[u,(d_.+e_*x)^q_./; FreeQ[{d,e,q},x]] || MatchQ[u,(f_*x)^m_*(d_.+e_*x)^q_./; FreeQ[{d,e,f,m,q},x]] || MatchQ[u,(d_.+e_*x^2)^q_./; FreeQ[{d,e,q},x]] || MatchQ[u,(f_*x)^m_*(d_.+e_*x^2)^q_./; FreeQ[{d,e,f,m,q},x]])
+
+Integrate[(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(a+b*ArcTan[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d},x] && IGtQ[p,0]
+
+Integrate[(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(a+b*ArcCot[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d},x] && IGtQ[p,0]
+
+Integrate[(a_.+b_*ArcTan[c_+d_*x_])^p_,x_] := Unintegrable[(a+b*ArcTan[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(a_.+b_*ArcCot[c_+d_*x_])^p_,x_] := Unintegrable[(a+b*ArcCot[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(f*x/d)^m*(a+b*ArcTan[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[d*e-c*f,0] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(f*x/d)^m*(a+b*ArcCot[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[d*e-c*f,0] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := (e+f*x)^(m+1)*(a+b*ArcTan[c+d*x])^p/(f*(m+1)) - b*d*p/(f*(m+1))*Integrate[(e+f*x)^(m+1)*(a+b*ArcTan[c+d*x])^(p-1)/(1+(c+d*x)^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && ILtQ[m,-1]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := (e+f*x)^(m+1)*(a+b*ArcCot[c+d*x])^p/(f*(m+1)) + b*d*p/(f*(m+1))*Integrate[(e+f*x)^(m+1)*(a+b*ArcCot[c+d*x])^(p-1)/(1+(c+d*x)^2),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && ILtQ[m,-1]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcTan[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcCot[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcTan[c_+d_*x_])^p_,x_] := Unintegrable[(e+f*x)^m*(a+b*ArcTan[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCot[c_+d_*x_])^p_,x_] := Unintegrable[(e+f*x)^m*(a+b*ArcCot[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && Not[IGtQ[p,0]]
+
+Integrate[ArcTan[a_+b_*x_]/(c_+d_*x_^n_.),x_] := I/2*Integrate[Log[1-I*a-I*b*x]/(c+d*x^n),x] - I/2*Integrate[Log[1+I*a+I*b*x]/(c+d*x^n),x] /;
+FreeQ[{a,b,c,d},x] && RationalQ[n]
+
+Integrate[ArcCot[a_+b_*x_]/(c_+d_*x_^n_.),x_] := I/2*Integrate[Log[(-I+a+b*x)/(a+b*x)]/(c+d*x^n),x] - I/2*Integrate[Log[(I+a+b*x)/(a+b*x)]/(c+d*x^n),x] /;
+FreeQ[{a,b,c,d},x] && RationalQ[n]
+
+Integrate[ArcTan[a_+b_*x_]/(c_+d_*x_^n_),x_] := Unintegrable[ArcTan[a+b*x]/(c+d*x^n),x] /;
+FreeQ[{a,b,c,d,n},x] && Not[RationalQ[n]]
+
+Integrate[ArcCot[a_+b_*x_]/(c_+d_*x_^n_),x_] := Unintegrable[ArcCot[a+b*x]/(c+d*x^n),x] /;
+FreeQ[{a,b,c,d,n},x] && Not[RationalQ[n]]
+
+Integrate[(A_.+B_*x_+C_*x_^2)^q_*(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(C/d^2+C/d^2*x^2)^q*(a+b*ArcTan[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,A,B,C,p,q},x] && EqQ[B*(1+c^2)-2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(A_.+B_*x_+C_*x_^2)^q_*(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(C/d^2+C/d^2*x^2)^q*(a+b*ArcCot[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,A,B,C,p,q},x] && EqQ[B*(1+c^2)-2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(e_.+f_*x_)^m_*(A_.+B_*x_+C_*x_^2)^q_*(a_.+b_*ArcTan[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(C/d^2+C/d^2*x^2)^q*(a+b*ArcTan[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,A,B,C,m,p,q},x] && EqQ[B*(1+c^2)-2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[(e_.+f_*x_)^m_*(A_.+B_*x_+C_*x_^2)^q_*(a_.+b_*ArcCot[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(C/d^2+C/d^2*x^2)^q*(a+b*ArcCot[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,A,B,C,m,p,q},x] && EqQ[B*(1+c^2)-2*A*c*d,0] && EqQ[2*c*C-B*d,0]
+
+Integrate[E^(n_*ArcTan[a_*x_]),x_] := Integrate[((1-I*a*x)^((I*n+1)/2)/((1+I*a*x)^((I*n-1)/2)*Sqrt[1+a^2*x^2])),x] /;
+FreeQ[a,x] && IntegerQ[(I*n-1)/2]
+
+Integrate[x_^m_*E^(n_*ArcTan[a_*x_]),x_] := Integrate[x^m*((1-I*a*x)^((I*n+1)/2)/((1+I*a*x)^((I*n-1)/2)*Sqrt[1+a^2*x^2])),x] /;
+FreeQ[{a,m},x] && IntegerQ[(I*n-1)/2]
+
+Integrate[E^(n_*ArcTan[a_*x_]),x_] := Integrate[(1-I*a*x)^(I*n/2)/(1+I*a*x)^(I*n/2),x] /;
+FreeQ[{a,n},x] && Not[IntegerQ[(I*n-1)/2]]
+
+Integrate[x_^m_*E^(n_*ArcTan[a_*x_]),x_] := Integrate[x^m*(1-I*a*x)^(I*n/2)/(1+I*a*x)^(I*n/2),x] /;
+FreeQ[{a,m,n},x] && Not[IntegerQ[(I*n-1)/2]]
+
+Integrate[u_*(c_+d_*x_)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[u*(1+d*x/c)^p*(1-I*a*x)^(I*n/2)/(1+I*a*x)^(I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[a^2*c^2+d^2,0] && (IntegerQ[p] || GtQ[c,0])
+
+Integrate[u_*(c_+d_*x_)^p_*E^(n_*ArcTan[a_*x_]),x_] := Integrate[u*(c+d*x)^p*(1-I*a*x)^(I*n/2)/(1+I*a*x)^(I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[a^2*c^2+d^2,0] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[u_*(c_+d_./x_)^p_*E^(n_*ArcTan[a_*x_]),x_] := d^p*Integrate[u/x^p*(1+c*x/d)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[c^2+a^2*d^2,0] && IntegerQ[p]
+
+Integrate[u_*(c_+d_./x_)^p_*E^(n_*ArcTanh[a_*x_]),x_] := (-1)^(n/2)*c^p*Integrate[u*(1+d/(c*x))^p*(1-1/(I*a*x))^(I*n/2)/(1+1/(I*a*x))^(I*n/2),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[p]] && IntegerQ[I*n/2] && GtQ[c,0]
+
+Integrate[u_*(c_+d_./x_)^p_*E^(n_*ArcTan[a_*x_]),x_] := Integrate[u*(c+d/x)^p*(1-I*a*x)^(I*n/2)/(1+I*a*x)^(I*n/2),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[p]] && IntegerQ[I*n/2] && Not[GtQ[c,0]]
+
+Integrate[u_*(c_+d_./x_)^p_*E^(n_*ArcTan[a_*x_]),x_] := x^p*(c+d/x)^p/(1+c*x/d)^p*Integrate[u/x^p*(1+c*x/d)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[p]]
+
+Integrate[E^(n_*ArcTan[a_*x_])/(c_+d_*x_^2)^(3/2),x_] := (n+a*x)*E^(n*ArcTan[a*x])/(a*c*(n^2+1)*Sqrt[c+d*x^2]) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && Not[IntegerQ[I*n]]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := (n-2*a*(p+1)*x)*(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x])/(a*c*(n^2+4*(p+1)^2)) + 2*(p+1)*(2*p+3)/(c*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LtQ[p,-1] && Not[IntegerQ[I*n]] && NeQ[n^2+4*(p+1)^2,0] && IntegerQ[2*p]
+
+Integrate[E^(n_*ArcTan[a_*x_])/(c_+d_*x_^2),x_] := E^(n*ArcTan[a*x])/(a*c*n) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[(1+a^2*x^2)^(p-I*n/2)*(1-I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[d,a^2*c] && IntegerQ[p] && IntegerQ[(I*n+1)/2] && Not[IntegerQ[p-I*n/2]]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[(1-I*a*x)^(p+I*n/2)*(1+I*a*x)^(p-I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && (IntegerQ[p] || GtQ[c,0])
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^(I*n/2)*Integrate[(c+d*x^2)^(p-I*n/2)*(1-I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]] && IGtQ[I*n/2,0]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := 1/c^(I*n/2)*Integrate[(c+d*x^2)^(p+I*n/2)/(1+I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]] && ILtQ[I*n/2,0]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^IntPart[p]*(c+d*x^2)^FracPart[p]/(1+a^2*x^2)^FracPart[p]*Integrate[(1+a^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[x_*E^(n_*ArcTan[a_*x_])/(c_+d_*x_^2)^(3/2),x_] := -(1-a*n*x)*E^(n*ArcTan[a*x])/(d*(n^2+1)*Sqrt[c+d*x^2]) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && Not[IntegerQ[I*n]]
+
+Integrate[x_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := (c+d*x^2)^(p+1)*E^(n*ArcTan[a*x])/(2*d*(p+1)) - a*c*n/(2*d*(p+1))*Integrate[(c+d*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LtQ[p,-1] && Not[IntegerQ[I*n]] && IntegerQ[2*p] (* Integrate[x_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := (2*(p+1)+a*n*x)*(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x])/(a^2*c*(n^2+4*(p+1)^2)) - n*(2*p+3)/(a*c*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x]),x] /; FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LtQ[p,-1] && NeQ[n^2+4*(p+1)^2,0] && Not[IntegerQ[I*n]] *)
+
+Integrate[x_^2*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := -(1-a*n*x)*(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x])/(a*d*n*(n^2+1)) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && EqQ[n^2-2*(p+1),0] && Not[IntegerQ[I*n]]
+
+Integrate[x_^2*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := -(n-2*(p+1)*a*x)*(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x])/(a*d*(n^2+4*(p+1)^2)) + (n^2-2*(p+1))/(d*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LtQ[p,-1] && Not[IntegerQ[I*n]] && NeQ[n^2+4*(p+1)^2,0] && IntegerQ[2*p]
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[x^m*(1+a^2*x^2)^(p-I*n/2)*(1-I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,m,p},x] && EqQ[d,a^2*c] && (IntegerQ[p] || GtQ[c,0]) && IntegerQ[(I*n+1)/2] && Not[IntegerQ[p-I*n/2]]
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[x^m*(1-I*a*x)^(p+I*n/2)*(1+I*a*x)^(p-I*n/2),x] /;
+FreeQ[{a,c,d,m,n,p},x] && EqQ[d,a^2*c] && (IntegerQ[p] || GtQ[c,0])
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^(I*n/2)*Integrate[x^m*(c+d*x^2)^(p-I*n/2)*(1-I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,m,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]] && IGtQ[I*n/2,0]
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := 1/c^(I*n/2)*Integrate[x^m*(c+d*x^2)^(p+I*n/2)/(1+I*a*x)^(I*n),x] /;
+FreeQ[{a,c,d,m,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]] && ILtQ[I*n/2,0]
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^IntPart[p]*(c+d*x^2)^FracPart[p]/(1+a^2*x^2)^FracPart[p]*Integrate[x^m*(1+a^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,m,n,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[u_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[u*(1-I*a*x)^(p+I*n/2)*(1+I*a*x)^(p-I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && (IntegerQ[p] || GtQ[c,0])
+
+Integrate[u_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^IntPart[p]*(c+d*x^2)^FracPart[p]/((1-I*a*x)^FracPart[p]*(1+I*a*x)^FracPart[p])* Integrate[u*(1-I*a*x)^(p+I*n/2)*(1+I*a*x)^(p-I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && (IntegerQ[p] || GtQ[c,0]) && IntegerQ[I*n/2]
+
+Integrate[u_*(c_+d_*x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^IntPart[p]*(c+d*x^2)^FracPart[p]/(1+a^2*x^2)^FracPart[p]*Integrate[u*(1+a^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[p] || GtQ[c,0]] && Not[IntegerQ[I*n/2]]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := d^p*Integrate[u/x^(2*p)*(1+a^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[c-a^2*d,0] && IntegerQ[p]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := c^p*Integrate[u*(1-I/(a*x))^p*(1+I/(a*x))^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,p},x] && EqQ[c-a^2*d,0] && Not[IntegerQ[p]] && IntegerQ[I*n/2] && GtQ[c,0]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := x^(2*p)*(c+d/x^2)^p/((1-I*a*x)^p*(1+I*a*x)^p)*Integrate[u/x^(2*p)*(1-I*a*x)^p*(1+I*a*x)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c-a^2*d,0] && Not[IntegerQ[p]] && IntegerQ[I*n/2] && Not[GtQ[c,0]]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcTan[a_*x_]),x_] := x^(2*p)*(c+d/x^2)^p/(1+a^2*x^2)^p*Integrate[u/x^(2*p)*(1+a^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c-a^2*d,0] && Not[IntegerQ[p]] && Not[IntegerQ[I*n/2]]
+
+Integrate[E^(n_*ArcTan[c_*(a_+b_*x_)]),x_] := Integrate[(1-I*a*c-I*b*c*x)^(I*n/2)/(1+I*a*c+I*b*c*x)^(I*n/2),x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[x_^m_*E^(n_*ArcTan[c_*(a_+b_*x_)]),x_] := 4/(I^m*n*b^(m+1)*c^(m+1))* Subst[Integrate[x^(2/(I*n))*(1-I*a*c-(1+I*a*c)*x^(2/(I*n)))^m/(1+x^(2/(I*n)))^(m+2),x],x, (1-I*c*(a+b*x))^(I*n/2)/(1+I*c*(a+b*x))^(I*n/2)] /;
+FreeQ[{a,b,c},x] && ILtQ[m,0] && LtQ[-1,I*n,1]
+
+Integrate[(d_.+e_*x_)^m_*E^(n_*ArcTan[c_*(a_+b_*x_)]),x_] := Integrate[(d+e*x)^m*(1-I*a*c-I*b*c*x)^(I*n/2)/(1+I*a*c+I*b*c*x)^(I*n/2),x] /;
+FreeQ[{a,b,c,d,e,m,n},x]
+
+Integrate[u_*(c_+d_*x_+e_*x_^2)^p_*E^(n_*ArcTan[a_+b_*x_]),x_] := (c/(1+a^2))^p*Integrate[u*(1-I*a-I*b*x)^(p+I*n/2)*(1+I*a+I*b*x)^(p-I*n/2),x] /;
+FreeQ[{a,b,c,d,e,n,p},x] && EqQ[b*d,2*a*e] && EqQ[b^2*c-e(1+a^2),0] && (IntegerQ[p] || GtQ[c/(1+a^2),0])
+
+Integrate[u_*(c_+d_*x_+e_*x_^2)^p_*E^(n_*ArcTan[a_+b_*x_]),x_] := (c+d*x+e*x^2)^p/(1+a^2+2*a*b*x+b^2*x^2)^p*Integrate[u*(1+a^2+2*a*b*x+b^2*x^2)^p*E^(n*ArcTan[a*x]),x] /;
+FreeQ[{a,b,c,d,e,n,p},x] && EqQ[b*d,2*a*e] && EqQ[b^2*c-e(1+a^2),0] && Not[IntegerQ[p] || GtQ[c/(1+a^2),0]]
+
+Integrate[u_*E^(n_*ArcTan[c_./(a_.+b_*x_)]),x_] := Integrate[u*E^(n*ArcCot[a/c+b*x/c]),x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[u_*E^(n_*ArcCot[a_*x_]),x_] := (-1)^(I*n/2)*Integrate[u*E^(-n*ArcTan[a*x]),x] /;
+FreeQ[a,x] && IntegerQ[I*n/2]
+
+Integrate[E^(n_*ArcCot[a_*x_]),x_] := -Subst[Integrate[(1-I*x/a)^((I*n+1)/2)/(x^2*(1+I*x/a)^((I*n-1)/2)*Sqrt[1+x^2/a^2]),x],x,1/x] /;
+FreeQ[a,x] && IntegerQ[(I*n-1)/2]
+
+Integrate[x_^m_*E^(n_*ArcCot[a_*x_]),x_] := -Subst[Integrate[(1-I*x/a)^((I*n+1)/2)/(x^(m+2)*(1+I*x/a)^((I*n-1)/2)*Sqrt[1+x^2/a^2]),x],x,1/x] /;
+FreeQ[a,x] && IntegerQ[(I*n-1)/2] && IntegerQ[m]
+
+Integrate[E^(n_*ArcCot[a_*x_]),x_] := -Subst[Integrate[(1-I*x/a)^(I*n/2)/(x^2*(1+I*x/a)^(I*n/2)),x],x,1/x] /;
+FreeQ[{a,n},x] && Not[IntegerQ[I*n]]
+
+Integrate[x_^m_*E^(n_*ArcCot[a_*x_]),x_] := -Subst[Integrate[(1-I*x/a)^(n/2)/(x^(m+2)*(1+I*x/a)^(n/2)),x],x,1/x] /;
+FreeQ[{a,n},x] && Not[IntegerQ[I*n]] && IntegerQ[m]
+
+Integrate[x_^m_*E^(n_*ArcCot[a_*x_]),x_] := -x^m*(1/x)^m*Subst[Integrate[(1-I*x/a)^((I*n+1)/2)/(x^(m+2)*(1+I*x/a)^((I*n-1)/2)*Sqrt[1+x^2/a^2]),x],x,1/x] /;
+FreeQ[{a,m},x] && IntegerQ[(I*n-1)/2] && Not[IntegerQ[m]]
+
+Integrate[x_^m_*E^(n_*ArcCot[a_*x_]),x_] := -Subst[Integrate[(1-I*x/a)^(n/2)/(x^(m+2)*(1+I*x/a)^(n/2)),x],x,1/x] /;
+FreeQ[{a,m,n},x] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[m]]
+
+Integrate[u_*(c_+d_*x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := d^p*Integrate[u*x^p*(1+c/(d*x))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[a^2*c^2+d^2,0] && Not[IntegerQ[I*n/2]] && IntegerQ[p]
+
+Integrate[u_*(c_+d_*x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := (c+d*x)^p/(x^p*(1+c/(d*x))^p)*Integrate[u*x^p*(1+c/(d*x))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[a^2*c^2+d^2,0] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[p]]
+
+Integrate[(c_+d_./x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*Subst[Integrate[(1+d*x/c)^p*(1-I*x/a)^(I*n/2)/(x^2*(1+I*x/a)^(I*n/2)),x],x,1/x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0])
+
+Integrate[x_^m_*(c_+d_./x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*Subst[Integrate[(1+d*x/c)^p*(1-I*x/a)^(I*n/2)/(x^(m+2)*(1+I*x/a)^(I*n/2)),x],x,1/x] /;
+FreeQ[{a,c,d,m,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && IntegerQ[m]
+
+Integrate[(c_+d_./x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := (c+d/x)^p/(1+d/(c*x))^p*Integrate[(1+d/(c*x))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[x_^m_*(c_+d_./x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*x^m*(1/x)^m*Subst[Integrate[(1+d*x/c)^p*(1-I*x/a)^(I*n/2)/(x^(m+2)*(1+I*x/a)^(I*n/2)),x],x,1/x] /;
+FreeQ[{a,c,d,m,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && Not[IntegerQ[m]]
+
+Integrate[u_*(c_+d_./x_)^p_*E^(n_*ArcCot[a_*x_]),x_] := (c+d/x)^p/(1+d/(c*x))^p*Integrate[u*(1+d/(c*x))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c^2+a^2*d^2,0] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[E^(n_*ArcCot[a_*x_])/(c_+d_*x_^2),x_] := -E^(n*ArcCot[a*x])/(a*c*n) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c]
+
+Integrate[E^(n_*ArcCot[a_*x_])/(c_+d_*x_^2)^(3/2),x_] := -(n-a*x)*E^(n*ArcCot[a*x])/(a*c*(n^2+1)*Sqrt[c+d*x^2]) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && Not[IntegerQ[(I*n-1)/2]]
+
+Integrate[(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := -(n+2*a*(p+1)*x)*(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x])/(a*c*(n^2+4*(p+1)^2)) +    2*(p+1)*(2*p+3)/(c*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LtQ[p,-1] && NeQ[p,-3/2] && NeQ[n^2+4*(p+1)^2,0] && Not[IntegerQ[p] && IntegerQ[I*n/2]] && Not[Not[IntegerQ[p]] && IntegerQ[(I*n-1)/2]]
+
+Integrate[x_*E^(n_*ArcCot[a_*x_])/(c_+d_*x_^2)^(3/2),x_] := -(1+a*n*x)*E^(n*ArcCot[a*x])/(a^2*c*(n^2+1)*Sqrt[c+d*x^2]) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && Not[IntegerQ[(I*n-1)/2]]
+
+Integrate[x_*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := (2*(p+1)-a*n*x)*(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x])/(a^2*c*(n^2+4*(p+1)^2)) + n*(2*p+3)/(a*c*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LeQ[p,-1] && NeQ[p,-3/2] && NeQ[n^2+4*(p+1)^2,0] && Not[IntegerQ[p] && IntegerQ[I*n/2]] && Not[Not[IntegerQ[p]] && IntegerQ[(I*n-1)/2]]
+
+Integrate[x_^2*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := (n+2*(p+1)*a*x)*(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x])/(a^3*c*n^2*(n^2+1)) /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && EqQ[n^2-2*(p+1),0] && NeQ[n^2+1,0]
+
+Integrate[x_^2*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := (n+2*(p+1)*a*x)*(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x])/(a^3*c*(n^2+4*(p+1)^2)) + (n^2-2*(p+1))/(a^2*c*(n^2+4*(p+1)^2))*Integrate[(c+d*x^2)^(p+1)*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && LeQ[p,-1] && NeQ[n^2-2*(p+1),0] && NeQ[n^2+4*(p+1)^2,0] && Not[IntegerQ[p] && IntegerQ[I*n/2]] && Not[Not[IntegerQ[p]] && IntegerQ[(I*n-1)/2]]
+
+Integrate[x_^m_*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p/a^(m+1)*Subst[Integrate[E^(n*x)*Cot[x]^(m+2*(p+1))/Cos[x]^(2*(p+1)),x],x,ArcCot[a*x]] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && IntegerQ[m] && LeQ[3,m,-2(p+1)] && IntegerQ[p]
+
+Integrate[u_*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := d^p*Integrate[u*x^(2*p)*(1+1/(a^2*x^2))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n},x] && EqQ[d,a^2*c] && Not[IntegerQ[I*n/2]] && IntegerQ[p]
+
+Integrate[u_*(c_+d_*x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := (c+d*x^2)^p/(x^(2*p)*(1+1/(a^2*x^2))^p)*Integrate[u*x^(2*p)*(1+1/(a^2*x^2))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[d,a^2*c] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[p]]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := c^p/(I*a)^(2*p)*Integrate[u/x^(2*p)*(-1+I*a*x)^(p-I*n/2)*(1+I*a*x)^(p+I*n/2),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c,a^2*d] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && IntegersQ[2*p,p+I*n/2]
+
+Integrate[(c_+d_./x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*Subst[Integrate[(1-I*x/a)^(p+I*n/2)*(1+I*x/a)^(p-I*n/2)/x^2,x],x,1/x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c,a^2*d] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && Not[IntegerQ[2*p] && IntegerQ[p+I*n/2]]
+
+Integrate[x_^m_*(c_+d_./x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*Subst[Integrate[(1-I*x/a)^(p+I*n/2)*(1+I*x/a)^(p-I*n/2)/x^(m+2),x],x,1/x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c,a^2*d] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && Not[IntegerQ[2*p] && IntegerQ[p+I*n/2]] && IntegerQ[m]
+
+Integrate[x_^m_*(c_+d_./x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := -c^p*x^m*(1/x)^m*Subst[Integrate[(1-I*x/a)^(p+I*n/2)*(1+I*x/a)^(p-I*n/2)/x^(m+2),x],x,1/x] /;
+FreeQ[{a,c,d,m,n,p},x] && EqQ[c,a^2*d] && Not[IntegerQ[I*n/2]] && (IntegerQ[p] || GtQ[c,0]) && Not[IntegerQ[2*p] && IntegerQ[p+I*n/2]] && Not[IntegerQ[m]]
+
+Integrate[u_*(c_+d_./x_^2)^p_*E^(n_*ArcCot[a_*x_]),x_] := (c+d/x^2)^p/(1+1/(a^2*x^2))^p*Integrate[u*(1+1/(a^2*x^2))^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,c,d,n,p},x] && EqQ[c,a^2*d] && Not[IntegerQ[I*n/2]] && Not[IntegerQ[p] || GtQ[c,0]]
+
+Integrate[u_*E^(n_*ArcCot[c_*(a_+b_*x_)]),x_] := (-1)^(I*n/2)*Integrate[u*E^(-n*ArcTan[c*(a+b*x)]),x] /;
+FreeQ[{a,b,c},x] && IntegerQ[I*n/2]
+
+Integrate[E^(n_*ArcCot[c_*(a_+b_*x_)]),x_] := (I*c*(a+b*x))^(I*n/2)*(1+1/(I*c*(a+b*x)))^(I*n/2)/(1+I*a*c+I*b*c*x)^(I*n/2)* Integrate[(1+I*a*c+I*b*c*x)^(I*n/2)/(-1+I*a*c+I*b*c*x)^(I*n/2),x] /;
+FreeQ[{a,b,c,n},x] && Not[IntegerQ[I*n/2]]
+
+Integrate[x_^m_*E^(n_*ArcCoth[c_*(a_+b_*x_)]),x_] := 4/(I^m*n*b^(m+1)*c^(m+1))* Subst[Integrate[x^(2/(I*n))*(1+I*a*c+(1-I*a*c)*x^(2/(I*n)))^m/(-1+x^(2/(I*n)))^(m+2),x],x, (1+1/(I*c*(a+b*x)))^(I*n/2)/(1-1/(I*c*(a+b*x)))^(I*n/2)] /;
+FreeQ[{a,b,c},x] && ILtQ[m,0] && LtQ[-1,I*n,1]
+
+Integrate[(d_.+e_*x_)^m_*E^(n_*ArcCoth[c_*(a_+b_*x_)]),x_] := (I*c*(a+b*x))^(I*n/2)*(1+1/(I*c*(a+b*x)))^(I*n/2)/(1+I*a*c+I*b*c*x)^(I*n/2)* Integrate[(d+e*x)^m*(1+I*a*c+I*b*c*x)^(I*n/2)/(-1+I*a*c+I*b*c*x)^(I*n/2),x] /;
+FreeQ[{a,b,c,d,e,m,n},x] && Not[IntegerQ[I*n/2]]
+
+Integrate[u_*(c_+d_*x_+e_*x_^2)^p_*E^(n_*ArcCot[a_+b_*x_]),x_] := (c/(1+a^2))^p*((I*a+I*b*x)/(1+I*a+I*b*x))^(I*n/2)*((1+I*a+I*b*x)/(I*a+I*b*x))^(I*n/2)* ((1-I*a-I*b*x)^(I*n/2)/(-1+I*a+I*b*x)^(I*n/2))*     Integrate[u*(1-I*a-I*b*x)^(p-I*n/2)*(1+I*a+I*b*x)^(p+I*n/2),x] /;
+FreeQ[{a,b,c,d,e,n,p},x] && Not[IntegerQ[I*n/2]] && EqQ[b*d-2*a*e,0] && EqQ[b^2*c-e(1+a^2),0] && (IntegerQ[p] || GtQ[c/(1+a^2),0])
+
+Integrate[u_*(c_+d_*x_+e_*x_^2)^p_*E^(n_*ArcCot[a_+b_*x_]),x_] := (c+d*x+e*x^2)^p/(1+a^2+2*a*b*x+b^2*x^2)^p*Integrate[u*(1+a^2+2*a*b*x+b^2*x^2)^p*E^(n*ArcCot[a*x]),x] /;
+FreeQ[{a,b,c,d,e,n,p},x] && Not[IntegerQ[I*n/2]] && EqQ[b*d-2*a*e,0] && EqQ[b^2*c-e(1+a^2),0] && Not[IntegerQ[p] || GtQ[c/(1+a^2),0]]
+
+Integrate[u_*E^(n_*ArcCot[c_./(a_.+b_*x_)]),x_] := Integrate[u*E^(n*ArcTan[a/c+b*x/c]),x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[ArcTan[a_+b_*x_^n_],x_] := x*ArcTan[a+b*x^n] - b*n*Integrate[x^n/(1+a^2+2*a*b*x^n+b^2*x^(2*n)),x] /;
+FreeQ[{a,b,n},x]
+
+Integrate[ArcCot[a_+b_*x_^n_],x_] := x*ArcCot[a+b*x^n] + b*n*Integrate[x^n/(1+a^2+2*a*b*x^n+b^2*x^(2*n)),x] /;
+FreeQ[{a,b,n},x]
+
+Integrate[ArcTan[a_.+b_*x_^n_]/x_,x_] := I/2*Integrate[Log[1-I*a-I*b*x^n]/x,x] - I/2*Integrate[Log[1+I*a+I*b*x^n]/x,x] /;
+FreeQ[{a,b,n},x]
+
+Integrate[ArcCot[a_.+b_*x_^n_]/x_,x_] := I/2*Integrate[Log[1-I/(a+b*x^n)]/x,x] - I/2*Integrate[Log[1+I/(a+b*x^n)]/x,x] /;
+FreeQ[{a,b,n},x]
+
+Integrate[x_^m_*ArcTan[a_+b_*x_^n_],x_] := x^(m+1)*ArcTan[a+b*x^n]/(m+1) - b*n/(m+1)*Integrate[x^(m+n)/(1+a^2+2*a*b*x^n+b^2*x^(2*n)),x] /;
+FreeQ[{a,b},x] && RationalQ[m,n] && m+1NotEqual0 && m+1NotEqualn
+
+Integrate[x_^m_*ArcCot[a_+b_*x_^n_],x_] := x^(m+1)*ArcCot[a+b*x^n]/(m+1) + b*n/(m+1)*Integrate[x^(m+n)/(1+a^2+2*a*b*x^n+b^2*x^(2*n)),x] /;
+FreeQ[{a,b},x] && RationalQ[m,n] && m+1NotEqual0 && m+1NotEqualn
+
+Integrate[ArcTan[a_.+b_*f_^(c_.+d_*x_)],x_] := I/2*Integrate[Log[1-I*a-I*b*f^(c+d*x)],x] - I/2*Integrate[Log[1+I*a+I*b*f^(c+d*x)],x] /;
+FreeQ[{a,b,c,d,f},x]
+
+Integrate[ArcCot[a_.+b_*f_^(c_.+d_*x_)],x_] := I/2*Integrate[Log[1-I/(a+b*f^(c+d*x))],x] - I/2*Integrate[Log[1+I/(a+b*f^(c+d*x))],x] /;
+FreeQ[{a,b,c,d,f},x]
+
+Integrate[x_^m_*ArcTan[a_.+b_*f_^(c_.+d_*x_)],x_] := I/2*Integrate[x^m*Log[1-I*a-I*b*f^(c+d*x)],x] - I/2*Integrate[x^m*Log[1+I*a+I*b*f^(c+d*x)],x] /;
+FreeQ[{a,b,c,d,f},x] && IntegerQ[m] && m>0
+
+Integrate[x_^m_*ArcCot[a_.+b_*f_^(c_.+d_*x_)],x_] := I/2*Integrate[x^m*Log[1-I/(a+b*f^(c+d*x))],x] - I/2*Integrate[x^m*Log[1+I/(a+b*f^(c+d*x))],x] /;
+FreeQ[{a,b,c,d,f},x] && IntegerQ[m] && m>0
+
+Integrate[u_*ArcTan[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcCot[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[u_*ArcCot[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcTan[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]],x_] := x*ArcTan[(c*x)/Sqrt[a+b*x^2]] - c*Integrate[x/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]],x_] := x*ArcCot[(c*x)/Sqrt[a+b*x^2]] + c*Integrate[x/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]]/x_,x_] := ArcTan[c*x/Sqrt[a+b*x^2]]*Log[x] - c*Integrate[Log[x]/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]]/x_,x_] := ArcCot[c*x/Sqrt[a+b*x^2]]*Log[x] + c*Integrate[Log[x]/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[(d_*x_)^m_*ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]],x_] := (d*x)^(m+1)*ArcTan[(c*x)/Sqrt[a+b*x^2]]/(d*(m+1)) - c/(d*(m+1))*Integrate[(d*x)^(m+1)/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c,d,m},x] && EqQ[b+c^2,0] && NeQ[m,-1]
+
+Integrate[(d_*x_)^m_*ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]],x_] := (d*x)^(m+1)*ArcCot[(c*x)/Sqrt[a+b*x^2]]/(d*(m+1)) + c/(d*(m+1))*Integrate[(d*x)^(m+1)/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c,d,m},x] && EqQ[b+c^2,0] && NeQ[m,-1]
+
+Integrate[1/(Sqrt[a_.+b_*x_^2]*ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]]),x_] := 1/c*Log[ArcTan[c*x/Sqrt[a+b*x^2]]] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[1/(Sqrt[a_.+b_*x_^2]*ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]]),x_] := -1/c*Log[ArcCot[c*x/Sqrt[a+b*x^2]]] /;
+FreeQ[{a,b,c},x] && EqQ[b+c^2,0]
+
+Integrate[ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]]^m_./Sqrt[a_.+b_*x_^2],x_] := ArcTan[c*x/Sqrt[a+b*x^2]]^(m+1)/(c*(m+1)) /;
+FreeQ[{a,b,c,m},x] && EqQ[b+c^2,0] && NeQ[m,-1]
+
+Integrate[ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]]^m_./Sqrt[a_.+b_*x_^2],x_] := -ArcCot[c*x/Sqrt[a+b*x^2]]^(m+1)/(c*(m+1)) /;
+FreeQ[{a,b,c,m},x] && EqQ[b+c^2,0] && NeQ[m,-1]
+
+Integrate[ArcTan[c_*x_/Sqrt[a_.+b_*x_^2]]^m_./Sqrt[d_.+e_*x_^2],x_] := Sqrt[a+b*x^2]/Sqrt[d+e*x^2]*Integrate[ArcTan[c*x/Sqrt[a+b*x^2]]^m/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c,d,e,m},x] && EqQ[b+c^2,0] && EqQ[b*d-a*e,0]
+
+Integrate[ArcCot[c_*x_/Sqrt[a_.+b_*x_^2]]^m_./Sqrt[d_.+e_*x_^2],x_] := Sqrt[a+b*x^2]/Sqrt[d+e*x^2]*Integrate[ArcCot[c*x/Sqrt[a+b*x^2]]^m/Sqrt[a+b*x^2],x] /;
+FreeQ[{a,b,c,d,e,m},x] && EqQ[b+c^2,0] && EqQ[b*d-a*e,0]
+
+Integrate[u_*ArcTan[v_+s_*Sqrt[w_]],x_] := Pi*s/4*Integrate[u,x] + 1/2*Integrate[u*ArcTan[v],x] /;
+EqQ[s^2,1] && EqQ[w,v^2+1]
+
+Integrate[u_*ArcCot[v_+s_*Sqrt[w_]],x_] := Pi*s/4*Integrate[u,x] - 1/2*Integrate[u*ArcTan[v],x] /;
+EqQ[s^2,1] && EqQ[w,v^2+1] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_*v_^n_.,x_] := With[{tmp=InverseFunctionOfLinear[u,x]}, ShowStep["\<\>","\<Integrate[f[x,ArcTan[a+b*x]]/(1+(a+b*x)^2),x]\>", "\<Subst[Integrate[f[-a/b+Tan[x]/b,x],x],x,ArcTan[a+b*x]]/b\>",Hold[ (-Discriminant[v,x]/(4*Coefficient[v,x,2]))^n/Coefficient[tmp[[1]],x,1]* Subst[Integrate[SimplifyIntegrand[SubstForInverseFunction[u,tmp,x]*Sec[x]^(2*(n+1)),x],x], x, tmp]]] /; Not[FalseQ[tmp]] && EqQ[Head[tmp],ArcTan] && EqQ[Discriminant[v,x]*tmp[[1]]^2+D[v,x]^2,0]] /;
+SimplifyFlag && QuadraticQ[v,x] && ILtQ[n,0] && NegQ[Discriminant[v,x]] && MatchQ[u,r_*f_^w_ /; FreeQ[f,x]],
+
+Integrate[u_*v_^n_.,x_] := With[{tmp=InverseFunctionOfLinear[u,x]}, (-Discriminant[v,x]/(4*Coefficient[v,x,2]))^n/Coefficient[tmp[[1]],x,1]* Subst[Integrate[SimplifyIntegrand[SubstForInverseFunction[u,tmp,x]*Sec[x]^(2*(n+1)),x],x], x, tmp] /; Not[FalseQ[tmp]] && EqQ[Head[tmp],ArcTan] && EqQ[Discriminant[v,x]*tmp[[1]]^2+D[v,x]^2,0]] /;
+QuadraticQ[v,x] && ILtQ[n,0] && NegQ[Discriminant[v,x]] && MatchQ[u,r_*f_^w_ /; FreeQ[f,x]]] If[TrueQ[$LoadShowSteps],
+
+Integrate[u_*v_^n_.,x_] := With[{tmp=InverseFunctionOfLinear[u,x]}, ShowStep["\<\>","\<Integrate[f[x,ArcCot[a+b*x]]/(1+(a+b*x)^2),x]\>", "\<-Subst[Integrate[f[-a/b+Cot[x]/b,x],x],x,ArcCot[a+b*x]]/b\>",Hold[ -(-Discriminant[v,x]/(4*Coefficient[v,x,2]))^n/Coefficient[tmp[[1]],x,1]* Subst[Integrate[SimplifyIntegrand[SubstForInverseFunction[u,tmp,x]*Csc[x]^(2*(n+1)),x],x], x, tmp]]] /; Not[FalseQ[tmp]] && EqQ[Head[tmp],ArcCot] && EqQ[Discriminant[v,x]*tmp[[1]]^2+D[v,x]^2,0]] /;
+SimplifyFlag && QuadraticQ[v,x] && ILtQ[n,0] && NegQ[Discriminant[v,x]] && MatchQ[u,r_*f_^w_ /; FreeQ[f,x]],
+
+Integrate[u_*v_^n_.,x_] := With[{tmp=InverseFunctionOfLinear[u,x]}, -(-Discriminant[v,x]/(4*Coefficient[v,x,2]))^n/Coefficient[tmp[[1]],x,1]* Subst[Integrate[SimplifyIntegrand[SubstForInverseFunction[u,tmp,x]*Csc[x]^(2*(n+1)),x],x], x, tmp] /; Not[FalseQ[tmp]] && EqQ[Head[tmp],ArcCot] && EqQ[Discriminant[v,x]*tmp[[1]]^2+D[v,x]^2,0]] /;
+QuadraticQ[v,x] && ILtQ[n,0] && NegQ[Discriminant[v,x]] && MatchQ[u,r_*f_^w_ /; FreeQ[f,x]]]
+
+Integrate[ArcTan[c_.+d_*Tan[a_.+b_*x_]],x_] := x*ArcTan[c+d*Tan[a+b*x]] - I*b*Integrate[x/(c+I*d+c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c+I*d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Tan[a_.+b_*x_]],x_] := x*ArcCot[c+d*Tan[a+b*x]] + I*b*Integrate[x/(c+I*d+c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c+I*d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Cot[a_.+b_*x_]],x_] := x*ArcTan[c+d*Cot[a+b*x]] - I*b*Integrate[x/(c-I*d-c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-I*d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Cot[a_.+b_*x_]],x_] := x*ArcCot[c+d*Cot[a+b*x]] + I*b*Integrate[x/(c-I*d-c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-I*d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Tan[a_.+b_*x_]],x_] := x*ArcTan[c+d*Tan[a+b*x]] -    b*(1+I*c+d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1+I*c-d+(1+I*c+d)*E^(2*I*a+2*I*b*x)),x] + b*(1-I*c-d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1-I*c+d+(1-I*c-d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c+I*d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Tan[a_.+b_*x_]],x_] := x*ArcCot[c+d*Tan[a+b*x]] +    b*(1+I*c+d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1+I*c-d+(1+I*c+d)*E^(2*I*a+2*I*b*x)),x] - b*(1-I*c-d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1-I*c+d+(1-I*c-d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c+I*d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Cot[a_.+b_*x_]],x_] := x*ArcTan[c+d*Cot[a+b*x]] +    b*(1+I*c-d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1+I*c+d-(1+I*c-d)*E^(2*I*a+2*I*b*x)),x] - b*(1-I*c+d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1-I*c-d-(1-I*c+d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c+I*d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Cot[a_.+b_*x_]],x_] := x*ArcCot[c+d*Cot[a+b*x]] -    b*(1+I*c-d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1+I*c+d-(1+I*c-d)*E^(2*I*a+2*I*b*x)),x] + b*(1-I*c+d)*Integrate[x*E^(2*I*a+2*I*b*x)/(1-I*c-d-(1-I*c+d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c-I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Tan[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Tan[a+b*x]]/(f*(m+1)) - I*b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c+I*d+c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c+I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Tan[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Tan[a+b*x]]/(f*(m+1)) + I*b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c+I*d+c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c+I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Cot[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Cot[a+b*x]]/(f*(m+1)) - I*b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-I*d-c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Cot[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Cot[a+b*x]]/(f*(m+1)) + I*b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-I*d-c*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Tan[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Tan[a+b*x]]/(f*(m+1)) -    b*(1+I*c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1+I*c-d+(1+I*c+d)*E^(2*I*a+2*I*b*x)),x] +    b*(1-I*c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1-I*c+d+(1-I*c-d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c+I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Tan[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Tan[a+b*x]]/(f*(m+1)) +    b*(1+I*c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1+I*c-d+(1+I*c+d)*E^(2*I*a+2*I*b*x)),x] -    b*(1-I*c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1-I*c+d+(1-I*c-d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c+I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Cot[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Cot[a+b*x]]/(f*(m+1)) +    b*(1+I*c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1+I*c+d-(1+I*c-d)*E^(2*I*a+2*I*b*x)),x] - b*(1-I*c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1-I*c-d-(1-I*c+d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-I*d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Cot[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Cot[a+b*x]]/(f*(m+1)) -    b*(1+I*c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1+I*c+d-(1+I*c-d)*E^(2*I*a+2*I*b*x)),x] + b*(1-I*c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*I*a+2*I*b*x)/(1-I*c-d-(1-I*c+d)*E^(2*I*a+2*I*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-I*d)^2,-1]
+
+Integrate[ArcTan[Tanh[a_.+b_*x_]],x_] := x*ArcTan[Tanh[a+b*x]] - b*Integrate[x*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b},x]
+
+Integrate[ArcCot[Tanh[a_.+b_*x_]],x_] := x*ArcCot[Tanh[a+b*x]] + b*Integrate[x*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b},x]
+
+Integrate[ArcTan[Coth[a_.+b_*x_]],x_] := x*ArcTan[Coth[a+b*x]] + b*Integrate[x*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b},x]
+
+Integrate[ArcCot[Coth[a_.+b_*x_]],x_] := x*ArcCot[Coth[a+b*x]] - b*Integrate[x*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b},x]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[Tanh[a+b*x]]/(f*(m+1)) - b/(f*(m+1))*Integrate[(e+f*x)^(m+1)*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b,e,f},x] && IGtQ[m,0]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[Tanh[a+b*x]]/(f*(m+1)) + b/(f*(m+1))*Integrate[(e+f*x)^(m+1)*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b,e,f},x] && IGtQ[m,0]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[Coth[a+b*x]]/(f*(m+1)) + b/(f*(m+1))*Integrate[(e+f*x)^(m+1)*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b,e,f},x] && IGtQ[m,0]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[Coth[a+b*x]]/(f*(m+1)) - b/(f*(m+1))*Integrate[(e+f*x)^(m+1)*Sech[2*a+2*b*x],x] /;
+FreeQ[{a,b,e,f},x] && IGtQ[m,0]
+
+Integrate[ArcTan[c_.+d_*Tanh[a_.+b_*x_]],x_] := x*ArcTan[c+d*Tanh[a+b*x]] - b*Integrate[x/(c-d+c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Tanh[a_.+b_*x_]],x_] := x*ArcCot[c+d*Tanh[a+b*x]] + b*Integrate[x/(c-d+c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Coth[a_.+b_*x_]],x_] := x*ArcTan[c+d*Coth[a+b*x]] - b*Integrate[x/(c-d-c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Coth[a_.+b_*x_]],x_] := x*ArcCot[c+d*Coth[a+b*x]] + b*Integrate[x/(c-d-c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && EqQ[(c-d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Tanh[a_.+b_*x_]],x_] := x*ArcTan[c+d*Tanh[a+b*x]] +    I*b*(I-c-d)*Integrate[x*E^(2*a+2*b*x)/(I-c+d+(I-c-d)*E^(2*a+2*b*x)),x] -    I*b*(I+c+d)*Integrate[x*E^(2*a+2*b*x)/(I+c-d+(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c-d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Tanh[a_.+b_*x_]],x_] := x*ArcCot[c+d*Tanh[a+b*x]] -    I*b*(I-c-d)*Integrate[x*E^(2*a+2*b*x)/(I-c+d+(I-c-d)*E^(2*a+2*b*x)),x] +    I*b*(I+c+d)*Integrate[x*E^(2*a+2*b*x)/(I+c-d+(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c-d)^2,-1]
+
+Integrate[ArcTan[c_.+d_*Coth[a_.+b_*x_]],x_] := x*ArcTan[c+d*Coth[a+b*x]] -    I*b*(I-c-d)*Integrate[x*E^(2*a+2*b*x)/(I-c+d-(I-c-d)*E^(2*a+2*b*x)),x] +    I*b*(I+c+d)*Integrate[x*E^(2*a+2*b*x)/(I+c-d-(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c-d)^2,-1]
+
+Integrate[ArcCot[c_.+d_*Coth[a_.+b_*x_]],x_] := x*ArcCot[c+d*Coth[a+b*x]] +    I*b*(I-c-d)*Integrate[x*E^(2*a+2*b*x)/(I-c+d-(I-c-d)*E^(2*a+2*b*x)),x] -    I*b*(I+c+d)*Integrate[x*E^(2*a+2*b*x)/(I+c-d-(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d},x] && NeQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Tanh[a+b*x]]/(f*(m+1)) - b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-d+c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Tanh[a+b*x]]/(f*(m+1)) + b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-d+c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Coth[a+b*x]]/(f*(m+1)) - b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-d-c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Coth[a+b*x]]/(f*(m+1)) + b/(f*(m+1))*Integrate[(e+f*x)^(m+1)/(c-d-c*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && EqQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Tanh[a+b*x]]/(f*(m+1)) +    I*b*(I-c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I-c+d+(I-c-d)*E^(2*a+2*b*x)),x] -    I*b*(I+c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I+c-d+(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Tanh[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Tanh[a+b*x]]/(f*(m+1)) -    I*b*(I-c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I-c+d+(I-c-d)*E^(2*a+2*b*x)),x] +    I*b*(I+c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I+c-d+(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcTan[c_.+d_*Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcTan[c+d*Coth[a+b*x]]/(f*(m+1)) -    I*b*(I-c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I-c+d-(I-c-d)*E^(2*a+2*b*x)),x] +    I*b*(I+c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I+c-d-(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-d)^2,-1]
+
+Integrate[(e_.+f_*x_)^m_*ArcCot[c_.+d_*Coth[a_.+b_*x_]],x_] := (e+f*x)^(m+1)*ArcCot[c+d*Coth[a+b*x]]/(f*(m+1)) +    I*b*(I-c-d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I-c+d-(I-c-d)*E^(2*a+2*b*x)),x] -    I*b*(I+c+d)/(f*(m+1))*Integrate[(e+f*x)^(m+1)*E^(2*a+2*b*x)/(I+c-d-(I+c+d)*E^(2*a+2*b*x)),x] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[m,0] && NeQ[(c-d)^2,-1]
+
+Integrate[ArcTan[u_],x_] := x*ArcTan[u] - Integrate[SimplifyIntegrand[x*D[u,x]/(1+u^2),x],x] /;
+InverseFunctionFreeQ[u,x]
+
+Integrate[ArcCot[u_],x_] := x*ArcCot[u] + Integrate[SimplifyIntegrand[x*D[u,x]/(1+u^2),x],x] /;
+InverseFunctionFreeQ[u,x]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcTan[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcTan[u])/(d*(m+1)) - b/(d*(m+1))*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/(1+u^2),x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && FalseQ[PowerVariableExpn[u,m+1,x]]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcCot[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcCot[u])/(d*(m+1)) + b/(d*(m+1))*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/(1+u^2),x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && FalseQ[PowerVariableExpn[u,m+1,x]]
+
+Integrate[v_*(a_.+b_*ArcTan[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcTan[u]),w,x] - b*Integrate[SimplifyIntegrand[w*D[u,x]/(1+u^2),x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]] && FalseQ[FunctionOfLinear[v*(a+b*ArcTan[u]),x]]
+
+Integrate[v_*(a_.+b_*ArcCot[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcCot[u]),w,x] + b*Integrate[SimplifyIntegrand[w*D[u,x]/(1+u^2),x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]] && FalseQ[FunctionOfLinear[v*(a+b*ArcCot[u]),x]]
+
+Integrate[ArcTan[v_]*Log[w_]/(a_.+b_*x_),x_] := I/2*Integrate[Log[1-I*v]*Log[w]/(a+b*x),x] - I/2*Integrate[Log[1+I*v]*Log[w]/(a+b*x),x] /;
+FreeQ[{a,b},x] && LinearQ[v,x] && LinearQ[w,x] && EqQ[Simplify[D[v/(a+b*x),x]],0] && EqQ[Simplify[D[w/(a+b*x),x]],0]
+
+Integrate[ArcTan[v_]*Log[w_],x_] := x*ArcTan[v]*Log[w] - Integrate[SimplifyIntegrand[x*Log[w]*D[v,x]/(1+v^2),x],x] - Integrate[SimplifyIntegrand[x*ArcTan[v]*D[w,x]/w,x],x] /;
+InverseFunctionFreeQ[v,x] && InverseFunctionFreeQ[w,x]
+
+Integrate[ArcCot[v_]*Log[w_],x_] := x*ArcCot[v]*Log[w] + Integrate[SimplifyIntegrand[x*Log[w]*D[v,x]/(1+v^2),x],x] - Integrate[SimplifyIntegrand[x*ArcCot[v]*D[w,x]/w,x],x] /;
+InverseFunctionFreeQ[v,x] && InverseFunctionFreeQ[w,x]
+
+Integrate[u_*ArcTan[v_]*Log[w_],x_] := With[{z=IntHide[u,x]}, Dist[ArcTan[v]*Log[w],z,x] - Integrate[SimplifyIntegrand[z*Log[w]*D[v,x]/(1+v^2),x],x] - Integrate[SimplifyIntegrand[z*ArcTan[v]*D[w,x]/w,x],x] /; InverseFunctionFreeQ[z,x]] /;
+InverseFunctionFreeQ[v,x] && InverseFunctionFreeQ[w,x]
+
+Integrate[u_*ArcCot[v_]*Log[w_],x_] := With[{z=IntHide[u,x]}, Dist[ArcCot[v]*Log[w],z,x] + Integrate[SimplifyIntegrand[z*Log[w]*D[v,x]/(1+v^2),x],x] - Integrate[SimplifyIntegrand[z*ArcCot[v]*D[w,x]/w,x],x] /; InverseFunctionFreeQ[z,x]] /;
+InverseFunctionFreeQ[v,x] && InverseFunctionFreeQ[w,x]
+
+Integrate[ArcSec[c_*x_],x_] := x*ArcSec[c*x] - 1/c*Integrate[1/(x*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[c,x]
+
+Integrate[ArcCsc[c_*x_],x_] := x*ArcCsc[c*x] + 1/c*Integrate[1/(x*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[c,x]
+
+Integrate[(a_.+b_*ArcSec[c_*x_])^n_,x_] := 1/c*Subst[Integrate[(a+b*x)^n*Sec[x]*Tan[x],x],x,ArcSec[c*x]] /;
+FreeQ[{a,b,c,n},x] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcCsc[c_*x_])^n_,x_] := -1/c*Subst[Integrate[(a+b*x)^n*Csc[x]*Cot[x],x],x,ArcCsc[c*x]] /;
+FreeQ[{a,b,c,n},x] && IGtQ[n,0]
+
+Integrate[(a_.+b_*ArcSec[c_*x_])/x_,x_] := -Subst[Integrate[(a+b*ArcCos[x/c])/x,x],x,1/x] /;
+FreeQ[{a,b,c},x]
+
+Integrate[(a_.+b_*ArcCsc[c_*x_])/x_,x_] := -Subst[Integrate[(a+b*ArcSin[x/c])/x,x],x,1/x] /;
+FreeQ[{a,b,c},x]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcSec[c_*x_]),x_] := (d*x)^(m+1)*(a+b*ArcSec[c*x])/(d*(m+1)) - b*d/(c*(m+1))*Integrate[(d*x)^(m-1)/Sqrt[1-1/(c^2*x^2)],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1]
+
+Integrate[(d_*x_)^m_*(a_.+b_*ArcCsc[c_*x_]),x_] := (d*x)^(m+1)*(a+b*ArcCsc[c*x])/(d*(m+1)) + b*d/(c*(m+1))*Integrate[(d*x)^(m-1)/Sqrt[1-1/(c^2*x^2)],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1]
+
+Integrate[x_^m_*(a_.+b_*ArcSec[c_*x_])^n_,x_] := 1/c^(m+1)*Subst[Integrate[(a+b*x)^n*Sec[x]^(m+1)*Tan[x],x],x,ArcSec[c*x]] /;
+FreeQ[{a,b,c},x] && IntegerQ[n] && IntegerQ[m] && (GtQ[n,0] || LtQ[m,-1])
+
+Integrate[x_^m_*(a_.+b_*ArcCsc[c_*x_])^n_,x_] := -1/c^(m+1)*Subst[Integrate[(a+b*x)^n*Csc[x]^(m+1)*Cot[x],x],x,ArcCsc[c*x]] /;
+FreeQ[{a,b,c},x] && IntegerQ[n] && IntegerQ[m] && (GtQ[n,0] || LtQ[m,-1])
+
+Integrate[(a_.+b_*ArcSec[c_*x_])/(d_.+e_*x_),x_] := (a+b*ArcSec[c*x])*Log[1+(e-Sqrt[-c^2*d^2+e^2])*E^(I*ArcSec[c*x])/(c*d)]/e +    (a+b*ArcSec[c*x])*Log[1+(e+Sqrt[-c^2*d^2+e^2])*E^(I*ArcSec[c*x])/(c*d)]/e - (a+b*ArcSec[c*x])*Log[1+E^(2*I*ArcSec[c*x])]/e -    b/(c*e)*Integrate[Log[1+(e-Sqrt[-c^2*d^2+e^2])*E^(I*ArcSec[c*x])/(c*d)]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] - b/(c*e)*Integrate[Log[1+(e+Sqrt[-c^2*d^2+e^2])*E^(I*ArcSec[c*x])/(c*d)]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] +    b/(c*e)*Integrate[Log[1+E^(2*I*ArcSec[c*x])]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[{a,b,c,d,e},x]
+
+Integrate[(a_.+b_*ArcCsc[c_*x_])/(d_.+e_*x_),x_] := (a+b*ArcCsc[c*x])*Log[1-I*(e-Sqrt[-c^2*d^2+e^2])*E^(I*ArcCsc[c*x])/(c*d)]/e +    (a+b*ArcCsc[c*x])*Log[1-I*(e+Sqrt[-c^2*d^2+e^2])*E^(I*ArcCsc[c*x])/(c*d)]/e - (a+b*ArcCsc[c*x])*Log[1-E^(2*I*ArcCsc[c*x])]/e +    b/(c*e)*Integrate[Log[1-I*(e-Sqrt[-c^2*d^2+e^2])*E^(I*ArcCsc[c*x])/(c*d)]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] + b/(c*e)*Integrate[Log[1-I*(e+Sqrt[-c^2*d^2+e^2])*E^(I*ArcCsc[c*x])/(c*d)]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] -    b/(c*e)*Integrate[Log[1-E^(2*I*ArcCsc[c*x])]/(x^2*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[{a,b,c,d,e},x]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcSec[c_*x_]),x_] := (d+e*x)^(m+1)*(a+b*ArcSec[c*x])/(e*(m+1)) - b/(c*e*(m+1))*Integrate[(d+e*x)^(m+1)/(x^2*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[{a,b,c,d,e,m},x] && NeQ[m,-1]
+
+Integrate[(d_.+e_*x_)^m_*(a_.+b_*ArcCsc[c_*x_]),x_] := (d+e*x)^(m+1)*(a+b*ArcCsc[c*x])/(e*(m+1)) + b/(c*e*(m+1))*Integrate[(d+e*x)^(m+1)/(x^2*Sqrt[1-1/(c^2*x^2)]),x] /;
+FreeQ[{a,b,c,d,e,m},x] && NeQ[m,-1]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[(a+b*ArcSec[c*x]),u,x] - b*c*x/Sqrt[c^2*x^2]*Integrate[SimplifyIntegrand[u/(x*Sqrt[c^2*x^2-1]),x],x]] /;
+FreeQ[{a,b,c,d,e},x] && (IGtQ[p,0] || ILtQ[p+1/2,0])
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_]),x_] := With[{u=IntHide[(d+e*x^2)^p,x]}, Dist[(a+b*ArcCsc[c*x]),u,x] + b*c*x/Sqrt[c^2*x^2]*Integrate[SimplifyIntegrand[u/(x*Sqrt[c^2*x^2-1]),x],x]] /;
+FreeQ[{a,b,c,d,e},x] && (IGtQ[p,0] || ILtQ[p+1/2,0])
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && IntegerQ[p]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && IntegerQ[p]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Sqrt[x^2]/x*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p+1/2] && GtQ[e,0] && LtQ[d,0]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Sqrt[x^2]/x*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p+1/2] && GtQ[e,0] && LtQ[d,0]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Sqrt[d+e*x^2]/(x*Sqrt[e+d/x^2])*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p+1/2] && Not[GtQ[e,0] && LtQ[d,0]]
+
+Integrate[(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Sqrt[d+e*x^2]/(x*Sqrt[e+d/x^2])*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[p+1/2] && Not[GtQ[e,0] && LtQ[d,0]]
+
+Integrate[x_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_]),x_] := (d+e*x^2)^(p+1)*(a+b*ArcSec[c*x])/(2*e*(p+1)) -    b*c*x/(2*e*(p+1)*Sqrt[c^2*x^2])*Integrate[(d+e*x^2)^(p+1)/(x*Sqrt[c^2*x^2-1]),x] /;
+FreeQ[{a,b,c,d,e,p},x] && NeQ[p,-1]
+
+Integrate[x_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_]),x_] := (d+e*x^2)^(p+1)*(a+b*ArcCsc[c*x])/(2*e*(p+1)) +    b*c*x/(2*e*(p+1)*Sqrt[c^2*x^2])*Integrate[(d+e*x^2)^(p+1)/(x*Sqrt[c^2*x^2-1]),x] /;
+FreeQ[{a,b,c,d,e,p},x] && NeQ[p,-1]
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[(a+b*ArcSec[c*x]),u,x] - b*c*x/Sqrt[c^2*x^2]*Integrate[SimplifyIntegrand[u/(x*Sqrt[c^2*x^2-1]),x],x]] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && ( IGtQ[p,0] && Not[ILtQ[(m-1)/2,0] && GtQ[m+2*p+3,0]] || IGtQ[(m+1)/2,0] && Not[ILtQ[p,0] && GtQ[m+2*p+3,0]] || ILtQ[(m+2*p+1)/2,0] && Not[ILtQ[(m-1)/2,0]])
+
+Integrate[(f_*x_)^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_]),x_] := With[{u=IntHide[(f*x)^m*(d+e*x^2)^p,x]}, Dist[(a+b*ArcCsc[c*x]),u,x] + b*c*x/Sqrt[c^2*x^2]*Integrate[SimplifyIntegrand[u/(x*Sqrt[c^2*x^2-1]),x],x]] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && ( IGtQ[p,0] && Not[ILtQ[(m-1)/2,0] && GtQ[m+2*p+3,0]] || IGtQ[(m+1)/2,0] && Not[ILtQ[p,0] && GtQ[m+2*p+3,0]] || ILtQ[(m+2*p+1)/2,0] && Not[ILtQ[(m-1)/2,0]])
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && IntegerQ[m] && IntegerQ[p]
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && IntegerQ[m] && IntegerQ[p]
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Sqrt[x^2]/x*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p+1/2] && GtQ[e,0] && LtQ[d,0]
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Sqrt[x^2]/x*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p+1/2] && GtQ[e,0] && LtQ[d,0]
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := -Sqrt[d+e*x^2]/(x*Sqrt[e+d/x^2])*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcCos[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p+1/2] && Not[GtQ[e,0] && LtQ[d,0]]
+
+Integrate[x_^m_*(d_.+e_*x_^2)^p_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := -Sqrt[d+e*x^2]/(x*Sqrt[e+d/x^2])*Subst[Integrate[(e+d*x^2)^p*(a+b*ArcSin[x/c])^n/x^(m+2*(p+1)),x],x,1/x] /;
+FreeQ[{a,b,c,d,e,n},x] && IGtQ[n,0] && EqQ[c^2*d+e,0] && IntegerQ[m] && IntegerQ[p+1/2] && Not[GtQ[e,0] && LtQ[d,0]]
+
+Integrate[u_*(a_.+b_*ArcSec[c_*x_]),x_] := With[{v=IntHide[u,x]}, Dist[(a+b*ArcSec[c*x]),v,x] - b/c*Integrate[SimplifyIntegrand[v/(x^2*Sqrt[1-1/(c^2*x^2)]),x],x] /; InverseFunctionFreeQ[v,x]] /;
+FreeQ[{a,b,c},x]
+
+Integrate[u_*(a_.+b_*ArcCsc[c_*x_]),x_] := With[{v=IntHide[u,x]}, Dist[(a+b*ArcCsc[c*x]),v,x] + b/c*Integrate[SimplifyIntegrand[v/(x^2*Sqrt[1-1/(c^2*x^2)]),x],x] /; InverseFunctionFreeQ[v,x]] /;
+FreeQ[{a,b,c},x]
+
+Integrate[u_*(a_.+b_*ArcSec[c_*x_])^n_.,x_] := Unintegrable[u*(a+b*ArcSec[c*x])^n,x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[u_*(a_.+b_*ArcCsc[c_*x_])^n_.,x_] := Unintegrable[u*(a+b*ArcCsc[c*x])^n,x] /;
+FreeQ[{a,b,c,n},x]
+
+Integrate[ArcSec[c_+d_*x_],x_] := (c+d*x)*ArcSec[c+d*x]/d -    Integrate[1/((c+d*x)*Sqrt[1-1/(c+d*x)^2]),x] /;
+FreeQ[{c,d},x]
+
+Integrate[ArcCsc[c_+d_*x_],x_] := (c+d*x)*ArcCsc[c+d*x]/d +    Integrate[1/((c+d*x)*Sqrt[1-1/(c+d*x)^2]),x] /;
+FreeQ[{c,d},x]
+
+Integrate[(a_.+b_*ArcSec[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(a+b*ArcSec[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d},x] && IGtQ[p,0]
+
+Integrate[(a_.+b_*ArcCsc[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(a+b*ArcCsc[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d},x] && IGtQ[p,0]
+
+Integrate[(a_.+b_*ArcSec[c_+d_*x_])^p_,x_] := Unintegrable[(a+b*ArcSec[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(a_.+b_*ArcCsc[c_+d_*x_])^p_,x_] := Unintegrable[(a+b*ArcCsc[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcSec[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(f*x/d)^m*(a+b*ArcSec[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[d*e-c*f,0] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCsc[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[(f*x/d)^m*(a+b*ArcCsc[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && EqQ[d*e-c*f,0] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcSec[c_+d_*x_])^p_.,x_] := 1/d^(m+1)*Subst[Integrate[(a+b*x)^p*Sec[x]*Tan[x]*(d*e-c*f+f*Sec[x])^m,x],x,ArcSec[c+d*x]] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && IntegerQ[m]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCsc[c_+d_*x_])^p_.,x_] := -1/d^(m+1)*Subst[Integrate[(a+b*x)^p*Csc[x]*Cot[x]*(d*e-c*f+f*Csc[x])^m,x],x,ArcCsc[c+d*x]] /;
+FreeQ[{a,b,c,d,e,f},x] && IGtQ[p,0] && IntegerQ[m]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcSec[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcSec[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCsc[c_+d_*x_])^p_.,x_] := 1/d*Subst[Integrate[((d*e-c*f)/d+f*x/d)^m*(a+b*ArcCsc[x])^p,x],x,c+d*x] /;
+FreeQ[{a,b,c,d,e,f,m},x] && IGtQ[p,0]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcSec[c_+d_*x_])^p_,x_] := Unintegrable[(e+f*x)^m*(a+b*ArcSec[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && Not[IGtQ[p,0]]
+
+Integrate[(e_.+f_*x_)^m_*(a_.+b_*ArcCsc[c_+d_*x_])^p_,x_] := Unintegrable[(e+f*x)^m*(a+b*ArcCsc[c+d*x])^p,x] /;
+FreeQ[{a,b,c,d,e,f,m,p},x] && Not[IGtQ[p,0]]
+
+Integrate[u_*ArcSec[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcCos[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[u_*ArcCsc[c_./(a_.+b_*x_^n_.)]^m_.,x_] := Integrate[u*ArcSin[a/c+b*x^n/c]^m,x] /;
+FreeQ[{a,b,c,n,m},x]
+
+Integrate[u_*f_^(c_*ArcSec[a_.+b_*x_]^n_.),x_] := 1/b*Subst[Integrate[ReplaceAll[u,xRule-a/b+Sec[x]/b]*f^(c*x^n)*Sec[x]*Tan[x],x],x,ArcSec[a+b*x]] /;
+FreeQ[{a,b,c,f},x] && IGtQ[n,0]
+
+Integrate[u_*f_^(c_*ArcCsc[a_.+b_*x_]^n_.),x_] := -1/b*Subst[Integrate[ReplaceAll[u,xRule-a/b+Csc[x]/b]*f^(c*x^n)*Csc[x]*Cot[x],x],x,ArcCsc[a+b*x]] /;
+FreeQ[{a,b,c,f},x] && IGtQ[n,0]
+
+Integrate[ArcSec[u_],x_] := x*ArcSec[u] - u/Sqrt[u^2]*Integrate[SimplifyIntegrand[x*D[u,x]/(u*Sqrt[u^2-1]),x],x] /;
+InverseFunctionFreeQ[u,x] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[ArcCsc[u_],x_] := x*ArcCsc[u] + u/Sqrt[u^2]*Integrate[SimplifyIntegrand[x*D[u,x]/(u*Sqrt[u^2-1]),x],x] /;
+InverseFunctionFreeQ[u,x] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcSec[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcSec[u])/(d*(m+1)) - b*u/(d*(m+1)*Sqrt[u^2])*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/(u*Sqrt[u^2-1]),x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[(c_.+d_*x_)^m_*(a_.+b_*ArcCsc[u_]),x_] := (c+d*x)^(m+1)*(a+b*ArcCsc[u])/(d*(m+1)) + b*u/(d*(m+1)*Sqrt[u^2])*Integrate[SimplifyIntegrand[(c+d*x)^(m+1)*D[u,x]/(u*Sqrt[u^2-1]),x],x] /;
+FreeQ[{a,b,c,d,m},x] && NeQ[m,-1] && InverseFunctionFreeQ[u,x] && Not[FunctionOfQ[(c+d*x)^(m+1),u,x]] && Not[FunctionOfExponentialQ[u,x]]
+
+Integrate[v_*(a_.+b_*ArcSec[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcSec[u]),w,x] - b*u/Sqrt[u^2]*Integrate[SimplifyIntegrand[w*D[u,x]/(u*Sqrt[u^2-1]),x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]]
+
+Integrate[v_*(a_.+b_*ArcCsc[u_]),x_] := With[{w=IntHide[v,x]}, Dist[(a+b*ArcCsc[u]),w,x] + b*u/Sqrt[u^2]*Integrate[SimplifyIntegrand[w*D[u,x]/(u*Sqrt[u^2-1]),x],x] /; InverseFunctionFreeQ[w,x]] /;
+FreeQ[{a,b},x] && InverseFunctionFreeQ[u,x] && Not[MatchQ[v, (c_.+d_*x)^m_. /; FreeQ[{c,d,m},x]]]
+

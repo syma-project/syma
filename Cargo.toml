@@ -15,6 +15,10 @@ jit = ["cranelift", "cranelift-module", "target-lexicon"]
 name = "calculus_d"
 path = "tests/Calculus/D.rs"
 
+[[test]]
+name = "attributes"
+path = "tests/attributes/mod.rs"
+
 [dependencies]
 fastrand = "2"
 unicode_categories = "0.1"
