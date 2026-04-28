@@ -4,6 +4,35 @@ use rug::Integer;
 use rug::Rational;
 use rug::ops::Pow;
 
+/// Normalize a complex result: if imaginary part is zero, return as Real.
+fn normalize_complex(re: f64, im: f64) -> Value {
+    if im == 0.0 {
+        Value::Real(Float::with_val(DEFAULT_PRECISION, re))
+    } else if re == 0.0 {
+        Value::Complex { re: 0.0, im }
+    } else {
+        Value::Complex { re, im }
+    }
+}
+
+/// Convert a Value to f64 for arithmetic with Complex numbers. Returns None for non-numeric values.
+fn val_to_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(n) => Some(n.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => Some(r.as_ref().to_f64()),
+        _ => None,
+    }
+}
+
+pub fn normalize_complex_public(re: f64, im: f64) -> Value {
+    normalize_complex(re, im)
+}
+
+pub fn val_to_f64_public(v: &Value) -> Option<f64> {
+    val_to_f64(v)
+}
+
 pub fn builtin_plus(args: &[Value]) -> Result<Value, EvalError> {
     let mut result = Value::Integer(Integer::from(0));
     for arg in args {
@@ -73,6 +102,44 @@ fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 ))
             }
         }
+        // Complex - Complex
+        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
+            Ok(normalize_complex(r1 - r2, im1 - im2))
+        }
+        // Complex - scalar
+        (Value::Complex { re, im }, other) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(re - v, im))
+            } else {
+                Ok(Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![
+                        a.clone(),
+                        Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![Value::Integer(Integer::from(-1)), b.clone()],
+                        },
+                    ],
+                })
+            }
+        }
+        // scalar - Complex
+        (other, Value::Complex { re, im }) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(v - re, -im))
+            } else {
+                Ok(Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![
+                        a.clone(),
+                        Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![Value::Integer(Integer::from(-1)), b.clone()],
+                        },
+                    ],
+                })
+            }
+        }
         _ => Ok(Value::Call {
             head: "Plus".to_string(),
             args: vec![
@@ -138,6 +205,32 @@ pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
                 Err(EvalError::Error(
                     "Lists must have same length for addition".to_string(),
                 ))
+            }
+        }
+        // Complex + Complex
+        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
+            Ok(normalize_complex(r1 + r2, im1 + im2))
+        }
+        // Complex + scalar
+        (Value::Complex { re, im }, other) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(re + v, im))
+            } else {
+                Ok(Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                })
+            }
+        }
+        // scalar + Complex
+        (other, Value::Complex { re, im }) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(re + v, im))
+            } else {
+                Ok(Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                })
             }
         }
         // a + a → 2*a
@@ -395,6 +488,32 @@ pub fn mul_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
             let y_f = Float::with_val(DEFAULT_PRECISION, y.numer())
                 / Float::with_val(DEFAULT_PRECISION, y.denom());
             Ok(Value::Real(x * y_f))
+        }
+        // Complex * Complex
+        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
+            Ok(normalize_complex(r1 * r2 - im1 * im2, r1 * im2 + im1 * r2))
+        }
+        // Complex * scalar
+        (Value::Complex { re, im }, other) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(re * v, im * v))
+            } else {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                })
+            }
+        }
+        // scalar * Complex
+        (other, Value::Complex { re, im }) => {
+            if let Some(v) = val_to_f64(other) {
+                Ok(normalize_complex(re * v, im * v))
+            } else {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a.clone(), b.clone()],
+                })
+            }
         }
         (Value::List(xs), Value::Integer(s)) | (Value::Integer(s), Value::List(xs)) => {
             let result: Vec<Value> = xs
@@ -679,6 +798,55 @@ pub fn builtin_divide(args: &[Value]) -> Result<Value, EvalError> {
             let b_f = Float::with_val(DEFAULT_PRECISION, b.numer())
                 / Float::with_val(DEFAULT_PRECISION, b.denom());
             Ok(Value::Real(a / b_f))
+        }
+        // Complex / Complex
+        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
+            let denom = r2 * r2 + im2 * im2;
+            if denom == 0.0 {
+                crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
+                crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
+                Ok(Value::Symbol("Indeterminate".to_string()))
+            } else {
+                Ok(normalize_complex(
+                    (r1 * r2 + im1 * im2) / denom,
+                    (im1 * r2 - r1 * im2) / denom,
+                ))
+            }
+        }
+        // Complex / scalar
+        (Value::Complex { re, im }, other) => {
+            if let Some(v) = val_to_f64(other) {
+                if v == 0.0 {
+                    crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
+                    crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
+                    Ok(Value::Symbol("ComplexInfinity".to_string()))
+                } else {
+                    Ok(normalize_complex(re / v, im / v))
+                }
+            } else {
+                Ok(Value::Call {
+                    head: "Divide".to_string(),
+                    args: args.to_vec(),
+                })
+            }
+        }
+        // scalar / Complex
+        (other, Value::Complex { re, im }) => {
+            if let Some(v) = val_to_f64(other) {
+                let denom = re * re + im * im;
+                if denom == 0.0 {
+                    crate::messages::emit("Power::infy", &[format!("{}/{}", args[0], args[1])]);
+                    crate::messages::emit("Infinity::indet", &[format!("{} ComplexInfinity", args[0])]);
+                    Ok(Value::Symbol("ComplexInfinity".to_string()))
+                } else {
+                    Ok(normalize_complex(v * re / denom, -v * im / denom))
+                }
+            } else {
+                Ok(Value::Call {
+                    head: "Divide".to_string(),
+                    args: args.to_vec(),
+                })
+            }
         }
         // a / a → 1 (for same non-zero values) — checked after zero checks
         _ if args[0] == args[1] => Ok(Value::Integer(Integer::from(1))),

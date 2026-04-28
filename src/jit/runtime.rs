@@ -72,7 +72,7 @@ pub const JIT_OP_GREATEREQUAL: u32 = 9;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_load_const(ctx: &mut JitContext, dst: u32, idx: u32) {
-    if (idx as usize) < ctx.nconstants as usize {
+    if (dst as usize) < ctx.nregs as usize && (idx as usize) < ctx.nconstants as usize {
         unsafe {
             let val = (*ctx.constants.add(idx as usize)).clone();
             *ctx.regs.add(dst as usize) = val;
@@ -82,7 +82,7 @@ pub extern "C" fn jit_load_const(ctx: &mut JitContext, dst: u32, idx: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_load_arg(ctx: &mut JitContext, dst: u32, idx: u32) {
-    if (idx as usize) < ctx.nargs as usize {
+    if (dst as usize) < ctx.nregs as usize && (idx as usize) < ctx.nargs as usize {
         unsafe {
             let val = (*ctx.args.add(idx as usize)).clone();
             *ctx.regs.add(dst as usize) = val;
@@ -214,6 +214,10 @@ pub extern "C" fn jit_sub(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
         unsafe {
             *ctx.regs.add(dst as usize) = result;
         }
+    } else {
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Null;
+        }
     }
 }
 
@@ -237,6 +241,10 @@ pub extern "C" fn jit_div(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     {
         unsafe {
             *ctx.regs.add(dst as usize) = result;
+        }
+    } else {
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Null;
         }
     }
 }
@@ -269,6 +277,10 @@ pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: 
     {
         unsafe {
             *ctx.regs.add(dst as usize) = result;
+        }
+    } else {
+        unsafe {
+            *ctx.regs.add(dst as usize) = Value::Null;
         }
     }
 }

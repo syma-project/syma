@@ -1114,6 +1114,61 @@ pub fn builtin_exp(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Root / Rounding ──
 
+/// Extract square factors from a non-negative integer.
+/// Returns (factor_outside, square_free_inside) such that n = factor_outside^2 * square_free_inside.
+fn sqrt_integer(n: &Integer) -> (Integer, Integer) {
+    if n.is_zero() {
+        return (Integer::from(0), Integer::from(0));
+    }
+    if *n == Integer::from(1) {
+        return (Integer::from(1), Integer::from(1));
+    }
+    let mut remaining = n.clone().abs();
+    let mut factor = Integer::from(1);
+    let mut d = Integer::from(2);
+    loop {
+        let d_sq = d.clone() * d.clone();
+        if d_sq > remaining {
+            break;
+        }
+        while remaining.clone() % d.clone() == Integer::from(0) {
+            let q = remaining.clone() / d.clone();
+            if q.clone() % d.clone() == Integer::from(0) {
+                remaining = q / d.clone();
+                factor *= d.clone();
+            } else {
+                break;
+            }
+        }
+        d += 1;
+    }
+    (factor, remaining)
+}
+
+fn sqrt_value_from_parts(outside: Integer, inside: Integer) -> Value {
+    if inside == Integer::from(0) {
+        Value::Integer(outside)
+    } else if inside == Integer::from(1) {
+        Value::Integer(outside)
+    } else if outside == Integer::from(1) {
+        Value::Call {
+            head: "Sqrt".to_string(),
+            args: vec![Value::Integer(inside)],
+        }
+    } else {
+        Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                Value::Integer(outside),
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![Value::Integer(inside)],
+                },
+            ],
+        }
+    }
+}
+
 pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -1134,45 +1189,49 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                     args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_n],
                 });
             }
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            let r = f.sqrt();
-            // Check if result is an exact integer
-            if r.is_integer() {
-                let i = r.to_f64() as i64;
-                return Ok(Value::Integer(Integer::from(i)));
-            }
-            // Keep symbolic: Sqrt[n]
-            Ok(Value::Call {
-                head: "Sqrt".to_string(),
-                args: vec![args[0].clone()],
-            })
+            let (outside, inside) = sqrt_integer(n);
+            Ok(sqrt_value_from_parts(outside, inside))
         }
         Value::Rational(n) => {
             if n.is_negative() {
-                // Sqrt[-a/b] = I * Sqrt[a/b]
                 let numer = n.numer().clone().abs();
                 let denom = n.denom().clone();
-                let abs_rational = Value::Rational(Box::new(rug::Rational::from((numer, denom))));
+                let abs_rational =
+                    Value::Rational(Box::new(rug::Rational::from((numer, denom))));
                 let sqrt_part = builtin_sqrt(&[abs_rational])?;
                 return Ok(Value::Call {
                     head: "Times".to_string(),
                     args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_part],
                 });
             }
-            // Check if numerator and denominator are perfect squares
-            let numer_f = Float::with_val(DEFAULT_PRECISION, n.numer());
-            let denom_f = Float::with_val(DEFAULT_PRECISION, n.denom());
-            let numer_sqrt = numer_f.sqrt();
-            let denom_sqrt = denom_f.sqrt();
-            if numer_sqrt.is_integer() && denom_sqrt.is_integer() {
-                let num = Integer::from(numer_sqrt.to_f64() as i64);
-                let den = Integer::from(denom_sqrt.to_f64() as i64);
-                return Ok(Value::Rational(Box::new(rug::Rational::from((num, den)))));
+            // Sqrt[a/b] = (num_out/den_out) * Sqrt[num_in/den_in]
+            // where a = num_out^2 * num_in, b = den_out^2 * den_in
+            let (num_out, num_in) = sqrt_integer(n.numer());
+            let (den_out, den_in) = sqrt_integer(n.denom());
+            if num_in == Integer::from(1) && den_in == Integer::from(1) {
+                // Both numerator and denominator are perfect squares
+                return Ok(Value::Rational(Box::new(rug::Rational::from((
+                    num_out, den_out,
+                )))));
             }
-            Ok(Value::Call {
+            // Build: (num_out/den_out) * Sqrt[num_in/den_in]
+            let sqrt_arg = Value::Rational(Box::new(rug::Rational::from((num_in, den_in))));
+            let sqrt_part = Value::Call {
                 head: "Sqrt".to_string(),
-                args: vec![args[0].clone()],
-            })
+                args: vec![sqrt_arg],
+            };
+            let outside_rat = rug::Rational::from((num_out, den_out));
+            if outside_rat == rug::Rational::from(1) {
+                Ok(sqrt_part)
+            } else {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Rational(Box::new(outside_rat)),
+                        sqrt_part,
+                    ],
+                })
+            }
         }
         Value::Real(r) => {
             if r.is_sign_negative() {
@@ -1185,6 +1244,63 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                 });
             }
             Ok(Value::Real(r.clone().sqrt()))
+        }
+        Value::Call { head, args: call_args } if head == "Times" => {
+            let mut outside = Integer::from(1);
+            let mut inside_args: Vec<Value> = Vec::new();
+            for arg in call_args {
+                match arg {
+                    Value::Integer(n) if !n.is_negative() => {
+                        let (o, i) = sqrt_integer(n);
+                        outside *= o;
+                        if i > Integer::from(1) {
+                            inside_args.push(Value::Integer(i));
+                        }
+                    }
+                    _ => inside_args.push(arg.clone()),
+                }
+            }
+            if inside_args.is_empty() {
+                Ok(Value::Integer(outside))
+            } else if inside_args.len() == 1 && outside == Integer::from(1) {
+                Ok(Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: inside_args,
+                })
+            } else if inside_args.len() == 1 {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Integer(outside),
+                        Value::Call {
+                            head: "Sqrt".to_string(),
+                            args: inside_args,
+                        },
+                    ],
+                })
+            } else if outside == Integer::from(1) {
+                Ok(Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![Value::Call {
+                        head: "Times".to_string(),
+                        args: inside_args,
+                    }],
+                })
+            } else {
+                Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Integer(outside),
+                        Value::Call {
+                            head: "Sqrt".to_string(),
+                            args: vec![Value::Call {
+                                head: "Times".to_string(),
+                                args: inside_args,
+                            }],
+                        },
+                    ],
+                })
+            }
         }
         _ => Ok(Value::Call {
             head: "Sqrt".to_string(),
