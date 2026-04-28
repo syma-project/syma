@@ -803,6 +803,11 @@ pub fn register_builtins(env: &Env) {
         ("SetDelayed", &["HoldAll", "Locked", "ReadProtected"]),
         ("SetAttributes", &["HoldFirst", "Locked", "ReadProtected"]),
         ("ClearAttributes", &["HoldFirst", "Locked", "ReadProtected"]),
+        ("Module", &["HoldAll", "Locked", "ReadProtected"]),
+        ("With", &["HoldAll", "Locked", "ReadProtected"]),
+        ("Block", &["HoldAll", "Locked", "ReadProtected"]),
+        ("If", &["HoldAll", "Locked", "ReadProtected"]),
+        ("ReleaseHold", &["SequenceHold", "Locked", "ReadProtected"]),
     ] {
         env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
     }

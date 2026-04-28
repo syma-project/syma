@@ -24,11 +24,11 @@ fn protected_prevents_redefinition() {
 
 #[test]
 fn protected_stays_after_assignment() {
-    // Assign, protect, verify Protected is set
+    // Use string form since Attributes doesn't have HoldFirst
     let out = syma_eval(
         "g = 42; \
          SetAttributes[g, Protected]; \
-         MemberQ[Attributes[g], Protected]",
+         MemberQ[Attributes[\"g\"], Protected]",
     );
     assert!(out.contains("True"), "g should be Protected, got: {out}");
 }

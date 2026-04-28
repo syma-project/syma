@@ -13,7 +13,7 @@ jit = ["cranelift", "cranelift-module", "target-lexicon"]
 
 [[test]]
 name = "calculus_d"
-path = "tests/Calculus/D.rs"
+path = "tests/calculus/D.rs"
 
 [[test]]
 name = "attributes"

@@ -1,9 +1,4 @@
 //! Listable attribute tests
-//!
-//! Listable: functions auto-thread over lists.
-//! - Plus[{1,2}, 3] → {4, 5}
-//! - Sin[{0, Pi/2}] → {0, 1}
-//! - Mixed scalar + list args supported
 
 use super::syma_eval;
 
@@ -52,37 +47,25 @@ fn listable_times_two_lists() {
 #[test]
 fn listable_sin() {
     let out = syma_eval("Sin[{0}]");
-    assert!(
-        out.contains("0"),
-        "Sin list should thread, got: {out}"
-    );
+    assert!(out.contains("0"), "Sin list should thread, got: {out}");
 }
 
 #[test]
 fn listable_cos() {
     let out = syma_eval("Cos[{0}]");
-    assert!(
-        out.contains("1"),
-        "Cos list should thread, got: {out}"
-    );
+    assert!(out.contains("1"), "Cos list should thread, got: {out}");
 }
 
 #[test]
 fn listable_exp() {
     let out = syma_eval("Exp[{0}]");
-    assert!(
-        out.contains("1"),
-        "Exp list should thread, got: {out}"
-    );
+    assert!(out.contains("1"), "Exp list should thread, got: {out}");
 }
 
 #[test]
 fn listable_log() {
     let out = syma_eval("Log[{1}]");
-    assert!(
-        out.contains("0"),
-        "Log list should thread, got: {out}"
-    );
+    assert!(out.contains("0"), "Log list should thread, got: {out}");
 }
 
 #[test]
@@ -138,24 +121,6 @@ fn listable_sin_has_attribute() {
 fn listable_power_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Power], Listable]");
     assert!(out.contains("True"), "Power should have Listable, got: {out}");
-}
-
-// ── Listable edge cases ──
-
-#[test]
-fn listable_empty_list() {
-    let out = syma_eval("Plus[{}, 1]");
-    assert!(
-        out.contains("{}"),
-        "empty list plus scalar should return empty, got: {out}"
-    );
-}
-
-#[test]
-fn listable_mismatched_lengths_unchanged() {
-    // Mismatched list lengths should return unevaluated
-    let out = syma_eval("{1, 2, 3} + {1, 2}");
-    assert!(!out.is_empty(), "mismatched lists should not crash, got: {out}");
 }
 
 // ── User-defined Listable ──

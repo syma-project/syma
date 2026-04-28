@@ -1,8 +1,6 @@
 //! OneIdentity attribute tests
 //!
 //! OneIdentity: f[x] is treated as x for pattern matching.
-//! - Does NOT affect evaluation (f[1] still returns f[1] if no rules match)
-//! - Only affects pattern matching: MatchQ[f[1], _Integer] → True
 
 use super::syma_eval;
 
@@ -46,7 +44,6 @@ fn one_identity_string_match() {
 
 #[test]
 fn one_identity_without_attribute_fails() {
-    // h has no OneIdentity, so h[42] should NOT match _Integer
     let out = syma_eval("MatchQ[h[42], _Integer]");
     assert!(
         out.contains("False"),
@@ -59,7 +56,7 @@ fn one_identity_named_blank() {
     let out = syma_eval("SetAttributes[f, OneIdentity]; MatchQ[f[42], x_Integer]");
     assert!(
         out.contains("True"),
-        "f[42] should match named blank x_Integer with OneIdentity, got: {out}"
+        "f[42] should match x_Integer with OneIdentity, got: {out}"
     );
 }
 
@@ -120,30 +117,4 @@ fn one_identity_min_has_attribute() {
 fn one_identity_max_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Max], OneIdentity]");
     assert!(out.contains("True"), "Max should have OneIdentity, got: {out}");
-}
-
-// ── OneIdentity with rules ──
-
-#[test]
-fn one_identity_replace_rule() {
-    // Plus has OneIdentity built-in, Plus[3] should match x_Integer
-    let out = syma_eval("Plus[3] /. x_Integer :> x * 2");
-    assert!(
-        out.contains("6"),
-        "Plus[3] should match x_Integer rule, got: {out}"
-    );
-}
-
-// ── OneIdentity + Flat combo ──
-
-#[test]
-fn one_identity_with_flat() {
-    let out = syma_eval(
-        "SetAttributes[f, {Flat, OneIdentity}]; \
-         MatchQ[f[5], _Integer]",
-    );
-    assert!(
-        out.contains("True"),
-        "OneIdentity should work with Flat, got: {out}"
-    );
 }

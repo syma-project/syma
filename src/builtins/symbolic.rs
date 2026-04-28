@@ -74,6 +74,7 @@ fn simplify_plus(args: &[Value]) -> Value {
     for arg in args {
         match arg {
             Value::Integer(n) if n.is_zero() => {}
+            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {}
             Value::Call { head, args: a } if head == "Plus" => {
                 terms.extend(a.iter().cloned());
             }
@@ -243,8 +244,14 @@ fn simplify_times(args: &[Value]) -> Value {
 
     // Build result: numeric_product with each base^exp
     let mut result: Vec<Value> = Vec::new();
-    // Add numeric product if not 1
-    if !numeric_product.struct_eq(&Value::Integer(Integer::from(1))) {
+    // Add numeric product unless it's 1 (in any form)
+    let is_one = match &numeric_product {
+        Value::Integer(n) => *n == Integer::from(1),
+        Value::Real(r) => *r == Float::with_val(DEFAULT_PRECISION, 1.0),
+        Value::Rational(r) => **r == Rational::from(1_i64),
+        _ => false,
+    };
+    if !is_one {
         result.push(numeric_product);
     }
     for (base, exp) in base_exp {

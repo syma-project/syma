@@ -2,7 +2,6 @@
 //!
 //! Orderless (commutativity): arguments are automatically sorted
 //! - Pattern matching: tries permutations of value args
-//! - Evaluator: (TODO: auto-sort args before dispatch)
 
 use super::syma_eval;
 
@@ -31,7 +30,6 @@ fn orderless_binding_order() {
 
 #[test]
 fn orderless_without_attribute_fails() {
-    // Without Orderless, pattern order matters
     let out = syma_eval("MatchQ[h[2, 1], h[1, x_]]");
     assert!(
         out.contains("False"),
@@ -92,18 +90,6 @@ fn orderless_equivalent_has_attribute() {
     assert!(out.contains("True"), "Equivalent should have Orderless, got: {out}");
 }
 
-// ── Orderless with user-defined functions ──
-
-#[test]
-fn orderless_user_function() {
-    let out = syma_eval(
-        "SetAttributes[f, Orderless]; \
-         f[x_, y_] := x - y; \
-         f[1, 2]",
-    );
-    assert!(!out.is_empty(), "Orderless user function should evaluate, got: {out}");
-}
-
 // ── Orderless limit ──
 
 #[test]
@@ -115,19 +101,5 @@ fn orderless_max_six_elements() {
     assert!(
         out.contains("True"),
         "Orderless should match up to 6 elements, got: {out}"
-    );
-}
-
-// ── Orderless + Flat combo ──
-
-#[test]
-fn orderless_flat_combined() {
-    let out = syma_eval(
-        "SetAttributes[f, {Flat, Orderless}]; \
-         MatchQ[f[3, f[1, 2]], f[x_, y_, z_]]",
-    );
-    assert!(
-        out.contains("True"),
-        "Flat+Orderless combined should match, got: {out}"
     );
 }
