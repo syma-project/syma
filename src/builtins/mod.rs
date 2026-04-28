@@ -26,6 +26,7 @@ pub mod pattern;
 pub mod random;
 pub mod statistics;
 pub mod string;
+pub mod systeminfo;
 pub mod symbolic;
 
 use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
@@ -590,6 +591,9 @@ pub fn register_builtins(env: &Env) {
 
     // -- Developer context --
     developer::register(env);
+
+    // -- System information --
+    systeminfo::register(env);
 
     // -- Custom Notation --
     register_builtin_env(env, "Infix", builtin_infix);
@@ -1805,6 +1809,47 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "ReplaceAllUnheld" => {
             "ReplaceAllUnheld[expr, rules] applies replacement rules without holding (wraps ReplaceAll)."
+        }
+
+        // -- System information --
+        "$System" => {
+            "$System gives the operating system and processor type for the current machine (e.g., \"MacOS-x86-64\")."
+        }
+        "$Version" => {
+            "$Version gives the version information for the current Syma installation."
+        }
+        "$ReleaseDate" => {
+            "$ReleaseDate gives the release date of the Syma version as a string."
+        }
+        "$Machine" => {
+            "$Machine gives the processor type of the current machine (e.g., \"x86-64\")."
+        }
+        "$MachineName" => {
+            "$MachineName gives the network name of the current machine."
+        }
+        "$OperatingSystem" => {
+            "$OperatingSystem gives the name of the operating system (e.g., \"MacOS\", \"Linux\", \"Windows\")."
+        }
+        "$ProcessorType" => {
+            "$ProcessorType gives the processor type (e.g., \"x86-64\", \"aarch64\")."
+        }
+        "$User" => {
+            "$User gives the login name of the current user."
+        }
+        "$TimeZone" => {
+            "$TimeZone gives the local timezone offset from UTC in hours."
+        }
+        "$SystemId" => {
+            "$SystemId gives the system identifier (e.g., \"MacOS\", \"Linux\", \"Windows\")."
+        }
+        "$Language" => {
+            "$Language gives the interface language (default \"English\")."
+        }
+        "$CommandLine" => {
+            "$CommandLine gives True if the session was started from the command line."
+        }
+        "$InputLine" => {
+            "$InputLine gives the text of the current input line, or Null."
         }
 
         _ => return None,
