@@ -20,15 +20,6 @@ fn as_list(v: &Value) -> Result<&Vec<Value>, EvalError> {
     }
 }
 
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
 // ── Graphics Style State ────────────────────────────────────────────────────
 
 /// Accumulated rendering state from graphics directives.
@@ -112,23 +103,23 @@ fn color_call_to_svg(val: &Value) -> Option<String> {
     };
     match head {
         "RGBColor" if args.len() >= 3 => {
-            let r = to_f64(&args[0])?;
-            let g = to_f64(&args[1])?;
-            let b = to_f64(&args[2])?;
+            let r = super::to_f64(&args[0])?;
+            let g = super::to_f64(&args[1])?;
+            let b = super::to_f64(&args[2])?;
             let ri = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
             let gi = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
             let bi = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
             Some(format!("#{:02x}{:02x}{:02x}", ri, gi, bi))
         }
         "Hue" if !args.is_empty() => {
-            let h = to_f64(&args[0])?;
+            let h = super::to_f64(&args[0])?;
             let s = if args.len() > 1 {
-                to_f64(&args[1])?
+                super::to_f64(&args[1])?
             } else {
                 1.0
             };
             let v = if args.len() > 2 {
-                to_f64(&args[2])?
+                super::to_f64(&args[2])?
             } else {
                 1.0
             };
@@ -168,28 +159,28 @@ fn apply_directive(style: &mut GraphicsStyle, directive: &Value) {
                 }
             }
             "Thickness" if !args.is_empty() => {
-                if let Some(t) = to_f64(&args[0]) {
+                if let Some(t) = super::to_f64(&args[0]) {
                     style.stroke_width = t.max(0.0) * 10.0; // WL relative thickness
                 }
             }
             "AbsoluteThickness" if !args.is_empty() => {
-                if let Some(t) = to_f64(&args[0]) {
+                if let Some(t) = super::to_f64(&args[0]) {
                     style.stroke_width = t.max(0.0);
                 }
             }
             "PointSize" if !args.is_empty() => {
-                if let Some(s) = to_f64(&args[0]) {
+                if let Some(s) = super::to_f64(&args[0]) {
                     style.point_size = s.max(0.0) * 20.0; // relative
                 }
             }
             "AbsolutePointSize" if !args.is_empty() => {
-                if let Some(s) = to_f64(&args[0]) {
+                if let Some(s) = super::to_f64(&args[0]) {
                     style.point_size = s.max(0.0);
                 }
             }
             "Dashing" if !args.is_empty() => {
                 if let Value::List(dashes) = &args[0] {
-                    let v: Vec<f64> = dashes.iter().filter_map(to_f64).collect();
+                    let v: Vec<f64> = dashes.iter().filter_map(super::to_f64).collect();
                     if !v.is_empty() {
                         style.dash_array = Some(v);
                     }
@@ -197,14 +188,14 @@ fn apply_directive(style: &mut GraphicsStyle, directive: &Value) {
             }
             "AbsoluteDashing" if !args.is_empty() => {
                 if let Value::List(dashes) = &args[0] {
-                    let v: Vec<f64> = dashes.iter().filter_map(to_f64).collect();
+                    let v: Vec<f64> = dashes.iter().filter_map(super::to_f64).collect();
                     if !v.is_empty() {
                         style.dash_array = Some(v);
                     }
                 }
             }
             "Opacity" if !args.is_empty() => {
-                if let Some(o) = to_f64(&args[0]) {
+                if let Some(o) = super::to_f64(&args[0]) {
                     style.opacity = o.clamp(0.0, 1.0);
                 }
             }
@@ -435,8 +426,8 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
             && let Value::List(size) = v
             && size.len() >= 2
         {
-            width = to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-            height = to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+            width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
+            height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
         }
         if let Some(v) = map.get("Axes") {
             show_axes = match v {
@@ -454,12 +445,12 @@ fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
         {
             plot_range = Some((
                 (
-                    to_f64(&xr[0]).unwrap_or(-1.0),
-                    to_f64(&xr[1]).unwrap_or(1.0),
+                    super::to_f64(&xr[0]).unwrap_or(-1.0),
+                    super::to_f64(&xr[1]).unwrap_or(1.0),
                 ),
                 (
-                    to_f64(&yr[0]).unwrap_or(-1.0),
-                    to_f64(&yr[1]).unwrap_or(1.0),
+                    super::to_f64(&yr[0]).unwrap_or(-1.0),
+                    super::to_f64(&yr[1]).unwrap_or(1.0),
                 ),
             ));
         }
@@ -502,15 +493,15 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
             Value::Call { head, args } if head == "Circle" => {
                 if let Some(center) = args.first() {
                     let r = if args.len() > 1 {
-                        to_f64(&args[1]).unwrap_or(1.0)
+                        super::to_f64(&args[1]).unwrap_or(1.0)
                     } else {
                         1.0
                     };
                     if let Value::List(c) = center
                         && c.len() >= 2
                     {
-                        let cx = to_f64(&c[0]).unwrap_or(0.0);
-                        let cy = to_f64(&c[1]).unwrap_or(0.0);
+                        let cx = super::to_f64(&c[0]).unwrap_or(0.0);
+                        let cy = super::to_f64(&c[1]).unwrap_or(0.0);
                         x_min = x_min.min(cx - r);
                         x_max = x_max.max(cx + r);
                         y_min = y_min.min(cy - r);
@@ -528,10 +519,10 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
                     && xr.len() >= 2
                     && yr.len() >= 2
                 {
-                    x_min = x_min.min(to_f64(&xr[0]).unwrap_or(x_min));
-                    x_max = x_max.max(to_f64(&xr[1]).unwrap_or(x_max));
-                    y_min = y_min.min(to_f64(&yr[0]).unwrap_or(y_min));
-                    y_max = y_max.max(to_f64(&yr[1]).unwrap_or(y_max));
+                    x_min = x_min.min(super::to_f64(&xr[0]).unwrap_or(x_min));
+                    x_max = x_max.max(super::to_f64(&xr[1]).unwrap_or(x_max));
+                    y_min = y_min.min(super::to_f64(&yr[0]).unwrap_or(y_min));
+                    y_max = y_max.max(super::to_f64(&yr[1]).unwrap_or(y_max));
                 }
             }
             Value::List(items) => {
@@ -577,8 +568,8 @@ fn expand_bounds_from_point(
     if let Value::List(coords) = pt
         && coords.len() >= 2
     {
-        let x = to_f64(&coords[0]).unwrap_or(0.0);
-        let y = to_f64(&coords[1]).unwrap_or(0.0);
+        let x = super::to_f64(&coords[0]).unwrap_or(0.0);
+        let y = super::to_f64(&coords[1]).unwrap_or(0.0);
         *x_min = x_min.min(x);
         *x_max = x_max.max(x);
         *y_min = y_min.min(y);
@@ -799,7 +790,7 @@ fn render_primitive(
             "Circle" => {
                 let center = args.first();
                 let r = if args.len() > 1 {
-                    to_f64(&args[1]).unwrap_or(1.0)
+                    super::to_f64(&args[1]).unwrap_or(1.0)
                 } else {
                     1.0
                 };
@@ -852,8 +843,8 @@ fn render_line(
         if let Value::List(coords) = pt
             && coords.len() >= 2
         {
-            let x = to_f64(&coords[0]).unwrap_or(0.0);
-            let y = to_f64(&coords[1]).unwrap_or(0.0);
+            let x = super::to_f64(&coords[0]).unwrap_or(0.0);
+            let y = super::to_f64(&coords[1]).unwrap_or(0.0);
             if !points_str.is_empty() {
                 points_str.push(' ');
             }
@@ -876,8 +867,8 @@ fn render_point(
     if let Value::List(coords) = pt
         && coords.len() >= 2
     {
-        let x = to_f64(&coords[0]).unwrap_or(0.0);
-        let y = to_f64(&coords[1]).unwrap_or(0.0);
+        let x = super::to_f64(&coords[0]).unwrap_or(0.0);
+        let y = super::to_f64(&coords[1]).unwrap_or(0.0);
         return Ok(format!(
             "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.1}\" stroke=\"none\" {}/>\n",
             tx(x),
@@ -899,8 +890,8 @@ fn render_circle(
     if let Value::List(coords) = center
         && coords.len() >= 2
     {
-        let cx = to_f64(&coords[0]).unwrap_or(0.0);
-        let cy = to_f64(&coords[1]).unwrap_or(0.0);
+        let cx = super::to_f64(&coords[0]).unwrap_or(0.0);
+        let cy = super::to_f64(&coords[1]).unwrap_or(0.0);
         // Scale radius using the x scale factor
         let scale = tx(1.0) - tx(0.0);
         return Ok(format!(
@@ -924,10 +915,10 @@ fn render_rectangle(
     let coords1 = as_list(p1)?;
     let coords2 = as_list(p2)?;
     if coords1.len() >= 2 && coords2.len() >= 2 {
-        let x1 = to_f64(&coords1[0]).unwrap_or(0.0);
-        let y1 = to_f64(&coords1[1]).unwrap_or(0.0);
-        let x2 = to_f64(&coords2[0]).unwrap_or(0.0);
-        let y2 = to_f64(&coords2[1]).unwrap_or(0.0);
+        let x1 = super::to_f64(&coords1[0]).unwrap_or(0.0);
+        let y1 = super::to_f64(&coords1[1]).unwrap_or(0.0);
+        let x2 = super::to_f64(&coords2[0]).unwrap_or(0.0);
+        let y2 = super::to_f64(&coords2[1]).unwrap_or(0.0);
         let sx = tx(x1).min(tx(x2));
         let sy = ty(y1).min(ty(y2));
         let w = (tx(x2) - tx(x1)).abs();
@@ -958,17 +949,17 @@ fn render_density_raster(
     let xr = as_list(&args[1])?;
     let yr = as_list(&args[2])?;
     let dims = as_list(&args[3])?;
-    let val_min = to_f64(&args[4]).unwrap_or(0.0);
-    let val_max = to_f64(&args[5]).unwrap_or(1.0);
+    let val_min = super::to_f64(&args[4]).unwrap_or(0.0);
+    let val_max = super::to_f64(&args[5]).unwrap_or(1.0);
 
     if xr.len() < 2 || yr.len() < 2 || dims.len() < 2 {
         return Ok(String::new());
     }
 
-    let xmin = to_f64(&xr[0]).unwrap_or(0.0);
-    let xmax = to_f64(&xr[1]).unwrap_or(1.0);
-    let ymin = to_f64(&yr[0]).unwrap_or(0.0);
-    let ymax = to_f64(&yr[1]).unwrap_or(1.0);
+    let xmin = super::to_f64(&xr[0]).unwrap_or(0.0);
+    let xmax = super::to_f64(&xr[1]).unwrap_or(1.0);
+    let ymin = super::to_f64(&yr[0]).unwrap_or(0.0);
+    let ymax = super::to_f64(&yr[1]).unwrap_or(1.0);
     let nx = match &dims[0] {
         Value::Integer(n) => n.to_usize().unwrap_or(50),
         _ => 50,
@@ -991,7 +982,7 @@ fn render_density_raster(
         for i in 0..nx {
             let x_lo = xmin + (xmax - xmin) * i as f64 / nx as f64;
             let x_hi = xmin + (xmax - xmin) * (i + 1) as f64 / nx as f64;
-            let v = to_f64(&flat[j * nx + i]).unwrap_or(val_min);
+            let v = super::to_f64(&flat[j * nx + i]).unwrap_or(val_min);
             let t = if range > 0.0 {
                 (v - val_min) / range
             } else {

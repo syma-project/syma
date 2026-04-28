@@ -7,7 +7,6 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::value::{EvalError, Value, rational_value};
-use rug::Float;
 use rug::Integer;
 use rug::Rational;
 
@@ -27,25 +26,6 @@ fn as_list(v: &Value) -> Result<&Vec<Value>, EvalError> {
             got: v.type_name().to_string(),
         }),
     }
-}
-
-/// Convert a Value to an f64 for numerical computation.
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => {
-            let num = r.numer().to_f64();
-            let den = r.denom().to_f64();
-            if den != 0.0 { Some(num / den) } else { None }
-        }
-        _ => None,
-    }
-}
-
-/// Create a Real value from f64.
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
 }
 
 /// Create an Integer value.
@@ -498,7 +478,7 @@ pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
         // Vector norm
         let mut s = 0.0f64;
         for v in items {
-            let f = to_f64(v).ok_or_else(|| EvalError::TypeError {
+            let f = super::to_f64(v).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".to_string(),
                 got: v.type_name().to_string(),
             })?;
@@ -511,7 +491,7 @@ pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
         for row_val in items {
             let row = as_list(row_val)?;
             for v in row {
-                let f = to_f64(v).ok_or_else(|| EvalError::TypeError {
+                let f = super::to_f64(v).ok_or_else(|| EvalError::TypeError {
                     expected: "Number".to_string(),
                     got: v.type_name().to_string(),
                 })?;
@@ -520,7 +500,7 @@ pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
         }
         s
     };
-    Ok(real(sum_sq.sqrt()))
+    Ok(super::real(sum_sq.sqrt()))
 }
 
 /// Cross[a, b] — 3D cross product (exact arithmetic).
@@ -662,7 +642,7 @@ fn matrix_to_f64(m: &[Value]) -> Result<Vec<Vec<f64>>, EvalError> {
         let row = as_list(row_val)?;
         let mut frow = Vec::with_capacity(row.len());
         for v in row {
-            frow.push(to_f64(v).ok_or_else(|| EvalError::TypeError {
+            frow.push(super::to_f64(v).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".into(),
                 got: v.type_name().into(),
             })?);
@@ -845,7 +825,7 @@ pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
             .partial_cmp(&a.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(Value::List(eigenvalues.into_iter().map(real).collect()))
+    Ok(Value::List(eigenvalues.into_iter().map(super::real).collect()))
 }
 
 /// Eigenvectors[m] — numerical eigenvectors via QR iteration.
@@ -885,7 +865,7 @@ pub fn builtin_eigenvectors(args: &[Value]) -> Result<Value, EvalError> {
         .map(|col_idx| {
             Value::List(
                 (0..n)
-                    .map(|row_idx| real(q_acc[row_idx][col_idx]))
+                    .map(|row_idx| super::real(q_acc[row_idx][col_idx]))
                     .collect(),
             )
         })
@@ -1466,7 +1446,7 @@ pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
     let u_f64: Result<Vec<f64>, _> = u
         .iter()
         .map(|x| {
-            to_f64(x).ok_or_else(|| EvalError::TypeError {
+            super::to_f64(x).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".into(),
                 got: x.type_name().into(),
             })
@@ -1476,7 +1456,7 @@ pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
     let v_f64: Result<Vec<f64>, _> = v
         .iter()
         .map(|x| {
-            to_f64(x).ok_or_else(|| EvalError::TypeError {
+            super::to_f64(x).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".into(),
                 got: x.type_name().into(),
             })
@@ -1495,7 +1475,7 @@ pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     let cos_theta = (dot / (norm_u * norm_v)).clamp(-1.0, 1.0);
-    Ok(real(cos_theta.acos()))
+    Ok(super::real(cos_theta.acos()))
 }
 
 /// Minors[m] — matrix of minors (determinant of submatrix after removing row i, column j).
@@ -1796,24 +1776,24 @@ mod tests {
         let rows = as_list(&result).unwrap();
         let r0 = as_list(&rows[0]).unwrap();
         let r1 = as_list(&rows[1]).unwrap();
-        assert!((to_f64(&r0[0]).unwrap() - 0.5).abs() < 1e-10);
-        assert!((to_f64(&r0[1]).unwrap()).abs() < 1e-10);
-        assert!((to_f64(&r1[0]).unwrap()).abs() < 1e-10);
-        assert!((to_f64(&r1[1]).unwrap() - 0.25).abs() < 1e-10);
+        assert!((super::super::to_f64(&r0[0]).unwrap() - 0.5).abs() < 1e-10);
+        assert!((super::super::to_f64(&r0[1]).unwrap()).abs() < 1e-10);
+        assert!((super::super::to_f64(&r1[0]).unwrap()).abs() < 1e-10);
+        assert!((super::super::to_f64(&r1[1]).unwrap() - 0.25).abs() < 1e-10);
     }
 
     #[test]
     fn test_eigenvalues_diagonal() {
         // Diagonal matrix: eigenvalues are the diagonal entries
         let m = list(vec![
-            list(vec![real(3.0), real(0.0)]),
-            list(vec![real(0.0), real(1.0)]),
+            list(vec![super::super::real(3.0), super::super::real(0.0)]),
+            list(vec![super::super::real(0.0), super::super::real(1.0)]),
         ]);
         let result = builtin_eigenvalues(&[m]).unwrap();
         let evals = as_list(&result).unwrap();
         assert_eq!(evals.len(), 2);
-        let v0 = to_f64(&evals[0]).unwrap();
-        let v1 = to_f64(&evals[1]).unwrap();
+        let v0 = super::super::to_f64(&evals[0]).unwrap();
+        let v1 = super::super::to_f64(&evals[1]).unwrap();
         // Sorted by descending abs value: 3.0, 1.0
         assert!((v0 - 3.0).abs() < 1e-6);
         assert!((v1 - 1.0).abs() < 1e-6);
@@ -1823,14 +1803,14 @@ mod tests {
     fn test_eigenvalues_symmetric() {
         // [[2,1],[1,2]] has eigenvalues 3 and 1
         let m = list(vec![
-            list(vec![real(2.0), real(1.0)]),
-            list(vec![real(1.0), real(2.0)]),
+            list(vec![super::super::real(2.0), super::super::real(1.0)]),
+            list(vec![super::super::real(1.0), super::super::real(2.0)]),
         ]);
         let result = builtin_eigenvalues(&[m]).unwrap();
         let evals = as_list(&result).unwrap();
         assert_eq!(evals.len(), 2);
-        let v0 = to_f64(&evals[0]).unwrap();
-        let v1 = to_f64(&evals[1]).unwrap();
+        let v0 = super::super::to_f64(&evals[0]).unwrap();
+        let v1 = super::super::to_f64(&evals[1]).unwrap();
         assert!((v0 - 3.0).abs() < 1e-6);
         assert!((v1 - 1.0).abs() < 1e-6);
     }

@@ -1,26 +1,12 @@
 use crate::env::Env;
 use crate::eval::apply_function;
-use crate::value::{DEFAULT_PRECISION, EvalError, Value};
-use rug::Float;
+use crate::value::{EvalError, Value};
 use rug::Integer;
 
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        Value::Complex { re, im: 0.0 } => Some(*re),
-        _ => None,
-    }
-}
-
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(DEFAULT_PRECISION, v))
-}
 
 fn substitute_numeric(expr: &Value, var: &str, val: f64) -> Value {
     match expr {
-        Value::Symbol(s) if s == var => real(val),
+        Value::Symbol(s) if s == var => super::real(val),
         Value::List(items) => Value::List(
             items
                 .iter()
@@ -56,7 +42,7 @@ fn eval_expr_to_f64(expr: &Value, env: &Env) -> Result<f64, EvalError> {
             let evaluated =
                 apply_function(&Value::Symbol("Simplify".to_string()), &[expr.clone()], env)
                     .unwrap_or(expr.clone());
-            to_f64(&evaluated).ok_or_else(|| {
+            super::to_f64(&evaluated).ok_or_else(|| {
                 EvalError::Error("Cannot evaluate expression to a real number".to_string())
             })
         }
@@ -239,7 +225,7 @@ fn parse_equation(arg: &Value) -> Result<(Value, f64), EvalError> {
             head,
             args: eq_args,
         } if head == "Equal" && eq_args.len() == 2 => {
-            let rhs = to_f64(&eq_args[1]).ok_or_else(|| {
+            let rhs = super::to_f64(&eq_args[1]).ok_or_else(|| {
                 EvalError::Error("Right-hand side of equation must be a number".to_string())
             })?;
             Ok((eq_args[0].clone(), rhs))
@@ -283,10 +269,7 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let var = extract_var_symbol(&search_spec[0])?;
 
     if search_spec.len() == 2 {
-        let x0 = to_f64(&search_spec[1]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: search_spec[1].type_name().to_string(),
-        })?;
+        let x0 = super::require_f64(&search_spec[1], "FindRoot", 1)?;
         let var_clone = var.clone();
         let f = move |x: f64| {
             let substituted = substitute_numeric(&expr, &var_clone, x);
@@ -295,18 +278,12 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         let root = newton_method(&f, x0)?;
         Ok(Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(root)),
+            rhs: Box::new(super::real(root)),
             delayed: false,
         })
     } else {
-        let xmin = to_f64(&search_spec[1]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: search_spec[1].type_name().to_string(),
-        })?;
-        let xmax = to_f64(&search_spec[2]).ok_or_else(|| EvalError::TypeError {
-            expected: "Number".to_string(),
-            got: search_spec[2].type_name().to_string(),
-        })?;
+        let xmin = super::require_f64(&search_spec[1], "FindRoot", 1)?;
+        let xmax = super::require_f64(&search_spec[2], "FindRoot", 2)?;
         let var_clone = var.clone();
         let f = move |x: f64| {
             let substituted = substitute_numeric(&expr, &var_clone, x);
@@ -315,7 +292,7 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         let root = brent_method(&f, xmin, xmax)?;
         Ok(Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(root)),
+            rhs: Box::new(super::real(root)),
             delayed: false,
         })
     }
@@ -345,14 +322,8 @@ pub fn builtin_find_minimum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "FindMinimum", 1)?;
+    let xmax = super::require_f64(&spec[2], "FindMinimum", 2)?;
 
     let expr = args[0].clone();
     let var_clone = var.clone();
@@ -364,10 +335,10 @@ pub fn builtin_find_minimum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     let (f_min, x_min) = golden_section(&f, xmin, xmax);
 
     Ok(Value::List(vec![
-        real(f_min),
+        super::real(f_min),
         Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(x_min)),
+            rhs: Box::new(super::real(x_min)),
             delayed: false,
         },
     ]))
@@ -397,14 +368,8 @@ pub fn builtin_find_maximum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "FindMaximum", 1)?;
+    let xmax = super::require_f64(&spec[2], "FindMaximum", 2)?;
 
     let expr = args[0].clone();
     let var_clone = var.clone();
@@ -418,10 +383,10 @@ pub fn builtin_find_maximum(args: &[Value], env: &Env) -> Result<Value, EvalErro
     let f_max = -neg_f_min;
 
     Ok(Value::List(vec![
-        real(f_max),
+        super::real(f_max),
         Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(x_max)),
+            rhs: Box::new(super::real(x_max)),
             delayed: false,
         },
     ]))
@@ -451,14 +416,8 @@ pub fn builtin_nminimize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "NMinimize", 1)?;
+    let xmax = super::require_f64(&spec[2], "NMinimize", 2)?;
 
     let expr = args[0].clone();
     let var_clone = var.clone();
@@ -470,10 +429,10 @@ pub fn builtin_nminimize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let (f_min, x_min) = multi_restart_minimize(&f, xmin, xmax, 10);
 
     Ok(Value::List(vec![
-        real(f_min),
+        super::real(f_min),
         Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(x_min)),
+            rhs: Box::new(super::real(x_min)),
             delayed: false,
         },
     ]))
@@ -503,14 +462,8 @@ pub fn builtin_nmaximize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "NMaximize", 1)?;
+    let xmax = super::require_f64(&spec[2], "NMaximize", 2)?;
 
     let expr = args[0].clone();
     let var_clone = var.clone();
@@ -524,10 +477,10 @@ pub fn builtin_nmaximize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let f_max = -neg_f_min;
 
     Ok(Value::List(vec![
-        real(f_max),
+        super::real(f_max),
         Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(real(x_max)),
+            rhs: Box::new(super::real(x_max)),
             delayed: false,
         },
     ]))
@@ -557,14 +510,8 @@ pub fn builtin_argmin(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "ArgMin", 1)?;
+    let xmax = super::require_f64(&spec[2], "ArgMin", 2)?;
 
     let expr = args[0].clone();
     let f = move |x: f64| {
@@ -574,7 +521,7 @@ pub fn builtin_argmin(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     let (_f_min, x_min) = multi_restart_minimize(&f, xmin, xmax, 10);
 
-    Ok(real(x_min))
+    Ok(super::real(x_min))
 }
 
 /// ArgMax[f, {x, xmin, xmax}] — return just the maximizing x value.
@@ -601,14 +548,8 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     let var = extract_var_symbol(&spec[0])?;
-    let xmin = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[1].type_name().to_string(),
-    })?;
-    let xmax = to_f64(&spec[2]).ok_or_else(|| EvalError::TypeError {
-        expected: "Number".to_string(),
-        got: spec[2].type_name().to_string(),
-    })?;
+    let xmin = super::require_f64(&spec[1], "ArgMax", 1)?;
+    let xmax = super::require_f64(&spec[2], "ArgMax", 2)?;
 
     let expr = args[0].clone();
     let f = move |x: f64| {
@@ -619,7 +560,7 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let neg_f = move |x: f64| -f(x);
     let (_neg_f_min, x_max) = multi_restart_minimize(&neg_f, xmin, xmax, 10);
 
-    Ok(real(x_max))
+    Ok(super::real(x_max))
 }
 
 /// FindInstance[eqn, var, n] — find n numeric instances (solutions).
@@ -676,7 +617,7 @@ pub fn builtin_find_instance(args: &[Value], env: &Env) -> Result<Value, EvalErr
         .map(|root| {
             Value::List(vec![Value::Rule {
                 lhs: Box::new(Value::Symbol(var.clone())),
-                rhs: Box::new(real(root)),
+                rhs: Box::new(super::real(root)),
                 delayed: false,
             }])
         })
@@ -705,7 +646,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 expr.clone(),
                 Value::Call {
                     head: "Times".to_string(),
-                    args: vec![real(-rhs)],
+                    args: vec![super::real(-rhs)],
                 },
             ],
         }
@@ -741,7 +682,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 let root = -c0 / c1;
                 return Ok(Value::List(vec![Value::List(vec![Value::Rule {
                     lhs: Box::new(Value::Symbol(var)),
-                    rhs: Box::new(real(root)),
+                    rhs: Box::new(super::real(root)),
                     delayed: false,
                 }])]));
             }
@@ -783,7 +724,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 .map(|root| {
                     Value::List(vec![Value::Rule {
                         lhs: Box::new(Value::Symbol(var.clone())),
-                        rhs: Box::new(real(root)),
+                        rhs: Box::new(super::real(root)),
                         delayed: false,
                     }])
                 })
@@ -840,7 +781,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 .map(|root| {
                     Value::List(vec![Value::Rule {
                         lhs: Box::new(Value::Symbol(var.clone())),
-                        rhs: Box::new(real(root)),
+                        rhs: Box::new(super::real(root)),
                         delayed: false,
                     }])
                 })
@@ -854,7 +795,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
     match expr {
         Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. } => {
-            to_f64(expr).map(|c| vec![c])
+            super::to_f64(expr).map(|c| vec![c])
         }
         Value::Symbol(s) if s == var => Some(vec![0.0, 1.0]),
         Value::Symbol(_) => None,
@@ -883,7 +824,7 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                 let mut poly_part: Option<Vec<f64>> = None;
 
                 for arg in args {
-                    if let Some(c) = to_f64(arg) {
+                    if let Some(c) = super::to_f64(arg) {
                         numeric_factor *= c;
                     } else if let Value::Symbol(s) = arg {
                         if s == var {
@@ -949,11 +890,11 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                     Some(coeffs)
                 }
                 (Value::Symbol(s), _) if s == var => None,
-                _ => to_f64(&args[0]).map(|c| vec![c]),
+                _ => super::to_f64(&args[0]).map(|c| vec![c]),
             },
             "Divide" if args.len() == 2 => {
                 let num_coeffs = extract_polynomial_coeffs(&args[0], var)?;
-                let denom = to_f64(&args[1])?;
+                let denom = super::to_f64(&args[1])?;
                 if denom.abs() < 1e-15 {
                     return None;
                 }
@@ -1165,6 +1106,8 @@ fn hessenberg(a: &mut [Vec<f64>], n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::DEFAULT_PRECISION;
+    use rug::Float;
 
     #[test]
     fn test_golden_section_simple() {
@@ -1290,12 +1233,12 @@ mod tests {
 
     #[test]
     fn test_to_f64() {
-        assert_eq!(to_f64(&Value::Integer(Integer::from(42))), Some(42.0));
+        assert_eq!(super::super::to_f64(&Value::Integer(Integer::from(42))), Some(42.0));
         assert_eq!(
-            to_f64(&Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14))),
+            super::super::to_f64(&Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14))),
             Some(3.14)
         );
-        assert_eq!(to_f64(&Value::Symbol("x".to_string())), None);
+        assert_eq!(super::super::to_f64(&Value::Symbol("x".to_string())), None);
     }
 
     #[test]

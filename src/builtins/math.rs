@@ -234,11 +234,7 @@ fn exact_tan(num: i64, den: u32) -> Option<Value> {
 // ── Trigonometric ──
 
 pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sin requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sin", args, 1)?;
     // Symbolic Pi-multiple detection (before numerical eval)
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_sin(num, den) {
@@ -286,11 +282,7 @@ pub fn builtin_sin(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Cos requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Cos", args, 1)?;
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_cos(num, den) {
             return Ok(result);
@@ -336,11 +328,7 @@ pub fn builtin_cos(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Tan requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Tan", args, 1)?;
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_tan(num, den) {
             return Ok(result);
@@ -394,11 +382,7 @@ pub fn builtin_tan(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arcsin(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcSin requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcSin", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -413,11 +397,7 @@ pub fn builtin_arcsin(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arccos(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCos requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCos", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -432,11 +412,7 @@ pub fn builtin_arccos(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arctan(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcTan requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcTan", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -499,11 +475,7 @@ fn exact_cot(num: i64, den: u32) -> Option<Value> {
 }
 
 pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Csc requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Csc", args, 1)?;
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_csc(num, den) {
             return Ok(result);
@@ -546,11 +518,7 @@ pub fn builtin_csc(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sec requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sec", args, 1)?;
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_sec(num, den) {
             return Ok(result);
@@ -590,11 +558,7 @@ pub fn builtin_sec(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Cot requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Cot", args, 1)?;
     if let Some((num, den)) = extract_pi_multiple(&args[0]) {
         if let Some(result) = exact_cot(num, den) {
             return Ok(result);
@@ -642,11 +606,7 @@ pub fn builtin_cot(args: &[Value]) -> Result<Value, EvalError> {
 // ── Inverse Reciprocal Trigonometric ──
 
 pub fn builtin_arccsc(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCsc requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCsc", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Call {
             head: "ArcCsc".to_string(),
@@ -674,11 +634,7 @@ pub fn builtin_arccsc(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arcsec(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcSec requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcSec", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Call {
             head: "ArcSec".to_string(),
@@ -706,11 +662,7 @@ pub fn builtin_arcsec(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCot requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCot", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => {
             // ArcCot[0] = π/2
@@ -741,11 +693,7 @@ pub fn builtin_arccot(args: &[Value]) -> Result<Value, EvalError> {
 // ── Haversine ──
 
 pub fn builtin_haversine(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Haversine requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Haversine", args, 1)?;
     // Haversine[x] = Sin[x/2]^2 = (1 - Cos[x]) / 2
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
@@ -770,11 +718,7 @@ pub fn builtin_haversine(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "InverseHaversine requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("InverseHaversine", args, 1)?;
     // InverseHaversine[x] = 2 * ArcSin[Sqrt[x]]
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
@@ -812,62 +756,38 @@ pub fn builtin_inverse_haversine(args: &[Value]) -> Result<Value, EvalError> {
 // ── Degree-based Trigonometric ──
 
 pub fn builtin_sin_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "SinDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("SinDegrees", args, 1)?;
     // SinDegrees[θ] = Sin[θ * π/180]
     let rad = degrees_to_radians(&args[0])?;
     builtin_sin(&[rad])
 }
 
 pub fn builtin_cos_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "CosDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("CosDegrees", args, 1)?;
     let rad = degrees_to_radians(&args[0])?;
     builtin_cos(&[rad])
 }
 
 pub fn builtin_tan_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "TanDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("TanDegrees", args, 1)?;
     let rad = degrees_to_radians(&args[0])?;
     builtin_tan(&[rad])
 }
 
 pub fn builtin_csc_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "CscDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("CscDegrees", args, 1)?;
     let rad = degrees_to_radians(&args[0])?;
     builtin_csc(&[rad])
 }
 
 pub fn builtin_sec_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "SecDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("SecDegrees", args, 1)?;
     let rad = degrees_to_radians(&args[0])?;
     builtin_sec(&[rad])
 }
 
 pub fn builtin_cot_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "CotDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("CotDegrees", args, 1)?;
     let rad = degrees_to_radians(&args[0])?;
     builtin_cot(&[rad])
 }
@@ -875,61 +795,37 @@ pub fn builtin_cot_degrees(args: &[Value]) -> Result<Value, EvalError> {
 // ── Inverse Trigonometric (Degrees) ──
 
 pub fn builtin_arcsin_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcSinDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcSinDegrees", args, 1)?;
     let rad = builtin_arcsin(args)?;
     radians_to_degrees(&rad)
 }
 
 pub fn builtin_arccos_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCosDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCosDegrees", args, 1)?;
     let rad = builtin_arccos(args)?;
     radians_to_degrees(&rad)
 }
 
 pub fn builtin_arctan_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcTanDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcTanDegrees", args, 1)?;
     let rad = builtin_arctan(args)?;
     radians_to_degrees(&rad)
 }
 
 pub fn builtin_arccsc_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCscDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCscDegrees", args, 1)?;
     let rad = builtin_arccsc(args)?;
     radians_to_degrees(&rad)
 }
 
 pub fn builtin_arcsec_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcSecDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcSecDegrees", args, 1)?;
     let rad = builtin_arcsec(args)?;
     radians_to_degrees(&rad)
 }
 
 pub fn builtin_arccot_degrees(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCotDegrees requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCotDegrees", args, 1)?;
     let rad = builtin_arccot(args)?;
     radians_to_degrees(&rad)
 }
@@ -1109,11 +1005,7 @@ fn log_natural(v: &Value) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_log2(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Log2 requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Log2", args, 1)?;
     match &args[0] {
         Value::Integer(n) if !n.is_zero() && !n.is_negative() => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1127,11 +1019,7 @@ pub fn builtin_log2(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_log10(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Log10 requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Log10", args, 1)?;
     match &args[0] {
         Value::Integer(n) if !n.is_zero() && !n.is_negative() => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1145,11 +1033,7 @@ pub fn builtin_log10(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_exp(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Exp requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Exp", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
         Value::Integer(_) => Ok(Value::Call {
@@ -1225,11 +1109,7 @@ fn sqrt_value_from_parts(outside: Integer, inside: Integer) -> Value {
 }
 
 pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sqrt requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sqrt", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             if n.is_negative() {
@@ -1377,11 +1257,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_floor(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Floor requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Floor", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
         Value::Real(r) => {
@@ -1397,11 +1273,7 @@ pub fn builtin_floor(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_ceiling(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Ceiling requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Ceiling", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
         Value::Real(r) => {
@@ -1417,11 +1289,7 @@ pub fn builtin_ceiling(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_round(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Round requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Round", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
         Value::Real(r) => {
@@ -1439,11 +1307,7 @@ pub fn builtin_round(args: &[Value]) -> Result<Value, EvalError> {
 // ── Min / Max ──
 
 pub fn builtin_max(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() {
-        return Err(EvalError::Error(
-            "Max requires at least 1 argument".to_string(),
-        ));
-    }
+    super::require_min_args("Max", args, 1)?;
     let mut max = &args[0];
     for arg in &args[1..] {
         match (max, arg) {
@@ -1460,11 +1324,7 @@ pub fn builtin_max(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_min(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() {
-        return Err(EvalError::Error(
-            "Min requires at least 1 argument".to_string(),
-        ));
-    }
+    super::require_min_args("Min", args, 1)?;
     let mut min = &args[0];
     for arg in &args[1..] {
         match (min, arg) {
@@ -1483,11 +1343,7 @@ pub fn builtin_min(args: &[Value]) -> Result<Value, EvalError> {
 // ── Modular arithmetic / Number theory ──
 
 pub fn builtin_mod(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Mod requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("Mod", args, 2)?;
     match (&args[0], &args[1]) {
         (Value::Integer(a), Value::Integer(b)) if !b.is_zero() => {
             let result = a.clone() % b;
@@ -1534,11 +1390,7 @@ pub fn gcd(mut a: Integer, mut b: Integer) -> Integer {
 }
 
 pub fn builtin_gcd(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "GCD requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("GCD", args, 2)?;
     match (&args[0], &args[1]) {
         (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(gcd(a.clone(), b.clone()))),
         _ => Err(EvalError::TypeError {
@@ -1549,11 +1401,7 @@ pub fn builtin_gcd(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_lcm(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "LCM requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("LCM", args, 2)?;
     match (&args[0], &args[1]) {
         (Value::Integer(a), Value::Integer(b)) => {
             if a.is_zero() || b.is_zero() {
@@ -1580,11 +1428,7 @@ pub fn factorial(n: i64) -> Integer {
 }
 
 pub fn builtin_factorial(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Factorial requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Factorial", args, 1)?;
     match &args[0] {
         Value::Integer(n) if *n >= 0 => {
             let n_i64 = n.to_i64().unwrap_or(0);
@@ -1608,11 +1452,7 @@ pub fn builtin_factorial(args: &[Value]) -> Result<Value, EvalError> {
 ///
 /// Numerically evaluated for real arguments; otherwise returned unevaluated.
 pub fn builtin_gamma(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Gamma requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Gamma", args, 1)?;
     match &args[0] {
         // Gamma[0] is undefined (pole)
         Value::Integer(n) if n.is_zero() => Ok(Value::Call {
@@ -1647,11 +1487,7 @@ pub fn builtin_gamma(args: &[Value]) -> Result<Value, EvalError> {
 macro_rules! hyperbolic_builtin {
     ($fn_name:ident, $sym_name:literal, $method:ident) => {
         pub fn $fn_name(args: &[Value]) -> Result<Value, EvalError> {
-            if args.len() != 1 {
-                return Err(EvalError::Error(
-                    concat!($sym_name, " requires exactly 1 argument").to_string(),
-                ));
-            }
+            super::require_args($sym_name, args, 1)?;
             match &args[0] {
                 Value::Integer(n) => {
                     Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, n).$method()))
@@ -1674,11 +1510,7 @@ hyperbolic_builtin!(builtin_arccosh, "ArcCosh", acosh);
 hyperbolic_builtin!(builtin_arctanh, "ArcTanh", atanh);
 
 pub fn builtin_csch(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Csch requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Csch", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let s = Float::with_val(DEFAULT_PRECISION, n).sinh();
@@ -1696,11 +1528,7 @@ pub fn builtin_csch(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_sech(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sech requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sech", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let c = Float::with_val(DEFAULT_PRECISION, n).cosh();
@@ -1718,11 +1546,7 @@ pub fn builtin_sech(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_coth(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Coth requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Coth", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1741,11 +1565,7 @@ pub fn builtin_coth(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arccsch(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCsch requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCsch", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1764,11 +1584,7 @@ pub fn builtin_arccsch(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arcsech(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcSech requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcSech", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1787,11 +1603,7 @@ pub fn builtin_arcsech(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_arccoth(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArcCoth requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("ArcCoth", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -1811,11 +1623,7 @@ pub fn builtin_arccoth(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Sinc[z] = Sin[z]/z, with Sinc[0] = 1
 pub fn builtin_sinc(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sinc requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sinc", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
         Value::Integer(n) => {
@@ -1839,11 +1647,7 @@ pub fn builtin_sinc(args: &[Value]) -> Result<Value, EvalError> {
 
 /// IntegerPart[x] — truncation toward zero
 pub fn builtin_integer_part(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "IntegerPart requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("IntegerPart", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
         Value::Real(r) => {
@@ -1861,11 +1665,7 @@ pub fn builtin_integer_part(args: &[Value]) -> Result<Value, EvalError> {
 
 /// FractionalPart[x] — x - IntegerPart[x]
 pub fn builtin_fractional_part(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "FractionalPart requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("FractionalPart", args, 1)?;
     match &args[0] {
         Value::Integer(_) => Ok(Value::Integer(Integer::from(0))),
         Value::Real(r) => {
@@ -1881,11 +1681,7 @@ pub fn builtin_fractional_part(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Sign[x] — 1 for x>0, -1 for x<0, 0 for x==0
 pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Sign requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Sign", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             use std::cmp::Ordering;
@@ -1915,11 +1711,7 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
 
 /// UnitStep[x] — 1 for x≥0, 0 for x<0
 pub fn builtin_unit_step(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() {
-        return Err(EvalError::Error(
-            "UnitStep requires at least 1 argument".to_string(),
-        ));
-    }
+    super::require_min_args("UnitStep", args, 1)?;
     // Multi-arg form: UnitStep[x1, x2, ...] = product of UnitStep[xi]
     // (standard Wolfram behavior: 1 only if all xi ≥ 0)
     for arg in args {
@@ -1942,11 +1734,7 @@ pub fn builtin_unit_step(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Boole[expr] — 1 if True, 0 if False
 pub fn builtin_boole(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Boole requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Boole", args, 1)?;
     match &args[0] {
         Value::Symbol(s) if s == "True" => Ok(Value::Integer(Integer::from(1))),
         Value::Symbol(s) if s == "False" => Ok(Value::Integer(Integer::from(0))),
@@ -2048,11 +1836,7 @@ pub fn builtin_rescale(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Quotient[m, n] — floor(m/n)
 pub fn builtin_quotient(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Quotient requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("Quotient", args, 2)?;
     match (&args[0], &args[1]) {
         (Value::Integer(m), Value::Integer(n)) => {
             if n.is_zero() {
@@ -2069,11 +1853,7 @@ pub fn builtin_quotient(args: &[Value]) -> Result<Value, EvalError> {
 
 /// QuotientRemainder[m, n] — {Quotient[m,n], Mod[m,n]}
 pub fn builtin_quotient_remainder(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "QuotientRemainder requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("QuotientRemainder", args, 2)?;
     match (&args[0], &args[1]) {
         (Value::Integer(m), Value::Integer(n)) => {
             if n.is_zero() {
@@ -2110,11 +1890,7 @@ pub fn builtin_quotient_remainder(args: &[Value]) -> Result<Value, EvalError> {
 
 /// KroneckerDelta[n1, n2, ...] — 1 if all equal, 0 otherwise
 pub fn builtin_kronecker_delta(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "KroneckerDelta requires at least 2 arguments".to_string(),
-        ));
-    }
+    super::require_min_args("KroneckerDelta", args, 2)?;
     let first = &args[0];
     for arg in &args[1..] {
         if arg != first {
@@ -2164,11 +1940,7 @@ pub fn builtin_fixed_point(args: &[Value], env: &Env) -> Result<Value, EvalError
 
 /// IntegerQ[x] — return True if x is an integer.
 pub fn builtin_integer_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "IntegerQ requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("IntegerQ", args, 1)?;
     Ok(Value::Bool(matches!(&args[0], Value::Integer(_))))
 }
 
@@ -2234,11 +2006,7 @@ fn chop_value(val: &Value, tol: f64) -> Result<Value, EvalError> {
 
 /// Unitize[x] — 0 if x == 0, 1 otherwise.
 pub fn builtin_unitize(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Unitize requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Unitize", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Real(r) if r.to_f64() == 0.0 => Ok(Value::Integer(Integer::from(0))),
@@ -2252,11 +2020,7 @@ pub fn builtin_unitize(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Ramp[x] — max(0, x).
 pub fn builtin_ramp(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Ramp requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("Ramp", args, 1)?;
     match &args[0] {
         Value::Integer(n) if n.is_negative() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
@@ -2274,11 +2038,7 @@ pub fn builtin_ramp(args: &[Value]) -> Result<Value, EvalError> {
 
 /// RealAbs[x] — absolute value for real numbers.
 pub fn builtin_real_abs(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "RealAbs requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("RealAbs", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone().abs())),
         Value::Real(r) => Ok(Value::Real(Float::with_val(r.prec(), r.clone().abs()))),
@@ -2291,11 +2051,7 @@ pub fn builtin_real_abs(args: &[Value]) -> Result<Value, EvalError> {
 
 /// RealSign[x] — -1 for x < 0, 0 for x == 0, 1 for x > 0 (real numbers only).
 pub fn builtin_real_sign(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "RealSign requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("RealSign", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             use std::cmp::Ordering;
@@ -2325,11 +2081,7 @@ pub fn builtin_real_sign(args: &[Value]) -> Result<Value, EvalError> {
 
 /// LogisticSigmoid[x] — 1/(1+exp(-x)).
 pub fn builtin_logistic_sigmoid(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "LogisticSigmoid requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("LogisticSigmoid", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let x = n.to_f64();
@@ -2350,11 +2102,7 @@ pub fn builtin_logistic_sigmoid(args: &[Value]) -> Result<Value, EvalError> {
 
 /// NumericalOrder[x, y] — -1 if x < y, 0 if x == y, 1 if x > y (numeric comparison).
 pub fn builtin_numerical_order(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "NumericalOrder requires exactly 2 arguments".to_string(),
-        ));
-    }
+    super::require_args("NumericalOrder", args, 2)?;
     let to_f64 = |v: &Value| -> Option<f64> {
         match v {
             Value::Integer(n) => Some(n.to_f64()),
@@ -2381,11 +2129,7 @@ pub fn builtin_numerical_order(args: &[Value]) -> Result<Value, EvalError> {
 
 /// UnitBox[x] — 1 if |x| < 1/2, 1/2 if |x| == 1/2, 0 otherwise.
 pub fn builtin_unit_box(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "UnitBox requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("UnitBox", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let x = n.to_f64();
@@ -2422,11 +2166,7 @@ pub fn builtin_unit_box(args: &[Value]) -> Result<Value, EvalError> {
 
 /// UnitTriangle[x] — max(0, 1 - |x|).
 pub fn builtin_unit_triangle(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "UnitTriangle requires exactly 1 argument".to_string(),
-        ));
-    }
+    super::require_args("UnitTriangle", args, 1)?;
     match &args[0] {
         Value::Integer(n) => {
             let x = n.to_f64();

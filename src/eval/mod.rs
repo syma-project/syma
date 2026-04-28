@@ -106,8 +106,90 @@ fn release_inner(val: Value, env: &Env) -> Result<Value, EvalError> {
     }
 }
 
+/// Evaluate compound (non-atomic, non-call) expressions:
+/// lists, associations, rules, replace-all/repeated, and map.
+///
+/// Returns `Ok(Some(value))` if the expression was handled, `Ok(None)` otherwise.
+fn eval_compound(expr: &Expr, env: &Env) -> Result<Option<Value>, EvalError> {
+    match expr {
+        // ── List ──
+        Expr::List(items) => {
+            let values: Result<Vec<Value>, _> = items.iter().map(|item| eval(item, env)).collect();
+            Ok(Some(Value::List(flatten_sequences(values?, false))))
+        }
+
+        // ── Association ──
+        Expr::Assoc(entries) => {
+            let mut map = HashMap::new();
+            for (key, val) in entries {
+                map.insert(key.clone(), eval(val, env)?);
+            }
+            Ok(Some(Value::Assoc(map)))
+        }
+
+        // ── Rules ──
+        Expr::Rule { lhs, rhs } => Ok(Some(Value::Rule {
+            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
+            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
+            delayed: false,
+        })),
+        Expr::RuleDelayed { lhs, rhs } => Ok(Some(Value::Rule {
+            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
+            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
+            delayed: true,
+        })),
+
+        // ── ReplaceAll: expr /. rules ──
+        Expr::ReplaceAll { expr, rules } => {
+            let val = eval(expr, env)?;
+            let rules_val = eval(rules, env)?;
+            Ok(Some(rules::apply_rules_value(&val, &rules_val, env)?))
+        }
+
+        // ── ReplaceRepeated: expr //. rules ──
+        Expr::ReplaceRepeated { expr, rules } => {
+            let mut val = eval(expr, env)?;
+            let rules_val = eval(rules, env)?;
+            let max_iterations = 1000;
+            for _ in 0..max_iterations {
+                match rules::apply_rules_value(&val, &rules_val, env)? {
+                    new_val if !new_val.struct_eq(&val) => val = new_val,
+                    _ => break,
+                }
+            }
+            Ok(Some(val))
+        }
+
+        // ── Map: f /@ list ──
+        Expr::Map { func, list } => {
+            let f = eval(func, env)?;
+            let l = eval(list, env)?;
+            match l {
+                Value::List(items) => {
+                    let mut result = Vec::new();
+                    for item in items {
+                        result.push(apply_function(&f, &[item], env)?);
+                    }
+                    Ok(Some(Value::List(result)))
+                }
+                _ => Err(EvalError::TypeError {
+                    expected: "List".to_string(),
+                    got: l.type_name().to_string(),
+                }),
+            }
+        }
+
+        _ => Ok(None),
+    }
+}
+
 /// Evaluate a single expression in the given environment.
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+    // Delegate compound expressions (lists, rules, etc.) to a helper.
+    if let Some(val) = eval_compound(expr, env)? {
+        return Ok(val);
+    }
+
     let _attr_checker = AttributeChecker::new(env.attributes.clone());
     match expr {
         // ── Atoms ──
@@ -128,75 +210,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             }
         }
 
-        // ── List ──
-        Expr::List(items) => {
-            let values: Result<Vec<Value>, _> = items.iter().map(|item| eval(item, env)).collect();
-            Ok(Value::List(flatten_sequences(values?, false)))
-        }
-
-        // ── Association ──
-        Expr::Assoc(entries) => {
-            let mut map = HashMap::new();
-            for (key, val) in entries {
-                map.insert(key.clone(), eval(val, env)?);
-            }
-            Ok(Value::Assoc(map))
-        }
-
-        // ── Rules ──
-        Expr::Rule { lhs, rhs } => Ok(Value::Rule {
-            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
-            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
-            delayed: false,
-        }),
-        Expr::RuleDelayed { lhs, rhs } => Ok(Value::Rule {
-            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
-            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
-            delayed: true,
-        }),
-
         // ── Function application ──
         Expr::Call { head, args } => eval_call(head, args, env),
-
-        // ── ReplaceAll: expr /. rules ──
-        Expr::ReplaceAll { expr, rules } => {
-            let val = eval(expr, env)?;
-            let rules_val = eval(rules, env)?;
-            rules::apply_rules_value(&val, &rules_val, env)
-        }
-
-        // ── ReplaceRepeated: expr //. rules ──
-        Expr::ReplaceRepeated { expr, rules } => {
-            let mut val = eval(expr, env)?;
-            let rules_val = eval(rules, env)?;
-            let max_iterations = 1000;
-            for _ in 0..max_iterations {
-                match rules::apply_rules_value(&val, &rules_val, env)? {
-                    new_val if !new_val.struct_eq(&val) => val = new_val,
-                    _ => break,
-                }
-            }
-            Ok(val)
-        }
-
-        // ── Map: f /@ list ──
-        Expr::Map { func, list } => {
-            let f = eval(func, env)?;
-            let l = eval(list, env)?;
-            match l {
-                Value::List(items) => {
-                    let mut result = Vec::new();
-                    for item in items {
-                        result.push(apply_function(&f, &[item], env)?);
-                    }
-                    Ok(Value::List(result))
-                }
-                _ => Err(EvalError::TypeError {
-                    expected: "List".to_string(),
-                    got: l.type_name().to_string(),
-                }),
-            }
-        }
 
         // ── Apply: f @@ expr ──
         Expr::Apply { func, expr } => {
@@ -1067,6 +1082,17 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             params: params.clone(),
             env: Some(env.clone()),
         }),
+
+        // ── Compound expressions handled by eval_compound() above ──
+        Expr::List(_)
+        | Expr::Assoc(_)
+        | Expr::Rule { .. }
+        | Expr::RuleDelayed { .. }
+        | Expr::ReplaceAll { .. }
+        | Expr::ReplaceRepeated { .. }
+        | Expr::Map { .. } => {
+            unreachable!("compound expressions are handled by eval_compound()")
+        }
     }
 }
 
@@ -1535,114 +1561,266 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
     }
 }
 
+/// Handle Set and SetDelayed assignment forms.
+///
+/// Returns `Ok(Some(value))` if this is a Set/SetDelayed call, `Ok(None)` otherwise.
+fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
+    if s != "Set" && s != "SetDelayed" {
+        return Ok(None);
+    }
+    // Handle assignment specially
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Set requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let val = eval(&args[1], env)?;
+    let result = match &args[0] {
+        Expr::Symbol(name) => {
+            env.set_propagate(name.clone(), val.clone());
+            val
+        }
+        // Attributes[sym] = value  via Set[Attributes[sym], value]
+        Expr::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1
+            && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+        {
+            let sym_name = match &call_args[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "Attributes assignment requires a symbol name".to_string(),
+                    ));
+                }
+            };
+            if env.has_attribute(&sym_name, "Locked") {
+                return Ok(Some(Value::Null));
+            }
+            let attrs = match &val {
+                Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
+                other => vec![other.to_string()],
+            };
+            env.set_attributes(&sym_name, attrs);
+            val
+        }
+        // f[args] = value  or SetDelayed[f[args], val]
+        // — function definition with immediate or delayed RHS.
+        // Also handles desugared OOP field access: this.field = val
+        // is parsed as Set[field[this], val]. When target is an
+        // Object, treat as field access.
+        Expr::Call {
+            head,
+            args: call_args,
+        } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
+            && !matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
+        {
+            if let Expr::Symbol(name) = head.as_ref() {
+                // Check for OOP field access: field[object] = value
+                // where object evaluates to an Object
+                if call_args.len() == 1 {
+                    let target = eval(&call_args[0], env)?;
+                    if let Value::Object {
+                        class_name,
+                        mut fields,
+                    } = target
+                    {
+                        fields.insert(name.clone(), val.clone());
+                        let updated = Value::Object { class_name, fields };
+                        if let Expr::Symbol(s) = &call_args[0]
+                            && s == "this"
+                        {
+                            env.set("this".to_string(), updated.clone());
+                        }
+                        return Ok(Some(val));
+                    }
+                }
+                // Otherwise: function definition via Set/SetDelayed
+                // SetDelayed[f[args], body] — use body as-is
+                // Set[f[args], val] — evaluate RHS then store as Expr
+                let body_expr = if s == "SetDelayed" {
+                    args[1].clone()
+                } else {
+                    table::value_to_expr(&val)
+                };
+                let func = if let Some(Value::Function(f)) = env.get(name) {
+                    Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
+                } else {
+                    FunctionDef {
+                        name: name.clone(),
+                        definitions: Vec::new(),
+                    }
+                };
+                let mut func = func;
+                func.definitions.push(FunctionDefinition {
+                    params: call_args.clone(),
+                    body: body_expr,
+                    delayed: s == "SetDelayed",
+                    guard: None,
+                });
+                // Sort definitions so more specific ones match first
+                func.definitions.sort_by(|a, b| {
+                    specificity(&b.params).cmp(&specificity(&a.params))
+                });
+                env.set(name.clone(), Value::Function(Arc::new(func)));
+                return Ok(Some(val));
+            }
+            return Err(EvalError::Error("Invalid assignment target".to_string()));
+        }
+        _ => return Err(EvalError::Error("Invalid assignment target".to_string())),
+    };
+    Ok(Some(result))
+}
+
+/// Handle control flow forms: While, For, Module, With, Block.
+///
+/// Returns `Ok(Some(value))` if the form was handled, `Ok(None)` otherwise.
+fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
+    match s {
+        "While" => {
+            // While[cond, body] — evaluate body while cond is True
+            if args.len() != 2 {
+                return Err(EvalError::Error(
+                    "While requires exactly 2 arguments".to_string(),
+                ));
+            }
+            let mut result = Value::Null;
+            loop {
+                let cond = eval(&args[0], env)?;
+                if !cond.to_bool() {
+                    break;
+                }
+                result = eval(&args[1], env).or_else(|e| match e {
+                    EvalError::Break => Ok(Value::Null),
+                    EvalError::Continue => Ok(Value::Null),
+                    other => Err(other),
+                })?;
+            }
+            Ok(Some(result))
+        }
+        "For" => {
+            // For[start, test, step, body] — C-style for loop
+            if args.len() != 4 {
+                return Err(EvalError::Error(
+                    "For requires exactly 4 arguments".to_string(),
+                ));
+            }
+            eval(&args[0], env)?;
+            let mut result = Value::Null;
+            loop {
+                let test = eval(&args[1], env)?;
+                if !test.to_bool() {
+                    break;
+                }
+                result = eval(&args[3], env).or_else(|e| match e {
+                    EvalError::Break => Ok(Value::Null),
+                    EvalError::Continue => Ok(Value::Null),
+                    other => Err(other),
+                })?;
+                eval(&args[2], env)?;
+            }
+            Ok(Some(result))
+        }
+        "Module" => {
+            if args.len() < 2 {
+                return Err(EvalError::Error(
+                    "Module requires at least 2 arguments".to_string(),
+                ));
+            }
+            let specs = parse_local_specs(&args[0])?;
+            let child = env.child();
+            for (name, init) in &specs {
+                let val = match init {
+                    Some(expr) => eval(expr, env)?,
+                    None => Value::Null,
+                };
+                child.set(name.clone(), val);
+            }
+            let mut result = Value::Null;
+            for expr in &args[1..] {
+                result = eval(expr, &child)?;
+            }
+            Ok(Some(result))
+        }
+        "With" => {
+            if args.len() < 2 {
+                return Err(EvalError::Error(
+                    "With requires at least 2 arguments".to_string(),
+                ));
+            }
+            let specs = parse_local_specs(&args[0])?;
+            let child = env.child();
+            // Evaluate RHS values and build substitution map
+            let mut subs = Vec::new();
+            for (name, init) in &specs {
+                match init {
+                    Some(rhs_expr) => {
+                        let val = eval(rhs_expr, env)?;
+                        subs.push((name.clone(), table::value_to_expr(&val)));
+                    }
+                    None => {
+                        return Err(EvalError::Error(
+                            "With requires initial values for all local variables".to_string(),
+                        ));
+                    }
+                }
+            }
+            let mut result = Value::Null;
+            for expr in &args[1..] {
+                let substituted = substitute_in_expr(expr, &subs);
+                result = eval(&substituted, &child)?;
+            }
+            Ok(Some(result))
+        }
+        "Block" => {
+            if args.len() < 2 {
+                return Err(EvalError::Error(
+                    "Block requires at least 2 arguments".to_string(),
+                ));
+            }
+            let specs = parse_local_specs(&args[0])?;
+            // Save old values and propagate new ones up the scope chain.
+            // Block uses dynamic scoping: the new values are visible everywhere,
+            // including in functions called within the body, by updating the
+            // defining scope (rather than shadowing in a child scope).
+            let mut saved: Vec<(String, Option<Value>)> = Vec::new();
+            for (name, init) in &specs {
+                let old_val = env.get(name);
+                let new_val = match init {
+                    Some(expr) => eval(expr, env)?,
+                    None => Value::Null,
+                };
+                env.set_propagate(name.clone(), new_val);
+                saved.push((name.clone(), old_val));
+            }
+            // Evaluate body
+            let mut result = Value::Null;
+            for expr in &args[1..] {
+                result = eval(expr, env)?;
+            }
+            // Restore old values (reverse order)
+            for (name, old_val) in saved.into_iter().rev() {
+                match old_val {
+                    Some(v) => env.set_propagate(name, v),
+                    None => {
+                        env.remove(&name);
+                    }
+                }
+            }
+            Ok(Some(result))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Evaluate a function call.
 fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     // Special forms that don't evaluate all arguments
     if let Expr::Symbol(s) = head {
         match s.as_str() {
             "Set" | "SetDelayed" => {
-                // Handle assignment specially
-                if args.len() != 2 {
-                    return Err(EvalError::Error(
-                        "Set requires exactly 2 arguments".to_string(),
-                    ));
-                }
-                let val = eval(&args[1], env)?;
-                match &args[0] {
-                    Expr::Symbol(name) => {
-                        env.set_propagate(name.clone(), val.clone());
-                        Ok(val)
-                    }
-                    // Attributes[sym] = value  via Set[Attributes[sym], value]
-                    Expr::Call {
-                        head,
-                        args: call_args,
-                    } if call_args.len() == 1
-                        && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
-                    {
-                        let sym_name = match &call_args[0] {
-                            Expr::Symbol(s) => s.clone(),
-                            _ => {
-                                return Err(EvalError::Error(
-                                    "Attributes assignment requires a symbol name".to_string(),
-                                ));
-                            }
-                        };
-                        if env.has_attribute(&sym_name, "Locked") {
-                            return Ok(Value::Null);
-                        }
-                        let attrs = match &val {
-                            Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
-                            other => vec![other.to_string()],
-                        };
-                        env.set_attributes(&sym_name, attrs);
-                        Ok(val)
-                    }
-                    // f[args] = value  or SetDelayed[f[args], val]
-                    // — function definition with immediate or delayed RHS.
-                    // Also handles desugared OOP field access: this.field = val
-                    // is parsed as Set[field[this], val]. When target is an
-                    // Object, treat as field access.
-                    Expr::Call {
-                        head,
-                        args: call_args,
-                    } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
-                        && !matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
-                    {
-                        if let Expr::Symbol(name) = head.as_ref() {
-                            // Check for OOP field access: field[object] = value
-                            // where object evaluates to an Object
-                            if call_args.len() == 1 {
-                                let target = eval(&call_args[0], env)?;
-                                if let Value::Object {
-                                    class_name,
-                                    mut fields,
-                                } = target
-                                {
-                                    fields.insert(name.clone(), val.clone());
-                                    let updated = Value::Object { class_name, fields };
-                                    if let Expr::Symbol(s) = &call_args[0]
-                                        && s == "this"
-                                    {
-                                        env.set("this".to_string(), updated.clone());
-                                    }
-                                    return Ok(val);
-                                }
-                            }
-                            // Otherwise: function definition via Set/SetDelayed
-                            // SetDelayed[f[args], body] — use body as-is
-                            // Set[f[args], val] — evaluate RHS then store as Expr
-                            let body_expr = if s == "SetDelayed" {
-                                args[1].clone()
-                            } else {
-                                table::value_to_expr(&val)
-                            };
-                            let func = if let Some(Value::Function(f)) = env.get(name) {
-                                Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
-                            } else {
-                                FunctionDef {
-                                    name: name.clone(),
-                                    definitions: Vec::new(),
-                                }
-                            };
-                            let mut func = func;
-                            func.definitions.push(FunctionDefinition {
-                                params: call_args.clone(),
-                                body: body_expr,
-                                delayed: s == "SetDelayed",
-                                guard: None,
-                            });
-                            // Sort definitions so more specific ones match first
-                            func.definitions.sort_by(|a, b| {
-                                specificity(&b.params).cmp(&specificity(&a.params))
-                            });
-                            env.set(name.clone(), Value::Function(Arc::new(func)));
-                            return Ok(val);
-                        }
-                        Err(EvalError::Error("Invalid assignment target".to_string()))
-                    }
-                    _ => Err(EvalError::Error("Invalid assignment target".to_string())),
-                }
+                Ok(eval_set(s, args, env)?.expect("Set/SetDelayed always handled by eval_set"))
             }
             "Hold" => {
                 // Don't evaluate arguments. Single arg: Hold[expr]; multi: Hold[expr, ...]
@@ -1784,49 +1962,8 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 }
                 Err(EvalError::Continue)
             }
-            "While" => {
-                // While[cond, body] — evaluate body while cond is True
-                if args.len() != 2 {
-                    return Err(EvalError::Error(
-                        "While requires exactly 2 arguments".to_string(),
-                    ));
-                }
-                let mut result = Value::Null;
-                loop {
-                    let cond = eval(&args[0], env)?;
-                    if !cond.to_bool() {
-                        break;
-                    }
-                    result = eval(&args[1], env).or_else(|e| match e {
-                        EvalError::Break => Ok(Value::Null),
-                        EvalError::Continue => Ok(Value::Null),
-                        other => Err(other),
-                    })?;
-                }
-                Ok(result)
-            }
-            "For" => {
-                // For[start, test, step, body] — C-style for loop
-                if args.len() != 4 {
-                    return Err(EvalError::Error(
-                        "For requires exactly 4 arguments".to_string(),
-                    ));
-                }
-                eval(&args[0], env)?;
-                let mut result = Value::Null;
-                loop {
-                    let test = eval(&args[1], env)?;
-                    if !test.to_bool() {
-                        break;
-                    }
-                    result = eval(&args[3], env).or_else(|e| match e {
-                        EvalError::Break => Ok(Value::Null),
-                        EvalError::Continue => Ok(Value::Null),
-                        other => Err(other),
-                    })?;
-                    eval(&args[2], env)?;
-                }
-                Ok(result)
+            "While" | "For" => {
+                Ok(eval_control_flow(s, args, env)?.expect("While/For handled by eval_control_flow"))
             }
             "ReleaseHold" => {
                 if args.len() != 1 {
@@ -1870,93 +2007,8 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 };
                 numeric::numeric_eval_expr(&args[0], prec_bits, env)
             }
-            "Module" => {
-                if args.len() < 2 {
-                    return Err(EvalError::Error(
-                        "Module requires at least 2 arguments".to_string(),
-                    ));
-                }
-                let specs = parse_local_specs(&args[0])?;
-                let child = env.child();
-                for (name, init) in &specs {
-                    let val = match init {
-                        Some(expr) => eval(expr, env)?,
-                        None => Value::Null,
-                    };
-                    child.set(name.clone(), val);
-                }
-                let mut result = Value::Null;
-                for expr in &args[1..] {
-                    result = eval(expr, &child)?;
-                }
-                Ok(result)
-            }
-            "With" => {
-                if args.len() < 2 {
-                    return Err(EvalError::Error(
-                        "With requires at least 2 arguments".to_string(),
-                    ));
-                }
-                let specs = parse_local_specs(&args[0])?;
-                let child = env.child();
-                // Evaluate RHS values and build substitution map
-                let mut subs = Vec::new();
-                for (name, init) in &specs {
-                    match init {
-                        Some(rhs_expr) => {
-                            let val = eval(rhs_expr, env)?;
-                            subs.push((name.clone(), table::value_to_expr(&val)));
-                        }
-                        None => {
-                            return Err(EvalError::Error(
-                                "With requires initial values for all local variables".to_string(),
-                            ));
-                        }
-                    }
-                }
-                let mut result = Value::Null;
-                for expr in &args[1..] {
-                    let substituted = substitute_in_expr(expr, &subs);
-                    result = eval(&substituted, &child)?;
-                }
-                Ok(result)
-            }
-            "Block" => {
-                if args.len() < 2 {
-                    return Err(EvalError::Error(
-                        "Block requires at least 2 arguments".to_string(),
-                    ));
-                }
-                let specs = parse_local_specs(&args[0])?;
-                // Save old values and propagate new ones up the scope chain.
-                // Block uses dynamic scoping: the new values are visible everywhere,
-                // including in functions called within the body, by updating the
-                // defining scope (rather than shadowing in a child scope).
-                let mut saved: Vec<(String, Option<Value>)> = Vec::new();
-                for (name, init) in &specs {
-                    let old_val = env.get(name);
-                    let new_val = match init {
-                        Some(expr) => eval(expr, env)?,
-                        None => Value::Null,
-                    };
-                    env.set_propagate(name.clone(), new_val);
-                    saved.push((name.clone(), old_val));
-                }
-                // Evaluate body
-                let mut result = Value::Null;
-                for expr in &args[1..] {
-                    result = eval(expr, env)?;
-                }
-                // Restore old values (reverse order)
-                for (name, old_val) in saved.into_iter().rev() {
-                    match old_val {
-                        Some(v) => env.set_propagate(name, v),
-                        None => {
-                            env.remove(&name);
-                        }
-                    }
-                }
-                Ok(result)
+            "Module" | "With" | "Block" => {
+                Ok(eval_control_flow(s, args, env)?.expect("Module/With/Block handled by eval_control_flow"))
             }
             _ => {
                 // Check if this is a custom operator symbol registered in the operator table.

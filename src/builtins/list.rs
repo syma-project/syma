@@ -1,23 +1,7 @@
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
-use rug::Float;
 use rug::Integer;
-
-// Helper: convert a Value to f64.
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
-// Helper: create a Real value from f64.
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
-}
 
 // ── Helper functions ──
 
@@ -1706,8 +1690,8 @@ pub fn builtin_moving_average(args: &[Value]) -> Result<Value, EvalError> {
     let mut result = Vec::with_capacity(items.len() - n + 1);
     for window in items.windows(n) {
         let count = window.len() as f64;
-        let sum: f64 = window.iter().filter_map(to_f64).sum();
-        result.push(real(sum / count));
+        let sum: f64 = window.iter().filter_map(super::to_f64).sum();
+        result.push(super::real(sum / count));
     }
     Ok(Value::List(result))
 }
@@ -1771,11 +1755,11 @@ pub fn builtin_list_convolve(args: &[Value]) -> Result<Value, EvalError> {
     for j in 0..=(n - k) {
         let mut sum = 0.0f64;
         for (i, k_val) in kernel.iter().enumerate() {
-            if let (Some(kf), Some(lf)) = (to_f64(k_val), to_f64(&list[j + i])) {
+            if let (Some(kf), Some(lf)) = (super::to_f64(k_val), super::to_f64(&list[j + i])) {
                 sum += kf * lf;
             }
         }
-        result.push(real(sum));
+        result.push(super::real(sum));
     }
     Ok(Value::List(result))
 }
@@ -1812,13 +1796,13 @@ pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     // Compute distances as f64
-    let target_f = to_f64(target)
+    let target_f = super::to_f64(target)
         .ok_or_else(|| EvalError::Error("Nearest target must be numeric".to_string()))?;
 
     let mut scored: Vec<(f64, &Value)> = items
         .iter()
         .filter_map(|item| {
-            to_f64(item).map(|f| {
+            super::to_f64(item).map(|f| {
                 let d = (f - target_f).abs();
                 (d, item)
             })

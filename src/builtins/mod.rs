@@ -38,9 +38,62 @@ pub mod systeminfo;
 
 use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
 use crate::value::{BuiltinFn, EvalError, Value};
+use rug::Float;
 use rug::Integer;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ── Shared helpers ──────────────────────────────────────────────────────────
+
+/// Convert a `Value` to `f64`. Returns `None` for non-numeric values.
+pub fn to_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(n) => Some(n.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        Value::Rational(r) => Some(r.to_f64()),
+        Value::Complex { re, im: 0.0 } => Some(*re),
+        _ => None,
+    }
+}
+
+/// Create a `Value::Real` from an `f64`.
+pub fn real(v: f64) -> Value {
+    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
+}
+
+/// Check that `args` has exactly `expected` elements.
+pub fn require_args(name: &str, args: &[Value], expected: usize) -> Result<(), EvalError> {
+    if args.len() != expected {
+        return Err(EvalError::Error(format!(
+            "{} requires exactly {} argument{}",
+            name,
+            expected,
+            if expected == 1 { "" } else { "s" }
+        )));
+    }
+    Ok(())
+}
+
+/// Check that `args` has at least `min` elements.
+pub fn require_min_args(name: &str, args: &[Value], min: usize) -> Result<(), EvalError> {
+    if args.len() < min {
+        return Err(EvalError::Error(format!(
+            "{} requires at least {} argument{}",
+            name,
+            min,
+            if min == 1 { "" } else { "s" }
+        )));
+    }
+    Ok(())
+}
+
+/// Extract an `f64` from a `Value`, returning a `TypeError` if it is not numeric.
+pub fn require_f64(v: &Value, name: &str, pos: usize) -> Result<f64, EvalError> {
+    to_f64(v).ok_or_else(|| EvalError::TypeError {
+        expected: "a number".to_string(),
+        got: format!("{} at argument {} of {}", v.type_name(), pos, name),
+    })
+}
 
 /// Register all built-in functions in the environment.
 pub fn register_builtins(env: &Env) {

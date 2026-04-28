@@ -20,15 +20,6 @@ fn palette_color(i: usize) -> String {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
 fn get_list(val: &Value) -> Result<&Vec<Value>, EvalError> {
     match val {
         Value::List(items) => Ok(items),
@@ -255,8 +246,8 @@ fn parse_chart_options(opts: &Value) -> (f64, f64, bool) {
         if let Some(v) = map.get("ImageSize")
             && let Value::List(size) = v
                 && size.len() >= 2 {
-                    width = to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-                    height = to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+                    width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
+                    height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
                 }
         if let Some(v) = map.get("GridLines") {
             grid_lines = match v {
@@ -304,7 +295,7 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
             let mut result = Vec::new();
             for item in data {
                 if let Value::List(p) = item
-                    && let (Some(x), Some(y)) = (to_f64(&p[0]), to_f64(&p[1])) {
+                    && let (Some(x), Some(y)) = (super::to_f64(&p[0]), super::to_f64(&p[1])) {
                         result.push((x, y));
                     }
             }
@@ -313,7 +304,7 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
         _ => data
             .iter()
             .enumerate()
-            .filter_map(|(i, v)| to_f64(v).map(|y| (i as f64 + 1.0, y)))
+            .filter_map(|(i, v)| super::to_f64(v).map(|y| (i as f64 + 1.0, y)))
             .collect(),
     };
 
@@ -466,7 +457,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
     };
     let (width, height, _) = parse_chart_options(options);
 
-    let nums: Vec<f64> = data.iter().filter_map(to_f64).collect();
+    let nums: Vec<f64> = data.iter().filter_map(super::to_f64).collect();
     if nums.is_empty() {
         return Err(EvalError::Error("Histogram: no numeric data".to_string()));
     }
@@ -479,7 +470,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
             Value::Integer(n) => n.to_usize().unwrap_or(10).max(1),
             Value::Real(r) => (r.to_f64() as usize).max(1),
             Value::List(edges) => {
-                let edge_vals: Vec<f64> = edges.iter().filter_map(to_f64).collect();
+                let edge_vals: Vec<f64> = edges.iter().filter_map(super::to_f64).collect();
                 if edge_vals.len() < 2 {
                     return Err(EvalError::Error(
                         "Histogram: need at least 2 bin edges".to_string(),
@@ -604,7 +595,7 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
             let mut result = Vec::new();
             for item in data {
                 if let Value::List(p) = item {
-                    let val = to_f64(&p[0]).unwrap_or(0.0);
+                    let val = super::to_f64(&p[0]).unwrap_or(0.0);
                     let label = if p.len() > 1 {
                         match &p[1] {
                             Value::Str(s) => Some(s.clone()),
@@ -621,7 +612,7 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
         _ => data
             .iter()
             .filter_map(|v| {
-                to_f64(v).map(|val| PieSlice {
+                super::to_f64(v).map(|val| PieSlice {
                     value: val,
                     label: None,
                 })
@@ -716,7 +707,7 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
 
     let inner_ratio = if let Value::Assoc(map) = options {
         if let Some(v) = map.get("InnerRadius") {
-            to_f64(v).unwrap_or(0.4)
+            super::to_f64(v).unwrap_or(0.4)
         } else {
             0.4
         }
@@ -734,7 +725,7 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
             let mut result = Vec::new();
             for item in data {
                 if let Value::List(p) = item {
-                    let val = to_f64(&p[0]).unwrap_or(0.0);
+                    let val = super::to_f64(&p[0]).unwrap_or(0.0);
                     let label = if p.len() > 1 {
                         match &p[1] {
                             Value::Str(s) => Some(s.clone()),
@@ -751,7 +742,7 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
         _ => data
             .iter()
             .filter_map(|v| {
-                to_f64(v).map(|val| PieSlice {
+                super::to_f64(v).map(|val| PieSlice {
                     value: val,
                     label: None,
                 })
@@ -865,10 +856,10 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
         .filter_map(|item| {
             if let Value::List(p) = item {
                 if p.len() >= 2 {
-                    let x = to_f64(&p[0])?;
-                    let y = to_f64(&p[1])?;
+                    let x = super::to_f64(&p[0])?;
+                    let y = super::to_f64(&p[1])?;
                     let r = if p.len() >= 3 {
-                        to_f64(&p[2]).unwrap_or(1.0)
+                        super::to_f64(&p[2]).unwrap_or(1.0)
                     } else {
                         1.0
                     };
@@ -974,7 +965,7 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
     };
     let (width, height, _) = parse_chart_options(options);
 
-    let values: Vec<f64> = data.iter().filter_map(to_f64).collect();
+    let values: Vec<f64> = data.iter().filter_map(super::to_f64).collect();
     if values.is_empty() {
         return Err(EvalError::Error(
             "WaterfallChart: no numeric data".to_string(),
@@ -1385,9 +1376,9 @@ fn marching_squares(
 pub fn apply_color_function(color_fn: &Value, t: f64) -> String {
     match color_fn {
         Value::Call { head: h, args } if h == "RGBColor" && args.len() >= 3 => {
-            let r = to_f64(&args[0]).unwrap_or(0.0);
-            let g = to_f64(&args[1]).unwrap_or(0.0);
-            let b = to_f64(&args[2]).unwrap_or(0.0);
+            let r = super::to_f64(&args[0]).unwrap_or(0.0);
+            let g = super::to_f64(&args[1]).unwrap_or(0.0);
+            let b = super::to_f64(&args[2]).unwrap_or(0.0);
             format!(
                 "#{:02x}{:02x}{:02x}",
                 (r.clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -1467,9 +1458,9 @@ mod tests {
 
     #[test]
     fn test_to_f64() {
-        assert!((to_f64(&int_val(42)).unwrap() - 42.0).abs() < 1e-12);
-        assert!((to_f64(&real_val(3.14)).unwrap() - 3.14).abs() < 1e-12);
-        assert!(to_f64(&Value::Str("abc".to_string())).is_none());
+        assert!((super::super::to_f64(&int_val(42)).unwrap() - 42.0).abs() < 1e-12);
+        assert!((super::super::to_f64(&real_val(3.14)).unwrap() - 3.14).abs() < 1e-12);
+        assert!(super::super::to_f64(&Value::Str("abc".to_string())).is_none());
     }
 
     #[test]

@@ -1,22 +1,6 @@
-use crate::value::{DEFAULT_PRECISION, EvalError, Value};
-use rug::Float;
+use crate::value::{EvalError, Value};
 use rug::Integer;
 use rug::ops::Pow;
-
-// Helper: convert a Value to f64.
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
-// Helper: create a Real value from f64.
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(DEFAULT_PRECISION, v))
-}
 
 // Helper: create an unevaluated Call node.
 fn unevaluated(head: &str, args: &[Value]) -> Value {
@@ -54,13 +38,13 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
             if x.is_infinite() {
                 return Ok(Value::Integer(Integer::from(if x > 0.0 { 1 } else { -1 })));
             }
-            Ok(real(erf_approx(x)))
+            Ok(super::real(erf_approx(x)))
         }
         Value::Real(r) => {
             if r.is_infinite() {
                 return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 1 } else { -1 })));
             }
-            Ok(real(erf_approx(r.to_f64())))
+            Ok(super::real(erf_approx(r.to_f64())))
         }
         _ => Ok(unevaluated("Erf", args)),
     }
@@ -77,13 +61,13 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
             if x.is_infinite() {
                 return Ok(Value::Integer(Integer::from(if x > 0.0 { 0 } else { 2 })));
             }
-            Ok(real(1.0 - erf_approx(x)))
+            Ok(super::real(1.0 - erf_approx(x)))
         }
         Value::Real(r) => {
             if r.is_infinite() {
                 return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 0 } else { 2 })));
             }
-            Ok(real(1.0 - erf_approx(r.to_f64())))
+            Ok(super::real(1.0 - erf_approx(r.to_f64())))
         }
         _ => Ok(unevaluated("Erfc", args)),
     }
@@ -127,14 +111,14 @@ pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
             if x.abs() >= 1.0 {
                 return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
             }
-            Ok(real(inverse_erf_approx(x)))
+            Ok(super::real(inverse_erf_approx(x)))
         }
         Value::Real(r) => {
             let x = r.to_f64();
             if x.abs() >= 1.0 {
                 return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
             }
-            Ok(real(inverse_erf_approx(x)))
+            Ok(super::real(inverse_erf_approx(x)))
         }
         _ => Ok(unevaluated("ErfInverse", args)),
     }
@@ -324,27 +308,27 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
     if let (Value::Integer(s), _) = (s_val, z_val) {
         if *s == Integer::from(0) {
             // Li_0(z) = z / (1 - z)
-            if let Some(z) = to_f64(z_val) {
+            if let Some(z) = super::to_f64(z_val) {
                 if (z - 1.0).abs() < 1e-15 {
                     return Ok(unevaluated("PolyLog", args));
                 }
-                return Ok(real(z / (1.0 - z)));
+                return Ok(super::real(z / (1.0 - z)));
             }
             return Ok(unevaluated("PolyLog", args));
         }
         if *s == Integer::from(1) {
             // Li_1(z) = -Log(1 - z)
-            if let Some(z) = to_f64(z_val) {
+            if let Some(z) = super::to_f64(z_val) {
                 if z >= 1.0 {
                     return Ok(unevaluated("PolyLog", args));
                 }
-                return Ok(real(-(1.0 - z).ln()));
+                return Ok(super::real(-(1.0 - z).ln()));
             }
             return Ok(unevaluated("PolyLog", args));
         }
     }
 
-    if let (Some(s), Some(z)) = (to_f64(s_val), to_f64(z_val)) {
+    if let (Some(s), Some(z)) = (super::to_f64(s_val), super::to_f64(z_val)) {
         if z.abs() >= 1.0 {
             return Ok(unevaluated("PolyLog", args));
         }
@@ -359,7 +343,7 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
                 break;
             }
         }
-        return Ok(real(sum));
+        return Ok(super::real(sum));
     }
 
     Ok(unevaluated("PolyLog", args))
@@ -393,19 +377,19 @@ pub fn builtin_digamma(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) if *n == Integer::from(1) => {
-            Ok(real(-EULER_GAMMA_F64))
+            Ok(super::real(-EULER_GAMMA_F64))
         }
         Value::Integer(n) => {
             if n.is_negative() || *n == Integer::from(0) {
                 return Ok(unevaluated("Digamma", args));
             }
-            Ok(real(digamma_approx(n.to_f64())))
+            Ok(super::real(digamma_approx(n.to_f64())))
         }
         Value::Real(r) => {
             if r.is_sign_negative() || r.is_zero() {
                 return Ok(unevaluated("Digamma", args));
             }
-            Ok(real(digamma_approx(r.to_f64())))
+            Ok(super::real(digamma_approx(r.to_f64())))
         }
         _ => Ok(unevaluated("Digamma", args)),
     }
@@ -430,7 +414,7 @@ pub fn builtin_polygamma(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
 
-    if let (Some(n), Some(z)) = (to_f64(n_val), to_f64(z_val)) {
+    if let (Some(n), Some(z)) = (super::to_f64(n_val), super::to_f64(z_val)) {
         if z <= 0.0 {
             return Ok(unevaluated("PolyGamma", args));
         }
@@ -452,7 +436,7 @@ pub fn builtin_polygamma(args: &[Value]) -> Result<Value, EvalError> {
             }
             k += 1;
         }
-        Ok(real(sign * factorial * sum))
+        Ok(super::real(sign * factorial * sum))
     } else {
         Ok(unevaluated("PolyGamma", args))
     }
@@ -521,10 +505,10 @@ pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => {
-            Ok(real(0.3550280538878172))
+            Ok(super::real(0.3550280538878172))
         }
-        Value::Integer(n) => Ok(real(airy_ai_approx(n.to_f64()))),
-        Value::Real(r) => Ok(real(airy_ai_approx(r.to_f64()))),
+        Value::Integer(n) => Ok(super::real(airy_ai_approx(n.to_f64()))),
+        Value::Real(r) => Ok(super::real(airy_ai_approx(r.to_f64()))),
         _ => Ok(unevaluated("AiryAi", args)),
     }
 }
@@ -564,8 +548,8 @@ pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
 
     match (n_val, z_val) {
         (Value::Integer(n), _) if !n.is_negative() => {
-            if let (Some(n_u64), Some(z)) = (n.to_u64(), to_f64(z_val)) {
-                return Ok(real(bessel_j_series(n_u64, z)));
+            if let (Some(n_u64), Some(z)) = (n.to_u64(), super::to_f64(z_val)) {
+                return Ok(super::real(bessel_j_series(n_u64, z)));
             }
         }
         _ => {}
@@ -629,8 +613,8 @@ pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
         (Value::Integer(n), &_) if !n.is_negative() =>
         {
-            if let (Some(n), Some(z)) = (to_f64(&args[0]), to_f64(&args[1])) {
-                return Ok(real(bessel_i_series(n as u64, z)));
+            if let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) {
+                return Ok(super::real(bessel_i_series(n as u64, z)));
             }
         }
         _ => {}
@@ -695,7 +679,7 @@ pub fn builtin_lambert_w(args: &[Value]) -> Result<Value, EvalError> {
                     "LambertW: argument must be >= -1/e".to_string(),
                 ));
             }
-            Ok(real(lambert_w_approx(z)))
+            Ok(super::real(lambert_w_approx(z)))
         }
         Value::Real(r) => {
             let z = r.to_f64();
@@ -704,7 +688,7 @@ pub fn builtin_lambert_w(args: &[Value]) -> Result<Value, EvalError> {
                     "LambertW: argument must be >= -1/e".to_string(),
                 ));
             }
-            Ok(real(lambert_w_approx(z)))
+            Ok(super::real(lambert_w_approx(z)))
         }
         _ => Ok(unevaluated("LambertW", args)),
     }
@@ -750,27 +734,27 @@ pub fn builtin_dirichlet_eta(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) if *n == Integer::from(1) => {
-            Ok(real(std::f64::consts::LN_2))
+            Ok(super::real(std::f64::consts::LN_2))
         }
         Value::Integer(n) => {
             if n.is_negative() || *n == Integer::from(0) {
                 return Ok(unevaluated("DirichletEta", args));
             }
-            Ok(real(compute_eta_numeric(n.to_f64())))
+            Ok(super::real(compute_eta_numeric(n.to_f64())))
         }
         Value::Real(r) => {
             if r.is_sign_negative() || r.is_zero() {
                 return Ok(unevaluated("DirichletEta", args));
             }
-            if let Some(one) = to_f64(&Value::Integer(Integer::from(1))) {
+            if let Some(one) = super::to_f64(&Value::Integer(Integer::from(1))) {
                 if (r.to_f64() - one).abs() < 1e-15 {
-                    return Ok(real(std::f64::consts::LN_2));
+                    return Ok(super::real(std::f64::consts::LN_2));
                 }
             }
             if r.to_f64() <= 0.0 {
                 return Ok(unevaluated("DirichletEta", args));
             }
-            Ok(real(compute_eta_numeric(r.to_f64())))
+            Ok(super::real(compute_eta_numeric(r.to_f64())))
         }
         _ => Ok(unevaluated("DirichletEta", args)),
     }

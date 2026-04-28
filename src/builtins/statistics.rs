@@ -223,21 +223,6 @@ fn as_list(v: &Value) -> Result<&Vec<Value>, EvalError> {
     }
 }
 
-/// Convert a Value to f64.
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
-/// Create a Real value from f64.
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
-}
-
 /// Create an Integer value.
 fn int(n: i64) -> Value {
     Value::Integer(Integer::from(n))
@@ -248,7 +233,7 @@ fn extract_numbers(items: &[Value]) -> Result<Vec<f64>, EvalError> {
     items
         .iter()
         .map(|v| {
-            to_f64(v).ok_or_else(|| EvalError::TypeError {
+            super::to_f64(v).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".to_string(),
                 got: v.type_name().to_string(),
             })
@@ -281,47 +266,47 @@ fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
         _ => None,
     })?;
     match dist_type {
-        "Normal" => dist.get("Mean").and_then(to_f64),
+        "Normal" => dist.get("Mean").and_then(super::to_f64),
         "Uniform" => {
-            let lo = dist.get("Min").and_then(to_f64)?;
-            let hi = dist.get("Max").and_then(to_f64)?;
+            let lo = dist.get("Min").and_then(super::to_f64)?;
+            let hi = dist.get("Max").and_then(super::to_f64)?;
             Some((lo + hi) / 2.0)
         }
-        "Poisson" => dist.get("Lambda").and_then(to_f64),
+        "Poisson" => dist.get("Lambda").and_then(super::to_f64),
         "Binomial" => {
-            let n = dist.get("N").and_then(to_f64)?;
-            let p = dist.get("P").and_then(to_f64)?;
+            let n = dist.get("N").and_then(super::to_f64)?;
+            let p = dist.get("P").and_then(super::to_f64)?;
             Some(n * p)
         }
-        "Bernoulli" => dist.get("P").and_then(to_f64),
+        "Bernoulli" => dist.get("P").and_then(super::to_f64),
         "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(to_f64)?;
+            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
             Some(1.0 / lambda)
         }
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(to_f64)?;
-            let lambda = dist.get("Lambda").and_then(to_f64)?;
+            let alpha = dist.get("Alpha").and_then(super::to_f64)?;
+            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
             Some(alpha / lambda)
         }
-        "ChiSquare" => dist.get("K").and_then(to_f64),
+        "ChiSquare" => dist.get("K").and_then(super::to_f64),
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(to_f64)?;
+            let nu = dist.get("Nu").and_then(super::to_f64)?;
             if nu > 1.0 { Some(0.0) } else { None }
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(to_f64)?;
-            let b = dist.get("Beta").and_then(to_f64)?;
+            let a = dist.get("Alpha").and_then(super::to_f64)?;
+            let b = dist.get("Beta").and_then(super::to_f64)?;
             Some(a / (a + b))
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(to_f64)?;
-            let sigma = dist.get("Sigma").and_then(to_f64)?;
+            let mu = dist.get("Mu").and_then(super::to_f64)?;
+            let sigma = dist.get("Sigma").and_then(super::to_f64)?;
             Some((mu + 0.5 * sigma * sigma).exp())
         }
         "Cauchy" => None, // undefined
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(to_f64)?;
-            let hi = dist.get("Max").and_then(to_f64)?;
+            let lo = dist.get("Min").and_then(super::to_f64)?;
+            let hi = dist.get("Max").and_then(super::to_f64)?;
             Some((lo + hi) / 2.0)
         }
         _ => None,
@@ -336,39 +321,39 @@ fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
     })?;
     match dist_type {
         "Normal" => {
-            let sd = dist.get("SD").and_then(to_f64)?;
+            let sd = dist.get("SD").and_then(super::to_f64)?;
             Some(sd * sd)
         }
         "Uniform" => {
-            let lo = dist.get("Min").and_then(to_f64)?;
-            let hi = dist.get("Max").and_then(to_f64)?;
+            let lo = dist.get("Min").and_then(super::to_f64)?;
+            let hi = dist.get("Max").and_then(super::to_f64)?;
             Some((hi - lo).powi(2) / 12.0)
         }
-        "Poisson" => dist.get("Lambda").and_then(to_f64),
+        "Poisson" => dist.get("Lambda").and_then(super::to_f64),
         "Binomial" => {
-            let n = dist.get("N").and_then(to_f64)?;
-            let p = dist.get("P").and_then(to_f64)?;
+            let n = dist.get("N").and_then(super::to_f64)?;
+            let p = dist.get("P").and_then(super::to_f64)?;
             Some(n * p * (1.0 - p))
         }
         "Bernoulli" => {
-            let p = dist.get("P").and_then(to_f64)?;
+            let p = dist.get("P").and_then(super::to_f64)?;
             Some(p * (1.0 - p))
         }
         "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(to_f64)?;
+            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
             Some(1.0 / (lambda * lambda))
         }
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(to_f64)?;
-            let lambda = dist.get("Lambda").and_then(to_f64)?;
+            let alpha = dist.get("Alpha").and_then(super::to_f64)?;
+            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
             Some(alpha / (lambda * lambda))
         }
         "ChiSquare" => {
-            let k = dist.get("K").and_then(to_f64)?;
+            let k = dist.get("K").and_then(super::to_f64)?;
             Some(2.0 * k)
         }
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(to_f64)?;
+            let nu = dist.get("Nu").and_then(super::to_f64)?;
             if nu > 2.0 {
                 Some(nu / (nu - 2.0))
             } else {
@@ -376,20 +361,20 @@ fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
             }
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(to_f64)?;
-            let b = dist.get("Beta").and_then(to_f64)?;
+            let a = dist.get("Alpha").and_then(super::to_f64)?;
+            let b = dist.get("Beta").and_then(super::to_f64)?;
             Some(a * b / ((a + b).powi(2) * (a + b + 1.0)))
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(to_f64)?;
-            let sigma = dist.get("Sigma").and_then(to_f64)?;
+            let mu = dist.get("Mu").and_then(super::to_f64)?;
+            let sigma = dist.get("Sigma").and_then(super::to_f64)?;
             let s2 = sigma * sigma;
             Some((s2.exp() - 1.0) * (2.0 * mu + s2).exp())
         }
         "Cauchy" => None,
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(to_f64)?;
-            let hi = dist.get("Max").and_then(to_f64)?;
+            let lo = dist.get("Min").and_then(super::to_f64)?;
+            let hi = dist.get("Max").and_then(super::to_f64)?;
             let n = hi - lo;
             Some(n * (n + 2.0) / 12.0)
         }
@@ -411,7 +396,7 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
         && map.contains_key("Distribution")
     {
         return match distribution_mean_f64(map) {
-            Some(v) => Ok(real(v)),
+            Some(v) => Ok(super::real(v)),
             None => Err(EvalError::Error(
                 "Mean: distribution mean is undefined".to_string(),
             )),
@@ -426,7 +411,7 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     if mean.fract() == 0.0 && mean.abs() < i64::MAX as f64 {
         Ok(int(mean as i64))
     } else {
-        Ok(real(mean))
+        Ok(super::real(mean))
     }
 }
 
@@ -448,7 +433,7 @@ pub fn builtin_median(args: &[Value]) -> Result<Value, EvalError> {
     if med.fract() == 0.0 && med.abs() < i64::MAX as f64 {
         Ok(int(med as i64))
     } else {
-        Ok(real(med))
+        Ok(super::real(med))
     }
 }
 
@@ -464,7 +449,7 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
         && map.contains_key("Distribution")
     {
         return match distribution_variance_f64(map) {
-            Some(v) => Ok(real(v)),
+            Some(v) => Ok(super::real(v)),
             None => Err(EvalError::Error(
                 "Variance: distribution variance is undefined".to_string(),
             )),
@@ -480,7 +465,7 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
     let nums = extract_numbers(items)?;
     let mean = compute_mean(&nums);
     let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    Ok(real(ss / (n - 1) as f64))
+    Ok(super::real(ss / (n - 1) as f64))
 }
 
 /// StandardDeviation[list] — sample standard deviation; StandardDeviation[dist] — distribution SD.
@@ -495,7 +480,7 @@ pub fn builtin_standard_deviation(args: &[Value]) -> Result<Value, EvalError> {
         && map.contains_key("Distribution")
     {
         return match distribution_variance_f64(map) {
-            Some(v) => Ok(real(v.sqrt())),
+            Some(v) => Ok(super::real(v.sqrt())),
             None => Err(EvalError::Error(
                 "StandardDeviation: distribution variance is undefined".to_string(),
             )),
@@ -523,7 +508,7 @@ pub fn builtin_quantile(args: &[Value]) -> Result<Value, EvalError> {
             "Quantile: list must not be empty".to_string(),
         ));
     }
-    let q = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let q = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -536,13 +521,13 @@ pub fn builtin_quantile(args: &[Value]) -> Result<Value, EvalError> {
     nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = nums.len();
     if n == 1 {
-        return Ok(real(nums[0]));
+        return Ok(super::real(nums[0]));
     }
     let pos = q * (n - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = (lo + 1).min(n - 1);
     let frac = pos - lo as f64;
-    Ok(real(nums[lo] * (1.0 - frac) + nums[hi] * frac))
+    Ok(super::real(nums[lo] * (1.0 - frac) + nums[hi] * frac))
 }
 
 /// Covariance[list1, list2] — sample covariance.
@@ -577,7 +562,7 @@ pub fn builtin_covariance(args: &[Value]) -> Result<Value, EvalError> {
         .map(|(x, y)| (x - mean1) * (y - mean2))
         .sum::<f64>()
         / (n - 1) as f64;
-    Ok(real(cov))
+    Ok(super::real(cov))
 }
 
 /// Correlation[list1, list2] — Pearson correlation coefficient.
@@ -632,7 +617,7 @@ pub fn builtin_geometric_mean(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
     let log_sum: f64 = nums.iter().map(|x| x.ln()).sum();
-    Ok(real((log_sum / nums.len() as f64).exp()))
+    Ok(super::real((log_sum / nums.len() as f64).exp()))
 }
 
 /// HarmonicMean[list] — harmonic mean (no zero values).
@@ -657,7 +642,7 @@ pub fn builtin_harmonic_mean(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
     let inv_sum: f64 = nums.iter().map(|x| 1.0 / x).sum();
-    Ok(real(nums.len() as f64 / inv_sum))
+    Ok(super::real(nums.len() as f64 / inv_sum))
 }
 
 /// Skewness[list] — Fisher-Pearson standardized third central moment
@@ -680,9 +665,9 @@ pub fn builtin_skewness(args: &[Value]) -> Result<Value, EvalError> {
     let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
     let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n as f64;
     if m2 == 0.0 {
-        return Ok(real(0.0));
+        return Ok(super::real(0.0));
     }
-    Ok(real(m3 / m2.powf(1.5)))
+    Ok(super::real(m3 / m2.powf(1.5)))
 }
 
 /// Kurtosis[list] — ratio of the fourth and second central moments
@@ -705,9 +690,9 @@ pub fn builtin_kurtosis(args: &[Value]) -> Result<Value, EvalError> {
     let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
     let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum::<f64>() / n as f64;
     if m2 == 0.0 {
-        return Ok(real(0.0));
+        return Ok(super::real(0.0));
     }
-    Ok(real(m4 / m2.powi(2)))
+    Ok(super::real(m4 / m2.powi(2)))
 }
 
 /// Mode[list] — most frequently occurring value(s).
@@ -752,18 +737,18 @@ pub fn builtin_interquartile_range(args: &[Value]) -> Result<Value, EvalError> {
             "InterquartileRange requires exactly 1 argument".to_string(),
         ));
     }
-    let q1 = builtin_quantile(&[args[0].clone(), real(0.25)])?;
-    let q3 = builtin_quantile(&[args[0].clone(), real(0.75)])?;
+    let q1 = builtin_quantile(&[args[0].clone(), super::real(0.25)])?;
+    let q3 = builtin_quantile(&[args[0].clone(), super::real(0.75)])?;
     match (&q1, &q3) {
-        (Value::Real(a), Value::Real(b)) => Ok(real(b.to_f64() - a.to_f64())),
+        (Value::Real(a), Value::Real(b)) => Ok(super::real(b.to_f64() - a.to_f64())),
         (Value::Integer(a), Value::Integer(b)) => {
             let v = b.to_i64().unwrap_or(0) - a.to_i64().unwrap_or(0);
             Ok(int(v))
         }
         _ => {
-            let a = to_f64(&q1).unwrap_or(0.0);
-            let b = to_f64(&q3).unwrap_or(0.0);
-            Ok(real(b - a))
+            let a = super::to_f64(&q1).unwrap_or(0.0);
+            let b = super::to_f64(&q3).unwrap_or(0.0);
+            Ok(super::real(b - a))
         }
     }
 }
@@ -798,7 +783,7 @@ pub fn builtin_weighted_mean(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let weighted_sum: f64 = nums.iter().zip(ws.iter()).map(|(x, w)| x * w).sum();
-    Ok(real(weighted_sum / total_w))
+    Ok(super::real(weighted_sum / total_w))
 }
 
 /// RootMeanSquare[list] — √(mean of squares).
@@ -816,7 +801,7 @@ pub fn builtin_root_mean_square(args: &[Value]) -> Result<Value, EvalError> {
     }
     let nums = extract_numbers(items)?;
     let mean_sq: f64 = nums.iter().map(|x| x * x).sum::<f64>() / nums.len() as f64;
-    Ok(real(mean_sq.sqrt()))
+    Ok(super::real(mean_sq.sqrt()))
 }
 
 /// MeanDeviation[list] — mean of |xᵢ - mean(x)|.
@@ -835,7 +820,7 @@ pub fn builtin_mean_deviation(args: &[Value]) -> Result<Value, EvalError> {
     let nums = extract_numbers(items)?;
     let mean = compute_mean(&nums);
     let dev: f64 = nums.iter().map(|x| (x - mean).abs()).sum::<f64>() / nums.len() as f64;
-    Ok(real(dev))
+    Ok(super::real(dev))
 }
 
 /// MedianDeviation[list] — median of |xᵢ - median(x)|.
@@ -855,7 +840,7 @@ pub fn builtin_median_deviation(args: &[Value]) -> Result<Value, EvalError> {
     let med = compute_median(&mut nums);
     let mut deviations: Vec<f64> = nums.iter().map(|x| (x - med).abs()).collect();
     let mad = compute_median(&mut deviations);
-    Ok(real(mad))
+    Ok(super::real(mad))
 }
 
 /// Standardize[list] — shift to zero mean and unit sample variance.
@@ -882,7 +867,7 @@ pub fn builtin_standardize(args: &[Value]) -> Result<Value, EvalError> {
             "Standardize: standard deviation is zero".to_string(),
         ));
     }
-    let result: Vec<Value> = nums.iter().map(|x| real((x - mean) / sd)).collect();
+    let result: Vec<Value> = nums.iter().map(|x| super::real((x - mean) / sd)).collect();
     Ok(Value::List(result))
 }
 
@@ -910,7 +895,7 @@ pub fn builtin_bin_counts(args: &[Value]) -> Result<Value, EvalError> {
 
     let (bin_min, bin_max, dx) = match &args[1] {
         Value::Integer(_) | Value::Real(_) => {
-            let dx = to_f64(&args[1]).unwrap();
+            let dx = super::to_f64(&args[1]).unwrap();
             if dx <= 0.0 {
                 return Err(EvalError::Error(
                     "BinCounts: bin width must be positive".to_string(),
@@ -920,19 +905,19 @@ pub fn builtin_bin_counts(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::List(spec) => match spec.len() {
             1 => {
-                let dx = to_f64(&spec[0]).ok_or_else(|| {
+                let dx = super::to_f64(&spec[0]).ok_or_else(|| {
                     EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
                 })?;
                 (data_min, data_max, dx)
             }
             3 => {
-                let lo = to_f64(&spec[0]).ok_or_else(|| {
+                let lo = super::to_f64(&spec[0]).ok_or_else(|| {
                     EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
                 })?;
-                let hi = to_f64(&spec[1]).ok_or_else(|| {
+                let hi = super::to_f64(&spec[1]).ok_or_else(|| {
                     EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
                 })?;
-                let dx = to_f64(&spec[2]).ok_or_else(|| {
+                let dx = super::to_f64(&spec[2]).ok_or_else(|| {
                     EvalError::Error("BinCounts: bin spec must contain numbers".to_string())
                 })?;
                 (lo, hi, dx)
@@ -1016,7 +1001,7 @@ pub fn builtin_histogram_list(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     let edges: Vec<Value> = (0..=n_bins)
-        .map(|i| real(data_min + i as f64 * dx))
+        .map(|i| super::real(data_min + i as f64 * dx))
         .collect();
 
     let mut counts = vec![0i64; n_bins];
@@ -1045,11 +1030,11 @@ pub fn builtin_binomial_distribution(args: &[Value]) -> Result<Value, EvalError>
             "BinomialDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let n = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let n = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let p = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let p = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1069,7 +1054,7 @@ pub fn builtin_binomial_distribution(args: &[Value]) -> Result<Value, EvalError>
         Value::Str("Binomial".to_string()),
     );
     map.insert("N".to_string(), int(n as i64));
-    map.insert("P".to_string(), real(p));
+    map.insert("P".to_string(), super::real(p));
     Ok(Value::Assoc(map))
 }
 
@@ -1080,7 +1065,7 @@ pub fn builtin_bernoulli_distribution(args: &[Value]) -> Result<Value, EvalError
             "BernoulliDistribution requires exactly 1 argument".to_string(),
         ));
     }
-    let p = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let p = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1094,7 +1079,7 @@ pub fn builtin_bernoulli_distribution(args: &[Value]) -> Result<Value, EvalError
         "Distribution".to_string(),
         Value::Str("Bernoulli".to_string()),
     );
-    map.insert("P".to_string(), real(p));
+    map.insert("P".to_string(), super::real(p));
     Ok(Value::Assoc(map))
 }
 
@@ -1105,7 +1090,7 @@ pub fn builtin_exponential_distribution(args: &[Value]) -> Result<Value, EvalErr
             "ExponentialDistribution requires exactly 1 argument".to_string(),
         ));
     }
-    let lambda = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let lambda = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1119,7 +1104,7 @@ pub fn builtin_exponential_distribution(args: &[Value]) -> Result<Value, EvalErr
         "Distribution".to_string(),
         Value::Str("Exponential".to_string()),
     );
-    map.insert("Lambda".to_string(), real(lambda));
+    map.insert("Lambda".to_string(), super::real(lambda));
     Ok(Value::Assoc(map))
 }
 
@@ -1130,11 +1115,11 @@ pub fn builtin_gamma_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "GammaDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let alpha = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let alpha = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let lambda = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let lambda = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1145,8 +1130,8 @@ pub fn builtin_gamma_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Gamma".to_string()));
-    map.insert("Alpha".to_string(), real(alpha));
-    map.insert("Lambda".to_string(), real(lambda));
+    map.insert("Alpha".to_string(), super::real(alpha));
+    map.insert("Lambda".to_string(), super::real(lambda));
     Ok(Value::Assoc(map))
 }
 
@@ -1157,7 +1142,7 @@ pub fn builtin_chi_square_distribution(args: &[Value]) -> Result<Value, EvalErro
             "ChiSquareDistribution requires exactly 1 argument".to_string(),
         ));
     }
-    let k = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let k = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1171,7 +1156,7 @@ pub fn builtin_chi_square_distribution(args: &[Value]) -> Result<Value, EvalErro
         "Distribution".to_string(),
         Value::Str("ChiSquare".to_string()),
     );
-    map.insert("K".to_string(), real(k));
+    map.insert("K".to_string(), super::real(k));
     Ok(Value::Assoc(map))
 }
 
@@ -1182,7 +1167,7 @@ pub fn builtin_student_t_distribution(args: &[Value]) -> Result<Value, EvalError
             "StudentTDistribution requires exactly 1 argument".to_string(),
         ));
     }
-    let nu = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let nu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1196,7 +1181,7 @@ pub fn builtin_student_t_distribution(args: &[Value]) -> Result<Value, EvalError
         "Distribution".to_string(),
         Value::Str("StudentT".to_string()),
     );
-    map.insert("Nu".to_string(), real(nu));
+    map.insert("Nu".to_string(), super::real(nu));
     Ok(Value::Assoc(map))
 }
 
@@ -1207,11 +1192,11 @@ pub fn builtin_beta_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "BetaDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let alpha = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let alpha = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let beta = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let beta = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1222,8 +1207,8 @@ pub fn builtin_beta_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Beta".to_string()));
-    map.insert("Alpha".to_string(), real(alpha));
-    map.insert("Beta".to_string(), real(beta));
+    map.insert("Alpha".to_string(), super::real(alpha));
+    map.insert("Beta".to_string(), super::real(beta));
     Ok(Value::Assoc(map))
 }
 
@@ -1234,11 +1219,11 @@ pub fn builtin_log_normal_distribution(args: &[Value]) -> Result<Value, EvalErro
             "LogNormalDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let mu = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let sigma = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let sigma = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1252,8 +1237,8 @@ pub fn builtin_log_normal_distribution(args: &[Value]) -> Result<Value, EvalErro
         "Distribution".to_string(),
         Value::Str("LogNormal".to_string()),
     );
-    map.insert("Mu".to_string(), real(mu));
-    map.insert("Sigma".to_string(), real(sigma));
+    map.insert("Mu".to_string(), super::real(mu));
+    map.insert("Sigma".to_string(), super::real(sigma));
     Ok(Value::Assoc(map))
 }
 
@@ -1264,11 +1249,11 @@ pub fn builtin_cauchy_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "CauchyDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let x0 = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let x0 = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let gamma = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let gamma = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1279,8 +1264,8 @@ pub fn builtin_cauchy_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Cauchy".to_string()));
-    map.insert("Location".to_string(), real(x0));
-    map.insert("Scale".to_string(), real(gamma));
+    map.insert("Location".to_string(), super::real(x0));
+    map.insert("Scale".to_string(), super::real(gamma));
     Ok(Value::Assoc(map))
 }
 
@@ -1297,11 +1282,11 @@ pub fn builtin_discrete_uniform_distribution(args: &[Value]) -> Result<Value, Ev
             "DiscreteUniformDistribution: argument must be {min, max}".to_string(),
         ));
     }
-    let lo = to_f64(&spec[0]).ok_or_else(|| EvalError::TypeError {
+    let lo = super::to_f64(&spec[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: spec[0].type_name().to_string(),
     })?;
-    let hi = to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
+    let hi = super::to_f64(&spec[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: spec[1].type_name().to_string(),
     })?;
@@ -1334,11 +1319,11 @@ pub fn builtin_normal_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "NormalDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let mu = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let sigma = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let sigma = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1349,8 +1334,8 @@ pub fn builtin_normal_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Normal".to_string()));
-    map.insert("Mean".to_string(), real(mu));
-    map.insert("SD".to_string(), real(sigma));
+    map.insert("Mean".to_string(), super::real(mu));
+    map.insert("SD".to_string(), super::real(sigma));
     Ok(Value::Assoc(map))
 }
 
@@ -1361,11 +1346,11 @@ pub fn builtin_uniform_distribution(args: &[Value]) -> Result<Value, EvalError> 
             "UniformDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let lo = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let lo = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
-    let hi = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let hi = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1379,8 +1364,8 @@ pub fn builtin_uniform_distribution(args: &[Value]) -> Result<Value, EvalError> 
         "Distribution".to_string(),
         Value::Str("Uniform".to_string()),
     );
-    map.insert("Min".to_string(), real(lo));
-    map.insert("Max".to_string(), real(hi));
+    map.insert("Min".to_string(), super::real(lo));
+    map.insert("Max".to_string(), super::real(hi));
     Ok(Value::Assoc(map))
 }
 
@@ -1391,7 +1376,7 @@ pub fn builtin_poisson_distribution(args: &[Value]) -> Result<Value, EvalError> 
             "PoissonDistribution requires exactly 1 argument".to_string(),
         ));
     }
-    let lambda = to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let lambda = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1405,7 +1390,7 @@ pub fn builtin_poisson_distribution(args: &[Value]) -> Result<Value, EvalError> 
         "Distribution".to_string(),
         Value::Str("Poisson".to_string()),
     );
-    map.insert("Lambda".to_string(), real(lambda));
+    map.insert("Lambda".to_string(), super::real(lambda));
     Ok(Value::Assoc(map))
 }
 
@@ -1427,7 +1412,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let x = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let x = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1441,14 +1426,14 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
 
     let density = match dist_type {
         "Normal" => {
-            let mu = dist.get("Mean").and_then(to_f64).unwrap_or(0.0);
-            let sigma = dist.get("SD").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mean").and_then(super::to_f64).unwrap_or(0.0);
+            let sigma = dist.get("SD").and_then(super::to_f64).unwrap_or(1.0);
             let z = (x - mu) / sigma;
             (-0.5 * z * z).exp() / (sigma * (2.0 * std::f64::consts::PI).sqrt())
         }
         "Uniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
             if x >= lo && x <= hi {
                 1.0 / (hi - lo)
             } else {
@@ -1456,7 +1441,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Poisson" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x < 0.0 || x.fract() != 0.0 {
                 0.0
             } else {
@@ -1466,8 +1451,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Binomial" => {
-            let n = dist.get("N").and_then(to_f64).unwrap_or(1.0) as u64;
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0) as u64;
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             if x < 0.0 || x.fract() != 0.0 || x as u64 > n {
                 0.0
             } else {
@@ -1481,7 +1466,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Bernoulli" => {
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             if x == 0.0 {
                 1.0 - p
             } else if x == 1.0 {
@@ -1491,7 +1476,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x < 0.0 {
                 0.0
             } else {
@@ -1499,8 +1484,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1510,7 +1495,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "ChiSquare" => {
-            let k = dist.get("K").and_then(to_f64).unwrap_or(1.0);
+            let k = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1522,7 +1507,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(to_f64).unwrap_or(1.0);
+            let nu = dist.get("Nu").and_then(super::to_f64).unwrap_or(1.0);
             let ln_pdf = ln_gamma((nu + 1.0) / 2.0)
                 - ln_gamma(nu / 2.0)
                 - 0.5 * (nu * std::f64::consts::PI).ln()
@@ -1530,8 +1515,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             ln_pdf.exp()
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let b = dist.get("Beta").and_then(to_f64).unwrap_or(1.0);
+            let a = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let b = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 || x >= 1.0 {
                 0.0
             } else {
@@ -1541,8 +1526,8 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(to_f64).unwrap_or(0.0);
-            let sigma = dist.get("Sigma").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let sigma = dist.get("Sigma").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1551,14 +1536,14 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Cauchy" => {
-            let x0 = dist.get("Location").and_then(to_f64).unwrap_or(0.0);
-            let gamma = dist.get("Scale").and_then(to_f64).unwrap_or(1.0);
+            let x0 = dist.get("Location").and_then(super::to_f64).unwrap_or(0.0);
+            let gamma = dist.get("Scale").and_then(super::to_f64).unwrap_or(1.0);
             let z = (x - x0) / gamma;
             1.0 / (std::f64::consts::PI * gamma * (1.0 + z * z))
         }
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
             if x.fract() == 0.0 && x >= lo && x <= hi {
                 1.0 / (hi - lo + 1.0)
             } else {
@@ -1572,7 +1557,7 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             )));
         }
     };
-    Ok(real(density))
+    Ok(super::real(density))
 }
 
 /// CDF[dist, x] — cumulative distribution function P(X ≤ x).
@@ -1591,7 +1576,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let x = to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let x = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
@@ -1605,13 +1590,13 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
 
     let cdf_val = match dist_type {
         "Normal" => {
-            let mu = dist.get("Mean").and_then(to_f64).unwrap_or(0.0);
-            let sigma = dist.get("SD").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mean").and_then(super::to_f64).unwrap_or(0.0);
+            let sigma = dist.get("SD").and_then(super::to_f64).unwrap_or(1.0);
             normal_cdf((x - mu) / sigma)
         }
         "Uniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
             if x <= lo {
                 0.0
             } else if x >= hi {
@@ -1621,7 +1606,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Poisson" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x < 0.0 {
                 0.0
             } else {
@@ -1633,8 +1618,8 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Binomial" => {
-            let n = dist.get("N").and_then(to_f64).unwrap_or(1.0) as u64;
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0) as u64;
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             if x < 0.0 {
                 0.0
             } else if x as u64 >= n {
@@ -1655,7 +1640,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Bernoulli" => {
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             if x < 0.0 {
                 0.0
             } else if x < 1.0 {
@@ -1665,7 +1650,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1673,8 +1658,8 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1682,7 +1667,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "ChiSquare" => {
-            let k = dist.get("K").and_then(to_f64).unwrap_or(1.0);
+            let k = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1690,7 +1675,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(to_f64).unwrap_or(1.0);
+            let nu = dist.get("Nu").and_then(super::to_f64).unwrap_or(1.0);
             // CDF via regularized incomplete beta: I_x(nu/2, 1/2) where x = nu/(nu+t^2)
             let xb = nu / (nu + x * x);
             let ibeta = regularized_beta(xb, nu / 2.0, 0.5);
@@ -1701,13 +1686,13 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let b = dist.get("Beta").and_then(to_f64).unwrap_or(1.0);
+            let a = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let b = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
             regularized_beta(x.clamp(0.0, 1.0), a, b)
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(to_f64).unwrap_or(0.0);
-            let sigma = dist.get("Sigma").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let sigma = dist.get("Sigma").and_then(super::to_f64).unwrap_or(1.0);
             if x <= 0.0 {
                 0.0
             } else {
@@ -1715,13 +1700,13 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         "Cauchy" => {
-            let x0 = dist.get("Location").and_then(to_f64).unwrap_or(0.0);
-            let gamma = dist.get("Scale").and_then(to_f64).unwrap_or(1.0);
+            let x0 = dist.get("Location").and_then(super::to_f64).unwrap_or(0.0);
+            let gamma = dist.get("Scale").and_then(super::to_f64).unwrap_or(1.0);
             0.5 + ((x - x0) / gamma).atan() / std::f64::consts::PI
         }
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
             if x < lo {
                 0.0
             } else if x >= hi {
@@ -1737,7 +1722,7 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             )));
         }
     };
-    Ok(real(cdf_val))
+    Ok(super::real(cdf_val))
 }
 
 // ── RandomVariate ─────────────────────────────────────────────────────────────
@@ -1791,19 +1776,19 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
     let mut rng = fastrand::Rng::new();
     let samples: Vec<Value> = match dist_type {
         "Normal" => {
-            let mu = dist.get("Mean").and_then(to_f64).unwrap_or(0.0);
-            let sd = dist.get("SD").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mean").and_then(super::to_f64).unwrap_or(0.0);
+            let sd = dist.get("SD").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| real(mu + sd * sample_std_normal(&mut rng)))
+                .map(|_| super::real(mu + sd * sample_std_normal(&mut rng)))
                 .collect()
         }
         "Uniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0);
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0);
-            (0..n).map(|_| real(lo + (hi - lo) * rng.f64())).collect()
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
+            (0..n).map(|_| super::real(lo + (hi - lo) * rng.f64())).collect()
         }
         "Poisson" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
                 .map(|_| {
                     let l = (-lambda).exp();
@@ -1821,8 +1806,8 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
                 .collect()
         }
         "Binomial" => {
-            let n_trials = dist.get("N").and_then(to_f64).unwrap_or(1.0) as u64;
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let n_trials = dist.get("N").and_then(super::to_f64).unwrap_or(1.0) as u64;
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             (0..n)
                 .map(|_| {
                     let count = (0..n_trials).filter(|_| rng.f64() < p).count();
@@ -1831,71 +1816,71 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
                 .collect()
         }
         "Bernoulli" => {
-            let p = dist.get("P").and_then(to_f64).unwrap_or(0.5);
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
             (0..n)
                 .map(|_| int(if rng.f64() < p { 1 } else { 0 }))
                 .collect()
         }
         "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| real(-rng.f64().max(1e-15).ln() / lambda))
+                .map(|_| super::real(-rng.f64().max(1e-15).ln() / lambda))
                 .collect()
         }
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| real(sample_gamma_unit(alpha, &mut rng) / lambda))
+                .map(|_| super::real(sample_gamma_unit(alpha, &mut rng) / lambda))
                 .collect()
         }
         "ChiSquare" => {
-            let k = dist.get("K").and_then(to_f64).unwrap_or(1.0);
+            let k = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
             // ChiSquare(k) = Gamma(k/2, 0.5) = 2 * Gamma(k/2, 1)
             (0..n)
-                .map(|_| real(2.0 * sample_gamma_unit(k / 2.0, &mut rng)))
+                .map(|_| super::real(2.0 * sample_gamma_unit(k / 2.0, &mut rng)))
                 .collect()
         }
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(to_f64).unwrap_or(1.0);
+            let nu = dist.get("Nu").and_then(super::to_f64).unwrap_or(1.0);
             // T = Z / sqrt(V/nu) where Z ~ N(0,1), V ~ ChiSquare(nu)
             (0..n)
                 .map(|_| {
                     let z = sample_std_normal(&mut rng);
                     let v = 2.0 * sample_gamma_unit(nu / 2.0, &mut rng);
-                    real(z / (v / nu).sqrt())
+                    super::real(z / (v / nu).sqrt())
                 })
                 .collect()
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(to_f64).unwrap_or(1.0);
-            let b = dist.get("Beta").and_then(to_f64).unwrap_or(1.0);
+            let a = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let b = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
             // Beta(a,b) = Gamma(a,1) / (Gamma(a,1) + Gamma(b,1))
             (0..n)
                 .map(|_| {
                     let x = sample_gamma_unit(a, &mut rng);
                     let y = sample_gamma_unit(b, &mut rng);
-                    real(x / (x + y))
+                    super::real(x / (x + y))
                 })
                 .collect()
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(to_f64).unwrap_or(0.0);
-            let sigma = dist.get("Sigma").and_then(to_f64).unwrap_or(1.0);
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let sigma = dist.get("Sigma").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| real((mu + sigma * sample_std_normal(&mut rng)).exp()))
+                .map(|_| super::real((mu + sigma * sample_std_normal(&mut rng)).exp()))
                 .collect()
         }
         "Cauchy" => {
-            let x0 = dist.get("Location").and_then(to_f64).unwrap_or(0.0);
-            let gamma = dist.get("Scale").and_then(to_f64).unwrap_or(1.0);
+            let x0 = dist.get("Location").and_then(super::to_f64).unwrap_or(0.0);
+            let gamma = dist.get("Scale").and_then(super::to_f64).unwrap_or(1.0);
             (0..n)
-                .map(|_| real(x0 + gamma * (std::f64::consts::PI * (rng.f64() - 0.5)).tan()))
+                .map(|_| super::real(x0 + gamma * (std::f64::consts::PI * (rng.f64() - 0.5)).tan()))
                 .collect()
         }
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(to_f64).unwrap_or(0.0) as i64;
-            let hi = dist.get("Max").and_then(to_f64).unwrap_or(1.0) as i64;
+            let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0) as i64;
+            let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0) as i64;
             (0..n)
                 .map(|_| int(lo + (rng.f64() * (hi - lo + 1) as f64).floor() as i64))
                 .collect()
