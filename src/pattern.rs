@@ -89,14 +89,20 @@ pub fn unwrap_expr_to_value(expr: &Expr) -> Value {
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Str(s) => Value::Str(s.clone()),
         Expr::Null => Value::Null,
-        Expr::List(items) => {
-            Value::List(items.iter().map(|item| unwrap_expr_to_value(item)).collect())
-        }
+        Expr::List(items) => Value::List(
+            items
+                .iter()
+                .map(|item| unwrap_expr_to_value(item))
+                .collect(),
+        ),
         Expr::Call { head, args } => {
             let h = unwrap_expr_to_value(head);
             let a: Vec<Value> = args.iter().map(|arg| unwrap_expr_to_value(arg)).collect();
             match h {
-                Value::Symbol(name) => Value::Call { head: name, args: a },
+                Value::Symbol(name) => Value::Call {
+                    head: name,
+                    args: a,
+                },
                 _ => Value::Call {
                     head: h.to_string(),
                     args: a,
@@ -907,22 +913,28 @@ fn match_call_pattern(
             };
 
             // Check if any pattern args contain sequences (__, ___)
-            let has_sequences = pat_args.iter().any(|p| matches!(
-                p,
-                Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
-            ));
+            let has_sequences = pat_args.iter().any(|p| {
+                matches!(
+                    p,
+                    Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
+                )
+            });
 
             if has_sequences {
                 // Use recursive backtracking sequence matcher for __ and ___
                 let mut bindings = head_bindings;
                 return match_sequence_pattern(
-                    &pat_args, &val_args, 0, 0, &mut bindings, attr_checker,
+                    &pat_args,
+                    &val_args,
+                    0,
+                    0,
+                    &mut bindings,
+                    attr_checker,
                 );
             }
 
             // 1. Try direct ordered match
-            if let MatchResult::Match(mut b) =
-                try_ordered_match(&pat_args, &val_args, attr_checker)
+            if let MatchResult::Match(mut b) = try_ordered_match(&pat_args, &val_args, attr_checker)
             {
                 b.extend(head_bindings);
                 return MatchResult::Match(b);

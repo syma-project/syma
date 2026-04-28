@@ -3247,7 +3247,9 @@ mod tests {
                 else_branch,
             } => {
                 match *condition {
-                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    Expr::Call { head, .. } => {
+                        assert_eq!(*head, Expr::Symbol("Greater".to_string()))
+                    }
                     _ => panic!("Expected Greater call"),
                 }
                 match *then_branch {
@@ -3269,13 +3271,19 @@ mod tests {
         let expr = parse_one("if (a) x else if (b) y else z");
         match expr {
             Expr::If {
-                condition, then_branch, else_branch,
+                condition,
+                then_branch,
+                else_branch,
             } => {
                 assert_eq!(*condition, Expr::Symbol("a".to_string()));
                 assert_eq!(*then_branch, Expr::Symbol("x".to_string()));
                 // else branch should be another If
                 match *else_branch.unwrap() {
-                    Expr::If { condition: c, then_branch: t, else_branch: e } => {
+                    Expr::If {
+                        condition: c,
+                        then_branch: t,
+                        else_branch: e,
+                    } => {
                         assert_eq!(*c, Expr::Symbol("b".to_string()));
                         assert_eq!(*t, Expr::Symbol("y".to_string()));
                         assert_eq!(*e.unwrap(), Expr::Symbol("z".to_string()));
@@ -3293,7 +3301,9 @@ mod tests {
         match expr {
             Expr::While { condition, body } => {
                 match *condition {
-                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    Expr::Call { head, .. } => {
+                        assert_eq!(*head, Expr::Symbol("Greater".to_string()))
+                    }
                     _ => panic!("Expected Greater"),
                 }
                 assert_eq!(*body, Expr::Symbol("body".to_string()));
@@ -3308,7 +3318,9 @@ mod tests {
         match expr {
             Expr::While { condition, body } => {
                 match *condition {
-                    Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Greater".to_string())),
+                    Expr::Call { head, .. } => {
+                        assert_eq!(*head, Expr::Symbol("Greater".to_string()))
+                    }
                     _ => panic!("Expected Greater"),
                 }
                 match *body {
@@ -3324,7 +3336,12 @@ mod tests {
     fn test_for_c_style() {
         let expr = parse_one("for (i = 0; i < 10; i = i + 1) body");
         match expr {
-            Expr::For { init, condition, step: _, body } => {
+            Expr::For {
+                init,
+                condition,
+                step: _,
+                body,
+            } => {
                 match *init {
                     Expr::Assign { .. } => {}
                     _ => panic!("Expected Assign for init"),
@@ -3343,7 +3360,12 @@ mod tests {
     fn test_for_c_style_block() {
         let expr = parse_one("for (i = 0; i < 10; i = i + 1) { Print[i] }");
         match expr {
-            Expr::For { init, condition, step: _, body } => {
+            Expr::For {
+                init,
+                condition,
+                step: _,
+                body,
+            } => {
                 assert!(matches!(*init, Expr::Assign { .. }));
                 assert!(matches!(*condition, Expr::Call { .. }));
                 match *body {
@@ -3361,7 +3383,12 @@ mod tests {
     fn test_for_c_style_empty_parts() {
         let expr = parse_one("for (;;) body");
         match expr {
-            Expr::For { init, condition, step, body } => {
+            Expr::For {
+                init,
+                condition,
+                step,
+                body,
+            } => {
                 assert_eq!(*init, Expr::Null);
                 assert_eq!(*condition, Expr::Null);
                 assert_eq!(*step, Expr::Null);
@@ -3713,10 +3740,22 @@ mod tests {
     fn test_def_simple() {
         let expr = parse_one("def f(x) = x + 1");
         match expr {
-            Expr::FuncDef { name, params, body, delayed, .. } => {
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                delayed,
+                ..
+            } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
-                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: None });
+                assert_eq!(
+                    params[0],
+                    Expr::NamedBlank {
+                        name: "x".to_string(),
+                        type_constraint: None
+                    }
+                );
                 assert!(!delayed);
                 match *body {
                     Expr::Call { head, .. } => assert_eq!(*head, Expr::Symbol("Plus".to_string())),
@@ -3734,8 +3773,20 @@ mod tests {
             Expr::FuncDef { name, params, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 2);
-                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: None });
-                assert_eq!(params[1], Expr::NamedBlank { name: "y".to_string(), type_constraint: None });
+                assert_eq!(
+                    params[0],
+                    Expr::NamedBlank {
+                        name: "x".to_string(),
+                        type_constraint: None
+                    }
+                );
+                assert_eq!(
+                    params[1],
+                    Expr::NamedBlank {
+                        name: "y".to_string(),
+                        type_constraint: None
+                    }
+                );
             }
             _ => panic!("Expected FuncDef"),
         }
@@ -3748,7 +3799,13 @@ mod tests {
             Expr::FuncDef { name, params, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
-                assert_eq!(params[0], Expr::NamedBlank { name: "x".to_string(), type_constraint: Some("Integer".to_string()) });
+                assert_eq!(
+                    params[0],
+                    Expr::NamedBlank {
+                        name: "x".to_string(),
+                        type_constraint: Some("Integer".to_string())
+                    }
+                );
             }
             _ => panic!("Expected FuncDef"),
         }
@@ -3761,7 +3818,12 @@ mod tests {
             Expr::FuncDef { name, params, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 1);
-                assert_eq!(params[0], Expr::Blank { type_constraint: None });
+                assert_eq!(
+                    params[0],
+                    Expr::Blank {
+                        type_constraint: None
+                    }
+                );
             }
             _ => panic!("Expected FuncDef"),
         }
@@ -3771,7 +3833,13 @@ mod tests {
     fn test_def_delayed() {
         let expr = parse_one("def f(x) := x^2");
         match expr {
-            Expr::FuncDef { name, params: _, body, delayed, .. } => {
+            Expr::FuncDef {
+                name,
+                params: _,
+                body,
+                delayed,
+                ..
+            } => {
                 assert_eq!(name, "f");
                 assert!(delayed);
                 match *body {
@@ -3787,7 +3855,13 @@ mod tests {
     fn test_def_block() {
         let expr = parse_one("def f(x, y) { a; b; c }");
         match expr {
-            Expr::FuncDef { name, params, body, delayed, .. } => {
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                delayed,
+                ..
+            } => {
                 assert_eq!(name, "f");
                 assert_eq!(params.len(), 2);
                 assert!(delayed);
@@ -3804,7 +3878,13 @@ mod tests {
     fn test_def_no_params() {
         let expr = parse_one("def f() = 42");
         match expr {
-            Expr::FuncDef { name, params, body, delayed, .. } => {
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                delayed,
+                ..
+            } => {
                 assert_eq!(name, "f");
                 assert!(params.is_empty());
                 assert!(!delayed);

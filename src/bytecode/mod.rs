@@ -127,11 +127,7 @@ pub struct BytecodeFunctionDef {
 
 impl BytecodeFunctionDef {
     /// Create a new BytecodeFunctionDef with no JIT module.
-    pub fn new(
-        name: String,
-        bytecode: CompiledBytecode,
-        call_count: Arc<AtomicU64>,
-    ) -> Self {
+    pub fn new(name: String, bytecode: CompiledBytecode, call_count: Arc<AtomicU64>) -> Self {
         Self {
             name,
             bytecode,

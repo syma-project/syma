@@ -298,9 +298,7 @@ pub fn builtin_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
 fn strip_pattern(v: &Value) -> Value {
     match v {
         Value::Pattern(unevaluated) => expr_to_value(unevaluated),
-        Value::List(items) => {
-            Value::List(items.iter().map(|item| strip_pattern(item)).collect())
-        }
+        Value::List(items) => Value::List(items.iter().map(|item| strip_pattern(item)).collect()),
         _ => v.clone(),
     }
 }
@@ -514,9 +512,10 @@ fn parse_func_name_offset(expr: &Value, var_name: &str) -> Option<(String, i64)>
             let arg_expr = &args[0];
             let offset = match arg_expr {
                 Value::Symbol(s) if s == var_name => Some(0),
-                Value::Call { head, args: plus_args }
-                    if head == "Plus" && plus_args.len() == 2 =>
-                {
+                Value::Call {
+                    head,
+                    args: plus_args,
+                } if head == "Plus" && plus_args.len() == 2 => {
                     if plus_args[0].struct_eq(&Value::Symbol(var_name.to_string())) {
                         call_to_int(&plus_args[1])
                     } else if plus_args[1].struct_eq(&Value::Symbol(var_name.to_string())) {
@@ -625,7 +624,9 @@ fn parse_init_condition(expr: &Value) -> Option<(i64, Value)> {
         && head == "Equal"
         && args.len() == 2
     {
-        if let Value::Call { args: call_args, .. } = &args[0]
+        if let Value::Call {
+            args: call_args, ..
+        } = &args[0]
             && call_args.len() == 1
         {
             if let Value::Integer(k) = &call_args[0] {
@@ -673,11 +674,7 @@ fn eval_numeric(v: &Value) -> Float {
 
 /// Build the solution for a first-order recurrence.
 /// Solution: a[n] = a0 * root^(n - k0)
-fn build_first_order_solution(
-    _coeffs: &[Value],
-    init: &[(i64, Value)],
-    root: &Value,
-) -> Value {
+fn build_first_order_solution(_coeffs: &[Value], init: &[(i64, Value)], root: &Value) -> Value {
     let (k0, a0) = &init[0];
     // Simplified: a0 * root^n (assuming k0==0 for the common case)
     if *k0 == 0 {
@@ -1110,7 +1107,10 @@ mod tests {
         // Test parse_term for Times (negates offset to get order)
         let times_term = call_syma(
             "Times",
-            vec![int(2), call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])])],
+            vec![
+                int(2),
+                call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])]),
+            ],
         );
         let result = parse_term(&times_term, "n");
         assert_eq!(
@@ -1134,13 +1134,20 @@ mod tests {
                 call_syma("a", vec![sym("n")]),
                 call_syma(
                     "Times",
-                    vec![int(2), call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])])],
+                    vec![
+                        int(2),
+                        call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])]),
+                    ],
                 ),
             ],
         );
         let ic = call_syma("Equal", vec![call_syma("a", vec![int(0)]), int(3)]);
         let result = builtin_rsolve(
-            &[list(vec![eq, ic]), sym("a"), list(vec![sym("n"), int(0), int(10)])],
+            &[
+                list(vec![eq, ic]),
+                sym("a"),
+                list(vec![sym("n"), int(0), int(10)]),
+            ],
             &crate::env::Env::new(),
         )
         .unwrap();
@@ -1174,8 +1181,20 @@ mod tests {
     fn test_rsolve_second_order() {
         // RSolve[{a[n] == 5*a[n-1] - 6*a[n-2], a[0] == 1, a[1] == 4}, a, {n}]
         // Expected: a[n] = -2^n + 2*3^n
-        let term1 = call_syma("Times", vec![int(5), call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])])]);
-        let term2 = call_syma("Times", vec![int(-6), call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-2)])])]);
+        let term1 = call_syma(
+            "Times",
+            vec![
+                int(5),
+                call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])]),
+            ],
+        );
+        let term2 = call_syma(
+            "Times",
+            vec![
+                int(-6),
+                call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-2)])]),
+            ],
+        );
         let eq = call_syma(
             "Equal",
             vec![
@@ -1186,7 +1205,11 @@ mod tests {
         let ic1 = call_syma("Equal", vec![call_syma("a", vec![int(0)]), int(1)]);
         let ic2 = call_syma("Equal", vec![call_syma("a", vec![int(1)]), int(4)]);
         let result = builtin_rsolve(
-            &[list(vec![eq, ic1, ic2]), sym("a"), list(vec![sym("n"), int(0), int(20)])],
+            &[
+                list(vec![eq, ic1, ic2]),
+                sym("a"),
+                list(vec![sym("n"), int(0), int(20)]),
+            ],
             &crate::env::Env::new(),
         )
         .unwrap();
@@ -1218,11 +1241,7 @@ mod tests {
     #[test]
     fn test_rsolve_bad_args_returns_unevaluated() {
         // RSolve with wrong number of args should return unevaluated
-        let result = builtin_rsolve(
-            &[sym("a"), sym("n")],
-            &crate::env::Env::new(),
-        )
-        .unwrap_err();
+        let result = builtin_rsolve(&[sym("a"), sym("n")], &crate::env::Env::new()).unwrap_err();
         assert!(matches!(result, EvalError::Error(_)));
     }
 
@@ -1235,13 +1254,20 @@ mod tests {
                 call_syma("a", vec![sym("n")]),
                 call_syma(
                     "Power",
-                    vec![call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])]), int(2)],
+                    vec![
+                        call_syma("a", vec![call_syma("Plus", vec![sym("n"), int(-1)])]),
+                        int(2),
+                    ],
                 ),
             ],
         );
         let ic = call_syma("Equal", vec![call_syma("a", vec![int(0)]), int(1)]);
         let result = builtin_rsolve(
-            &[list(vec![eq, ic]), sym("a"), list(vec![sym("n"), int(0), int(10)])],
+            &[
+                list(vec![eq, ic]),
+                sym("a"),
+                list(vec![sym("n"), int(0), int(10)]),
+            ],
             &crate::env::Env::new(),
         )
         .unwrap();

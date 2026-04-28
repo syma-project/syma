@@ -18,7 +18,10 @@ fn eval(expr: &str) -> String {
 /// Assert that output contains all given substrings.
 fn contains_all(out: &str, needles: &[&str], expr: &str) {
     for n in needles {
-        assert!(out.contains(n), "{expr} output should contain \"{n}\", got: {out}");
+        assert!(
+            out.contains(n),
+            "{expr} output should contain \"{n}\", got: {out}"
+        );
     }
 }
 
@@ -100,8 +103,14 @@ fn test_d_sum_poly_trig() {
 fn test_d_sum_constant_expr() {
     // D[x^2 + 5, x] = 2*x
     let out = eval("D[x^2 + 5, x]");
-    assert!(out.contains("2"), "D[x^2+5, x] should contain 2, got: {out}");
-    assert!(!out.contains("5"), "D[x^2+5, x] should not contain 5, got: {out}");
+    assert!(
+        out.contains("2"),
+        "D[x^2+5, x] should contain 2, got: {out}"
+    );
+    assert!(
+        !out.contains("5"),
+        "D[x^2+5, x] should not contain 5, got: {out}"
+    );
 }
 
 // ── Product rule ─────────────────────────────────────────────────────────────
@@ -133,7 +142,10 @@ fn test_d_product_two_trig() {
 fn test_d_chain_sin_power() {
     // D[Sin[x^2], x] = Cos[x^2] * 2*x
     let out = eval("D[Sin[x^2], x]");
-    assert!(out.contains("Cos"), "D[Sin[x^2], x] should contain Cos, got: {out}");
+    assert!(
+        out.contains("Cos"),
+        "D[Sin[x^2], x] should contain Cos, got: {out}"
+    );
 }
 
 #[test]
@@ -147,7 +159,10 @@ fn test_d_chain_exp_sin() {
 fn test_d_chain_sin_cos() {
     // D[Sin[Cos[x]], x] = Cos[Cos[x]] * (-Sin[x])
     let out = eval("D[Sin[Cos[x]], x]");
-    assert!(out.contains("Cos"), "D[Sin[Cos[x]], x] should contain Cos, got: {out}");
+    assert!(
+        out.contains("Cos"),
+        "D[Sin[Cos[x]], x] should contain Cos, got: {out}"
+    );
 }
 
 #[test]
@@ -204,7 +219,10 @@ fn test_d_cos() {
 fn test_d_tan() {
     // D[Tan[x], x] = 1/Cos[x]^2
     let out = eval("D[Tan[x], x]");
-    assert!(out.contains("Cos"), "D[Tan[x], x] should contain Cos, got: {out}");
+    assert!(
+        out.contains("Cos"),
+        "D[Tan[x], x] should contain Cos, got: {out}"
+    );
 }
 
 #[test]
@@ -294,7 +312,10 @@ fn test_d_fourth_derivative_x4() {
 fn test_d_second_derivative_sin() {
     // D[D[Sin[x], x], x] = D[Cos[x], x] = -Sin[x]
     let out = eval("D[D[Sin[x], x], x]");
-    assert!(out.contains("Sin"), "D^2[Sin[x], x] should contain Sin, got: {out}");
+    assert!(
+        out.contains("Sin"),
+        "D^2[Sin[x], x] should contain Sin, got: {out}"
+    );
 }
 
 // ── Compound expressions ────────────────────────────────────────────────────
@@ -310,7 +331,10 @@ fn test_d_sin_squared() {
 fn test_d_exp_minus_x() {
     // D[Exp[-x], x] = Exp[-x] * (-1)
     let out = eval("D[Exp[-x], x]");
-    assert!(out.contains("Exp"), "D[Exp[-x], x] should contain Exp, got: {out}");
+    assert!(
+        out.contains("Exp"),
+        "D[Exp[-x], x] should contain Exp, got: {out}"
+    );
 }
 
 #[test]
@@ -393,7 +417,10 @@ fn test_d_negative_power() {
 fn test_d_nth_order_0() {
     // D[f, {x, 0}] = f
     let out = eval("D[x^3, {x, 0}]");
-    assert!(out.contains("x"), "D[x^3, {{x, 0}}] should be x^3, got: {out}");
+    assert!(
+        out.contains("x"),
+        "D[x^3, {{x, 0}}] should be x^3, got: {out}"
+    );
 }
 
 #[test]
@@ -414,28 +441,40 @@ fn test_d_nth_order_2() {
 fn test_d_nth_order_3() {
     // D[x^3, {x, 3}] = 6
     let out = eval("D[x^3, {x, 3}]");
-    assert!(out.contains("6"), "D[x^3, {{x, 3}}] should be 6, got: {out}");
+    assert!(
+        out.contains("6"),
+        "D[x^3, {{x, 3}}] should be 6, got: {out}"
+    );
 }
 
 #[test]
 fn test_d_nth_order_4_x4() {
     // D[x^4, {x, 4}] = 24
     let out = eval("D[x^4, {x, 4}]");
-    assert!(out.contains("24"), "D[x^4, {{x, 4}}] should be 24, got: {out}");
+    assert!(
+        out.contains("24"),
+        "D[x^4, {{x, 4}}] should be 24, got: {out}"
+    );
 }
 
 #[test]
 fn test_d_nth_order_sin() {
     // D[Sin[x], {x, 4}] = Sin[x]
     let out = eval("D[Sin[x], {x, 4}]");
-    assert!(out.contains("Sin"), "D^4[Sin[x], x] should be Sin[x], got: {out}");
+    assert!(
+        out.contains("Sin"),
+        "D^4[Sin[x], x] should be Sin[x], got: {out}"
+    );
 }
 
 #[test]
 fn test_d_nth_order_exp() {
     // D[Exp[x], {x, 5}] = Exp[x]
     let out = eval("D[Exp[x], {x, 5}]");
-    assert!(out.contains("Exp"), "D^5[Exp[x], x] should be Exp[x], got: {out}");
+    assert!(
+        out.contains("Exp"),
+        "D^5[Exp[x], x] should be Exp[x], got: {out}"
+    );
 }
 
 // ── Mixed partial derivatives: D[f, x, y] ──────────────────────────────────────
@@ -458,7 +497,10 @@ fn test_d_mixed_reversed() {
 fn test_d_mixed_three_vars() {
     // D[x*y*z, x, y, z] = 1
     let out = eval("D[x*y*z, x, y, z]");
-    assert!(out.contains("1"), "D[x*y*z, x, y, z] should be 1, got: {out}");
+    assert!(
+        out.contains("1"),
+        "D[x*y*z, x, y, z] should be 1, got: {out}"
+    );
 }
 
 #[test]

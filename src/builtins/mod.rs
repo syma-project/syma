@@ -12,8 +12,8 @@ pub mod filesystem;
 pub mod format;
 pub mod graphics;
 pub mod image;
-pub mod io;
 pub mod integration;
+pub mod io;
 pub mod linalg;
 pub mod list;
 pub mod localsymbol;
@@ -27,8 +27,8 @@ pub mod pattern;
 pub mod random;
 pub mod statistics;
 pub mod string;
-pub mod systeminfo;
 pub mod symbolic;
+pub mod systeminfo;
 
 use crate::env::{Env, Fixity, LazyProvider, OperatorInfo};
 use crate::value::{BuiltinFn, EvalError, Value};
@@ -47,9 +47,17 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Abs", arithmetic::builtin_abs);
 
     // ── Noncommutative Algebra ──
-    register_builtin(env, "NonCommutativeMultiply", noncommutative::builtin_nc_multiply);
+    register_builtin(
+        env,
+        "NonCommutativeMultiply",
+        noncommutative::builtin_nc_multiply,
+    );
     register_builtin(env, "Commutator", noncommutative::builtin_commutator);
-    register_builtin(env, "Anticommutator", noncommutative::builtin_anticommutator);
+    register_builtin(
+        env,
+        "Anticommutator",
+        noncommutative::builtin_anticommutator,
+    );
 
     // ── Comparison ──
     register_builtin(env, "Equal", comparison::builtin_equal);
@@ -120,6 +128,17 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "FoldList", list::builtin_fold_list);
     register_builtin_env(env, "NestList", list::builtin_nest_list);
     register_builtin_env(env, "Apply", list::builtin_apply);
+    register_builtin_env(env, "AllApply", list::builtin_all_apply);
+    register_builtin_env(env, "MapAt", list::builtin_map_at);
+    register_builtin(env, "ApplyTo", list::builtin_apply_to);
+    register_builtin(env, "Thread", list::builtin_thread);
+    register_builtin_env(env, "Outer", list::builtin_outer);
+    register_builtin_env(env, "Inner", list::builtin_inner);
+    register_builtin_env(env, "MapIndexed", list::builtin_map_indexed);
+    register_builtin_env(env, "MapThread", list::builtin_map_thread);
+    register_builtin_env(env, "NestWhile", list::builtin_nest_while);
+    register_builtin_env(env, "NestWhileList", list::builtin_nest_while_list);
+    register_builtin_env(env, "FixedPointList", list::builtin_fixed_point_list);
 
     // ── Rule application ──
     register_builtin_env(env, "ReplaceAll", crate::eval::rules::builtin_replace_all);
@@ -249,23 +268,63 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "FreeFactors", integration::builtin_free_factors);
     register_builtin(env, "NonfreeFactors", integration::builtin_nonfree_factors);
     // Expand helpers
-    register_builtin(env, "ExpandIntegrand", integration::builtin_expand_integrand);
+    register_builtin(
+        env,
+        "ExpandIntegrand",
+        integration::builtin_expand_integrand,
+    );
     register_builtin(env, "ExpandToSum", integration::builtin_expand_to_sum);
     register_builtin(env, "ExpandTrig", integration::builtin_expand_trig);
-    register_builtin(env, "ExpandTrigReduce", integration::builtin_expand_trig_reduce);
-    register_builtin(env, "ExpandTregExpand", integration::builtin_expand_trig_expand);
-    register_builtin(env, "ExpandTrigToExp", integration::builtin_expand_trig_to_exp);
-    register_builtin(env, "ExpandLinearProduct", integration::builtin_expand_linear_product);
-    register_builtin(env, "ExpandExpression", integration::builtin_expand_expression);
+    register_builtin(
+        env,
+        "ExpandTrigReduce",
+        integration::builtin_expand_trig_reduce,
+    );
+    register_builtin(
+        env,
+        "ExpandTregExpand",
+        integration::builtin_expand_trig_expand,
+    );
+    register_builtin(
+        env,
+        "ExpandTrigToExp",
+        integration::builtin_expand_trig_to_exp,
+    );
+    register_builtin(
+        env,
+        "ExpandLinearProduct",
+        integration::builtin_expand_linear_product,
+    );
+    register_builtin(
+        env,
+        "ExpandExpression",
+        integration::builtin_expand_expression,
+    );
     // Structural helpers
     register_builtin(env, "Dist", integration::builtin_dist);
     register_builtin(env, "Distrib", integration::builtin_distrib);
     register_builtin(env, "RemoveContent", integration::builtin_remove_content);
     // KnownIntegrand stubs
-    register_builtin(env, "KnownSineIntegrandQ", integration::builtin_known_sine_integrand_q);
-    register_builtin(env, "KnownSecantIntegrandQ", integration::builtin_known_secant_integrand_q);
-    register_builtin(env, "KnownTangentIntegrandQ", integration::builtin_known_tangent_integrand_q);
-    register_builtin(env, "KnownCotangentIntegrandQ", integration::builtin_known_cotangent_integrand_q);
+    register_builtin(
+        env,
+        "KnownSineIntegrandQ",
+        integration::builtin_known_sine_integrand_q,
+    );
+    register_builtin(
+        env,
+        "KnownSecantIntegrandQ",
+        integration::builtin_known_secant_integrand_q,
+    );
+    register_builtin(
+        env,
+        "KnownTangentIntegrandQ",
+        integration::builtin_known_tangent_integrand_q,
+    );
+    register_builtin(
+        env,
+        "KnownCotangentIntegrandQ",
+        integration::builtin_known_cotangent_integrand_q,
+    );
     // Misc predicates
     register_builtin(env, "LinearQ", integration::builtin_linear_q);
     register_builtin(env, "SumQ", integration::builtin_sum_q);
@@ -281,21 +340,45 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "IntBinomialQ", integration::builtin_int_binomial_q);
     register_builtin(env, "QuadraticQ", integration::builtin_quadratic_q);
     register_builtin(env, "TrinomialQ", integration::builtin_trinomial_q);
-    register_builtin(env, "PowerOfLinearQ", integration::builtin_power_of_linear_q);
+    register_builtin(
+        env,
+        "PowerOfLinearQ",
+        integration::builtin_power_of_linear_q,
+    );
     register_builtin(env, "FunctionOfQ", integration::builtin_function_of_q);
     register_builtin(env, "TrigQ", integration::builtin_trig_q);
     register_builtin(env, "HyperbolicQ", integration::builtin_hyperbolic_q);
-    register_builtin(env, "InverseFunctionQ", integration::builtin_inverse_function_q);
+    register_builtin(
+        env,
+        "InverseFunctionQ",
+        integration::builtin_inverse_function_q,
+    );
     register_builtin(env, "PowerQ", integration::builtin_power_q);
     register_builtin(env, "ProductQ", integration::builtin_product_q);
-    register_builtin(env, "RationalFunctionQ", integration::builtin_rational_function_q);
+    register_builtin(
+        env,
+        "RationalFunctionQ",
+        integration::builtin_rational_function_q,
+    );
     register_builtin(env, "ComplexFreeQ", integration::builtin_complex_free_q);
     register_builtin(env, "CalculusFreeQ", integration::builtin_calculus_free_q);
     register_builtin(env, "IntegralFreeQ", integration::builtin_integral_free_q);
-    register_builtin(env, "InverseFunctionFreeQ", integration::builtin_inverse_function_free_q);
+    register_builtin(
+        env,
+        "InverseFunctionFreeQ",
+        integration::builtin_inverse_function_free_q,
+    );
     register_builtin(env, "InertTrigQ", integration::builtin_inert_trig_q);
-    register_builtin(env, "InertTrigFreeQ", integration::builtin_inert_trig_free_q);
-    register_builtin(env, "AlgebraicFunctionQ", integration::builtin_algebraic_function_q);
+    register_builtin(
+        env,
+        "InertTrigFreeQ",
+        integration::builtin_inert_trig_free_q,
+    );
+    register_builtin(
+        env,
+        "AlgebraicFunctionQ",
+        integration::builtin_algebraic_function_q,
+    );
     register_builtin(env, "IndependentQ", integration::builtin_independent_q);
     register_builtin(env, "PolynomialInQ", integration::builtin_polynomial_in_q);
     // Comparison stubs
@@ -303,7 +386,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "SimplerSqrtQ", integration::builtin_simpler_sqrt_q);
     register_builtin(env, "SumSimplerQ", integration::builtin_sum_simpler_q);
     register_builtin(env, "NiceSqrtQ", integration::builtin_nice_sqrt_q);
-    register_builtin(env, "DerivativeDivides", integration::builtin_derivative_divides);
+    register_builtin(
+        env,
+        "DerivativeDivides",
+        integration::builtin_derivative_divides,
+    );
     // With/Module/If
     register_builtin_env(env, "With", integration::builtin_with);
     register_builtin_env(env, "Module", integration::builtin_module);
@@ -314,57 +401,213 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "IntLinearQ", integration::builtin_int_linear_q);
     register_builtin(env, "IntQuadraticQ", integration::builtin_int_quadratic_q);
     register_builtin(env, "Expon", integration::builtin_expon);
-    register_builtin(env, "QuadraticMatchQ", integration::builtin_quadratic_match_q);
+    register_builtin(
+        env,
+        "QuadraticMatchQ",
+        integration::builtin_quadratic_match_q,
+    );
     register_builtin(env, "BinomialMatchQ", integration::builtin_binomial_match_q);
-    register_builtin(env, "PowerOfLinearMatchQ", integration::builtin_power_of_linear_match_q);
-    register_builtin(env, "NormalizePowerOfLinear", integration::builtin_normalize_power_of_linear);
-    register_builtin(env, "NormalizeIntegrand", integration::builtin_normalize_integrand);
-    register_builtin(env, "FunctionOfLinear", integration::builtin_function_of_linear);
+    register_builtin(
+        env,
+        "PowerOfLinearMatchQ",
+        integration::builtin_power_of_linear_match_q,
+    );
+    register_builtin(
+        env,
+        "NormalizePowerOfLinear",
+        integration::builtin_normalize_power_of_linear,
+    );
+    register_builtin(
+        env,
+        "NormalizeIntegrand",
+        integration::builtin_normalize_integrand,
+    );
+    register_builtin(
+        env,
+        "FunctionOfLinear",
+        integration::builtin_function_of_linear,
+    );
     register_builtin(env, "FunctionOfLog", integration::builtin_function_of_log);
-    register_builtin(env, "FunctionOfTrigOfLinearQ", integration::builtin_function_of_trig_of_linear_q);
-    register_builtin(env, "FunctionOfExponentialQ", integration::builtin_function_of_exponential_q);
-    register_builtin(env, "FunctionOfExponential", integration::builtin_function_of_exponential);
+    register_builtin(
+        env,
+        "FunctionOfTrigOfLinearQ",
+        integration::builtin_function_of_trig_of_linear_q,
+    );
+    register_builtin(
+        env,
+        "FunctionOfExponentialQ",
+        integration::builtin_function_of_exponential_q,
+    );
+    register_builtin(
+        env,
+        "FunctionOfExponential",
+        integration::builtin_function_of_exponential,
+    );
     register_builtin(env, "FunctionExpand", integration::builtin_function_expand);
-    register_builtin(env, "SimplifyIntegrand", integration::builtin_simplify_integrand);
+    register_builtin(
+        env,
+        "SimplifyIntegrand",
+        integration::builtin_simplify_integrand,
+    );
     register_builtin(env, "Integral", integration::builtin_integral);
-    register_builtin(env, "CannotIntegrate", integration::builtin_cannot_integrate);
+    register_builtin(
+        env,
+        "CannotIntegrate",
+        integration::builtin_cannot_integrate,
+    );
     register_builtin(env, "ShowStep", integration::builtin_show_step);
     register_builtin(env, "IntHide", integration::builtin_int_hide);
-    register_builtin(env, "PolynomialRemainder", integration::builtin_polynomial_remainder);
-    register_builtin(env, "PolynomialQuotient", integration::builtin_polynomial_quotient);
-    register_builtin(env, "PolynomialDivide", integration::builtin_polynomial_divide);
-    register_builtin(env, "RationalFunctionExpand", integration::builtin_rational_function_expand);
-    register_builtin(env, "GeneralizedTrinomialQ", integration::builtin_generalized_trinomial_q);
-    register_builtin(env, "GeneralizedBinomialQ", integration::builtin_generalized_binomial_q);
-    register_builtin(env, "GeneralizedBinomialMatchQ", integration::builtin_generalized_binomial_match_q);
-    register_builtin(env, "GeneralizedTrinomialMatchQ", integration::builtin_generalized_trinomial_match_q);
-    register_builtin(env, "GeneralizedTrinomialDegree", integration::builtin_generalized_trinomial_degree);
+    register_builtin(
+        env,
+        "PolynomialRemainder",
+        integration::builtin_polynomial_remainder,
+    );
+    register_builtin(
+        env,
+        "PolynomialQuotient",
+        integration::builtin_polynomial_quotient,
+    );
+    register_builtin(
+        env,
+        "PolynomialDivide",
+        integration::builtin_polynomial_divide,
+    );
+    register_builtin(
+        env,
+        "RationalFunctionExpand",
+        integration::builtin_rational_function_expand,
+    );
+    register_builtin(
+        env,
+        "GeneralizedTrinomialQ",
+        integration::builtin_generalized_trinomial_q,
+    );
+    register_builtin(
+        env,
+        "GeneralizedBinomialQ",
+        integration::builtin_generalized_binomial_q,
+    );
+    register_builtin(
+        env,
+        "GeneralizedBinomialMatchQ",
+        integration::builtin_generalized_binomial_match_q,
+    );
+    register_builtin(
+        env,
+        "GeneralizedTrinomialMatchQ",
+        integration::builtin_generalized_trinomial_match_q,
+    );
+    register_builtin(
+        env,
+        "GeneralizedTrinomialDegree",
+        integration::builtin_generalized_trinomial_degree,
+    );
     register_builtin(env, "BinomialParts", integration::builtin_binomial_parts);
     register_builtin(env, "BinomialDegree", integration::builtin_binomial_degree);
-    register_builtin(env, "EulerIntegrandQ", integration::builtin_euler_integrand_q);
-    register_builtin(env, "PseudoBinomialPairQ", integration::builtin_pseudo_binomial_pair_q);
-    register_builtin(env, "QuotientOfLinearsQ", integration::builtin_quotient_of_linears_q);
-    register_builtin(env, "QuotientOfLinearsParts", integration::builtin_quotient_of_linears_parts);
-    register_builtin(env, "QuadraticProductQ", integration::builtin_quadratic_product_q);
+    register_builtin(
+        env,
+        "EulerIntegrandQ",
+        integration::builtin_euler_integrand_q,
+    );
+    register_builtin(
+        env,
+        "PseudoBinomialPairQ",
+        integration::builtin_pseudo_binomial_pair_q,
+    );
+    register_builtin(
+        env,
+        "QuotientOfLinearsQ",
+        integration::builtin_quotient_of_linears_q,
+    );
+    register_builtin(
+        env,
+        "QuotientOfLinearsParts",
+        integration::builtin_quotient_of_linears_parts,
+    );
+    register_builtin(
+        env,
+        "QuadraticProductQ",
+        integration::builtin_quadratic_product_q,
+    );
     register_builtin(env, "LinearPairQ", integration::builtin_linear_pair_q);
-    register_builtin(env, "SubstForFractionalPowerOfLinear", integration::builtin_subst_for_fractional_power_of_linear);
-    register_builtin(env, "SubstForFractionalPowerQ", integration::builtin_subst_for_fractional_power_q);
-    register_builtin(env, "SubstForFractionalPowerOfQuotientOfLinears", integration::builtin_subst_for_fractional_power_of_quotient_of_linears);
-    register_builtin(env, "SubstForInverseFunction", integration::builtin_subst_for_inverse_function);
-    register_builtin(env, "InverseFunctionOfLinear", integration::builtin_inverse_function_of_linear);
-    register_builtin(env, "FunctionOfSquareRootOfQuadratic", integration::builtin_function_of_sqrt_of_quadratic);
-    register_builtin(env, "FunctionOfLinear", integration::builtin_function_of_linear_fn);
-    register_builtin(env, "TryPureTanSubst", integration::builtin_try_pure_tan_subst);
-    register_builtin(env, "SimplerIntegrandQ", integration::builtin_simpler_integrand_q);
-    register_builtin(env, "NormalizePseudoBinomial", integration::builtin_normalize_pseudo_binomial);
-    register_builtin(env, "PolynomialInSubst", integration::builtin_polynomial_in_subst);
-    register_builtin(env, "MinimumMonomialExponent", integration::builtin_minimum_monomial_exponent);
-    register_builtin(env, "PowerVariableExpn", integration::builtin_power_variable_expn);
-    register_builtin(env, "DistributeDegree", integration::builtin_distribute_degree);
+    register_builtin(
+        env,
+        "SubstForFractionalPowerOfLinear",
+        integration::builtin_subst_for_fractional_power_of_linear,
+    );
+    register_builtin(
+        env,
+        "SubstForFractionalPowerQ",
+        integration::builtin_subst_for_fractional_power_q,
+    );
+    register_builtin(
+        env,
+        "SubstForFractionalPowerOfQuotientOfLinears",
+        integration::builtin_subst_for_fractional_power_of_quotient_of_linears,
+    );
+    register_builtin(
+        env,
+        "SubstForInverseFunction",
+        integration::builtin_subst_for_inverse_function,
+    );
+    register_builtin(
+        env,
+        "InverseFunctionOfLinear",
+        integration::builtin_inverse_function_of_linear,
+    );
+    register_builtin(
+        env,
+        "FunctionOfSquareRootOfQuadratic",
+        integration::builtin_function_of_sqrt_of_quadratic,
+    );
+    register_builtin(
+        env,
+        "FunctionOfLinear",
+        integration::builtin_function_of_linear_fn,
+    );
+    register_builtin(
+        env,
+        "TryPureTanSubst",
+        integration::builtin_try_pure_tan_subst,
+    );
+    register_builtin(
+        env,
+        "SimplerIntegrandQ",
+        integration::builtin_simpler_integrand_q,
+    );
+    register_builtin(
+        env,
+        "NormalizePseudoBinomial",
+        integration::builtin_normalize_pseudo_binomial,
+    );
+    register_builtin(
+        env,
+        "PolynomialInSubst",
+        integration::builtin_polynomial_in_subst,
+    );
+    register_builtin(
+        env,
+        "MinimumMonomialExponent",
+        integration::builtin_minimum_monomial_exponent,
+    );
+    register_builtin(
+        env,
+        "PowerVariableExpn",
+        integration::builtin_power_variable_expn,
+    );
+    register_builtin(
+        env,
+        "DistributeDegree",
+        integration::builtin_distribute_degree,
+    );
     register_builtin(env, "IntSum", integration::builtin_int_sum);
     register_builtin(env, "SplitProduct", integration::builtin_split_product);
     register_builtin(env, "EveryQ", integration::builtin_every_q);
-    register_builtin(env, "RationalFunctionExponents", integration::builtin_rational_function_exponents);
+    register_builtin(
+        env,
+        "RationalFunctionExponents",
+        integration::builtin_rational_function_exponents,
+    );
 
     // ── Discrete Calculus ──
     register_builtin(env, "DiscreteDelta", discrete::builtin_discrete_delta);
@@ -596,10 +839,22 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "CharacterCounts", string::builtin_character_counts);
     register_builtin(env, "Alphabet", string::builtin_alphabet);
     register_builtin(env, "ToCharacterCode", string::builtin_to_character_code);
-    register_builtin(env, "FromCharacterCode", string::builtin_from_character_code);
+    register_builtin(
+        env,
+        "FromCharacterCode",
+        string::builtin_from_character_code,
+    );
     register_builtin(env, "EditDistance", string::builtin_edit_distance);
-    register_builtin(env, "LongestCommonSubsequence", string::builtin_longest_common_subsequence);
-    register_builtin(env, "LongestCommonSubString", string::builtin_longest_common_sub_string);
+    register_builtin(
+        env,
+        "LongestCommonSubsequence",
+        string::builtin_longest_common_subsequence,
+    );
+    register_builtin(
+        env,
+        "LongestCommonSubString",
+        string::builtin_longest_common_sub_string,
+    );
     register_builtin(env, "WordCount", string::builtin_word_count);
     register_builtin(env, "SentenceCount", string::builtin_sentence_count);
 
@@ -797,7 +1052,10 @@ pub fn register_builtins(env: &Env) {
     // Set attributes for forms that aren't registered via register_builtin
     for (name, attrs) in [
         ("Hold", &["HoldAll", "Locked", "ReadProtected"] as &[&str]),
-        ("HoldComplete", &["HoldAllComplete", "Locked", "ReadProtected"]),
+        (
+            "HoldComplete",
+            &["HoldAllComplete", "Locked", "ReadProtected"],
+        ),
         ("Defer", &["HoldAll", "Locked", "ReadProtected"]),
         ("Set", &["HoldFirst", "Locked", "ReadProtected"]),
         ("SetDelayed", &["HoldAll", "Locked", "ReadProtected"]),
@@ -826,16 +1084,28 @@ fn builtin_infix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
     let op_str = match &args[0] {
         Value::Str(s) => s.clone(),
-        _ => return Err(EvalError::Error("First argument to Infix must be a string".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "First argument to Infix must be a string".to_string(),
+            ));
+        }
     };
     let head = match &args[1] {
         Value::Symbol(s) => s.clone(),
-        _ => return Err(EvalError::Error("Second argument to Infix must be a symbol".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Second argument to Infix must be a symbol".to_string(),
+            ));
+        }
     };
     let precedence = if args.len() == 3 {
         match &args[2] {
             Value::Integer(n) => u32::try_from(n).unwrap_or(180),
-            _ => return Err(EvalError::Error("Third argument to Infix must be an integer".to_string())),
+            _ => {
+                return Err(EvalError::Error(
+                    "Third argument to Infix must be an integer".to_string(),
+                ));
+            }
         }
     } else {
         180
@@ -862,11 +1132,19 @@ fn builtin_prefix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
     let op_str = match &args[0] {
         Value::Str(s) => s.clone(),
-        _ => return Err(EvalError::Error("First argument to Prefix must be a string".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "First argument to Prefix must be a string".to_string(),
+            ));
+        }
     };
     let head = match &args[1] {
         Value::Symbol(s) => s.clone(),
-        _ => return Err(EvalError::Error("Second argument to Prefix must be a symbol".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Second argument to Prefix must be a symbol".to_string(),
+            ));
+        }
     };
     env.register_operator(
         &op_str,
@@ -890,11 +1168,19 @@ fn builtin_postfix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
     let op_str = match &args[0] {
         Value::Str(s) => s.clone(),
-        _ => return Err(EvalError::Error("First argument to Postfix must be a string".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "First argument to Postfix must be a string".to_string(),
+            ));
+        }
     };
     let head = match &args[1] {
         Value::Symbol(s) => s.clone(),
-        _ => return Err(EvalError::Error("Second argument to Postfix must be a symbol".to_string())),
+        _ => {
+            return Err(EvalError::Error(
+                "Second argument to Postfix must be a symbol".to_string(),
+            ));
+        }
     };
     env.register_operator(
         &op_str,
@@ -1360,7 +1646,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "DeleteCases[{e1, e2, ...}, pattern] removes elements that match pattern.\n\
              DeleteCases[list, pattern, levelspec] — not yet supported."
         }
-        "Dispatch" => "Dispatch[rules] builds a dispatch-indexed rule set for O(1) lookup by head name and argument type patterns. Use for large rule sets like Rubi.",
+        "Dispatch" => {
+            "Dispatch[rules] builds a dispatch-indexed rule set for O(1) lookup by head name and argument type patterns. Use for large rule sets like Rubi."
+        }
 
         // ── String ──
         "StringJoin" => "StringJoin[s1, s2, ...] or s1 <> s2 <> ... concatenates strings.",
@@ -1460,7 +1748,9 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "Mod" => "Mod[m, n] gives the remainder when m is divided by n.",
         "GCD" => "GCD[n1, n2, ...] gives the greatest common divisor of the arguments.",
         "LCM" => "LCM[n1, n2, ...] gives the least common multiple of the arguments.",
-        "Factorial" => "Factorial[n] or n! gives the factorial of n. For non-integer n, returns Gamma[1 + n].",
+        "Factorial" => {
+            "Factorial[n] or n! gives the factorial of n. For non-integer n, returns Gamma[1 + n]."
+        }
         "Gamma" => "Gamma[z] gives the Euler gamma function of z.",
         // ── Symbolic ──
         "Simplify" => "Simplify[expr] attempts to simplify expr. (Currently a pass-through.)",
@@ -1473,8 +1763,10 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         }
         "Factor" => "Factor[expr] factors the polynomial expr. (Planned.)",
         "Solve" => "Solve[eqns, vars] solves equations for variables. (Planned.)",
-        "Series" => "Series[expr, {x, x0, n}] computes a power series expansion to order n.\n\
-             Returns a SeriesData object that displays with an O[x-x0]^(n+1) remainder term.",
+        "Series" => {
+            "Series[expr, {x, x0, n}] computes a power series expansion to order n.\n\
+             Returns a SeriesData object that displays with an O[x-x0]^(n+1) remainder term."
+        }
 
         // ── Discrete Calculus ──
         "DiscreteDelta" => {
@@ -1802,8 +2094,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "InputForm[expr] displays expr using infix notation (e.g., `a + b` instead of `Plus[a, b]`)."
         }
         "FullForm" => "FullForm[expr] displays expr in head[arg, ...] notation.",
-        "StandardForm" => "StandardForm[expr] displays expr in StandardForm (infix notation with SeriesData special display).",
-        "OutputForm" => "OutputForm[expr] displays expr in OutputForm (plain-text, same as StandardForm for terminal).",
+        "StandardForm" => {
+            "StandardForm[expr] displays expr in StandardForm (infix notation with SeriesData special display)."
+        }
+        "OutputForm" => {
+            "OutputForm[expr] displays expr in OutputForm (plain-text, same as StandardForm for terminal)."
+        }
         "Short" => {
             "Short[expr] displays expr with top-level truncation (shows at most 5 items).\nShort[expr, n] displays at most n top-level items."
         }
@@ -2004,42 +2300,28 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         "$System" => {
             "$System gives the operating system and processor type for the current machine (e.g., \"MacOS-x86-64\")."
         }
-        "$Version" => {
-            "$Version gives the version information for the current Syma installation."
-        }
-        "$ReleaseDate" => {
-            "$ReleaseDate gives the release date of the Syma version as a string."
-        }
+        "$Version" => "$Version gives the version information for the current Syma installation.",
+        "$ReleaseDate" => "$ReleaseDate gives the release date of the Syma version as a string.",
         "$Machine" => {
             "$Machine gives the processor type of the current machine (e.g., \"x86-64\")."
         }
-        "$MachineName" => {
-            "$MachineName gives the network name of the current machine."
-        }
+        "$MachineName" => "$MachineName gives the network name of the current machine.",
         "$OperatingSystem" => {
             "$OperatingSystem gives the name of the operating system (e.g., \"MacOS\", \"Linux\", \"Windows\")."
         }
         "$ProcessorType" => {
             "$ProcessorType gives the processor type (e.g., \"x86-64\", \"aarch64\")."
         }
-        "$User" => {
-            "$User gives the login name of the current user."
-        }
-        "$TimeZone" => {
-            "$TimeZone gives the local timezone offset from UTC in hours."
-        }
+        "$User" => "$User gives the login name of the current user.",
+        "$TimeZone" => "$TimeZone gives the local timezone offset from UTC in hours.",
         "$SystemId" => {
             "$SystemId gives the system identifier (e.g., \"MacOS\", \"Linux\", \"Windows\")."
         }
-        "$Language" => {
-            "$Language gives the interface language (default \"English\")."
-        }
+        "$Language" => "$Language gives the interface language (default \"English\").",
         "$CommandLine" => {
             "$CommandLine gives True if the session was started from the command line."
         }
-        "$InputLine" => {
-            "$InputLine gives the text of the current input line, or Null."
-        }
+        "$InputLine" => "$InputLine gives the text of the current input line, or Null.",
 
         _ => return None,
     })
@@ -2066,12 +2348,7 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         ],
         "Power" => vec!["Listable", "Locked", "NumericFunction", "ReadProtected"],
         "Divide" | "Minus" | "Abs" => lnlr(),
-        "NonCommutativeMultiply" => vec![
-            "Flat",
-            "Locked",
-            "OneIdentity",
-            "ReadProtected",
-        ],
+        "NonCommutativeMultiply" => vec!["Flat", "Locked", "OneIdentity", "ReadProtected"],
         "Commutator" | "Anticommutator" => vec!["Locked", "ReadProtected"],
         "Sin" | "Cos" | "Tan" | "Log" | "Exp" | "Sqrt" | "Floor" | "Ceiling" | "Round" => lnlr(),
         "ArcSin" | "ArcCos" | "ArcTan" | "Log2" | "Log10" => lnlr(),

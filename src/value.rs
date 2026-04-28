@@ -574,8 +574,14 @@ impl PartialEq for Value {
                 },
             ) => n1 == n2 && r1 == r2,
             (
-                Value::DispatchedRules { index: i1, rules: r1 },
-                Value::DispatchedRules { index: i2, rules: r2 },
+                Value::DispatchedRules {
+                    index: i1,
+                    rules: r1,
+                },
+                Value::DispatchedRules {
+                    index: i2,
+                    rules: r2,
+                },
             ) => i1 == i2 && r1 == r2,
             (
                 Value::Module {
@@ -627,9 +633,20 @@ impl PartialEq for Value {
             // PureFunction: compare by body expression
             (Value::PureFunction { body: a, .. }, Value::PureFunction { body: b, .. }) => a == b,
             // Method: compare by name and object
-            (Value::Method { name: a, object: b }, Value::Method { name: c, object: d }) => a == c && b == d,
+            (Value::Method { name: a, object: b }, Value::Method { name: c, object: d }) => {
+                a == c && b == d
+            }
             // Object: compare by class name and fields
-            (Value::Object { class_name: a, fields: b }, Value::Object { class_name: c, fields: d }) => a == c && b == d,
+            (
+                Value::Object {
+                    class_name: a,
+                    fields: b,
+                },
+                Value::Object {
+                    class_name: c,
+                    fields: d,
+                },
+            ) => a == c && b == d,
             // Class: compare by name only (definition structural comparison is not implemented)
             (Value::Class(a), Value::Class(b)) => a.name == b.name,
             // Hold: compare inner values
@@ -840,19 +857,34 @@ impl Value {
                     max_exponent: mx2,
                     denominator: d2,
                 },
-            ) => v1.struct_eq(v2)
-                && e1.struct_eq(e2)
-                && c1.len() == c2.len()
-                && c1.iter().zip(c2.iter()).all(|(a, b)| a.struct_eq(b))
-                && mn1 == mn2
-                && mx1 == mx2
-                && d1 == d2,
+            ) => {
+                v1.struct_eq(v2)
+                    && e1.struct_eq(e2)
+                    && c1.len() == c2.len()
+                    && c1.iter().zip(c2.iter()).all(|(a, b)| a.struct_eq(b))
+                    && mn1 == mn2
+                    && mx1 == mx2
+                    && d1 == d2
+            }
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.struct_eq(y))
             }
-            (Value::Call { head: a_head, args: a_args }, Value::Call { head: b_head, args: b_args }) => {
-                a_head == b_head && a_args.len() == b_args.len()
-                    && a_args.iter().zip(b_args.iter()).all(|(x, y)| x.struct_eq(y))
+            (
+                Value::Call {
+                    head: a_head,
+                    args: a_args,
+                },
+                Value::Call {
+                    head: b_head,
+                    args: b_args,
+                },
+            ) => {
+                a_head == b_head
+                    && a_args.len() == b_args.len()
+                    && a_args
+                        .iter()
+                        .zip(b_args.iter())
+                        .all(|(x, y)| x.struct_eq(y))
             }
             _ => false,
         }
@@ -1221,7 +1253,9 @@ impl fmt::Display for Value {
             }
             Value::Class(class_def) => write!(f, "Class[{}]", class_def.name),
             Value::RuleSet { name, .. } => write!(f, "RuleSet[{}]", name),
-            Value::DispatchedRules { rules, .. } => write!(f, "DispatchedRules[{} rules]", rules.len()),
+            Value::DispatchedRules { rules, .. } => {
+                write!(f, "DispatchedRules[{} rules]", rules.len())
+            }
             Value::Pattern(expr) => write!(f, "Pattern[{}]", expr),
             Value::Module { name, exports, .. } => {
                 write!(
@@ -1384,7 +1418,11 @@ impl fmt::Display for Value {
                     }
                     write!(f, "{}", coeff)?;
                 }
-                write!(f, "}}, {}, {}, {}]", min_exponent, max_exponent, denominator)
+                write!(
+                    f,
+                    "}}, {}, {}, {}]",
+                    min_exponent, max_exponent, denominator
+                )
             }
             Value::NativeLib { name, .. } => write!(f, "NativeLib[\"{}\"]", name),
             Value::NativeFunction {
@@ -1512,11 +1550,8 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                             || is_negative_number(arg)
                             || (match arg {
                                 Value::Call {
-                                    head: h,
-                                    args: pa,
-                                    ..
-                                } if h == "Power" && pa.len() >= 2 =>
-                                {
+                                    head: h, args: pa, ..
+                                } if h == "Power" && pa.len() >= 2 => {
                                     matches!(
                                         &pa[0],
                                         Value::Call { head: b, .. }
@@ -1837,7 +1872,11 @@ fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 }
                 format_full_form(coeff, f)?;
             }
-            write!(f, "}}, {}, {}, {}]", min_exponent, max_exponent, denominator)
+            write!(
+                f,
+                "}}, {}, {}, {}]",
+                min_exponent, max_exponent, denominator
+            )
         }
         _ => write!(f, "{}", v),
     }

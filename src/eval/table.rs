@@ -27,11 +27,19 @@ pub(crate) fn value_to_expr(v: &Value) -> Expr {
             args: items.iter().map(value_to_expr).collect(),
         },
         Value::Pattern(e) => e.clone(),
-        Value::Rule { lhs, rhs, delayed: false } => Expr::Rule {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: false,
+        } => Expr::Rule {
             lhs: Box::new(value_to_expr(lhs)),
             rhs: Box::new(value_to_expr(rhs)),
         },
-        Value::Rule { lhs, rhs, delayed: true } => Expr::RuleDelayed {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: true,
+        } => Expr::RuleDelayed {
             lhs: Box::new(value_to_expr(lhs)),
             rhs: Box::new(value_to_expr(rhs)),
         },
@@ -292,11 +300,7 @@ pub(super) fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     eval_sum_recursive(&args[0], &args[1..], env)
 }
 
-fn eval_sum_recursive(
-    expr: &Expr,
-    iter_specs: &[Expr],
-    env: &Env,
-) -> Result<Value, EvalError> {
+fn eval_sum_recursive(expr: &Expr, iter_specs: &[Expr], env: &Env) -> Result<Value, EvalError> {
     if iter_specs.is_empty() {
         return super::eval(expr, env);
     }

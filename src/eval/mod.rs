@@ -144,20 +144,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Rules ──
-        Expr::Rule { lhs, rhs } => {
-            Ok(Value::Rule {
-                lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
-                rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
-                delayed: false,
-            })
-        }
-        Expr::RuleDelayed { lhs, rhs } => {
-            Ok(Value::Rule {
-                lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
-                rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
-                delayed: true,
-            })
-        }
+        Expr::Rule { lhs, rhs } => Ok(Value::Rule {
+            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
+            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
+            delayed: false,
+        }),
+        Expr::RuleDelayed { lhs, rhs } => Ok(Value::Rule {
+            lhs: Box::new(Value::Pattern(lhs.as_ref().clone())),
+            rhs: Box::new(Value::Pattern(rhs.as_ref().clone())),
+            delayed: true,
+        }),
 
         // ── Function application ──
         Expr::Call { head, args } => eval_call(head, args, env),
@@ -475,9 +471,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             });
 
             // Sort definitions so more specific (literal) patterns come first.
-            func.definitions.sort_by(|a, b| {
-                specificity(&b.params).cmp(&specificity(&a.params))
-            });
+            func.definitions
+                .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
 
             env.set(name.clone(), Value::Function(Arc::new(func)));
             Ok(Value::Null)
@@ -534,9 +529,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         return Ok(Value::Null);
                     }
                     let attrs = match &val {
-                        Value::List(items) => {
-                            items.iter().map(|v| v.to_string()).collect()
-                        }
+                        Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
                         other => vec![other.to_string()],
                     };
                     env.set_attributes(&sym_name, attrs);
@@ -592,9 +585,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                             guard: None,
                         });
                         // Sort definitions so more specific ones match first
-                        func.definitions.sort_by(|a, b| {
-                            specificity(&b.params).cmp(&specificity(&a.params))
-                        });
+                        func.definitions
+                            .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
                         env.set(name.clone(), Value::Function(Arc::new(func)));
                         return Ok(val);
                     }
@@ -1245,15 +1237,18 @@ fn eval_args_with_attributes(
         let hold_rest = env.has_attribute(name, "HoldRest");
 
         if hold_all {
-            let vals = args.iter().map(|arg| {
-                match arg {
-                    Expr::Symbol(_) => {
-                        // Evaluate to resolve bindings, then wrap as Hold to prevent further eval
-                        eval(arg, env).map(|v| Value::Hold(Box::new(v)))
+            let vals = args
+                .iter()
+                .map(|arg| {
+                    match arg {
+                        Expr::Symbol(_) => {
+                            // Evaluate to resolve bindings, then wrap as Hold to prevent further eval
+                            eval(arg, env).map(|v| Value::Hold(Box::new(v)))
+                        }
+                        _ => Ok(Value::Pattern(arg.clone())),
                     }
-                    _ => Ok(Value::Pattern(arg.clone())),
-                }
-            }).collect::<Result<Vec<_>, _>>()?;
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(vals);
         }
         if hold_first {
@@ -1328,9 +1323,7 @@ fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)>, EvalErro
             Expr::Call {
                 head,
                 args: call_args,
-            } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Set")
-                && call_args.len() == 2 =>
-            {
+            } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Set") && call_args.len() == 2 => {
                 if let Expr::Symbol(name) = &call_args[0] {
                     specs.push((name.clone(), Some(call_args[1].clone())));
                 } else {
@@ -1366,7 +1359,9 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             head: Box::new(substitute_in_expr(head, subs)),
             args: args.iter().map(|a| substitute_in_expr(a, subs)).collect(),
         },
-        Expr::List(items) => Expr::List(items.iter().map(|i| substitute_in_expr(i, subs)).collect()),
+        Expr::List(items) => {
+            Expr::List(items.iter().map(|i| substitute_in_expr(i, subs)).collect())
+        }
         Expr::Assoc(pairs) => Expr::Assoc(
             pairs
                 .iter()
@@ -1385,7 +1380,8 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             rhs: Box::new(substitute_in_expr(rhs, subs)),
         },
         Expr::Slot(_) => expr.clone(),
-        Expr::SlotSequence(_) => expr.clone(),        Expr::Function { params, body } => Expr::Function {
+        Expr::SlotSequence(_) => expr.clone(),
+        Expr::Function { params, body } => Expr::Function {
             params: params.clone(),
             body: Box::new(substitute_in_expr(body, subs)),
         },
@@ -1483,14 +1479,19 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             params: params.clone(),
             body: Box::new(substitute_in_expr(body, subs)),
             delayed: *delayed,
-            guard: guard.as_ref().map(|g| Box::new(substitute_in_expr(g, subs))),
+            guard: guard
+                .as_ref()
+                .map(|g| Box::new(substitute_in_expr(g, subs))),
         },
         Expr::Assign { lhs, rhs } => Expr::Assign {
             lhs: Box::new(substitute_in_expr(lhs, subs)),
             rhs: Box::new(substitute_in_expr(rhs, subs)),
         },
         Expr::DestructAssign { patterns, rhs } => Expr::DestructAssign {
-            patterns: patterns.iter().map(|p| substitute_in_expr(p, subs)).collect(),
+            patterns: patterns
+                .iter()
+                .map(|p| substitute_in_expr(p, subs))
+                .collect(),
             rhs: Box::new(substitute_in_expr(rhs, subs)),
         },
         Expr::PostIncrement { expr: inner } => Expr::PostIncrement {
@@ -1511,7 +1512,11 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             exports: exports.clone(),
             body: body.iter().map(|b| substitute_in_expr(b, subs)).collect(),
         },
-        Expr::Import { module, selective, alias } => Expr::Import {
+        Expr::Import {
+            module,
+            selective,
+            alias,
+        } => Expr::Import {
             module: module.clone(),
             selective: selective.clone(),
             alias: alias.clone(),
@@ -1529,9 +1534,7 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
             members: members.clone(),
         },
         Expr::Hold(inner) => Expr::Hold(Box::new(substitute_in_expr(inner, subs))),
-        Expr::HoldComplete(inner) => {
-            Expr::HoldComplete(Box::new(substitute_in_expr(inner, subs)))
-        }
+        Expr::HoldComplete(inner) => Expr::HoldComplete(Box::new(substitute_in_expr(inner, subs))),
         Expr::ReleaseHold(inner) => Expr::ReleaseHold(Box::new(substitute_in_expr(inner, subs))),
         Expr::Information(inner) => Expr::Information(Box::new(substitute_in_expr(inner, subs))),
         // Atoms and non-recursive variants pass through unchanged
@@ -1576,9 +1579,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                             return Ok(Value::Null);
                         }
                         let attrs = match &val {
-                            Value::List(items) => {
-                                items.iter().map(|v| v.to_string()).collect()
-                            }
+                            Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
                             other => vec![other.to_string()],
                         };
                         env.set_attributes(&sym_name, attrs);
@@ -1979,11 +1980,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     )?;
                     let skip_seq = env.has_attribute(&op_info.head, "SequenceHold")
                         || env.has_attribute(&op_info.head, "HoldAllComplete");
-                    return apply_function(
-                        &head_val,
-                        &flatten_sequences(arg_vals, skip_seq),
-                        env,
-                    );
+                    return apply_function(&head_val, &flatten_sequences(arg_vals, skip_seq), env);
                 }
 
                 let head_val = eval(head, env)?;
@@ -2023,11 +2020,18 @@ fn normalize_flat_result(name: &str, result: Value, env: &Env) -> Value {
     if !env.has_attribute(name, "Flat") {
         return result;
     }
-    if let Value::Call { ref head, args: ref a } = result {
+    if let Value::Call {
+        ref head,
+        args: ref a,
+    } = result
+    {
         if head == name {
             let flat = flatten_flat_args(name, a);
             if flat.len() != a.len() || flat.as_slice() != a.as_slice() {
-                return Value::Call { head: head.clone(), args: flat };
+                return Value::Call {
+                    head: head.clone(),
+                    args: flat,
+                };
             }
         }
     }
@@ -4963,7 +4967,10 @@ mod tests {
     fn test_slot_sequence_from_n() {
         assert_eq!(
             eval_str("(##2 &)[10, 20, 30]"),
-            Value::Sequence(vec![Value::Integer(Integer::from(20)), Value::Integer(Integer::from(30))])
+            Value::Sequence(vec![
+                Value::Integer(Integer::from(20)),
+                Value::Integer(Integer::from(30))
+            ])
         );
     }
 
@@ -5446,7 +5453,10 @@ mod tests {
     #[test]
     fn test_module_empty_specs() {
         // Module with empty local list
-        assert_eq!(eval_str("Module[{}, 42]"), Value::Integer(Integer::from(42)));
+        assert_eq!(
+            eval_str("Module[{}, 42]"),
+            Value::Integer(Integer::from(42))
+        );
     }
 
     #[test]
@@ -5460,9 +5470,7 @@ mod tests {
     fn test_module_sequential_body() {
         // Module args[1..] evaluated sequentially
         // Set[x, x + 2] => x=3, then Set[x, Times[x, 3]] = 9
-        let result = eval_str(
-            "Module[{x = 1}, Set[x, x + 2], Set[x, x * 3], x]"
-        );
+        let result = eval_str("Module[{x = 1}, Set[x, x + 2], Set[x, x * 3], x]");
         assert_eq!(result, Value::Integer(Integer::from(9)));
     }
 
@@ -5490,10 +5498,13 @@ mod tests {
     fn test_with_substitution_in_call() {
         // With substitutes x with 5 inside Sin[...]
         let result = eval_str("With[{x = 5}, Sin[x]]");
-        assert_eq!(result, Value::Call {
-            head: "Sin".to_string(),
-            args: vec![Value::Integer(Integer::from(5))],
-        });
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Sin".to_string(),
+                args: vec![Value::Integer(Integer::from(5))],
+            }
+        );
     }
 
     #[test]
@@ -5560,9 +5571,7 @@ mod tests {
     #[test]
     fn test_block_affects_function_due_to_dynamic_scoping() {
         // Block uses dynamic scoping: f sees Block's x=5, not the original x=100
-        let result = eval_str(
-            "x = 100; f = Function[{a}, x]; Block[{x = 5}, f[0]]"
-        );
+        let result = eval_str("x = 100; f = Function[{a}, x]; Block[{x = 5}, f[0]]");
         assert_eq!(result, Value::Integer(Integer::from(5)));
     }
 }

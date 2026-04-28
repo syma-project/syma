@@ -71,7 +71,13 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             "FreeQ requires exactly 2 arguments".to_string(),
         ));
     }
-    eprintln!("DEBUG FreeQ: args=[{}/{}, {}/{}]", args[0], args[0].type_name(), args[1], args[1].type_name());
+    eprintln!(
+        "DEBUG FreeQ: args=[{}/{}, {}/{}]",
+        args[0],
+        args[0].type_name(),
+        args[1],
+        args[1].type_name()
+    );
     let attr_checker = AttributeChecker::new(env.attributes.clone());
     fn expr_to_val(e: &Expr) -> Value {
         match e {
@@ -137,7 +143,14 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         }
     }
     let result = !contains_pattern(&args[0], &args[1], &attr_checker, env);
-    eprintln!("DEBUG FreeQ: args=[{}/ {:?}, {}/ {:?}], result={}", args[0], args[0].type_name(), args[1], args[1].type_name(), result);
+    eprintln!(
+        "DEBUG FreeQ: args=[{}/ {:?}, {}/ {:?}], result={}",
+        args[0],
+        args[0].type_name(),
+        args[1],
+        args[1].type_name(),
+        result
+    );
     Ok(Value::Bool(result))
 }
 
@@ -289,12 +302,29 @@ fn get_arg_dispatch_key(arg: &Expr) -> Option<String> {
         tc.clone().unwrap_or_else(|| default.to_string())
     };
     Some(match inner {
-        Expr::Blank { type_constraint: tc } => tc_or(tc, "Blank"),
-        Expr::NamedBlank { type_constraint: tc, .. } => tc_or(tc, "Blank"),
-        Expr::BlankSequence { type_constraint: tc, .. } => tc_or(tc, "BlankSequence"),
-        Expr::BlankNullSequence { type_constraint: tc, .. } => tc_or(tc, "BlankNullSequence"),
-        Expr::OptionalBlank { type_constraint: tc, .. } => tc_or(tc, "OptionalBlank"),
-        Expr::OptionalNamedBlank { type_constraint: tc, .. } => tc_or(tc, "OptionalBlank"),
+        Expr::Blank {
+            type_constraint: tc,
+        } => tc_or(tc, "Blank"),
+        Expr::NamedBlank {
+            type_constraint: tc,
+            ..
+        } => tc_or(tc, "Blank"),
+        Expr::BlankSequence {
+            type_constraint: tc,
+            ..
+        } => tc_or(tc, "BlankSequence"),
+        Expr::BlankNullSequence {
+            type_constraint: tc,
+            ..
+        } => tc_or(tc, "BlankNullSequence"),
+        Expr::OptionalBlank {
+            type_constraint: tc,
+            ..
+        } => tc_or(tc, "OptionalBlank"),
+        Expr::OptionalNamedBlank {
+            type_constraint: tc,
+            ..
+        } => tc_or(tc, "OptionalBlank"),
         Expr::Integer(_) => "Integer".to_string(),
         Expr::Real(_) => "Real".to_string(),
         Expr::Str(_) => "String".to_string(),

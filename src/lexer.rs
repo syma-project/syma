@@ -102,12 +102,12 @@ pub enum Token {
     Unset,       // =.  (clear definition)
 
     // ── Special ──
-    Quote,        // ' (quote)
-    Tilde,        // ~ (splice)
-    QuestionMark, // ?
-    Slot,                // #
-    SlotN(usize),        // #1, #2, ...
-    SlotSequence,        // ##
+    Quote,                // ' (quote)
+    Tilde,                // ~ (splice)
+    QuestionMark,         // ?
+    Slot,                 // #
+    SlotN(usize),         // #1, #2, ...
+    SlotSequence,         // ##
     SlotSequenceN(usize), // ##2, ##3, ...
 
     // ── Keywords ──
@@ -274,7 +274,6 @@ fn is_unicode_operator_char(c: char) -> bool {
     }
     false
 }
-
 
 pub struct Lexer {
     input: Vec<char>,
@@ -481,10 +480,7 @@ impl Lexer {
                 Some(c) if c.is_alphanumeric() => name.push(c),
                 Some(c) => {
                     return Err(LexError {
-                        message: format!(
-                            "Invalid character '{}' in named character reference",
-                            c
-                        ),
+                        message: format!("Invalid character '{}' in named character reference", c),
                         pos: self.pos,
                         line: self.line,
                         col: self.col,
@@ -1564,10 +1560,7 @@ mod tests {
     #[test]
     fn test_named_character_greek() {
         let toks = tokens(r"\[Alpha]");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("Alpha".to_string()), Token::Eof,]
-        );
+        assert_eq!(toks, vec![Token::Ident("Alpha".to_string()), Token::Eof,]);
     }
 
     #[test]
@@ -1584,10 +1577,7 @@ mod tests {
     fn test_named_character_prefix_to_ident() {
         // x\[Alpha] → xAlpha (named char in middle of identifier)
         let toks = tokens(r"x\[Alpha]");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("xAlpha".to_string()), Token::Eof,]
-        );
+        assert_eq!(toks, vec![Token::Ident("xAlpha".to_string()), Token::Eof,]);
     }
 
     #[test]
@@ -1644,10 +1634,7 @@ mod tests {
     fn test_named_character_pi() {
         // \[Pi] → Pi (the symbol, not π character)
         let toks = tokens(r"\[Pi]");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("Pi".to_string()), Token::Eof,]
-        );
+        assert_eq!(toks, vec![Token::Ident("Pi".to_string()), Token::Eof,]);
     }
 
     #[test]
@@ -1701,9 +1688,9 @@ mod tests {
     fn test_named_character_all_greek_lowercase() {
         // Spot-check every lowercase Greek letter works
         for name in [
-            "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
-            "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
-            "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega",
+            "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa",
+            "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi", "Rho", "Sigma", "Tau", "Upsilon", "Phi",
+            "Chi", "Psi", "Omega",
         ] {
             let input = format!("\\[{}]", name);
             let toks = tokens(&input);
@@ -1754,10 +1741,7 @@ mod tests {
     fn test_named_character_rule() {
         // \[Rule] → Rule (identifier, not -> operator)
         let toks = tokens(r"\[Rule]");
-        assert_eq!(
-            toks,
-            vec![Token::Ident("Rule".to_string()), Token::Eof,]
-        );
+        assert_eq!(toks, vec![Token::Ident("Rule".to_string()), Token::Eof,]);
     }
 
     #[test]

@@ -70,7 +70,10 @@ fn hold_complete_prevents_evaluation() {
 #[test]
 fn hold_complete_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[HoldComplete], HoldAllComplete]");
-    assert!(out.contains("True"), "HoldComplete should have HoldAllComplete, got: {out}");
+    assert!(
+        out.contains("True"),
+        "HoldComplete should have HoldAllComplete, got: {out}"
+    );
 }
 
 // ── ReleaseHold ──
@@ -105,10 +108,7 @@ fn release_hold_non_held() {
 #[test]
 fn release_hold_nested() {
     let out = syma_eval("ReleaseHold[Hold[1 + 2]]");
-    assert!(
-        out.contains("3"),
-        "ReleaseHold should evaluate, got: {out}"
-    );
+    assert!(out.contains("3"), "ReleaseHold should evaluate, got: {out}");
 }
 
 // ── HoldFirst ──
@@ -134,7 +134,10 @@ fn hold_first_setdelayed() {
 #[test]
 fn hold_first_set_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Set], HoldFirst]");
-    assert!(out.contains("True"), "Set should have HoldFirst, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Set should have HoldFirst, got: {out}"
+    );
 }
 
 #[test]
@@ -182,13 +185,19 @@ fn if_hold_all() {
 #[test]
 fn if_basic_true() {
     let out = syma_eval("If[True, a, b]");
-    assert!(out.contains("a"), "If True should return first branch, got: {out}");
+    assert!(
+        out.contains("a"),
+        "If True should return first branch, got: {out}"
+    );
 }
 
 #[test]
 fn if_basic_false() {
     let out = syma_eval("If[False, a, b]");
-    assert!(out.contains("b"), "If False should return second branch, got: {out}");
+    assert!(
+        out.contains("b"),
+        "If False should return second branch, got: {out}"
+    );
 }
 
 // ── Module/With/Block (HoldAll) ──
@@ -196,7 +205,10 @@ fn if_basic_false() {
 #[test]
 fn module_hold_all() {
     let out = syma_eval("MemberQ[Attributes[Module], HoldAll]");
-    assert!(out.contains("True"), "Module should have HoldAll, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Module should have HoldAll, got: {out}"
+    );
 }
 
 #[test]
@@ -208,7 +220,10 @@ fn with_hold_all() {
 #[test]
 fn block_hold_all() {
     let out = syma_eval("MemberQ[Attributes[Block], HoldAll]");
-    assert!(out.contains("True"), "Block should have HoldAll, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Block should have HoldAll, got: {out}"
+    );
 }
 
 // ── D and Integrate (HoldAll) ──
@@ -222,5 +237,8 @@ fn d_hold_all() {
 #[test]
 fn integrate_hold_all() {
     let out = syma_eval("MemberQ[Attributes[Integrate], HoldAll]");
-    assert!(out.contains("True"), "Integrate should have HoldAll, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Integrate should have HoldAll, got: {out}"
+    );
 }

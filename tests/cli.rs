@@ -605,4 +605,3 @@ fn test_flat_deeply_nested() {
         "Deeply nested Plus should be fully flattened, got: {out}"
     );
 }
-

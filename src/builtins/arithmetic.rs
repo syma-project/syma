@@ -188,7 +188,11 @@ pub fn builtin_times(args: &[Value]) -> Result<Value, EvalError> {
     // Flatten nested Times and collect all factors
     let mut factors: Vec<Value> = Vec::new();
     let mut push_factor = |v: Value| {
-        if let Value::Call { head, args: inner_args } = &v {
+        if let Value::Call {
+            head,
+            args: inner_args,
+        } = &v
+        {
             if head == "Times" {
                 for f in inner_args {
                     factors.push(f.clone());
@@ -251,7 +255,11 @@ fn flatten_times(v: Value) -> Result<Value, EvalError> {
         Value::Call { head, mut args } if head == "Times" => {
             let mut flat = Vec::new();
             for arg in args.drain(..) {
-                if let Value::Call { head: h, args: inner } = &arg {
+                if let Value::Call {
+                    head: h,
+                    args: inner,
+                } = &arg
+                {
                     if h == "Times" {
                         flat.extend(inner.clone());
                         continue;
@@ -280,7 +288,11 @@ fn try_combine_factors(a: &Value, b: &Value) -> Option<Value> {
     match (a, b) {
         // a^n * a^m → a^(n+m) when same base
         (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 })
-            if h1 == "Power" && a1.len() == 2 && h2 == "Power" && a2.len() == 2 && a1[0] == a2[0] =>
+            if h1 == "Power"
+                && a1.len() == 2
+                && h2 == "Power"
+                && a2.len() == 2
+                && a1[0] == a2[0] =>
         {
             let new_exp = add_power_exponents(&a1[1], &a2[1])?;
             Some(power_val(a1[0].clone(), new_exp))

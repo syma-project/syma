@@ -346,7 +346,10 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                     let idx = normalize_index(index, items.len())?;
                     current = items[idx].clone();
                 }
-                Value::Call { head, args: call_args } => {
+                Value::Call {
+                    head,
+                    args: call_args,
+                } => {
                     if index == 0 {
                         current = Value::Symbol(head.clone());
                     } else {
@@ -414,7 +417,10 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
         }
         // Part[Call[f, args], n] — index into call arguments
         // n = 0 → head f, n > 0 → args[n-1]
-        Value::Call { head, args: call_args } => {
+        Value::Call {
+            head,
+            args: call_args,
+        } => {
             let index = match &args[1] {
                 Value::Integer(n) => n.to_i64().unwrap_or(0),
                 _ => {
@@ -1823,6 +1829,342 @@ pub fn builtin_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 }
 
+/// AllApply[f, expr] (like f @@@ expr) replaces heads at level 2.
+/// For each level-1 item that is a List, applies f to its elements.
+/// Non-list level-1 items are passed as a single argument.
+pub fn builtin_all_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "AllApply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let items = get_list(&args[1])?;
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::List(sub_items) => {
+                let mut row = Vec::with_capacity(sub_items.len());
+                for sub in sub_items {
+                    row.push(apply_function(f, &[sub.clone()], env)?);
+                }
+                result.push(Value::List(row));
+            }
+            _ => {
+                result.push(apply_function(f, &[item.clone()], env)?);
+            }
+        }
+    }
+    Ok(Value::List(result))
+}
+
+/// MapAt[f, list, spec] — apply f at specified positions.
+/// spec = single Integer or List of Integers.
+pub fn builtin_map_at(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "MapAt requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let items = get_list(&args[1])?;
+    let positions: Vec<i64> = match &args[2] {
+        Value::Integer(n) => vec![n.to_i64().unwrap_or(0)],
+        Value::List(specs) => {
+            let mut pos = Vec::new();
+            for s in specs {
+                pos.push(s.to_integer().ok_or_else(|| EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: s.type_name().to_string(),
+                })?);
+            }
+            pos
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer or List of Integers".to_string(),
+                got: args[2].type_name().to_string(),
+            });
+        }
+    };
+    let mut result = items.to_vec();
+    for p in &positions {
+        let idx = normalize_index(*p, result.len())?;
+        result[idx] = apply_function(f, &[result[idx].clone()], env)?;
+    }
+    Ok(Value::List(result))
+}
+
+/// ApplyTo[expr, f] — returns f[expr] as a Call node.
+pub fn builtin_apply_to(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ApplyTo requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let expr = args[0].clone();
+    let head = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => args[1].type_name().to_string(),
+    };
+    Ok(Value::Call {
+        head,
+        args: vec![expr],
+    })
+}
+
+/// Thread[f[{a,b},{c,d}]] → {f[{a,c}], f[{b,d}]}.
+/// Transposes inner lists, rebuilds calls with same head.
+pub fn builtin_thread(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Thread requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Call {
+            head,
+            args: call_args,
+        } => {
+            if call_args.is_empty() {
+                return Ok(args[0].clone());
+            }
+            let mut lists: Vec<&[Value]> = Vec::with_capacity(call_args.len());
+            for arg in call_args {
+                match arg {
+                    Value::List(items) => lists.push(items.as_slice()),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "all arguments must be Lists of equal length".to_string(),
+                            got: arg.type_name().to_string(),
+                        });
+                    }
+                }
+            }
+            let len = lists[0].len();
+            for l in &lists[1..] {
+                if l.len() != len {
+                    return Err(EvalError::Error(
+                        "Thread: all lists must have the same length".to_string(),
+                    ));
+                }
+            }
+            let mut result = Vec::with_capacity(len);
+            for i in 0..len {
+                let threaded_args: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
+                result.push(Value::Call {
+                    head: head.clone(),
+                    args: threaded_args,
+                });
+            }
+            Ok(Value::List(result))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Call expression".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// Outer[f, l1, l2] — generalized outer product.
+pub fn builtin_outer(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "Outer requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let l1 = get_list(&args[1])?;
+    let l2 = get_list(&args[2])?;
+    let mut result = Vec::with_capacity(l1.len());
+    for a in l1 {
+        let mut row = Vec::with_capacity(l2.len());
+        for b in l2 {
+            row.push(apply_function(f, &[a.clone(), b.clone()], env)?);
+        }
+        result.push(Value::List(row));
+    }
+    Ok(Value::List(result))
+}
+
+/// Inner[f, g, l1, l2] — generalized inner product.
+/// g is the combining function, f is the element-wise function.
+pub fn builtin_inner(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let (f, g, l1, l2) = match args.len() {
+        3 => {
+            // Inner[f, l1, l2] — f is both element-wise and combining (default Times then Plus)
+            let l1 = get_list(&args[1])?;
+            let l2 = get_list(&args[2])?;
+            (&args[0], &Value::Symbol("Plus".to_string()), l1, l2)
+        }
+        4 => {
+            let f = &args[0];
+            let g = &args[1];
+            let l1 = get_list(&args[2])?;
+            let l2 = get_list(&args[3])?;
+            (f, g, l1, l2)
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "Inner requires 3 or 4 arguments".to_string(),
+            ));
+        }
+    };
+    if l1.len() != l2.len() {
+        return Err(EvalError::Error(
+            "Inner: lists must have the same length".to_string(),
+        ));
+    }
+    let mut products = Vec::with_capacity(l1.len());
+    for (a, b) in l1.iter().zip(l2.iter()) {
+        products.push(apply_function(f, &[a.clone(), b.clone()], env)?);
+    }
+    apply_function(g, &products, env)
+}
+
+/// MapIndexed[f, list] → {f[{1}, a], f[{2}, b], ...}
+pub fn builtin_map_indexed(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MapIndexed requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let items = get_list(&args[1])?;
+    let mut result = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let idx = Value::List(vec![Value::Integer(Integer::from((i + 1) as i64))]);
+        result.push(apply_function(f, &[idx, item.clone()], env)?);
+    }
+    Ok(Value::List(result))
+}
+
+/// MapThread[f, {{a,b,c}, {x,y,z}}] → {f[a,x], f[b,y], f[c,z]}
+pub fn builtin_map_thread(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MapThread requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let lists: Vec<&[Value]> = match &args[1] {
+        Value::List(specs) => {
+            let mut ls = Vec::new();
+            for s in specs {
+                ls.push(get_list(s)?);
+            }
+            ls
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List of Lists".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    if lists.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let len = lists[0].len();
+    for l in &lists[1..] {
+        if l.len() != len {
+            return Err(EvalError::Error(
+                "MapThread: all lists must have the same length".to_string(),
+            ));
+        }
+    }
+    let mut result = Vec::with_capacity(len);
+    for i in 0..len {
+        let threaded: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
+        result.push(apply_function(f, &threaded, env)?);
+    }
+    Ok(Value::List(result))
+}
+
+/// NestWhile[f, x, test] — keep applying f while test[result] is True.
+pub fn builtin_nest_while(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "NestWhile requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let test = &args[2];
+    let mut val = args[1].clone();
+    for _ in 0..10_000 {
+        val = apply_function(f, &[val], env)?;
+        let t = apply_function(test, &[val.clone()], env)?;
+        if !t.to_bool() {
+            return Ok(val);
+        }
+    }
+    Err(EvalError::Error(
+        "NestWhile: iteration limit (10000) reached".to_string(),
+    ))
+}
+
+/// NestWhileList[f, x, test] — same as NestWhile but returns all intermediates.
+pub fn builtin_nest_while_list(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "NestWhileList requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    let test = &args[2];
+    let mut val = args[1].clone();
+    let mut result = vec![val.clone()];
+    for _ in 0..10_000 {
+        val = apply_function(f, &[val], env)?;
+        result.push(val.clone());
+        let t = apply_function(test, &[val.clone()], env)?;
+        if !t.to_bool() {
+            return Ok(Value::List(result));
+        }
+    }
+    Err(EvalError::Error(
+        "NestWhileList: iteration limit (10000) reached".to_string(),
+    ))
+}
+
+/// FixedPointList[f, x, maxIter?] — same as FixedPoint but returns all intermediates.
+pub fn builtin_fixed_point_list(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error(
+            "FixedPointList requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let max_iter = if args.len() == 3 {
+        args[2].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[2].type_name().to_string(),
+        })? as usize
+    } else {
+        1000
+    };
+    let f = &args[0];
+    let mut val = args[1].clone();
+    let mut result = vec![val.clone()];
+    for _ in 0..max_iter {
+        let new_val = apply_function(f, &[val.clone()], env)?;
+        // Floating-point convergence check
+        if let (Value::Real(a), Value::Real(b)) = (&new_val, &val) {
+            let diff = rug::Float::with_val(crate::value::DEFAULT_PRECISION, a - b).abs();
+            if diff < 1e-12 {
+                result.push(new_val.clone());
+                return Ok(Value::List(result));
+            }
+        }
+        if new_val.struct_eq(&val) {
+            result.push(new_val.clone());
+            return Ok(Value::List(result));
+        }
+        val = new_val;
+        result.push(val.clone());
+    }
+    Ok(Value::List(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2260,5 +2602,651 @@ mod tests {
         let mat = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
         let result = builtin_part(&[mat, int(2), int(1)]).unwrap();
         assert_eq!(result, int(3));
+    }
+
+    // ── Env-aware function tests ──
+
+    fn test_env() -> Env {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        env
+    }
+
+    // ── Map tests ──
+
+    #[test]
+    fn test_map_empty() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_map(&[sqrt, list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_map_single() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_map(&[sqrt, list(vec![int(9)])], &env).unwrap();
+        assert_eq!(result, list(vec![int(3)]));
+    }
+
+    #[test]
+    fn test_map_multi() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_map(&[sqrt, list(vec![int(1), int(4), int(9)])], &env).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2), int(3)]));
+    }
+
+    #[test]
+    fn test_map_non_list() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_map(&[sqrt, int(5)], &env).is_err());
+    }
+
+    // ── Apply tests ──
+
+    #[test]
+    fn test_apply_list() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_apply(&[plus, list(vec![int(1), int(2), int(3)])], &env).unwrap();
+        assert_eq!(result, int(6));
+    }
+
+    #[test]
+    fn test_apply_single() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_apply(&[sqrt, int(9)], &env).unwrap();
+        assert_eq!(result, int(3));
+    }
+
+    #[test]
+    fn test_apply_empty_list() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_apply(&[plus, list(vec![])], &env).unwrap();
+        assert_eq!(result, int(0));
+    }
+
+    #[test]
+    fn test_apply_wrong_count() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(builtin_apply(&[plus], &env).is_err());
+    }
+
+    // ── Fold tests ──
+
+    #[test]
+    fn test_fold_with_init() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result =
+            builtin_fold(&[plus, int(0), list(vec![int(1), int(2), int(3)])], &env).unwrap();
+        assert_eq!(result, int(6));
+    }
+
+    #[test]
+    fn test_fold_no_init() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_fold(&[plus, list(vec![int(1), int(2), int(3)])], &env).unwrap();
+        assert_eq!(result, int(6));
+    }
+
+    #[test]
+    fn test_fold_single() {
+        let env = test_env();
+        let times = Value::Symbol("Times".to_string());
+        let result = builtin_fold(&[times, int(1), list(vec![int(5)])], &env).unwrap();
+        assert_eq!(result, int(5));
+    }
+
+    #[test]
+    fn test_fold_empty_no_init() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(builtin_fold(&[plus, list(vec![])], &env).is_err());
+    }
+
+    #[test]
+    fn test_fold_wrong_count() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(builtin_fold(&[plus], &env).is_err());
+    }
+
+    // ── Scan tests ──
+
+    #[test]
+    fn test_scan_multi() {
+        let env = test_env();
+        let length = Value::Symbol("Length".to_string());
+        let result = builtin_scan(&[length, list(vec![int(1), int(2)])], &env).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_scan_empty() {
+        let env = test_env();
+        let length = Value::Symbol("Length".to_string());
+        let result = builtin_scan(&[length, list(vec![])], &env).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_scan_non_list() {
+        let env = test_env();
+        let length = Value::Symbol("Length".to_string());
+        assert!(builtin_scan(&[length, int(5)], &env).is_err());
+    }
+
+    // ── Nest tests ──
+
+    #[test]
+    fn test_nest_sqr() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_nest(&[sqrt, int(81), int(2)], &env).unwrap();
+        assert_eq!(result, int(3));
+    }
+
+    #[test]
+    fn test_nest_zero() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_nest(&[sqrt, int(5), int(0)], &env).unwrap();
+        assert_eq!(result, int(5));
+    }
+
+    #[test]
+    fn test_nest_negative() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_nest(&[sqrt, int(5), int(-1)], &env).is_err());
+    }
+
+    #[test]
+    fn test_nest_wrong_count() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_nest(&[sqrt, int(5)], &env).is_err());
+    }
+
+    // ── FoldList tests ──
+
+    #[test]
+    fn test_foldlist_basic() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result =
+            builtin_fold_list(&[plus, int(0), list(vec![int(1), int(2), int(3)])], &env).unwrap();
+        assert_eq!(result, list(vec![int(0), int(1), int(3), int(6)]));
+    }
+
+    #[test]
+    fn test_foldlist_single() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_fold_list(&[plus, int(0), list(vec![int(5)])], &env).unwrap();
+        assert_eq!(result, list(vec![int(0), int(5)]));
+    }
+
+    #[test]
+    fn test_foldlist_empty() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_fold_list(&[plus, int(0), list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![int(0)]));
+    }
+
+    #[test]
+    fn test_foldlist_wrong() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(builtin_fold_list(&[plus], &env).is_err());
+    }
+
+    // ── NestList tests ──
+
+    #[test]
+    fn test_nestlist_basic() {
+        let env = test_env();
+        // NestList[Sqrt, 81, 2] → {81, 9, 3}
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_nest_list(&[sqrt, int(81), int(2)], &env).unwrap();
+        assert_eq!(result, list(vec![int(81), int(9), int(3)]));
+    }
+
+    #[test]
+    fn test_nestlist_zero() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_nest_list(&[sqrt, int(5), int(0)], &env).unwrap();
+        assert_eq!(result, list(vec![int(5)]));
+    }
+
+    #[test]
+    fn test_nestlist_one() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_nest_list(&[sqrt, int(81), int(1)], &env).unwrap();
+        assert_eq!(result, list(vec![int(81), int(9)]));
+    }
+
+    #[test]
+    fn test_nestlist_negative() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_nest_list(&[sqrt, int(5), int(-1)], &env).is_err());
+    }
+
+    // ── MapApply tests ──
+
+    #[test]
+    fn test_mapapply_nested() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_map_apply(
+            &[
+                plus,
+                list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, list(vec![int(3), int(7)]));
+    }
+
+    #[test]
+    fn test_mapapply_empty() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_map_apply(&[plus, list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_mapapply_flat() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_map_apply(&[sqrt, list(vec![int(9)])], &env).unwrap();
+        assert_eq!(result, list(vec![int(3)]));
+    }
+
+    #[test]
+    fn test_mapapply_mixed() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_map_apply(
+            &[
+                plus,
+                list(vec![
+                    list(vec![int(1), int(2)]),
+                    int(3),
+                    list(vec![int(4), int(5)]),
+                ]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, list(vec![int(3), int(3), int(9)]));
+    }
+
+    // ── New function tests ──
+
+    // AllApply
+
+    #[test]
+    fn test_allapply_basic() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_all_apply(
+            &[
+                sqrt,
+                list(vec![
+                    list(vec![int(1), int(4)]),
+                    list(vec![int(9), int(16)]),
+                ]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])])
+        );
+    }
+
+    #[test]
+    fn test_allapply_empty() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_all_apply(&[sqrt, list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_allapply_wrong_count() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_all_apply(&[sqrt], &env).is_err());
+    }
+
+    // MapAt
+
+    #[test]
+    fn test_mapat_single() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result =
+            builtin_map_at(&[sqrt, list(vec![int(1), int(16), int(3)]), int(2)], &env).unwrap();
+        assert_eq!(result, list(vec![int(1), int(4), int(3)]));
+    }
+
+    #[test]
+    fn test_mapat_multi_positions() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_map_at(
+            &[
+                sqrt,
+                list(vec![int(1), int(16), int(25)]),
+                list(vec![int(1), int(3)]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, list(vec![int(1), int(16), int(5)]));
+    }
+
+    #[test]
+    fn test_mapat_negative() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result =
+            builtin_map_at(&[sqrt, list(vec![int(1), int(16), int(4)]), int(-1)], &env).unwrap();
+        assert_eq!(result, list(vec![int(1), int(16), int(2)]));
+    }
+
+    #[test]
+    fn test_mapat_wrong_count() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        assert!(builtin_map_at(&[sqrt, list(vec![int(1)])], &env).is_err());
+    }
+
+    // ApplyTo
+
+    #[test]
+    fn test_applyto_symbol() {
+        let f = Value::Symbol("f".to_string());
+        let result = builtin_apply_to(&[int(5), f]).unwrap();
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![int(5)]
+            }
+        );
+    }
+
+    #[test]
+    fn test_applyto_wrong_count() {
+        assert!(builtin_apply_to(&[int(5)]).is_err());
+    }
+
+    // Thread
+
+    #[test]
+    fn test_thread_basic() {
+        let call = Value::Call {
+            head: "f".to_string(),
+            args: vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])],
+        };
+        let result = builtin_thread(&[call]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                Value::Call {
+                    head: "f".to_string(),
+                    args: vec![int(1), int(3)]
+                },
+                Value::Call {
+                    head: "f".to_string(),
+                    args: vec![int(2), int(4)]
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_thread_empty_call() {
+        let call = Value::Call {
+            head: "f".to_string(),
+            args: vec![],
+        };
+        let result = builtin_thread(&[call.clone()]).unwrap();
+        assert_eq!(result, call);
+    }
+
+    #[test]
+    fn test_thread_wrong_count() {
+        assert!(builtin_thread(&[]).is_err());
+    }
+
+    // Outer
+
+    #[test]
+    fn test_outer_basic() {
+        let env = test_env();
+        let times = Value::Symbol("Times".to_string());
+        let result = builtin_outer(
+            &[
+                times,
+                list(vec![int(1), int(2)]),
+                list(vec![int(3), int(4)]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![list(vec![int(3), int(4)]), list(vec![int(6), int(8)])])
+        );
+    }
+
+    #[test]
+    fn test_outer_empty() {
+        let env = test_env();
+        let times = Value::Symbol("Times".to_string());
+        let result =
+            builtin_outer(&[times, list(vec![]), list(vec![int(1), int(2)])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    // Inner
+
+    #[test]
+    fn test_inner_basic() {
+        let env = test_env();
+        let times = Value::Symbol("Times".to_string());
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_inner(
+            &[
+                times,
+                plus,
+                list(vec![int(1), int(2), int(3)]),
+                list(vec![int(4), int(5), int(6)]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, int(32));
+    }
+
+    #[test]
+    fn test_inner_length_mismatch() {
+        let env = test_env();
+        let times = Value::Symbol("Times".to_string());
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(
+            builtin_inner(
+                &[times, plus, list(vec![int(1)]), list(vec![int(1), int(2)])],
+                &env,
+            )
+            .is_err()
+        );
+    }
+
+    // MapIndexed
+
+    #[test]
+    fn test_mapindexed_basic() {
+        let env = test_env();
+        // MapIndexed calls f[{index}, item]. Plus[{1}, 1] = {2}, Plus[{2}, 2] = {4}, etc.
+        let plus = Value::Symbol("Plus".to_string());
+        let result =
+            builtin_map_indexed(&[plus, list(vec![int(1), int(2), int(3)])], &env).unwrap();
+        // Each Plus[{i}, v] = {i+v} wrapped in a list
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(2)]),
+                list(vec![int(4)]),
+                list(vec![int(6)])
+            ])
+        );
+    }
+
+    #[test]
+    fn test_mapindexed_empty() {
+        let env = test_env();
+        let length = Value::Symbol("Length".to_string());
+        let result = builtin_map_indexed(&[length, list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    // MapThread
+
+    #[test]
+    fn test_mapthread_basic() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_map_thread(
+            &[
+                plus,
+                list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, list(vec![int(4), int(6)]));
+    }
+
+    #[test]
+    fn test_mapthread_empty() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        let result = builtin_map_thread(&[plus, list(vec![])], &env).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_mapthread_length_mismatch() {
+        let env = test_env();
+        let plus = Value::Symbol("Plus".to_string());
+        assert!(
+            builtin_map_thread(
+                &[
+                    plus,
+                    list(vec![list(vec![int(1)]), list(vec![int(1), int(2)])])
+                ],
+                &env,
+            )
+            .is_err()
+        );
+    }
+
+    // NestWhile
+
+    #[test]
+    fn test_nestwhile_basic() {
+        // NestWhile[Sqrt, 81, IntegerQ] → Sqrt[81]=9 (int), Sqrt[9]=3 (int), Sqrt[3]=Call (not int, stop)
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let integerq = Value::Symbol("IntegerQ".to_string());
+        let result = builtin_nest_while(&[sqrt, int(81), integerq], &env).unwrap();
+        // Sqrt[3] is a Call node, not an Integer
+        assert!(
+            matches!(&result, Value::Call { head, args } if *head == "Sqrt" && args[0] == int(3))
+        );
+    }
+
+    #[test]
+    fn test_nestwhile_wrong_count() {
+        let env = test_env();
+        assert!(builtin_nest_while(&[int(1), int(2)], &env).is_err());
+    }
+
+    // NestWhileList
+
+    #[test]
+    fn test_nestwhilelist_basic() {
+        // NestWhileList[Sqrt, 81, IntegerQ] → {81, 9, 3, Sqrt[3]}
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let integerq = Value::Symbol("IntegerQ".to_string());
+        let result = builtin_nest_while_list(&[sqrt, int(81), integerq], &env).unwrap();
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 4); // 81, 9, 3, Sqrt[3]
+                assert_eq!(items[0], int(81));
+                assert_eq!(items[1], int(9));
+                assert_eq!(items[2], int(3));
+                assert!(
+                    matches!(&items[3], Value::Call { head, args } if *head == "Sqrt" && args[0] == int(3))
+                );
+            }
+            _ => panic!("Expected List, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_nestwhilelist_wrong_count() {
+        let env = test_env();
+        assert!(builtin_nest_while_list(&[int(1), int(2)], &env).is_err());
+    }
+
+    // FixedPointList
+
+    #[test]
+    fn test_fixedpointlist_basic() {
+        let env = test_env();
+        let sqrt = Value::Symbol("Sqrt".to_string());
+        let result = builtin_fixed_point_list(&[sqrt, int(81), int(5)], &env).unwrap();
+        assert!(matches!(&result, Value::List(items) if items.len() > 1));
+    }
+
+    #[test]
+    fn test_fixedpointlist_immediate_fixed() {
+        let env = test_env();
+        // Abs[5] = 5, already fixed point → list should be short
+        let abs = Value::Symbol("Abs".to_string());
+        let result = builtin_fixed_point_list(&[abs, int(5)], &env).unwrap();
+        let list = match result {
+            Value::List(items) => items,
+            _ => panic!(),
+        };
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_fixedpointlist_wrong_count() {
+        let env = test_env();
+        assert!(builtin_fixed_point_list(&[], &env).is_err());
     }
 }

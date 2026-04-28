@@ -91,8 +91,7 @@ mod tests {
 
     #[test]
     fn test_nc_multiply_three_args() {
-        let result =
-            builtin_nc_multiply(&[symbol("a"), symbol("b"), symbol("c")]).unwrap();
+        let result = builtin_nc_multiply(&[symbol("a"), symbol("b"), symbol("c")]).unwrap();
         assert_eq!(
             result,
             Value::Call {

@@ -74,47 +74,71 @@ fn one_identity_multi_arg_no_match() {
 #[test]
 fn one_identity_plus_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Plus], OneIdentity]");
-    assert!(out.contains("True"), "Plus should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Plus should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_times_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Times], OneIdentity]");
-    assert!(out.contains("True"), "Times should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Times should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_and_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[And], OneIdentity]");
-    assert!(out.contains("True"), "And should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "And should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_xor_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Xor], OneIdentity]");
-    assert!(out.contains("True"), "Xor should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Xor should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_equivalent_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Equivalent], OneIdentity]");
-    assert!(out.contains("True"), "Equivalent should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Equivalent should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_nccm_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[NonCommutativeMultiply], OneIdentity]");
-    assert!(out.contains("True"), "NCCM should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "NCCM should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_min_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Min], OneIdentity]");
-    assert!(out.contains("True"), "Min should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Min should have OneIdentity, got: {out}"
+    );
 }
 
 #[test]
 fn one_identity_max_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Max], OneIdentity]");
-    assert!(out.contains("True"), "Max should have OneIdentity, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Max should have OneIdentity, got: {out}"
+    );
 }

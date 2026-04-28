@@ -10,11 +10,7 @@ use crate::pattern::{
 use crate::value::*;
 
 /// Evaluate RHS expression with pattern bindings in a child environment.
-fn apply_rhs_pattern(
-    rhs: &Value,
-    bindings: &Bindings,
-    env: &Env,
-) -> Result<Value, EvalError> {
+fn apply_rhs_pattern(rhs: &Value, bindings: &Bindings, env: &Env) -> Result<Value, EvalError> {
     if let Value::Pattern(rhs_expr) = rhs {
         let child_env = env.child();
         for (name, val) in bindings {
@@ -31,13 +27,17 @@ fn apply_rhs_pattern(
 fn extract_value_dispatch_key(value: &Value) -> (String, Vec<Option<String>>) {
     match value {
         Value::Call { head, args } => {
-            let arg_keys: Vec<Option<String>> =
-                args.iter().map(|a| Some(a.type_name().to_string())).collect();
+            let arg_keys: Vec<Option<String>> = args
+                .iter()
+                .map(|a| Some(a.type_name().to_string()))
+                .collect();
             (head.clone(), arg_keys)
         }
         Value::List(items) => {
-            let arg_keys: Vec<Option<String>> =
-                items.iter().map(|a| Some(a.type_name().to_string())).collect();
+            let arg_keys: Vec<Option<String>> = items
+                .iter()
+                .map(|a| Some(a.type_name().to_string()))
+                .collect();
             ("List".to_string(), arg_keys)
         }
         _ => (value.type_name().to_string(), vec![]),
@@ -202,7 +202,11 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
             }
             Ok(value.clone())
         }
-        Value::Rule { lhs, rhs, delayed: _ } => {
+        Value::Rule {
+            lhs,
+            rhs,
+            delayed: _,
+        } => {
             // Extract LHS as Pattern, or fall back to structural match
             let lhs_expr = if let Value::Pattern(ref lhs_expr) = **lhs {
                 lhs_expr.clone()

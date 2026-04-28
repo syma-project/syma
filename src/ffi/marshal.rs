@@ -396,14 +396,8 @@ pub fn value_to_json_full(v: &Value) -> serde_json::Value {
                 "coeffs".into(),
                 JVal::Array(coefficients.iter().map(value_to_json_full).collect()),
             );
-            m.insert(
-                "nmin".into(),
-                JVal::Number((*min_exponent as i64).into()),
-            );
-            m.insert(
-                "nmax".into(),
-                JVal::Number((*max_exponent as i64).into()),
-            );
+            m.insert("nmin".into(), JVal::Number((*min_exponent as i64).into()));
+            m.insert("nmax".into(), JVal::Number((*max_exponent as i64).into()));
             m.insert("den".into(), JVal::Number((*denominator as i64).into()));
             JVal::Object(m)
         }

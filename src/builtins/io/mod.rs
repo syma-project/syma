@@ -374,8 +374,7 @@ pub fn builtin_move_file(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    std::fs::rename(&src, &dst)
-        .map_err(|e| EvalError::Error(format!("MoveFile failed: {}", e)))?;
+    std::fs::rename(&src, &dst).map_err(|e| EvalError::Error(format!("MoveFile failed: {}", e)))?;
     Ok(Value::Str(dst))
 }
 
@@ -419,10 +418,7 @@ pub fn builtin_timing(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         Ok(v) => v,
         Err(_) => args[0].clone(),
     };
-    let seconds = rug::Float::with_val(
-        crate::value::DEFAULT_PRECISION,
-        elapsed.as_secs_f64(),
-    );
+    let seconds = rug::Float::with_val(crate::value::DEFAULT_PRECISION, elapsed.as_secs_f64());
     Ok(Value::List(vec![Value::Real(seconds), evaluated]))
 }
 
@@ -921,9 +917,17 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
             Value::Str(path.to_string()),
             Value::Str(content.to_string()),
         ]);
-        assert!(write_result.is_ok(), "FileWrite should succeed: {:?}", write_result);
+        assert!(
+            write_result.is_ok(),
+            "FileWrite should succeed: {:?}",
+            write_result
+        );
         let read_result = builtin_file_read(&[Value::Str(path.to_string())]);
-        assert!(read_result.is_ok(), "FileRead should succeed: {:?}", read_result);
+        assert!(
+            read_result.is_ok(),
+            "FileRead should succeed: {:?}",
+            read_result
+        );
         let val = read_result.unwrap();
         assert_eq!(val, Value::Str(content.to_string()));
         fs::remove_file(path).ok();
@@ -944,10 +948,8 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let result = builtin_file_read(&[Value::Integer(rug::Integer::from(42))]);
         assert!(matches!(result, Err(EvalError::NoMatch { .. })));
         // Too many args
-        let result = builtin_file_read(&[
-            Value::Str("/tmp/x.txt".into()),
-            Value::Str("extra".into()),
-        ]);
+        let result =
+            builtin_file_read(&[Value::Str("/tmp/x.txt".into()), Value::Str("extra".into())]);
         assert!(matches!(result, Err(EvalError::NoMatch { .. })));
     }
 
@@ -986,7 +988,8 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let result = builtin_file_exists(&[Value::Str(path.to_string())]).unwrap();
         assert_eq!(result, Value::Bool(true));
 
-        let result = builtin_file_exists(&[Value::Str("/nonexistent_file_abc.txt".into())]).unwrap();
+        let result =
+            builtin_file_exists(&[Value::Str("/nonexistent_file_abc.txt".into())]).unwrap();
         assert_eq!(result, Value::Bool(false));
 
         // Wrong arg count
@@ -1022,10 +1025,7 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let src = "/tmp/test_syma_copy_src.txt";
         let dst = "/tmp/test_syma_copy_dst.txt";
         fs::write(src, "copy me").ok();
-        let result = builtin_copy_file(&[
-            Value::Str(src.to_string()),
-            Value::Str(dst.to_string()),
-        ]);
+        let result = builtin_copy_file(&[Value::Str(src.to_string()), Value::Str(dst.to_string())]);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::Integer(n) => {
@@ -1050,10 +1050,7 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let src = "/tmp/test_syma_move_src.txt";
         let dst = "/tmp/test_syma_move_dst.txt";
         fs::write(src, "move me").ok();
-        let result = builtin_move_file(&[
-            Value::Str(src.to_string()),
-            Value::Str(dst.to_string()),
-        ]);
+        let result = builtin_move_file(&[Value::Str(src.to_string()), Value::Str(dst.to_string())]);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Value::Str(dst.to_string()));
         assert!(!std::path::Path::new(src).exists());

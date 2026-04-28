@@ -1,6 +1,6 @@
+use crate::env::Env;
 use crate::eval::eval;
 use crate::eval::table::value_to_expr;
-use crate::env::Env;
 use crate::value::{EvalError, Value};
 use rug::{Float, Integer};
 
@@ -9,7 +9,9 @@ use rug::{Float, Integer};
 /// EqQ[a, b] — structural equality
 pub fn builtin_eq_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("EqQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "EqQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(args[0].struct_eq(&args[1])))
 }
@@ -17,7 +19,9 @@ pub fn builtin_eq_q(args: &[Value]) -> Result<Value, EvalError> {
 /// NeQ[a, b] — structural inequality
 pub fn builtin_ne_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("NeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "NeQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(!args[0].struct_eq(&args[1])))
 }
@@ -25,65 +29,97 @@ pub fn builtin_ne_q(args: &[Value]) -> Result<Value, EvalError> {
 /// GtQ[a, b] — numeric a > b (False if non-numeric)
 pub fn builtin_gt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("GtQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "GtQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a > b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a > b).unwrap_or(false),
+    ))
 }
 
 /// LtQ[a, b] — numeric a < b (False if non-numeric)
 pub fn builtin_lt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("LtQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "LtQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a < b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a < b).unwrap_or(false),
+    ))
 }
 
 /// GeQ[a, b] — numeric a >= b (False if non-numeric)
 pub fn builtin_ge_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("GeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "GeQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a >= b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a >= b).unwrap_or(false),
+    ))
 }
 
 /// LeQ[a, b] — numeric a <= b (False if non-numeric)
 pub fn builtin_le_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("LeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "LeQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a <= b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a <= b).unwrap_or(false),
+    ))
 }
 
 /// IGtQ[a, b] — integer a > b
 pub fn builtin_igt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IGtQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IGtQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a > b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a > b).unwrap_or(false),
+    ))
 }
 
 /// ILtQ[a, b] — integer a < b
 pub fn builtin_ilt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("ILtQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "ILtQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a < b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a < b).unwrap_or(false),
+    ))
 }
 
 /// IGeQ[a, b] — integer a >= b
 pub fn builtin_ige_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IGeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IGeQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a >= b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a >= b).unwrap_or(false),
+    ))
 }
 
 /// ILeQ[a, b] — integer a <= b
 pub fn builtin_ile_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("ILeQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "ILeQ requires exactly 2 arguments".to_string(),
+        ));
     }
-    Ok(Value::Bool(compare_numeric(&args[0], &args[1], |a, b| a <= b).unwrap_or(false)))
+    Ok(Value::Bool(
+        compare_numeric(&args[0], &args[1], |a, b| a <= b).unwrap_or(false),
+    ))
 }
 
 // ─── Sign Predicates ───
@@ -91,7 +127,9 @@ pub fn builtin_ile_q(args: &[Value]) -> Result<Value, EvalError> {
 /// PosQ[a] — a > 0
 pub fn builtin_pos_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("PosQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "PosQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(
         compare_numeric(&args[0], &Value::Integer(Integer::from(0)), |a, b| a > b).unwrap_or(false),
@@ -101,7 +139,9 @@ pub fn builtin_pos_q(args: &[Value]) -> Result<Value, EvalError> {
 /// NegQ[a] — a < 0
 pub fn builtin_neg_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("NegQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "NegQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(
         compare_numeric(&args[0], &Value::Integer(Integer::from(0)), |a, b| a < b).unwrap_or(false),
@@ -113,7 +153,9 @@ pub fn builtin_neg_q(args: &[Value]) -> Result<Value, EvalError> {
 /// TrueQ[a] — is a literally True
 pub fn builtin_true_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("TrueQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "TrueQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(matches!(&args[0], Value::Bool(true))))
 }
@@ -121,7 +163,9 @@ pub fn builtin_true_q(args: &[Value]) -> Result<Value, EvalError> {
 /// FalseQ[a] — is a literally False
 pub fn builtin_false_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("FalseQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "FalseQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(matches!(&args[0], Value::Bool(false))))
 }
@@ -129,7 +173,9 @@ pub fn builtin_false_q(args: &[Value]) -> Result<Value, EvalError> {
 /// OddQ[a] — is a an odd integer
 pub fn builtin_odd_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("OddQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "OddQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) => Ok(Value::Bool(n.is_odd())),
@@ -140,7 +186,9 @@ pub fn builtin_odd_q(args: &[Value]) -> Result<Value, EvalError> {
 /// HalfIntegerQ[a] — is a a half-integer (n + 1/2)
 pub fn builtin_half_integer_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("HalfIntegerQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "HalfIntegerQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Rational(r) => {
@@ -171,17 +219,22 @@ pub fn builtin_half_integer_q(args: &[Value]) -> Result<Value, EvalError> {
 /// RationalQ[a] — is a a rational number (Integer or Rational)
 pub fn builtin_rational_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("RationalQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "RationalQ requires exactly 1 argument".to_string(),
+        ));
     }
-    Ok(Value::Bool(
-        matches!(&args[0], Value::Integer(_) | Value::Rational(_)),
-    ))
+    Ok(Value::Bool(matches!(
+        &args[0],
+        Value::Integer(_) | Value::Rational(_)
+    )))
 }
 
 /// IntegersQ[{a, b, ...}] — all elements are integers
 pub fn builtin_integers_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("IntegersQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "IntegersQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::List(items) => Ok(Value::Bool(
@@ -195,15 +248,15 @@ pub fn builtin_integers_q(args: &[Value]) -> Result<Value, EvalError> {
 /// PolyQ[expr, x] — expr is a polynomial in x
 pub fn builtin_poly_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 1 || args.len() > 2 {
-        return Err(EvalError::Error("PolyQ requires 1 or 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "PolyQ requires 1 or 2 arguments".to_string(),
+        ));
     }
     // Simple heuristic: no denominators containing the variable
-    let var = args
-        .get(1)
-        .and_then(|v| match v {
-            Value::Symbol(s) => Some(s.clone()),
-            _ => None,
-        });
+    let var = args.get(1).and_then(|v| match v {
+        Value::Symbol(s) => Some(s.clone()),
+        _ => None,
+    });
     let result = match var {
         Some(ref vx) => is_polynomial(&args[0], vx),
         None => is_polynomial_any(&args[0]),
@@ -214,9 +267,14 @@ pub fn builtin_poly_q(args: &[Value]) -> Result<Value, EvalError> {
 /// AtomQ[a] — is a an atomic value (not a Call or List)
 pub fn builtin_atom_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("AtomQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "AtomQ requires exactly 1 argument".to_string(),
+        ));
     }
-    Ok(Value::Bool(!matches!(&args[0], Value::Call { .. } | Value::List(_))))
+    Ok(Value::Bool(!matches!(
+        &args[0],
+        Value::Call { .. } | Value::List(_)
+    )))
 }
 
 // ─── Core Rubi Helpers ───
@@ -310,7 +368,9 @@ pub fn builtin_known_cotangent_integrand_q(args: &[Value]) -> Result<Value, Eval
 /// Simp[expr, x] — simplify (delegate to Simplify)
 pub fn builtin_simp(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 1 {
-        return Err(EvalError::Error("Simp requires at least 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Simp requires at least 1 argument".to_string(),
+        ));
     }
     crate::builtins::symbolic::builtin_simplify(&[args[0].clone()])
 }
@@ -318,21 +378,28 @@ pub fn builtin_simp(args: &[Value]) -> Result<Value, EvalError> {
 /// Rt[a, n] — positive real nth root: a^(1/n)
 pub fn builtin_rt(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Rt requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Rt requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Call {
         head: "Power".to_string(),
-        args: vec![args[0].clone(), Value::Call {
-            head: "Power".to_string(),
-            args: vec![args[1].clone(), Value::Integer(Integer::from(-1))],
-        }],
+        args: vec![
+            args[0].clone(),
+            Value::Call {
+                head: "Power".to_string(),
+                args: vec![args[1].clone(), Value::Integer(Integer::from(-1))],
+            },
+        ],
     })
 }
 
 /// FracPart[x] — fractional part (x - IntegerPart[x])
 pub fn builtin_frac_part(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("FracPart requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "FracPart requires exactly 1 argument".to_string(),
+        ));
     }
     // Return as Call: x - IntegerPart[x]
     Ok(Value::Call {
@@ -377,8 +444,7 @@ pub fn builtin_coefficient(args: &[Value]) -> Result<Value, EvalError> {
             _ => Integer::from(1),
         })
         .unwrap_or(Integer::from(1));
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(expr, &var);
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(expr, &var);
     let n_us = n.to_usize().unwrap_or(coeffs.len());
     if n_us >= coeffs.len() {
         return Ok(Value::Integer(Integer::from(0)));
@@ -538,7 +604,9 @@ pub fn builtin_remove_content(args: &[Value]) -> Result<Value, EvalError> {
 /// IntPart[x] — integer part (alias to IntegerPart)
 pub fn builtin_int_part(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("IntPart requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "IntPart requires exactly 1 argument".to_string(),
+        ));
     }
     crate::builtins::math::builtin_integer_part(&[args[0].clone()])
 }
@@ -546,7 +614,9 @@ pub fn builtin_int_part(args: &[Value]) -> Result<Value, EvalError> {
 /// LinearQ[expr, x] — is expr linear in x
 pub fn builtin_linear_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("LinearQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "LinearQ requires exactly 2 arguments".to_string(),
+        ));
     }
     let var = match &args[1] {
         Value::Symbol(s) => s.clone(),
@@ -557,20 +627,19 @@ pub fn builtin_linear_q(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
     Ok(Value::Bool(coeffs.len() >= 1 && coeffs.len() <= 2))
 }
 
 /// SumQ[expr] — is expr a sum (Plus with multiple args)
 pub fn builtin_sum_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("SumQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "SumQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, args } if head == "Plus" && args.len() > 1 => {
-            Ok(Value::Bool(true))
-        }
+        Value::Call { head, args } if head == "Plus" && args.len() > 1 => Ok(Value::Bool(true)),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -578,12 +647,12 @@ pub fn builtin_sum_q(args: &[Value]) -> Result<Value, EvalError> {
 /// NonsumQ[expr] — is expr NOT a sum
 pub fn builtin_nonsum_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("NonsumQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "NonsumQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, args } if head == "Plus" && args.len() > 1 => {
-            Ok(Value::Bool(false))
-        }
+        Value::Call { head, args } if head == "Plus" && args.len() > 1 => Ok(Value::Bool(false)),
         _ => Ok(Value::Bool(true)),
     }
 }
@@ -591,14 +660,15 @@ pub fn builtin_nonsum_q(args: &[Value]) -> Result<Value, EvalError> {
 /// Numerator[expr] — numerator of expression
 pub fn builtin_numerator(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Numerator requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Numerator requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            Ok(args[0].clone())
-        }
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[0].clone()),
         Value::Call { head, args }
-            if head == "Power" && args.len() == 2
+            if head == "Power"
+                && args.len() == 2
                 && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
         {
             Ok(Value::Integer(Integer::from(1)))
@@ -610,14 +680,15 @@ pub fn builtin_numerator(args: &[Value]) -> Result<Value, EvalError> {
 /// Denominator[expr] — denominator of expression
 pub fn builtin_denominator(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Denominator requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Denominator requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            Ok(args[1].clone())
-        }
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[1].clone()),
         Value::Call { head, args }
-            if head == "Power" && args.len() == 2
+            if head == "Power"
+                && args.len() == 2
                 && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
         {
             Ok(args[0].clone())
@@ -639,7 +710,9 @@ pub fn builtin_denom(args: &[Value]) -> Result<Value, EvalError> {
 /// Exponent[expr, base] — exponent of base in expr
 pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Exponent requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Exponent requires exactly 2 arguments".to_string(),
+        ));
     }
     match &args[0] {
         Value::Call { head, args }
@@ -655,7 +728,9 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
 /// Sign[x] — sign of x
 pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Sign requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Sign requires exactly 1 argument".to_string(),
+        ));
     }
     let zero = Float::with_val(crate::value::DEFAULT_PRECISION, 0);
     match &args[0] {
@@ -767,9 +842,7 @@ pub fn builtin_module(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// With HoldAll, only the selected branch is evaluated.
 pub fn builtin_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(EvalError::Error(
-            "If requires 2 or 3 arguments".to_string(),
-        ));
+        return Err(EvalError::Error("If requires 2 or 3 arguments".to_string()));
     }
     // Evaluate condition first
     let cond_expr = match &args[0] {
@@ -824,7 +897,9 @@ pub fn builtin_perfect_square_q(args: &[Value]) -> Result<Value, EvalError> {
 /// BinomialQ[expr, x] — is expr a binomial in x
 pub fn builtin_binomial_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("BinomialQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "BinomialQ requires exactly 2 arguments".to_string(),
+        ));
     }
     let var = match &args[1] {
         Value::Symbol(s) => s.clone(),
@@ -835,16 +910,20 @@ pub fn builtin_binomial_q(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    let non_zero = coeffs.iter().filter(|c| !matches!(c, Value::Integer(n) if n.is_zero())).count();
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let non_zero = coeffs
+        .iter()
+        .filter(|c| !matches!(c, Value::Integer(n) if n.is_zero()))
+        .count();
     Ok(Value::Bool(non_zero == 2))
 }
 
 /// IntBinomialQ[expr, x] — is expr a binomial integrand
 pub fn builtin_int_binomial_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IntBinomialQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IntBinomialQ requires exactly 2 arguments".to_string(),
+        ));
     }
     // Simplified: check if expr is a binomial form
     builtin_binomial_q(args)
@@ -858,7 +937,9 @@ pub fn builtin_linear_match_q(args: &[Value]) -> Result<Value, EvalError> {
 /// QuadraticQ[expr, x] — is expr a quadratic in x
 pub fn builtin_quadratic_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("QuadraticQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "QuadraticQ requires exactly 2 arguments".to_string(),
+        ));
     }
     let var = match &args[1] {
         Value::Symbol(s) => s.clone(),
@@ -869,16 +950,20 @@ pub fn builtin_quadratic_q(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    let non_zero = coeffs.iter().filter(|c| !matches!(c, Value::Integer(n) if n.is_zero())).count();
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let non_zero = coeffs
+        .iter()
+        .filter(|c| !matches!(c, Value::Integer(n) if n.is_zero()))
+        .count();
     Ok(Value::Bool(non_zero >= 1 && coeffs.len() >= 3))
 }
 
 /// FunctionOfQ[expr, var] — does expr depend on var
 pub fn builtin_function_of_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("FunctionOfQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "FunctionOfQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(!is_constant_wrt(&args[0], &args[1])))
 }
@@ -917,7 +1002,9 @@ pub fn builtin_derivative_divides(args: &[Value]) -> Result<Value, EvalError> {
 /// SimplerQ[expr1, expr2, x] — is expr1 simpler than expr2
 pub fn builtin_simpler_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
-        return Err(EvalError::Error("SimplerQ requires at least 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "SimplerQ requires at least 2 arguments".to_string(),
+        ));
     }
     // Stub: compare by structural size
     let s1 = leaf_count(&args[0]);
@@ -948,7 +1035,9 @@ pub fn builtin_sum_simpler_q(args: &[Value]) -> Result<Value, EvalError> {
 /// NiceSqrtQ[expr] — stub
 pub fn builtin_nice_sqrt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("NiceSqrtQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "NiceSqrtQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(true))
 }
@@ -966,7 +1055,9 @@ pub fn builtin_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
 /// IntQuadraticQ[expr, x] — is expr a quadratic integrand
 pub fn builtin_int_quadratic_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IntQuadraticQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IntQuadraticQ requires exactly 2 arguments".to_string(),
+        ));
     }
     builtin_quadratic_q(args)
 }
@@ -974,7 +1065,9 @@ pub fn builtin_int_quadratic_q(args: &[Value]) -> Result<Value, EvalError> {
 /// IntLinearQ[expr, x] — is expr a linear integrand
 pub fn builtin_int_linear_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IntLinearQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IntLinearQ requires exactly 2 arguments".to_string(),
+        ));
     }
     builtin_linear_q(args)
 }
@@ -982,7 +1075,9 @@ pub fn builtin_int_linear_q(args: &[Value]) -> Result<Value, EvalError> {
 /// Expon[expr, x] — exponential order of expr in x
 pub fn builtin_expon(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Expon requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Expon requires exactly 2 arguments".to_string(),
+        ));
     }
     // Stub: return 0
     Ok(Value::Integer(Integer::from(0)))
@@ -1019,9 +1114,7 @@ pub fn builtin_subst_for_inverse_function(args: &[Value]) -> Result<Value, EvalE
 }
 
 /// SubstForFractionalPowerOfLinear[result, expr, x] — stub
-pub fn builtin_subst_for_fractional_power_of_linear(
-    args: &[Value],
-) -> Result<Value, EvalError> {
+pub fn builtin_subst_for_fractional_power_of_linear(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
             "SubstForFractionalPowerOfLinear requires at least 3 arguments".to_string(),
@@ -1068,8 +1161,7 @@ pub fn builtin_discriminant(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
     if coeffs.len() == 3 {
         // Quadratic: b^2 - 4ac
         if let (Value::Integer(c), Value::Integer(b), Value::Integer(a)) =
@@ -1098,7 +1190,9 @@ pub fn builtin_quadratic_match_q(args: &[Value]) -> Result<Value, EvalError> {
 /// TrinomialQ[expr, x] — is expr a trinomial
 pub fn builtin_trinomial_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("TrinomialQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "TrinomialQ requires exactly 2 arguments".to_string(),
+        ));
     }
     let var = match &args[1] {
         Value::Symbol(s) => s.clone(),
@@ -1109,9 +1203,11 @@ pub fn builtin_trinomial_q(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    let non_zero = coeffs.iter().filter(|c| !matches!(c, Value::Integer(n) if n.is_zero())).count();
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let non_zero = coeffs
+        .iter()
+        .filter(|c| !matches!(c, Value::Integer(n) if n.is_zero()))
+        .count();
     Ok(Value::Bool(non_zero == 3))
 }
 
@@ -1128,7 +1224,9 @@ pub fn builtin_generalized_trinomial_q(args: &[Value]) -> Result<Value, EvalErro
 /// LinearPairQ[expr, x] — stub
 pub fn builtin_linear_pair_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("LinearPairQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "LinearPairQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(false))
 }
@@ -1150,11 +1248,8 @@ pub fn builtin_power_of_linear_q(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
     match &args[0] {
-        Value::Call { head, args }
-            if head == "Power" && args.len() == 2 =>
-        {
-            let inner_coeffs =
-                crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let inner_coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
             Ok(Value::Bool(inner_coeffs.len() <= 2))
         }
         _ => Ok(Value::Bool(false)),
@@ -1244,16 +1339,26 @@ pub fn builtin_function_of_exponential(args: &[Value]) -> Result<Value, EvalErro
 /// TrigQ[expr] — is expr a trig function
 pub fn builtin_trig_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("TrigQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "TrigQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, .. } => {
-            Ok(Value::Bool(matches!(
-                head.as_str(),
-                "Sin" | "Cos" | "Tan" | "Cot" | "Sec" | "Csc"
-                    | "ArcSin" | "ArcCos" | "ArcTan" | "ArcCot" | "ArcSec" | "ArcCsc"
-            )))
-        }
+        Value::Call { head, .. } => Ok(Value::Bool(matches!(
+            head.as_str(),
+            "Sin"
+                | "Cos"
+                | "Tan"
+                | "Cot"
+                | "Sec"
+                | "Csc"
+                | "ArcSin"
+                | "ArcCos"
+                | "ArcTan"
+                | "ArcCot"
+                | "ArcSec"
+                | "ArcCsc"
+        ))),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1261,15 +1366,15 @@ pub fn builtin_trig_q(args: &[Value]) -> Result<Value, EvalError> {
 /// HyperbolicQ[expr] — is expr a hyperbolic function
 pub fn builtin_hyperbolic_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("HyperbolicQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "HyperbolicQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Call { head, .. } => {
-            Ok(Value::Bool(matches!(
-                head.as_str(),
-                "Sinh" | "Cosh" | "Tanh" | "Coth" | "Sech" | "Csch"
-            )))
-        }
+        Value::Call { head, .. } => Ok(Value::Bool(matches!(
+            head.as_str(),
+            "Sinh" | "Cosh" | "Tanh" | "Coth" | "Sech" | "Csch"
+        ))),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1282,13 +1387,18 @@ pub fn builtin_inverse_function_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Call { head, .. } => {
-            Ok(Value::Bool(matches!(
-                head.as_str(),
-                "ArcSin" | "ArcCos" | "ArcTan" | "ArcCot"
-                    | "ArcSec" | "ArcCsc" | "ArcSinh" | "ArcCosh" | "ArcTanh"
-            )))
-        }
+        Value::Call { head, .. } => Ok(Value::Bool(matches!(
+            head.as_str(),
+            "ArcSin"
+                | "ArcCos"
+                | "ArcTan"
+                | "ArcCot"
+                | "ArcSec"
+                | "ArcCsc"
+                | "ArcSinh"
+                | "ArcCosh"
+                | "ArcTanh"
+        ))),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1296,7 +1406,9 @@ pub fn builtin_inverse_function_q(args: &[Value]) -> Result<Value, EvalError> {
 /// PowerQ[expr] — is expr a power
 pub fn builtin_power_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("PowerQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "PowerQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Call { head, .. } if head == "Power" => Ok(Value::Bool(true)),
@@ -1307,7 +1419,9 @@ pub fn builtin_power_q(args: &[Value]) -> Result<Value, EvalError> {
 /// ProductQ[expr] — is expr a product
 pub fn builtin_product_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ProductQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ProductQ requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Call { head, .. } if head == "Times" => Ok(Value::Bool(true)),
@@ -1339,7 +1453,9 @@ pub fn builtin_function_of_trig_of_linear_q(args: &[Value]) -> Result<Value, Eva
 /// InertTrigQ[expr] — stub
 pub fn builtin_inert_trig_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("InertTrigQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "InertTrigQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(false))
 }
@@ -1347,7 +1463,9 @@ pub fn builtin_inert_trig_q(args: &[Value]) -> Result<Value, EvalError> {
 /// InertTrigFreeQ[expr] — stub
 pub fn builtin_inert_trig_free_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("InertTrigFreeQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "InertTrigFreeQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(true))
 }
@@ -1419,7 +1537,9 @@ pub fn builtin_cannot_integrate(args: &[Value]) -> Result<Value, EvalError> {
 /// ShowStep[result, rule, expr, x] — stub
 pub fn builtin_show_step(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 4 {
-        return Err(EvalError::Error("ShowStep requires at least 4 arguments".to_string()));
+        return Err(EvalError::Error(
+            "ShowStep requires at least 4 arguments".to_string(),
+        ));
     }
     Ok(args[0].clone())
 }
@@ -1467,7 +1587,9 @@ pub fn builtin_pseudo_binomial_pair_q(args: &[Value]) -> Result<Value, EvalError
 /// IntSum[result, expr, x] — stub
 pub fn builtin_int_sum(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
-        return Err(EvalError::Error("IntSum requires at least 3 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IntSum requires at least 3 arguments".to_string(),
+        ));
     }
     Ok(args[0].clone())
 }
@@ -1485,7 +1607,9 @@ pub fn builtin_int_hide(args: &[Value]) -> Result<Value, EvalError> {
 /// EveryQ[list, pattern] — all elements match pattern
 pub fn builtin_every_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("EveryQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "EveryQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(true))
 }
@@ -1516,8 +1640,7 @@ pub fn builtin_binomial_degree(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let coeffs =
-        crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
     Ok(Value::Integer(Integer::from(coeffs.len() - 1)))
 }
 
@@ -1684,7 +1807,9 @@ pub fn builtin_simpler_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
 /// TrigonometricSimplifyQ[expr] — stub
 pub fn builtin_trig_simplify_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("TrigSimplifyQ requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "TrigSimplifyQ requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(Value::Bool(false))
 }
@@ -1692,7 +1817,9 @@ pub fn builtin_trig_simplify_q(args: &[Value]) -> Result<Value, EvalError> {
 /// TrigonometricSimplify[expr] — stub
 pub fn builtin_trig_simplify(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("TrigSimplify requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "TrigSimplify requires exactly 1 argument".to_string(),
+        ));
     }
     Ok(args[0].clone())
 }
@@ -1750,7 +1877,9 @@ pub fn builtin_simplify_integrand(args: &[Value]) -> Result<Value, EvalError> {
 /// IndependentQ[expr, x] — is expr independent of x
 pub fn builtin_independent_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("IndependentQ requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "IndependentQ requires exactly 2 arguments".to_string(),
+        ));
     }
     Ok(Value::Bool(is_constant_wrt(&args[0], &args[1])))
 }
@@ -1796,9 +1925,7 @@ pub fn builtin_power_variable_expn(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// NormalizeNormalizedPseudoBinomial[expr, x] — stub
-pub fn builtin_normalize_normalize_pseudo_binomial(
-    args: &[Value],
-) -> Result<Value, EvalError> {
+pub fn builtin_normalize_normalize_pseudo_binomial(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "NormalizeNormalizePseudoBinomial requires exactly 2 arguments".to_string(),

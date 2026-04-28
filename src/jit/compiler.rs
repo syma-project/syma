@@ -206,10 +206,7 @@ impl JitHelpers {
 ///
 /// Returns `(function_pointer, allocation_size)` on success.
 /// The allocation_size is needed for proper deallocation via `JitModule`.
-pub fn compile(
-    bc: &CompiledBytecode,
-    _name: &str,
-) -> Result<(*mut (), usize), JitCompileError> {
+pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), JitCompileError> {
     // ── Set up target ISA ──────────────────────────────────────────
     let triple = Triple::host();
     let isa = isa::lookup(triple)
@@ -779,12 +776,7 @@ unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
         }
         // MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000
         // PAGE_EXECUTE_READWRITE = 0x40
-        let ptr = VirtualAlloc(
-            std::ptr::null_mut(),
-            size,
-            0x1000 | 0x2000,
-            0x40,
-        );
+        let ptr = VirtualAlloc(std::ptr::null_mut(), size, 0x1000 | 0x2000, 0x40);
 
         if ptr.is_null() {
             return (std::ptr::null_mut(), 0);

@@ -1,6 +1,5 @@
 /// Shared helper for attribute integration tests.
 /// Each submodule tests one or more related attributes.
-
 use std::process::Command;
 
 pub fn syma_eval(expr: &str) -> String {
@@ -18,8 +17,8 @@ pub fn syma_eval(expr: &str) -> String {
 }
 
 mod flat;
-mod orderless;
-mod one_identity;
-mod listable;
 mod hold;
+mod listable;
+mod one_identity;
+mod orderless;
 mod protected_locked;

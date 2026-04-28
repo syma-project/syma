@@ -90,36 +90,20 @@ pub fn register(env: &Env) {
     let os = os_name();
     let arch = arch_name();
     let system = format!("{}-{}", os, arch);
-    let version = format!(
-        "{} for {} (2026-04-28)",
-        env!("CARGO_PKG_VERSION"),
-        system,
-    );
+    let version = format!("{} for {} (2026-04-28)", env!("CARGO_PKG_VERSION"), system,);
 
     let tz_offset = timezone_offset();
 
     env.set("$System".to_string(), Value::Str(system));
-    env.set(
-        "$Version".to_string(),
-        Value::Str(version),
-    );
+    env.set("$Version".to_string(), Value::Str(version));
     env.set(
         "$ReleaseDate".to_string(),
         Value::Str("2026-04-28".to_string()),
     );
     env.set("$Machine".to_string(), Value::Str(arch.clone()));
-    env.set(
-        "$MachineName".to_string(),
-        Value::Str(hostname()),
-    );
-    env.set(
-        "$OperatingSystem".to_string(),
-        Value::Str(os.to_string()),
-    );
-    env.set(
-        "$ProcessorType".to_string(),
-        Value::Str(arch),
-    );
+    env.set("$MachineName".to_string(), Value::Str(hostname()));
+    env.set("$OperatingSystem".to_string(), Value::Str(os.to_string()));
+    env.set("$ProcessorType".to_string(), Value::Str(arch));
     env.set(
         "$User".to_string(),
         Value::Str(
@@ -135,17 +119,8 @@ pub fn register(env: &Env) {
             tz_offset,
         )),
     );
-    env.set(
-        "$SystemId".to_string(),
-        Value::Str(os.to_string()),
-    );
-    env.set(
-        "$Language".to_string(),
-        Value::Str("English".to_string()),
-    );
-    env.set(
-        "$CommandLine".to_string(),
-        Value::Bool(true),
-    );
+    env.set("$SystemId".to_string(), Value::Str(os.to_string()));
+    env.set("$Language".to_string(), Value::Str("English".to_string()));
+    env.set("$CommandLine".to_string(), Value::Bool(true));
     env.set("$InputLine".to_string(), Value::Null);
 }

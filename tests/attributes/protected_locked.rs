@@ -110,13 +110,19 @@ fn locked_prevents_set_attributes() {
 #[test]
 fn read_protected_plus_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Plus], ReadProtected]");
-    assert!(out.contains("True"), "Plus should be ReadProtected, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Plus should be ReadProtected, got: {out}"
+    );
 }
 
 #[test]
 fn read_protected_sin_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Sin], ReadProtected]");
-    assert!(out.contains("True"), "Sin should be ReadProtected, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Sin should be ReadProtected, got: {out}"
+    );
 }
 
 // ── NumericFunction ──
@@ -124,13 +130,19 @@ fn read_protected_sin_has_attribute() {
 #[test]
 fn numeric_function_plus_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Plus], NumericFunction]");
-    assert!(out.contains("True"), "Plus should be NumericFunction, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Plus should be NumericFunction, got: {out}"
+    );
 }
 
 #[test]
 fn numeric_function_sin_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Sin], NumericFunction]");
-    assert!(out.contains("True"), "Sin should be NumericFunction, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Sin should be NumericFunction, got: {out}"
+    );
 }
 
 // ── Combined attributes ──

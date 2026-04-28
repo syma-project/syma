@@ -63,31 +63,46 @@ fn orderless_with_type_constraint() {
 #[test]
 fn orderless_plus_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Plus], Orderless]");
-    assert!(out.contains("True"), "Plus should have Orderless, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Plus should have Orderless, got: {out}"
+    );
 }
 
 #[test]
 fn orderless_times_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Times], Orderless]");
-    assert!(out.contains("True"), "Times should have Orderless, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Times should have Orderless, got: {out}"
+    );
 }
 
 #[test]
 fn orderless_and_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[And], Orderless]");
-    assert!(out.contains("True"), "And should have Orderless, got: {out}");
+    assert!(
+        out.contains("True"),
+        "And should have Orderless, got: {out}"
+    );
 }
 
 #[test]
 fn orderless_xor_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Xor], Orderless]");
-    assert!(out.contains("True"), "Xor should have Orderless, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Xor should have Orderless, got: {out}"
+    );
 }
 
 #[test]
 fn orderless_equivalent_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Equivalent], Orderless]");
-    assert!(out.contains("True"), "Equivalent should have Orderless, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Equivalent should have Orderless, got: {out}"
+    );
 }
 
 // ── Orderless limit ──

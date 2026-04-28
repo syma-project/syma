@@ -147,15 +147,13 @@ fn combine_like_terms(terms: Vec<Value>) -> Vec<Value> {
 fn extract_coeff_and_base(term: &Value) -> (Value, Integer) {
     match term {
         Value::Integer(n) => (Value::Integer(Integer::from(1)), n.clone()),
-        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
-            match &args[0] {
-                Value::Integer(n) => (args[1].clone(), n.clone()),
-                _ => match &args[1] {
-                    Value::Integer(n) => (args[0].clone(), n.clone()),
-                    _ => (term.clone(), Integer::from(1)),
-                },
-            }
-        }
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => match &args[0] {
+            Value::Integer(n) => (args[1].clone(), n.clone()),
+            _ => match &args[1] {
+                Value::Integer(n) => (args[0].clone(), n.clone()),
+                _ => (term.clone(), Integer::from(1)),
+            },
+        },
         _ => (term.clone(), Integer::from(1)),
     }
 }
@@ -196,12 +194,12 @@ fn simplify_times(args: &[Value]) -> Value {
         }
     }
     // Multiply all numeric factors together
-    let numeric_product = numeric_factors.iter().skip(1).fold(
-        Value::Integer(Integer::from(1)),
-        |acc, v| {
+    let numeric_product = numeric_factors
+        .iter()
+        .skip(1)
+        .fold(Value::Integer(Integer::from(1)), |acc, v| {
             crate::builtins::arithmetic::mul_values_public(&acc, v).unwrap_or(acc.clone())
-        },
-    );
+        });
     // Check if numeric product is zero
     match &numeric_product {
         Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
@@ -500,7 +498,8 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
     let den_lead_inv = invert_value(den_lead);
 
     let quot_deg = num_deg - den_deg;
-    let mut quot_coeffs: Vec<Value> = vec![Value::Integer(Integer::from(0)); (quot_deg + 1) as usize];
+    let mut quot_coeffs: Vec<Value> =
+        vec![Value::Integer(Integer::from(0)); (quot_deg + 1) as usize];
 
     for i in (0..=quot_deg).rev() {
         let j = (i + den_deg) as usize;
@@ -518,9 +517,14 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
         for k in 0..den_coeffs.len() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub = expand_value(&simplify_call("Times", &[q.clone(), den_coeffs[k].clone()]));
-                let neg = expand_value(&simplify_call("Times", &[Value::Integer(Integer::from(-1)), sub]));
-                remainder[idx] = expand_value(&simplify_call("Plus", &[remainder[idx].clone(), neg]));
+                let sub =
+                    expand_value(&simplify_call("Times", &[q.clone(), den_coeffs[k].clone()]));
+                let neg = expand_value(&simplify_call(
+                    "Times",
+                    &[Value::Integer(Integer::from(-1)), sub],
+                ));
+                remainder[idx] =
+                    expand_value(&simplify_call("Plus", &[remainder[idx].clone(), neg]));
             }
         }
         // Simplify all remainder coefficients after each subtraction step
@@ -545,10 +549,16 @@ fn invert_value(val: &Value) -> Value {
             if *n == 1 {
                 val.clone()
             } else {
-                call("Power", vec![val.clone(), Value::Integer(Integer::from(-1))])
+                call(
+                    "Power",
+                    vec![val.clone(), Value::Integer(Integer::from(-1))],
+                )
             }
         }
-        _ => call("Power", vec![val.clone(), Value::Integer(Integer::from(-1))]),
+        _ => call(
+            "Power",
+            vec![val.clone(), Value::Integer(Integer::from(-1))],
+        ),
     }
 }
 
@@ -578,7 +588,16 @@ fn rebuild_poly_from_coeffs(coeffs: &[Value], var: &str) -> Value {
         let term = match i {
             0 => coeff.clone(),
             1 => simplify_call("Times", &[coeff.clone(), x.clone()]),
-            _ => simplify_call("Times", &[coeff.clone(), call("Power", vec![x.clone(), Value::Integer(Integer::from(i as i64))])]),
+            _ => simplify_call(
+                "Times",
+                &[
+                    coeff.clone(),
+                    call(
+                        "Power",
+                        vec![x.clone(), Value::Integer(Integer::from(i as i64))],
+                    ),
+                ],
+            ),
         };
         terms.push(term);
     }
@@ -713,9 +732,9 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if let Value::List(items) = &args[1] {
         if !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
             let var = items[0].clone();
-            let n = items[1].to_integer().ok_or_else(|| EvalError::Error(
-                "D: order n must be a non-negative integer".to_string(),
-            ))?;
+            let n = items[1].to_integer().ok_or_else(|| {
+                EvalError::Error("D: order n must be a non-negative integer".to_string())
+            })?;
             if n < 0 {
                 return Err(EvalError::Error(
                     "D: order n must be a non-negative integer".to_string(),
@@ -784,16 +803,20 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
 
     // If the expression is a D call, evaluate the inner D first.
     // This handles nested derivatives like D[D[f, x], x].
-    if let Value::Call { head: ref h, args: ref args } = concrete {
-        eprintln!("DEBUG eval_d_2: concrete head={}, args.len={}", h, args.len());
+    if let Value::Call {
+        head: ref h,
+        args: ref args,
+    } = concrete
+    {
+        eprintln!(
+            "DEBUG eval_d_2: concrete head={}, args.len={}",
+            h,
+            args.len()
+        );
         if h == "D" && !args.is_empty() {
             eprintln!("DEBUG eval_d_2: inner D call detected, evaluating inner D");
             // Evaluate the inner D call
-            match crate::eval::apply_function(
-                &Value::Symbol("D".to_string()),
-                args,
-                env,
-            ) {
+            match crate::eval::apply_function(&Value::Symbol("D".to_string()), args, env) {
                 Ok(inner_result) => {
                     eprintln!("DEBUG eval_d_2: inner D result={}", inner_result);
                     return eval_d_2(inner_result, var, env);
@@ -840,10 +863,7 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
                 // Product rule: D[f*g*h, x] = D[f*g, x]*h + f*g*D[h, x]
                 let d_rest = eval_d_2(rest.clone(), var.clone(), env)?;
                 let d_last = eval_d_2(last.clone(), var.clone(), env)?;
-                return Ok(add_times(
-                    vec![d_rest, last.clone()],
-                    vec![rest, d_last],
-                ));
+                return Ok(add_times(vec![d_rest, last.clone()], vec![rest, d_last]));
             } else {
                 // Plus rule: D[f + g + h, x] = D[f + g, x] + D[h, x]
                 let d_rest = eval_d_2(rest, var.clone(), env)?;
@@ -940,8 +960,8 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
         for dir in paths.iter() {
             let candidate = dir.join(REL_PATH);
             if candidate.exists() {
-                let source = std::fs::read_to_string(&candidate)
-                    .unwrap_or_else(|_| embedded_d_source());
+                let source =
+                    std::fs::read_to_string(&candidate).unwrap_or_else(|_| embedded_d_source());
                 let tokens = crate::lexer::tokenize(&source).unwrap();
                 return crate::parser::parse_with_suppress(tokens).unwrap();
             }
@@ -954,8 +974,8 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
         {
             let candidate = exe_dir.join("../").join("SystemFiles").join(REL_PATH);
             if candidate.exists() {
-                let source = std::fs::read_to_string(&candidate)
-                    .unwrap_or_else(|_| embedded_d_source());
+                let source =
+                    std::fs::read_to_string(&candidate).unwrap_or_else(|_| embedded_d_source());
                 let tokens = crate::lexer::tokenize(&source).unwrap();
                 return crate::parser::parse_with_suppress(tokens).unwrap();
             }
@@ -996,17 +1016,15 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     };
     let var_name = match &args[1] {
         Value::Symbol(s) => s.clone(),
-        Value::Pattern(p) => {
-            match &crate::pattern::unwrap_expr_to_value(p) {
-                Value::Symbol(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "Symbol".to_string(),
-                        got: args[1].type_name().to_string(),
-                    });
-                }
+        Value::Pattern(p) => match &crate::pattern::unwrap_expr_to_value(p) {
+            Value::Symbol(s) => s.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Symbol".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
             }
-        }
+        },
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol".to_string(),
@@ -1099,7 +1117,11 @@ fn load_integrate_file(env: &Env, fname: &str) {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
     {
-        let candidate = exe_dir.join("../").join("SystemFiles").join(REL_PATH).join(fname);
+        let candidate = exe_dir
+            .join("../")
+            .join("SystemFiles")
+            .join(REL_PATH)
+            .join(fname);
         if candidate.exists() {
             if let Ok(source) = std::fs::read_to_string(&candidate) {
                 if let Ok(tokens) = crate::lexer::tokenize(&source) {
@@ -1129,15 +1151,33 @@ fn load_integrate_file(env: &Env, fname: &str) {
 /// Embedded Integrate rule files — fallback for cargo run.
 fn embedded_integrate_source(fname: &str) -> Option<String> {
     match fname {
-        "1-algebraic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/1-algebraic.syma").to_string()),
-        "2-exponentials.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/2-exponentials.syma").to_string()),
-        "3-logarithms.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/3-logarithms.syma").to_string()),
-        "4-trig.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/4-trig.syma").to_string()),
-        "5-inverse-trig.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/5-inverse-trig.syma").to_string()),
-        "6-hyperbolic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/6-hyperbolic.syma").to_string()),
-        "7-inverse-hyperbolic.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/7-inverse-hyperbolic.syma").to_string()),
-        "8-special.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/8-special.syma").to_string()),
-        "9-miscellaneous.syma" => Some(include_str!("../../SystemFiles/Kernel/Calculus/9-miscellaneous.syma").to_string()),
+        "1-algebraic.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/1-algebraic.syma").to_string())
+        }
+        "2-exponentials.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/2-exponentials.syma").to_string())
+        }
+        "3-logarithms.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/3-logarithms.syma").to_string())
+        }
+        "4-trig.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/4-trig.syma").to_string())
+        }
+        "5-inverse-trig.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/5-inverse-trig.syma").to_string())
+        }
+        "6-hyperbolic.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/6-hyperbolic.syma").to_string())
+        }
+        "7-inverse-hyperbolic.syma" => Some(
+            include_str!("../../SystemFiles/Kernel/Calculus/7-inverse-hyperbolic.syma").to_string(),
+        ),
+        "8-special.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/8-special.syma").to_string())
+        }
+        "9-miscellaneous.syma" => {
+            Some(include_str!("../../SystemFiles/Kernel/Calculus/9-miscellaneous.syma").to_string())
+        }
         _ => None,
     }
 }
@@ -1583,9 +1623,7 @@ fn expr_from_coeffs(coeffs: &[Value], var: &str) -> Value {
 fn strip_pattern(v: &Value) -> Value {
     match v {
         Value::Pattern(unevaluated) => expr_to_value(unevaluated),
-        Value::List(items) => {
-            Value::List(items.iter().map(|item| strip_pattern(item)).collect())
-        }
+        Value::List(items) => Value::List(items.iter().map(|item| strip_pattern(item)).collect()),
         _ => v.clone(),
     }
 }
@@ -1599,9 +1637,7 @@ fn expr_to_value(expr: &crate::ast::Expr) -> Value {
         crate::ast::Expr::Str(s) => Value::Str(s.clone()),
         crate::ast::Expr::Null => Value::Null,
         crate::ast::Expr::Symbol(s) => Value::Symbol(s.clone()),
-        crate::ast::Expr::List(items) => {
-            Value::List(items.iter().map(expr_to_value).collect())
-        }
+        crate::ast::Expr::List(items) => Value::List(items.iter().map(expr_to_value).collect()),
         crate::ast::Expr::Call { head, args } => {
             let head_str = match head.as_ref() {
                 crate::ast::Expr::Symbol(s) => s.clone(),
@@ -1724,18 +1760,24 @@ fn solve_polynomial(expr: &Value, var: &str) -> Value {
                         ])
                     }
                 }
-                _ => call("Solve", vec![
-                    simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
-                    Value::Symbol(var.to_string()),
-                ]),
+                _ => call(
+                    "Solve",
+                    vec![
+                        simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
+                        Value::Symbol(var.to_string()),
+                    ],
+                ),
             }
         }
         4 => solve_cubic(&coeffs, var),
         5 => solve_quartic(&coeffs, var),
-        _ => call("Solve", vec![
-            simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
-            Value::Symbol(var.to_string()),
-        ]),
+        _ => call(
+            "Solve",
+            vec![
+                simplify_call("Equal", &[expr.clone(), Value::Integer(Integer::from(0))]),
+                Value::Symbol(var.to_string()),
+            ],
+        ),
     }
 }
 
@@ -1795,8 +1837,12 @@ fn solve_cubic(coeffs: &[Value], var: &str) -> Value {
             // D = q^2/4 + p^3/27
             //   = (27 * q_num^2 * p_den^3 + 4 * p_num^3 * q_den^2) / (108 * q_den^2 * p_den^3)
 
-            let Value::Rational(p_rat) = &p else { unreachable!() };
-            let Value::Rational(q_rat) = &q else { unreachable!() };
+            let Value::Rational(p_rat) = &p else {
+                unreachable!()
+            };
+            let Value::Rational(q_rat) = &q else {
+                unreachable!()
+            };
 
             let p_num_r = p_rat.numer();
             let p_den_r = p_rat.denom();
@@ -1849,10 +1895,7 @@ fn solve_cubic(coeffs: &[Value], var: &str) -> Value {
             let shift = make_rat(&(-bi.clone()), &three_a);
 
             // Root 1: x1 = shift + u + v
-            let root1 = simplify_call(
-                "Plus",
-                &[shift.clone(), u_root.clone(), v_root.clone()],
-            );
+            let root1 = simplify_call("Plus", &[shift.clone(), u_root.clone(), v_root.clone()]);
 
             // Cube roots of unity:
             // omega = -1/2 + Sqrt[-3]/2
@@ -1936,7 +1979,13 @@ fn solve_cubic(coeffs: &[Value], var: &str) -> Value {
 fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
     let (e, d, c, b, a) = (&coeffs[0], &coeffs[1], &coeffs[2], &coeffs[3], &coeffs[4]);
     match (a, b, c, d, e) {
-        (Value::Integer(ai), Value::Integer(bi), Value::Integer(ci), Value::Integer(di), Value::Integer(ei)) => {
+        (
+            Value::Integer(ai),
+            Value::Integer(bi),
+            Value::Integer(ci),
+            Value::Integer(di),
+            Value::Integer(ei),
+        ) => {
             if ai.is_zero() {
                 return Value::List(vec![]);
             }
@@ -1951,9 +2000,7 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
             // t^4 + p*t^2 + q*t + r = 0
             let p = c / a - 6.0 * (b / a).powi(2) / 4.0;
             let q = d / a + 3.0 * (b / a).powi(3) / 8.0 - b * c / (2.0 * a * a);
-            let r = e / a
-                - 3.0 * (b / a).powi(4) / 256.0
-                + (b / a).powi(2) * c / (16.0 * a)
+            let r = e / a - 3.0 * (b / a).powi(4) / 256.0 + (b / a).powi(2) * c / (16.0 * a)
                 - b * d / (8.0 * a * a);
 
             // Resolvent cubic: m^3 + 2p*m^2 + (p^2 - 4r)*m - q^2 = 0
@@ -1963,7 +2010,8 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
             let resolvent_q = 2.0 * p * p * p / 27.0 - p * (p * p - 4.0 * r) / 3.0 - q * q;
 
             // Cardano: resolvent_disc = resolvent_q^2/4 + resolvent_p^3/27
-            let resolvent_disc = resolvent_q * resolvent_q / 4.0 + resolvent_p * resolvent_p * resolvent_p / 27.0;
+            let resolvent_disc =
+                resolvent_q * resolvent_q / 4.0 + resolvent_p * resolvent_p * resolvent_p / 27.0;
 
             if resolvent_disc >= 0.0 {
                 let u_cub = -resolvent_q / 2.0 + resolvent_disc.sqrt();
@@ -2003,19 +2051,10 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
                         let x1 = t1 + shift;
                         let x2 = t2 + shift;
                         if disc > 1e-12 {
-                            roots.push(Value::Real(Float::with_val(
-                                DEFAULT_PRECISION,
-                                x1,
-                            )));
-                            roots.push(Value::Real(Float::with_val(
-                                DEFAULT_PRECISION,
-                                x2,
-                            )));
+                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
+                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x2)));
                         } else {
-                            roots.push(Value::Real(Float::with_val(
-                                DEFAULT_PRECISION,
-                                x1,
-                            )));
+                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
                         }
                     }
                 }
@@ -2036,11 +2075,14 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
                 // Try trigonometric method for the resolvent cubic
                 // y^3 + resolvent_p*y + resolvent_q = 0 with resolvent_disc < 0
                 let mut roots: Vec<Value> = Vec::new();
-                let r_trig = ((-resolvent_q / 2.0) / (-resolvent_p / 3.0).powf(1.5)).abs().min(1.0);
+                let r_trig = ((-resolvent_q / 2.0) / (-resolvent_p / 3.0).powf(1.5))
+                    .abs()
+                    .min(1.0);
                 let theta = (r_trig).acos();
 
                 for k in 0..3 {
-                    let y = 2.0 * (-resolvent_p / 3.0).sqrt()
+                    let y = 2.0
+                        * (-resolvent_p / 3.0).sqrt()
                         * ((theta as f64 - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos());
                     let m = y - 2.0 * p / 3.0;
 
@@ -2065,19 +2107,10 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
                             let x1 = t1 + shift;
                             let x2 = t2 + shift;
                             if disc > 1e-12 {
-                                roots.push(Value::Real(Float::with_val(
-                                    DEFAULT_PRECISION,
-                                    x1,
-                                )));
-                                roots.push(Value::Real(Float::with_val(
-                                    DEFAULT_PRECISION,
-                                    x2,
-                                )));
+                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
+                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x2)));
                             } else {
-                                roots.push(Value::Real(Float::with_val(
-                                    DEFAULT_PRECISION,
-                                    x1,
-                                )));
+                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
                             }
                         }
                     }
@@ -2248,10 +2281,7 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         let coeff = combine_plus_terms(coeff);
         coefficients.push(coeff);
         derivative = crate::eval::apply_function(
-            &Value::Builtin(
-                "D".to_string(),
-                crate::value::BuiltinFn::Env(builtin_d),
-            ),
+            &Value::Builtin("D".to_string(), crate::value::BuiltinFn::Env(builtin_d)),
             &[derivative.clone(), Value::Symbol(var.clone())],
             env,
         )
@@ -2924,7 +2954,12 @@ mod tests {
         let result = builtin_series(&[expr, var_spec], &env()).unwrap();
         // Should return SeriesData
         assert!(matches!(result, Value::SeriesData { .. }));
-        if let Value::SeriesData { coefficients, max_exponent, .. } = &result {
+        if let Value::SeriesData {
+            coefficients,
+            max_exponent,
+            ..
+        } = &result
+        {
             assert_eq!(coefficients.len(), 2); // n=0 and n=1
             assert_eq!(*max_exponent, 2); // order+1
         }

@@ -350,11 +350,7 @@ impl Env {
 
     /// Look up a registered custom operator.
     pub fn get_operator(&self, op_name: &str) -> Option<OperatorInfo> {
-        self.operator_table
-            .lock()
-            .unwrap()
-            .get(op_name)
-            .cloned()
+        self.operator_table.lock().unwrap().get(op_name).cloned()
     }
 }
 

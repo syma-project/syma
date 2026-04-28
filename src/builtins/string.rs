@@ -94,7 +94,11 @@ pub fn builtin_string_split(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    let delim = if args.len() == 2 { str_arg(args, 1)? } else { " " };
+    let delim = if args.len() == 2 {
+        str_arg(args, 1)?
+    } else {
+        " "
+    };
     Ok(Value::List(
         s.split(delim)
             .map(|part| Value::Str(part.to_string()))
@@ -154,7 +158,11 @@ pub fn builtin_string_take(args: &[Value]) -> Result<Value, EvalError> {
         got: args[1].type_name().to_string(),
     })?;
     let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 { n as usize } else { chars.len().saturating_sub((-n) as usize) };
+    let count = if n >= 0 {
+        n as usize
+    } else {
+        chars.len().saturating_sub((-n) as usize)
+    };
     Ok(Value::Str(chars[..count.min(chars.len())].iter().collect()))
 }
 
@@ -170,7 +178,11 @@ pub fn builtin_string_drop(args: &[Value]) -> Result<Value, EvalError> {
         got: args[1].type_name().to_string(),
     })?;
     let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 { n as usize } else { chars.len().saturating_sub((-n) as usize) };
+    let count = if n >= 0 {
+        n as usize
+    } else {
+        chars.len().saturating_sub((-n) as usize)
+    };
     Ok(Value::Str(chars[count.min(chars.len())..].iter().collect()))
 }
 
@@ -222,7 +234,9 @@ pub fn builtin_characters(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    Ok(Value::List(s.chars().map(|c| Value::Str(c.to_string())).collect()))
+    Ok(Value::List(
+        s.chars().map(|c| Value::Str(c.to_string())).collect(),
+    ))
 }
 
 /// StringMatchQ["string", "pattern"] — check if string matches a glob pattern.
@@ -519,7 +533,9 @@ pub fn builtin_letter_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))
+    Ok(Value::Bool(
+        !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+    ))
 }
 
 /// DigitQ[s] — True if s is non-empty and all characters are ASCII digits.
@@ -530,7 +546,9 @@ pub fn builtin_digit_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())))
+    Ok(Value::Bool(
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+    ))
 }
 
 /// UpperCaseQ[s] — True if s is non-empty and all letters are uppercase.
@@ -543,7 +561,9 @@ pub fn builtin_upper_case_q(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = str_arg(args, 0)?;
     let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-    Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_uppercase())))
+    Ok(Value::Bool(
+        !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()),
+    ))
 }
 
 /// LowerCaseQ[s] — True if s is non-empty and all letters are lowercase.
@@ -556,7 +576,9 @@ pub fn builtin_lower_case_q(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = str_arg(args, 0)?;
     let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-    Ok(Value::Bool(!letters.is_empty() && letters.iter().all(|c| c.is_lowercase())))
+    Ok(Value::Bool(
+        !letters.is_empty() && letters.iter().all(|c| c.is_lowercase()),
+    ))
 }
 
 /// TextWords[s] — split string into a list of words (by whitespace).
@@ -567,7 +589,10 @@ pub fn builtin_text_words(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    let words: Vec<Value> = s.split_whitespace().map(|w| Value::Str(w.to_string())).collect();
+    let words: Vec<Value> = s
+        .split_whitespace()
+        .map(|w| Value::Str(w.to_string()))
+        .collect();
     Ok(Value::List(words))
 }
 
@@ -635,7 +660,8 @@ pub fn builtin_to_character_code(args: &[Value]) -> Result<Value, EvalError> {
         head: "ToCharacterCode".to_string(),
         args: args.to_vec().into(),
     })?;
-    let codes: Vec<Value> = s.chars()
+    let codes: Vec<Value> = s
+        .chars()
         .map(|c| Value::Integer(Integer::from(c as u32)))
         .collect();
     Ok(Value::List(codes))
@@ -798,7 +824,10 @@ pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
         head: "SentenceCount".to_string(),
         args: args.to_vec().into(),
     })?;
-    let sentences: Vec<&str> = s.split(|c| matches!(c, '.' | '!' | '?')).filter(|s| !s.trim().is_empty()).collect();
+    let sentences: Vec<&str> = s
+        .split(|c| matches!(c, '.' | '!' | '?'))
+        .filter(|s| !s.trim().is_empty())
+        .collect();
     Ok(Value::Integer(Integer::from(sentences.len() as i64)))
 }
 

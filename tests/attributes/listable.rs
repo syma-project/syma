@@ -102,13 +102,19 @@ fn listable_xor() {
 #[test]
 fn listable_plus_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Plus], Listable]");
-    assert!(out.contains("True"), "Plus should have Listable, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Plus should have Listable, got: {out}"
+    );
 }
 
 #[test]
 fn listable_times_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Times], Listable]");
-    assert!(out.contains("True"), "Times should have Listable, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Times should have Listable, got: {out}"
+    );
 }
 
 #[test]
@@ -120,7 +126,10 @@ fn listable_sin_has_attribute() {
 #[test]
 fn listable_power_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[Power], Listable]");
-    assert!(out.contains("True"), "Power should have Listable, got: {out}");
+    assert!(
+        out.contains("True"),
+        "Power should have Listable, got: {out}"
+    );
 }
 
 // ── User-defined Listable ──
