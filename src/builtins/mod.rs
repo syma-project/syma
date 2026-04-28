@@ -792,6 +792,20 @@ pub fn register_builtins(env: &Env) {
         "$RecursionLimit".to_string(),
         Value::Integer(Integer::from(1024)),
     );
+
+    // ── Special forms (handled in eval_call, not registered as builtins) ──
+    // Set attributes for forms that aren't registered via register_builtin
+    for (name, attrs) in [
+        ("Hold", &["HoldAll", "Locked", "ReadProtected"] as &[&str]),
+        ("HoldComplete", &["HoldAllComplete", "Locked", "ReadProtected"]),
+        ("Defer", &["HoldAll", "Locked", "ReadProtected"]),
+        ("Set", &["HoldFirst", "Locked", "ReadProtected"]),
+        ("SetDelayed", &["HoldAll", "Locked", "ReadProtected"]),
+        ("SetAttributes", &["HoldFirst", "Locked", "ReadProtected"]),
+        ("ClearAttributes", &["HoldFirst", "Locked", "ReadProtected"]),
+    ] {
+        env.set_attributes(name, attrs.iter().map(|s| s.to_string()).collect());
+    }
 }
 
 // ── Custom Notation builtins ──
@@ -2113,7 +2127,7 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "With" | "Module" | "Block" => vec!["HoldAll", "Locked", "ReadProtected"],
         "If" => vec!["HoldAll", "Locked", "ReadProtected"],
         // -- Calculus (HoldAll so expressions are not pre-evaluated) --
-        "Integrate" => vec!["HoldAll", "Locked", "ReadProtected"],
+        "D" | "Integrate" => vec!["HoldAll", "Locked", "ReadProtected"],
         "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
         // -- Equation solvers (need HoldAll so equations aren't evaluated before solving) --
         "Solve" | "RSolve" => vec!["HoldAll", "Locked", "ReadProtected"],

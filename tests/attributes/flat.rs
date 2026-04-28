@@ -10,19 +10,16 @@ use super::syma_eval;
 
 #[test]
 fn flat_pattern_matching_basic() {
-    // With Flat, f[1, f[2, 3]] should match f[x_, y_, z_]
     let out = syma_eval("SetAttributes[f, Flat]; MatchQ[f[1, f[2, 3]], f[x_, y_, z_]]");
     assert!(
         out.contains("True"),
-        "f[1, f[2, 3]] should match f[x_, y_, z_] with Flat, got: {out}"
+        "Flat pattern match failed, got: {out}"
     );
 }
 
 #[test]
 fn flat_pattern_matching_deep() {
-    // Deeply nested: f[f[1, 2], f[3, 4]] matches f[x_, y_, z_, w_]
-    let out =
-        syma_eval("SetAttributes[f, Flat]; MatchQ[f[f[1, 2], f[3, 4]], f[x_, y_, z_, w_]]");
+    let out = syma_eval("SetAttributes[f, Flat]; MatchQ[f[f[1, 2], f[3, 4]], f[x_, y_, z_, w_]]");
     assert!(
         out.contains("True"),
         "Deeply nested Flat match failed, got: {out}"
@@ -31,8 +28,9 @@ fn flat_pattern_matching_deep() {
 
 #[test]
 fn flat_pattern_without_attribute_fails() {
-    // Without Flat, f[1, f[2, 3]] should NOT match f[x_, y_, z_]
-    let out = syma_eval("g[x_] := x; MatchQ[g[1, g[2, 3]], g[x_, y_, z_]]");
+    // Without Flat, g[1, g[2, 3]] should NOT match g[x_, y_, z_]
+    // Use a symbol that has no Flat attribute
+    let out = syma_eval("MatchQ[h[1, h[2, 3]], h[x_, y_, z_]]");
     assert!(
         out.contains("False"),
         "Without Flat, nested calls should not flatten, got: {out}"
@@ -88,7 +86,7 @@ fn flat_deeply_nested_result() {
 
 #[test]
 fn flat_user_defined_result() {
-    // User-defined Flat function
+    // Set Flat before using the function
     let out = syma_eval("SetAttributes[f, Flat]; f[a, f[b, c]]");
     assert!(
         !out.contains("f[f"),
@@ -120,11 +118,8 @@ fn flat_noncommutative_multiply_has_attribute() {
 
 #[test]
 fn flat_orderless_combined_pattern() {
-    // Flat + Orderless: f[3, f[1, 2]] should match f[x_, y_, z_] with args 1,2,3
-    let out = syma_eval(
-        "SetAttributes[f, {Flat, Orderless}]; \
-         MatchQ[f[3, f[1, 2]], f[x_, y_, z_]]",
-    );
+    // Set both attributes before use
+    let out = syma_eval("SetAttributes[f, {Flat, Orderless}]; MatchQ[f[3, f[1, 2]], f[x_, y_, z_]]");
     assert!(
         out.contains("True"),
         "Flat+Orderless combined match failed, got: {out}"
@@ -135,8 +130,7 @@ fn flat_orderless_combined_pattern() {
 
 #[test]
 fn flat_user_function_definition() {
-    // Define f with Flat, then define f[x_, y_] := x + y
-    // f[a, f[b, c]] should match f[x_, y_] where y=f[b,c] or f[a,b,c] flattened
+    // Set Flat, then define
     let out = syma_eval(
         "SetAttributes[f, Flat]; \
          f[x_, y_] := x * y; \

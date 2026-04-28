@@ -3,8 +3,6 @@
 //! OneIdentity: f[x] is treated as x for pattern matching.
 //! - Does NOT affect evaluation (f[1] still returns f[1] if no rules match)
 //! - Only affects pattern matching: MatchQ[f[1], _Integer] → True
-//!
-//! Common on: Plus, Times, Min, Max, And, Or, Xor, Equivalent, NonCommutativeMultiply
 
 use super::syma_eval;
 
@@ -12,7 +10,6 @@ use super::syma_eval;
 
 #[test]
 fn one_identity_does_not_affect_evaluation() {
-    // OneIdentity only affects pattern matching, not evaluation
     let out = syma_eval("SetAttributes[f, OneIdentity]; f[1]");
     assert!(
         out.contains("f[1]"),
@@ -22,7 +19,6 @@ fn one_identity_does_not_affect_evaluation() {
 
 #[test]
 fn one_identity_integer_match() {
-    // Core: f[42] matches _Integer when f has OneIdentity
     let out = syma_eval("SetAttributes[f, OneIdentity]; MatchQ[f[42], _Integer]");
     assert!(
         out.contains("True"),
@@ -44,17 +40,17 @@ fn one_identity_string_match() {
     let out = syma_eval("SetAttributes[f, OneIdentity]; MatchQ[f[\"hello\"], _String]");
     assert!(
         out.contains("True"),
-        "f[\"hello\"] should match _String with OneIdentity, got: {out}"
+        "f string should match _String with OneIdentity, got: {out}"
     );
 }
 
 #[test]
 fn one_identity_without_attribute_fails() {
-    // Without OneIdentity, g[42] should NOT match _Integer
-    let out = syma_eval("g[x_] := x; MatchQ[g[42], _Integer]");
+    // h has no OneIdentity, so h[42] should NOT match _Integer
+    let out = syma_eval("MatchQ[h[42], _Integer]");
     assert!(
         out.contains("False"),
-        "Without OneIdentity, g[42] should not match _Integer, got: {out}"
+        "Without OneIdentity, h[42] should not match _Integer, got: {out}"
     );
 }
 
@@ -69,7 +65,6 @@ fn one_identity_named_blank() {
 
 #[test]
 fn one_identity_multi_arg_no_match() {
-    // OneIdentity only works for single-arg calls
     let out = syma_eval("SetAttributes[f, OneIdentity]; MatchQ[f[1, 2], _Integer]");
     assert!(
         out.contains("False"),
@@ -112,7 +107,7 @@ fn one_identity_equivalent_has_attribute() {
 #[test]
 fn one_identity_nccm_has_attribute() {
     let out = syma_eval("MemberQ[Attributes[NonCommutativeMultiply], OneIdentity]");
-    assert!(out.contains("True"), "NonCommutativeMultiply should have OneIdentity, got: {out}");
+    assert!(out.contains("True"), "NCCM should have OneIdentity, got: {out}");
 }
 
 #[test]
@@ -131,11 +126,11 @@ fn one_identity_max_has_attribute() {
 
 #[test]
 fn one_identity_replace_rule() {
-    // With OneIdentity on Plus, Plus[3] should match patterns for 3
+    // Plus has OneIdentity built-in, Plus[3] should match x_Integer
     let out = syma_eval("Plus[3] /. x_Integer :> x * 2");
     assert!(
         out.contains("6"),
-        "Plus[3] should match x_Integer rule with OneIdentity, got: {out}"
+        "Plus[3] should match x_Integer rule, got: {out}"
     );
 }
 

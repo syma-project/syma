@@ -1,3 +1,4 @@
+use crate::ast::Expr;
 use crate::env::Env;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
@@ -167,7 +168,11 @@ fn simplify_times(args: &[Value]) -> Value {
     for arg in args {
         match arg {
             Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
-            Value::Integer(n) if *n == 1 => {}
+            Value::Integer(n) if *n == Integer::from(1) => {}
+            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {
+                return Value::Integer(Integer::from(0));
+            }
+            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 1.0) => {}
             Value::Call { head, args: a } if head == "Times" => {
                 flat.extend(a.iter().cloned());
             }
@@ -178,18 +183,31 @@ fn simplify_times(args: &[Value]) -> Value {
         return Value::Integer(Integer::from(1));
     }
 
-    // Separate numeric factors from symbolic
-    let mut numeric = Integer::from(1);
+    // Separate numeric factors (Integer, Real, Rational) from symbolic
+    let mut numeric_factors: Vec<Value> = vec![Value::Integer(Integer::from(1))];
     let mut symbolic: Vec<Value> = Vec::new();
     for factor in flat {
-        if let Value::Integer(n) = &factor {
-            numeric *= n;
-        } else {
-            symbolic.push(factor);
+        match &factor {
+            Value::Integer(_) | Value::Real(_) | Value::Rational(_) => {
+                numeric_factors.push(factor.clone());
+            }
+            _ => symbolic.push(factor),
         }
     }
-    if numeric.is_zero() {
-        return Value::Integer(Integer::from(0));
+    // Multiply all numeric factors together
+    let numeric_product = numeric_factors.iter().skip(1).fold(
+        Value::Integer(Integer::from(1)),
+        |acc, v| {
+            crate::builtins::arithmetic::mul_values_public(&acc, v).unwrap_or(acc.clone())
+        },
+    );
+    // Check if numeric product is zero
+    match &numeric_product {
+        Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
+        Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {
+            return Value::Integer(Integer::from(0));
+        }
+        _ => {}
     }
 
     // Convert symbolic factors to (base, exponent) pairs for merging
@@ -223,16 +241,17 @@ fn simplify_times(args: &[Value]) -> Value {
         }
     }
 
-    // Build result: multiply numeric product with each base^exp
+    // Build result: numeric_product with each base^exp
     let mut result: Vec<Value> = Vec::new();
-    if numeric != 1 {
-        result.push(Value::Integer(numeric));
+    // Add numeric product if not 1
+    if !numeric_product.struct_eq(&Value::Integer(Integer::from(1))) {
+        result.push(numeric_product);
     }
     for (base, exp) in base_exp {
         if exp.is_zero() {
             continue;
         }
-        if exp == 1 {
+        if exp == Integer::from(1) {
             result.push(base);
         } else {
             result.push(simplify_call("Power", &[base, Value::Integer(exp)]));
@@ -2461,6 +2480,16 @@ pub fn builtin_set_attributes(args: &[Value], env: &Env) -> Result<Value, EvalEr
     let sym_name = match &args[0] {
         Value::Symbol(s) | Value::Str(s) => s.clone(),
         Value::Builtin(name, _) => name.clone(),
+        Value::Function(fd) => fd.name.clone(),
+        Value::Pattern(p) => match p {
+            Expr::Symbol(s) => s.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Symbol or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
+        },
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),
@@ -2487,6 +2516,16 @@ pub fn builtin_clear_attributes(args: &[Value], env: &Env) -> Result<Value, Eval
     let sym_name = match &args[0] {
         Value::Symbol(s) | Value::Str(s) => s.clone(),
         Value::Builtin(name, _) => name.clone(),
+        Value::Function(fd) => fd.name.clone(),
+        Value::Pattern(p) => match p {
+            Expr::Symbol(s) => s.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Symbol or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
+        },
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),
@@ -2520,6 +2559,16 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
     let sym_name = match &args[0] {
         Value::Symbol(s) | Value::Str(s) => s.clone(),
         Value::Builtin(name, _) => name.clone(),
+        Value::Function(fd) => fd.name.clone(),
+        Value::Pattern(p) => match p {
+            Expr::Symbol(s) => s.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Symbol or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
+        },
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),

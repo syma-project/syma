@@ -19,12 +19,10 @@ fn orderless_basic_match() {
 
 #[test]
 fn orderless_binding_order() {
-    // With Orderless, f[2, 1] matched against f[x_, y_] binds x=2, y=1 (original order)
     let out = syma_eval(
         "SetAttributes[f, Orderless]; \
          f[2, 1] /. f[x_, y_] :> {x, y}",
     );
-    // The pattern matching tries permutations, so x and y get the right values
     assert!(
         out.contains("2") && out.contains("1"),
         "Orderless binding should contain both values, got: {out}"
@@ -33,9 +31,8 @@ fn orderless_binding_order() {
 
 #[test]
 fn orderless_without_attribute_fails() {
-    // Without Orderless, f[x_, 1] should NOT match g[2, 1] if pattern order differs
-    let out = syma_eval("MatchQ[g[2, 1], g[1, x_]");
-    // This should be False because Orderless is not set
+    // Without Orderless, pattern order matters
+    let out = syma_eval("MatchQ[h[2, 1], h[1, x_]]");
     assert!(
         out.contains("False"),
         "Without Orderless, argument order matters, got: {out}"
@@ -104,19 +101,13 @@ fn orderless_user_function() {
          f[x_, y_] := x - y; \
          f[1, 2]",
     );
-    // f[1, 2] matches f[x_, y_] with x=1, y=2 (pattern order, not value order)
-    // Result should be 1-2 = -1 or displayed as Times[-1, 1]
-    assert!(
-        !out.is_empty(),
-        "Orderless user function should evaluate, got: {out}"
-    );
+    assert!(!out.is_empty(), "Orderless user function should evaluate, got: {out}");
 }
 
 // ── Orderless limit ──
 
 #[test]
 fn orderless_max_six_elements() {
-    // Orderless permutation matching is limited to 6 elements
     let out = syma_eval(
         "SetAttributes[f, Orderless]; \
          MatchQ[f[6,5,4,3,2,1], f[x_, y_, z_, w_, v_, u_]]",
