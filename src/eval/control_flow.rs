@@ -1,12 +1,17 @@
 use crate::ast::Expr;
 use crate::env::Env;
-use crate::value::{Value, EvalError};
-use crate::eval::apply_function;
+use crate::eval::table;
+use crate::value::{EvalError, Value};
 
-pub(super) fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
+use super::{eval, parse_local_specs, substitute_in_expr};
+
+pub(super) fn eval_control_flow(
+    s: &str,
+    args: &[Expr],
+    env: &Env,
+) -> Result<Option<Value>, EvalError> {
     match s {
         "While" => {
-            // While[cond, body] — evaluate body while cond is True
             if args.len() != 2 {
                 return Err(EvalError::Error(
                     "While requires exactly 2 arguments".to_string(),
@@ -27,7 +32,6 @@ pub(super) fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Opt
             Ok(Some(result))
         }
         "For" => {
-            // For[start, test, step, body] — C-style for loop
             if args.len() != 4 {
                 return Err(EvalError::Error(
                     "For requires exactly 4 arguments".to_string(),
@@ -78,7 +82,6 @@ pub(super) fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Opt
             }
             let specs = parse_local_specs(&args[0])?;
             let child = env.child();
-            // Evaluate RHS values and build substitution map
             let mut subs = Vec::new();
             for (name, init) in &specs {
                 match init {
@@ -107,10 +110,6 @@ pub(super) fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Opt
                 ));
             }
             let specs = parse_local_specs(&args[0])?;
-            // Save old values and propagate new ones up the scope chain.
-            // Block uses dynamic scoping: the new values are visible everywhere,
-            // including in functions called within the body, by updating the
-            // defining scope (rather than shadowing in a child scope).
             let mut saved: Vec<(String, Option<Value>)> = Vec::new();
             for (name, init) in &specs {
                 let old_val = env.get(name);
@@ -121,12 +120,10 @@ pub(super) fn eval_control_flow(s: &str, args: &[Expr], env: &Env) -> Result<Opt
                 env.set_propagate(name.clone(), new_val);
                 saved.push((name.clone(), old_val));
             }
-            // Evaluate body
             let mut result = Value::Null;
             for expr in &args[1..] {
                 result = eval(expr, env)?;
             }
-            // Restore old values (reverse order)
             for (name, old_val) in saved.into_iter().rev() {
                 match old_val {
                     Some(v) => env.set_propagate(name, v),

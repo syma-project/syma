@@ -13,13 +13,26 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
 
 /// Convert {year, month, day, hour, minute, second} to Unix timestamp (seconds since 1970-01-01).
-fn date_to_unix_seconds(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: f64) -> f64 {
+fn date_to_unix_seconds(
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: f64,
+) -> f64 {
     let mut total_days: i64 = 0;
 
     // Count days from year 1970 to `year`
@@ -86,7 +99,7 @@ fn unix_seconds_to_datetime_v2(seconds: f64) -> (i64, i64, i64, i64, i64, f64) {
     )
 }
 
-/// Convert a day count relative to Unix epoch (positive = after, negative = before) 
+/// Convert a day count relative to Unix epoch (positive = after, negative = before)
 /// to (year, month, day).
 fn days_since_epoch_to_ymd(day_offset: i64, _sign: i64) -> (i64, i64, i64) {
     if day_offset >= 0 {
@@ -182,7 +195,9 @@ fn extract_datetime(args: &[Value]) -> Result<(i64, i64, i64, i64, i64, f64), Ev
     }
     let to_i64 = |i: usize, what: &str| -> Result<i64, EvalError> {
         match &args[i] {
-            Value::Integer(n) => i64::try_from(n).map_err(|_| EvalError::Error(format!("{} out of range", what))),
+            Value::Integer(n) => {
+                i64::try_from(n).map_err(|_| EvalError::Error(format!("{} out of range", what)))
+            }
             Value::Real(r) => Ok(r.to_f64() as i64),
             _ => Err(EvalError::TypeError {
                 expected: "Integer".to_string(),
@@ -203,9 +218,21 @@ fn extract_datetime(args: &[Value]) -> Result<(i64, i64, i64, i64, i64, f64), Ev
     let y = to_i64(0, "Year")?;
     let m = to_i64(1, "Month")?;
     let d = to_i64(2, "Day")?;
-    let h = if args.len() > 3 { to_i64(3, "Hour")? } else { 0i64 };
-    let mi = if args.len() > 4 { to_i64(4, "Minute")? } else { 0i64 };
-    let s = if args.len() > 5 { to_f64(5, "Second")? } else { 0.0f64 };
+    let h = if args.len() > 3 {
+        to_i64(3, "Hour")?
+    } else {
+        0i64
+    };
+    let mi = if args.len() > 4 {
+        to_i64(4, "Minute")?
+    } else {
+        0i64
+    };
+    let s = if args.len() > 5 {
+        to_f64(5, "Second")?
+    } else {
+        0.0f64
+    };
     Ok((y, m, d, h, mi, s))
 }
 
@@ -215,20 +242,33 @@ fn parse_iso_date(s: &str) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> 
     let core = if s.contains('T') {
         s.split('T').collect::<Vec<&str>>()[0]
     } else {
-        s.split_whitespace().collect::<Vec<&str>>().first().copied().unwrap_or(s)
+        s.split_whitespace()
+            .collect::<Vec<&str>>()
+            .first()
+            .copied()
+            .unwrap_or(s)
     };
 
     let parts: Vec<&str> = core.split('-').collect();
     if parts.len() < 3 {
-        return Err(EvalError::Error(format!("Unable to parse date string: {}", s)));
+        return Err(EvalError::Error(format!(
+            "Unable to parse date string: {}",
+            s
+        )));
     }
 
-    let year: i64 = parts[0].parse().map_err(|_| EvalError::Error("Invalid year".to_string()))?;
-    let month: i64 = parts[1].parse().map_err(|_| EvalError::Error("Invalid month".to_string()))?;
+    let year: i64 = parts[0]
+        .parse()
+        .map_err(|_| EvalError::Error("Invalid year".to_string()))?;
+    let month: i64 = parts[1]
+        .parse()
+        .map_err(|_| EvalError::Error("Invalid month".to_string()))?;
     let day_part = parts[2];
     // Day might contain time like "15T10:30:00" if no T in date
     let day_str = day_part.split('T').next().unwrap_or(day_part);
-    let day: i64 = day_str.parse().map_err(|_| EvalError::Error("Invalid day".to_string()))?;
+    let day: i64 = day_str
+        .parse()
+        .map_err(|_| EvalError::Error("Invalid day".to_string()))?;
 
     // Parse time part if present
     let time_str = if s.contains('T') {
@@ -243,11 +283,14 @@ fn parse_iso_date(s: &str) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> 
         let time_parts: Vec<&str> = t.split(':').collect();
         let h: i64 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         let m: i64 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let s: f64 = time_parts.get(2).and_then(|s| {
-            // Strip fractional seconds and timezone info
-            let num_str = s.split(['.', '+', '-']).next().unwrap_or(s);
-            num_str.parse().ok()
-        }).unwrap_or(0.0);
+        let s: f64 = time_parts
+            .get(2)
+            .and_then(|s| {
+                // Strip fractional seconds and timezone info
+                let num_str = s.split(['.', '+', '-']).next().unwrap_or(s);
+                num_str.parse().ok()
+            })
+            .unwrap_or(0.0);
         (h, m, s)
     } else {
         (0, 0, 0.0)
@@ -271,18 +314,22 @@ fn parse_duration_spec(val: &Value) -> Result<(f64, String), EvalError> {
             let n = match &elems[0] {
                 Value::Integer(i) => i.to_f64(),
                 Value::Real(r) => r.to_f64(),
-                _ => return Err(EvalError::TypeError {
-                    expected: "Number".to_string(),
-                    got: elems[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Number".to_string(),
+                        got: elems[0].type_name().to_string(),
+                    });
+                }
             };
             let unit = match &elems[1] {
                 Value::Str(s) => s.clone(),
                 Value::Symbol(s) => s.clone(),
-                _ => return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: elems[1].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "String".to_string(),
+                        got: elems[1].type_name().to_string(),
+                    });
+                }
             };
             Ok((n, unit))
         }
@@ -300,8 +347,8 @@ fn unit_to_seconds(unit: &str) -> Result<f64, EvalError> {
         "Hours" | "Hour" => Ok(3600.0),
         "Days" | "Day" => Ok(86400.0),
         "Weeks" | "Week" => Ok(604800.0),
-        "Months" | "Month" => Ok(2592000.0),  // 30 days
-        "Years" | "Year" => Ok(31536000.0),   // 365 days
+        "Months" | "Month" => Ok(2592000.0), // 30 days
+        "Years" | "Year" => Ok(31536000.0),  // 365 days
         _ => Err(EvalError::Error(format!("Unknown time unit: {}", unit))),
     }
 }
@@ -311,18 +358,48 @@ fn format_datetime_components(secs: f64, len: usize) -> Value {
     let (y, m, d, h, mi, s) = unix_seconds_to_datetime_v2(secs);
     match len {
         3 => Value::List(vec![val_int(y), val_int(m), val_int(d)]),
-        6 => Value::List(vec![val_int(y), val_int(m), val_int(d), val_int(h), val_int(mi), val_real(s)]),
-        _ => Value::List(vec![val_int(y), val_int(m), val_int(d), val_int(h), val_int(mi), val_real(s)]),
+        6 => Value::List(vec![
+            val_int(y),
+            val_int(m),
+            val_int(d),
+            val_int(h),
+            val_int(mi),
+            val_real(s),
+        ]),
+        _ => Value::List(vec![
+            val_int(y),
+            val_int(m),
+            val_int(d),
+            val_int(h),
+            val_int(mi),
+            val_real(s),
+        ]),
     }
 }
 
 const DAY_NAMES: [&str; 7] = [
-    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
 ];
 
 const MONTH_NAMES: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 
 // ── Builtin implementations ──
@@ -342,10 +419,12 @@ pub fn builtin_absolute_time(args: &[Value]) -> Result<Value, EvalError> {
             let (y, m, d, h, mi, s) = match &args[0] {
                 Value::List(elems) => extract_datetime(elems)?,
                 Value::Str(s) => parse_iso_date(s)?,
-                _ => return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List or String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
             };
             let secs = date_to_unix_seconds(y, m, d, h, mi, s);
             Ok(val_real(secs))
@@ -377,7 +456,10 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
         0 => {
             let (y, m, d, h, mi, s) = get_current_datetime();
-            Ok(Value::Str(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, mi, s as i64)))
+            Ok(Value::Str(format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                y, m, d, h, mi, s as i64
+            )))
         }
         1 => {
             // Could be a spec string or a date
@@ -388,7 +470,10 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
                 }
                 Value::List(elems) => {
                     let (y, m, d, h, mi, s) = extract_datetime(elems)?;
-                    Ok(Value::Str(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, mi, s as i64)))
+                    Ok(Value::Str(format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        y, m, d, h, mi, s as i64
+                    )))
                 }
                 _ => Err(EvalError::TypeError {
                     expected: "String or List".to_string(),
@@ -400,18 +485,22 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
             // DateString[spec, date]
             let spec = match &args[0] {
                 Value::Str(s) => s.clone(),
-                _ => return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: args[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
             };
             let (y, m, d, h, mi, s) = match &args[1] {
                 Value::List(elems) => extract_datetime(elems)?,
                 Value::Str(s) => parse_iso_date(s)?,
-                _ => return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[1].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List or String".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
             };
             format_date_string(&spec, y, m, d, h, mi, s)
         }
@@ -421,9 +510,20 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-fn format_date_string(spec: &str, y: i64, m: i64, d: i64, h: i64, mi: i64, s: f64) -> Result<Value, EvalError> {
+fn format_date_string(
+    spec: &str,
+    y: i64,
+    m: i64,
+    d: i64,
+    h: i64,
+    mi: i64,
+    s: f64,
+) -> Result<Value, EvalError> {
     let result = match spec {
-        "ISO8601" => format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, m, d, h, mi, s as i64),
+        "ISO8601" => format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            y, m, d, h, mi, s as i64
+        ),
         "ShortDate" => format!("{:02}/{:02}/{:04}", m, d, y),
         "LongDate" => format!("{}, {:02}, {:04}", MONTH_NAMES[(m - 1) as usize], d, y),
         "Year" => format!("{:04}", y),
@@ -446,14 +546,14 @@ pub fn builtin_date_plus(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let (y, m, d, h, mi, s) = match &args[0] {
-        Value::List(elems) => {
-            extract_datetime(elems)?
-        }
+        Value::List(elems) => extract_datetime(elems)?,
         Value::Str(s) => parse_iso_date(s)?,
-        _ => return Err(EvalError::TypeError {
-            expected: "List or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
     };
 
     let input_len = match &args[0] {
@@ -481,18 +581,22 @@ pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
     let dt1 = match &args[0] {
         Value::List(elems) => extract_datetime(elems)?,
         Value::Str(s) => parse_iso_date(s)?,
-        _ => return Err(EvalError::TypeError {
-            expected: "List or String".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
     };
     let dt2 = match &args[1] {
         Value::List(elems) => extract_datetime(elems)?,
         Value::Str(s) => parse_iso_date(s)?,
-        _ => return Err(EvalError::TypeError {
-            expected: "List or String".to_string(),
-            got: args[1].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List or String".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
     };
 
     let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
@@ -503,10 +607,12 @@ pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
         let unit = match &args[2] {
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
-            _ => return Err(EvalError::TypeError {
-                expected: "String".to_string(),
-                got: args[2].type_name().to_string(),
-            }),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "String".to_string(),
+                    got: args[2].type_name().to_string(),
+                });
+            }
         };
         let divisor = unit_to_seconds(&unit)?;
         Ok(val_real(diff / divisor))
@@ -522,14 +628,18 @@ pub fn builtin_date_object(args: &[Value]) -> Result<Value, EvalError> {
         1 => match &args[0] {
             Value::List(elems) => extract_datetime(elems)?,
             Value::Str(s) => parse_iso_date(s)?,
-            _ => return Err(EvalError::TypeError {
-                expected: "List or String".to_string(),
-                got: args[0].type_name().to_string(),
-            }),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "List or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
         },
-        _ => return Err(EvalError::Error(
-            "DateObject takes 0 or 1 argument".to_string(),
-        )),
+        _ => {
+            return Err(EvalError::Error(
+                "DateObject takes 0 or 1 argument".to_string(),
+            ));
+        }
     };
 
     let mut fields = HashMap::new();
@@ -554,14 +664,18 @@ pub fn builtin_date_list(args: &[Value]) -> Result<Value, EvalError> {
         1 => match &args[0] {
             Value::List(elems) => extract_datetime(elems)?,
             Value::Str(s) => parse_iso_date(s)?,
-            _ => return Err(EvalError::TypeError {
-                expected: "List or String".to_string(),
-                got: args[0].type_name().to_string(),
-            }),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "List or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
         },
-        _ => return Err(EvalError::Error(
-            "DateList takes 0 or 1 argument".to_string(),
-        )),
+        _ => {
+            return Err(EvalError::Error(
+                "DateList takes 0 or 1 argument".to_string(),
+            ));
+        }
     };
     Ok(Value::List(vec![
         val_int(y),
@@ -593,16 +707,20 @@ pub fn builtin_day_name(args: &[Value]) -> Result<Value, EvalError> {
             let (y, m, d, _, _, _) = match &args[0] {
                 Value::List(elems) => extract_datetime(elems)?,
                 Value::Str(s) => parse_iso_date(s)?,
-                _ => return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List or String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
             };
             (y, m, d)
         }
-        _ => return Err(EvalError::Error(
-            "DayName takes 0 or 1 argument".to_string(),
-        )),
+        _ => {
+            return Err(EvalError::Error(
+                "DayName takes 0 or 1 argument".to_string(),
+            ));
+        }
     };
     let dow = day_of_week(y, m, d);
     Ok(Value::Str(DAY_NAMES[dow as usize].to_string()))
@@ -622,18 +740,22 @@ pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
             let dt1 = match &args[0] {
                 Value::List(elems) => extract_datetime(elems)?,
                 Value::Str(s) => parse_iso_date(s)?,
-                _ => return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List or String".to_string(),
+                        got: args[0].type_name().to_string(),
+                    });
+                }
             };
             let dt2 = match &args[1] {
                 Value::List(elems) => extract_datetime(elems)?,
                 Value::Str(s) => parse_iso_date(s)?,
-                _ => return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[1].type_name().to_string(),
-                }),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "List or String".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
             };
             let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
             let secs2 = date_to_unix_seconds(dt2.0, dt2.1, dt2.2, dt2.3, dt2.4, dt2.5);
@@ -665,37 +787,47 @@ pub fn builtin_month_name(args: &[Value]) -> Result<Value, EvalError> {
                 1 => match &elems[0] {
                     Value::Integer(n) => i64::try_from(n).unwrap_or(0),
                     Value::Real(r) => r.to_f64() as i64,
-                    _ => return Err(EvalError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: elems[0].type_name().to_string(),
-                    }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: elems[0].type_name().to_string(),
+                        });
+                    }
                 },
                 _ => {
                     if elems.len() < 2 {
-                        return Err(EvalError::Error("Date list must have at least 2 elements for MonthName".to_string()));
+                        return Err(EvalError::Error(
+                            "Date list must have at least 2 elements for MonthName".to_string(),
+                        ));
                     }
                     match &elems[1] {
                         Value::Integer(n) => i64::try_from(n).unwrap_or(0),
                         Value::Real(r) => r.to_f64() as i64,
-                        _ => return Err(EvalError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: elems[1].type_name().to_string(),
-                        }),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "Integer".to_string(),
+                                got: elems[1].type_name().to_string(),
+                            });
+                        }
                     }
                 }
             }
         }
-        _ => return Err(EvalError::TypeError {
-            expected: "Integer or List".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer or List".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
     };
     if !(1..=12).contains(&month_num) {
         return Err(EvalError::Error(
             "Month must be between 1 and 12".to_string(),
         ));
     }
-    Ok(Value::Str(MONTH_NAMES[(month_num - 1) as usize].to_string()))
+    Ok(Value::Str(
+        MONTH_NAMES[(month_num - 1) as usize].to_string(),
+    ))
 }
 
 /// `DaysInMonth[{year, month}]`
@@ -709,7 +841,8 @@ pub fn builtin_days_in_month(args: &[Value]) -> Result<Value, EvalError> {
         Value::List(elems) if elems.len() >= 2 => {
             let to_i64 = |i: usize, what: &str| -> Result<i64, EvalError> {
                 match &elems[i] {
-                    Value::Integer(n) => i64::try_from(n).map_err(|_| EvalError::Error(format!("{} out of range", what))),
+                    Value::Integer(n) => i64::try_from(n)
+                        .map_err(|_| EvalError::Error(format!("{} out of range", what))),
                     Value::Real(r) => Ok(r.to_f64() as i64),
                     _ => Err(EvalError::TypeError {
                         expected: "Integer".to_string(),
@@ -719,10 +852,12 @@ pub fn builtin_days_in_month(args: &[Value]) -> Result<Value, EvalError> {
             };
             (to_i64(0, "Year")?, to_i64(1, "Month")?)
         }
-        _ => return Err(EvalError::TypeError {
-            expected: "List {year, month}".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List {year, month}".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
     };
     Ok(val_int(days_in_month(year, month)))
 }
@@ -737,10 +872,12 @@ pub fn builtin_leap_year_q(args: &[Value]) -> Result<Value, EvalError> {
     let year = match &args[0] {
         Value::Integer(n) => i64::try_from(n).unwrap_or(0),
         Value::Real(r) => r.to_f64() as i64,
-        _ => return Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
     };
     Ok(Value::Bool(is_leap_year(year)))
 }
@@ -753,8 +890,8 @@ mod tests {
 
     #[test]
     fn test_is_leap_year() {
-        assert!(is_leap_year(2000));  // divisible by 400
-        assert!(is_leap_year(2024));  // divisible by 4, not 100
+        assert!(is_leap_year(2000)); // divisible by 400
+        assert!(is_leap_year(2024)); // divisible by 4, not 100
         assert!(!is_leap_year(1900)); // divisible by 100, not 400
         assert!(!is_leap_year(2023)); // not divisible by 4
     }
@@ -800,7 +937,13 @@ mod tests {
             assert_eq!(rd, d, "day mismatch for {:?}", (y, m, d, h, mi, s));
             assert_eq!(rh, h, "hour mismatch for {:?}", (y, m, d, h, mi, s));
             assert_eq!(rmi, mi, "minute mismatch for {:?}", (y, m, d, h, mi, s));
-            assert!((rs - s).abs() < 0.01, "second mismatch for {:?}: got {}, expected {}", (y, m, d, h, mi, s), rs, s);
+            assert!(
+                (rs - s).abs() < 0.01,
+                "second mismatch for {:?}: got {}, expected {}",
+                (y, m, d, h, mi, s),
+                rs,
+                s
+            );
         }
     }
 
@@ -837,19 +980,33 @@ mod tests {
 
     #[test]
     fn test_builtin_days_in_month_leap() {
-        let result = builtin_days_in_month(&[Value::List(vec![val_int(2024), val_int(2)])]).unwrap();
+        let result =
+            builtin_days_in_month(&[Value::List(vec![val_int(2024), val_int(2)])]).unwrap();
         assert_eq!(result, val_int(29));
 
-        let result = builtin_days_in_month(&[Value::List(vec![val_int(2023), val_int(2)])]).unwrap();
+        let result =
+            builtin_days_in_month(&[Value::List(vec![val_int(2023), val_int(2)])]).unwrap();
         assert_eq!(result, val_int(28));
     }
 
     #[test]
     fn test_builtin_leap_year_q() {
-        assert_eq!(builtin_leap_year_q(&[val_int(2000)]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_leap_year_q(&[val_int(1900)]).unwrap(), Value::Bool(false));
-        assert_eq!(builtin_leap_year_q(&[val_int(2024)]).unwrap(), Value::Bool(true));
-        assert_eq!(builtin_leap_year_q(&[val_int(2023)]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            builtin_leap_year_q(&[val_int(2000)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_leap_year_q(&[val_int(1900)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_leap_year_q(&[val_int(2024)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_leap_year_q(&[val_int(2023)]).unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[test]
@@ -925,9 +1082,18 @@ mod tests {
 
     #[test]
     fn test_builtin_month_name() {
-        assert_eq!(builtin_month_name(&[val_int(1)]).unwrap(), Value::Str("January".to_string()));
-        assert_eq!(builtin_month_name(&[val_int(2)]).unwrap(), Value::Str("February".to_string()));
-        assert_eq!(builtin_month_name(&[val_int(12)]).unwrap(), Value::Str("December".to_string()));
+        assert_eq!(
+            builtin_month_name(&[val_int(1)]).unwrap(),
+            Value::Str("January".to_string())
+        );
+        assert_eq!(
+            builtin_month_name(&[val_int(2)]).unwrap(),
+            Value::Str("February".to_string())
+        );
+        assert_eq!(
+            builtin_month_name(&[val_int(12)]).unwrap(),
+            Value::Str("December".to_string())
+        );
     }
 
     #[test]

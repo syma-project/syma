@@ -394,59 +394,64 @@ fn expand_value(val: &Value) -> Value {
 
 fn expand_times2(a: &Value, b: &Value) -> Value {
     if let Value::Call { head, args: pa } = b
-        && head == "Plus" {
-            let terms: Vec<Value> = pa
-                .iter()
-                .map(|t| expand_value(&simplify_call("Times", &[a.clone(), t.clone()])))
-                .collect();
-            return simplify_call("Plus", &terms);
-        }
+        && head == "Plus"
+    {
+        let terms: Vec<Value> = pa
+            .iter()
+            .map(|t| expand_value(&simplify_call("Times", &[a.clone(), t.clone()])))
+            .collect();
+        return simplify_call("Plus", &terms);
+    }
     if let Value::Call { head, args: pa } = a
-        && head == "Plus" {
-            let terms: Vec<Value> = pa
-                .iter()
-                .map(|t| expand_value(&simplify_call("Times", &[t.clone(), b.clone()])))
-                .collect();
-            return simplify_call("Plus", &terms);
-        }
+        && head == "Plus"
+    {
+        let terms: Vec<Value> = pa
+            .iter()
+            .map(|t| expand_value(&simplify_call("Times", &[t.clone(), b.clone()])))
+            .collect();
+        return simplify_call("Plus", &terms);
+    }
     call("Times", vec![a.clone(), b.clone()])
 }
 
 fn expand_pow2(base: &Value, exp: &Value) -> Value {
     if let Value::Integer(n) = exp
         && let Some(ni) = n.to_i64()
-            && let Value::Call { head, args: pa } = base
-                && head == "Plus" && pa.len() == 2 && (0..=10).contains(&ni) {
-                    let mut terms = Vec::new();
-                    for k in 0..=ni {
-                        let c = binom(ni, k);
-                        let ap = if ni - k == 0 {
-                            Value::Integer(Integer::from(1))
-                        } else if ni - k == 1 {
-                            pa[0].clone()
-                        } else {
-                            call(
-                                "Power",
-                                vec![pa[0].clone(), Value::Integer(Integer::from(ni - k))],
-                            )
-                        };
-                        let bp = if k == 0 {
-                            Value::Integer(Integer::from(1))
-                        } else if k == 1 {
-                            pa[1].clone()
-                        } else {
-                            call(
-                                "Power",
-                                vec![pa[1].clone(), Value::Integer(Integer::from(k))],
-                            )
-                        };
-                        terms.push(simplify_call(
-                            "Times",
-                            &[Value::Integer(Integer::from(c)), ap, bp],
-                        ));
-                    }
-                    return simplify_call("Plus", &terms);
-                }
+        && let Value::Call { head, args: pa } = base
+        && head == "Plus"
+        && pa.len() == 2
+        && (0..=10).contains(&ni)
+    {
+        let mut terms = Vec::new();
+        for k in 0..=ni {
+            let c = binom(ni, k);
+            let ap = if ni - k == 0 {
+                Value::Integer(Integer::from(1))
+            } else if ni - k == 1 {
+                pa[0].clone()
+            } else {
+                call(
+                    "Power",
+                    vec![pa[0].clone(), Value::Integer(Integer::from(ni - k))],
+                )
+            };
+            let bp = if k == 0 {
+                Value::Integer(Integer::from(1))
+            } else if k == 1 {
+                pa[1].clone()
+            } else {
+                call(
+                    "Power",
+                    vec![pa[1].clone(), Value::Integer(Integer::from(k))],
+                )
+            };
+            terms.push(simplify_call(
+                "Times",
+                &[Value::Integer(Integer::from(c)), ap, bp],
+            ));
+        }
+        return simplify_call("Plus", &terms);
+    }
     call("Power", vec![base.clone(), exp.clone()])
 }
 
@@ -714,51 +719,56 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
             let exp_sub = substitute(&expanded, var, target);
             let exp_simp = simplify_value(&exp_sub);
             if let Value::Call { head, args } = &exp_simp
-                && head == "Divide" && args.len() == 2 {
-                    if is_zero_v(&args[0]) && is_zero_v(&args[1]) {
-                        // Apply L'Hôpital
-                        let d_num = basic_diff(expr, var);
-                        let _d_den = basic_diff(expr, var);
-                        let d_result = simplify_value(&substitute(&d_num, var, target));
-                        if let Value::Call {
-                            head: dh,
-                            args: dargs,
-                        } = &d_result
-                            && dh == "Divide" && dargs.len() == 2 && !is_zero_v(&dargs[1]) {
-                                return d_result;
-                            }
-                        if !is_zero_v(&d_result)
-                            && !matches!(&d_result, Value::Call { head, .. } if head == "Divide" && {
-                                let d = &d_result;
-                                if let Value::Call { args: aa, .. } = d {
-                                    aa.len() == 2 && is_zero_v(&aa[1])
-                                } else { false }
-                            })
-                        {
-                            return d_result;
-                        }
-                        return call(
-                            "Limit",
-                            vec![
-                                expr.clone(),
-                                call(
-                                    "Rule",
-                                    vec![Value::Symbol(var.to_string()), target_val.clone()],
-                                ),
-                            ],
-                        );
+                && head == "Divide"
+                && args.len() == 2
+            {
+                if is_zero_v(&args[0]) && is_zero_v(&args[1]) {
+                    // Apply L'Hôpital
+                    let d_num = basic_diff(expr, var);
+                    let _d_den = basic_diff(expr, var);
+                    let d_result = simplify_value(&substitute(&d_num, var, target));
+                    if let Value::Call {
+                        head: dh,
+                        args: dargs,
+                    } = &d_result
+                        && dh == "Divide"
+                        && dargs.len() == 2
+                        && !is_zero_v(&dargs[1])
+                    {
+                        return d_result;
                     }
-                    if is_zero_v(&args[1]) {
-                        return call(
-                            "Limit",
-                            vec![
-                                expr.clone(),
-                                call("Rule", vec![Value::Symbol(var.to_string()), target_val]),
-                            ],
-                        );
+                    if !is_zero_v(&d_result)
+                        && !matches!(&d_result, Value::Call { head, .. } if head == "Divide" && {
+                            let d = &d_result;
+                            if let Value::Call { args: aa, .. } = d {
+                                aa.len() == 2 && is_zero_v(&aa[1])
+                            } else { false }
+                        })
+                    {
+                        return d_result;
                     }
-                    return exp_simp;
+                    return call(
+                        "Limit",
+                        vec![
+                            expr.clone(),
+                            call(
+                                "Rule",
+                                vec![Value::Symbol(var.to_string()), target_val.clone()],
+                            ),
+                        ],
+                    );
                 }
+                if is_zero_v(&args[1]) {
+                    return call(
+                        "Limit",
+                        vec![
+                            expr.clone(),
+                            call("Rule", vec![Value::Symbol(var.to_string()), target_val]),
+                        ],
+                    );
+                }
+                return exp_simp;
+            }
             if !is_zero_v(&simp) {
                 return simp;
             }
@@ -917,37 +927,39 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
             {
                 if ih == "Times" && iargs.len() == 2 {
                     if let Value::Integer(c) = &iargs[0]
-                        && iargs[1].struct_eq(&Value::Symbol(var.to_string())) {
-                            if *c > 0 {
-                                return if neg {
-                                    Value::Integer(Integer::from(0))
-                                } else {
-                                    Value::Symbol("Infinity".to_string())
-                                };
+                        && iargs[1].struct_eq(&Value::Symbol(var.to_string()))
+                    {
+                        if *c > 0 {
+                            return if neg {
+                                Value::Integer(Integer::from(0))
                             } else {
-                                return if neg {
-                                    Value::Symbol("Infinity".to_string())
-                                } else {
-                                    Value::Integer(Integer::from(0))
-                                };
-                            }
+                                Value::Symbol("Infinity".to_string())
+                            };
+                        } else {
+                            return if neg {
+                                Value::Symbol("Infinity".to_string())
+                            } else {
+                                Value::Integer(Integer::from(0))
+                            };
                         }
+                    }
                     if let Value::Integer(c) = &iargs[1]
-                        && iargs[0].struct_eq(&Value::Symbol(var.to_string())) {
-                            if *c > 0 {
-                                return if neg {
-                                    Value::Integer(Integer::from(0))
-                                } else {
-                                    Value::Symbol("Infinity".to_string())
-                                };
+                        && iargs[0].struct_eq(&Value::Symbol(var.to_string()))
+                    {
+                        if *c > 0 {
+                            return if neg {
+                                Value::Integer(Integer::from(0))
                             } else {
-                                return if neg {
-                                    Value::Symbol("Infinity".to_string())
-                                } else {
-                                    Value::Integer(Integer::from(0))
-                                };
-                            }
+                                Value::Symbol("Infinity".to_string())
+                            };
+                        } else {
+                            return if neg {
+                                Value::Symbol("Infinity".to_string())
+                            } else {
+                                Value::Integer(Integer::from(0))
+                            };
                         }
+                    }
                 }
                 expr.clone()
             } else {
@@ -1048,28 +1060,29 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
             // For polynomial-like expressions, look at highest power
             let expanded = expand_value(expr);
             if let Value::Call { head, args } = &expanded
-                && head == "Plus" {
-                    // Find the term with highest power of var
-                    let mut best_term: Option<(i64, Value)> = None;
-                    for arg in args {
-                        let (deg, _) = poly_degree(arg, var);
-                        if let Some((bd, _)) = best_term {
-                            if deg > bd {
-                                best_term = Some((deg, arg.clone()));
-                            }
-                        } else {
+                && head == "Plus"
+            {
+                // Find the term with highest power of var
+                let mut best_term: Option<(i64, Value)> = None;
+                for arg in args {
+                    let (deg, _) = poly_degree(arg, var);
+                    if let Some((bd, _)) = best_term {
+                        if deg > bd {
                             best_term = Some((deg, arg.clone()));
                         }
-                    }
-                    if let Some((deg, dominant)) = best_term {
-                        if deg > 0 {
-                            return limit_at_infinity(&dominant, var, neg);
-                        }
-                        if deg == 0 {
-                            return dominant;
-                        }
+                    } else {
+                        best_term = Some((deg, arg.clone()));
                     }
                 }
+                if let Some((deg, dominant)) = best_term {
+                    if deg > 0 {
+                        return limit_at_infinity(&dominant, var, neg);
+                    }
+                    if deg == 0 {
+                        return dominant;
+                    }
+                }
+            }
             // Return unevaluated
             let target_val = if neg {
                 call(
@@ -1107,9 +1120,10 @@ fn poly_degree(expr: &Value, var: &str) -> (i64, Value) {
         Value::Call { head, args } if head == "Power" && args.len() == 2 => {
             if args[0].struct_eq(&Value::Symbol(var.to_string()))
                 && let Value::Integer(n) = &args[1]
-                    && let Some(ni) = n.to_i64() {
-                        return (ni, expr.clone());
-                    }
+                && let Some(ni) = n.to_i64()
+            {
+                return (ni, expr.clone());
+            }
             (0, expr.clone())
         }
         Value::Call { head, args } if head == "Times" => {
@@ -1269,16 +1283,18 @@ fn extract_linear_factors_inner(expr: &Value, var: &str, factors: &mut Vec<(Valu
             // Check for c + x or x + c
             if let Value::Symbol(s) = &args[0]
                 && s == var
-                    && is_numeric_constant(&args[1]) {
-                        factors.push((args[1].clone(), expr.clone()));
-                        return;
-                    }
+                && is_numeric_constant(&args[1])
+            {
+                factors.push((args[1].clone(), expr.clone()));
+                return;
+            }
             if let Value::Symbol(s) = &args[1]
                 && s == var
-                    && is_numeric_constant(&args[0]) {
-                        factors.push((args[0].clone(), expr.clone()));
-                        return;
-                    }
+                && is_numeric_constant(&args[0])
+            {
+                factors.push((args[0].clone(), expr.clone()));
+                return;
+            }
         }
         if head == "Times" {
             for arg in args {
@@ -1289,13 +1305,15 @@ fn extract_linear_factors_inner(expr: &Value, var: &str, factors: &mut Vec<(Valu
     }
     // Try to factor quadratic
     if let Value::Call { head, args: _ } = expr
-        && head != "Plus" && head != "Times" {
-            // Single unfactored polynomial — try to factor
-            let factored = simple_factor_linear(expr, var);
-            if let Some(fs) = factored {
-                factors.extend(fs);
-            }
+        && head != "Plus"
+        && head != "Times"
+    {
+        // Single unfactored polynomial — try to factor
+        let factored = simple_factor_linear(expr, var);
+        if let Some(fs) = factored {
+            factors.extend(fs);
         }
+    }
 }
 
 /// Try to factor a polynomial into linear factors: (x+a)*(x+b) etc.
@@ -1309,44 +1327,53 @@ fn simple_factor_linear(poly: &Value, var: &str) -> Option<Vec<(Value, Value)>> 
     if coeffs.len() == 3
         && let (Value::Integer(a), Value::Integer(b), Value::Integer(c)) =
             (&coeffs[2], &coeffs[1], &coeffs[0])
-        {
-            let disc = b * b - Integer::from(4) * a * c;
-            if !disc.is_negative() {
-                let sqrt_disc = disc.clone().sqrt();
-                if (sqrt_disc.clone() * sqrt_disc.clone()) == disc {
-                    let two_a: Integer = Integer::from(2) * a;
-                    let neg_b: Integer = (-b).into();
-                    let r1_num: Integer = (&neg_b + &sqrt_disc).into();
-                    let r1 = Rational::from((&r1_num, &two_a));
-                    let r2_num: Integer = (&neg_b - &sqrt_disc).into();
-                    let r2 = Rational::from((&r2_num, &two_a));
-                    let x = Value::Symbol(var.to_string());
-                    let f1 = call(
-                        "Plus",
-                        vec![
-                            x.clone(),
-                            call(
-                                "Times",
-                                vec![Value::Integer(Integer::from(-1)), Value::Rational(Box::new(r1.clone()))],
-                            ),
-                        ],
-                    );
-                    let f2 = call(
-                        "Plus",
-                        vec![
-                            x,
-                            call(
-                                "Times",
-                                vec![Value::Integer(Integer::from(-1)), Value::Rational(Box::new(r2.clone()))],
-                            ),
-                        ],
-                    );
-                    let neg_r1: Rational = (-&r1).into();
-                    let neg_r2: Rational = (-&r2).into();
-                    return Some(vec![(Value::Rational(Box::new(neg_r1)), f1), (Value::Rational(Box::new(neg_r2)), f2)]);
-                }
+    {
+        let disc = b * b - Integer::from(4) * a * c;
+        if !disc.is_negative() {
+            let sqrt_disc = disc.clone().sqrt();
+            if (sqrt_disc.clone() * sqrt_disc.clone()) == disc {
+                let two_a: Integer = Integer::from(2) * a;
+                let neg_b: Integer = (-b).into();
+                let r1_num: Integer = (&neg_b + &sqrt_disc).into();
+                let r1 = Rational::from((&r1_num, &two_a));
+                let r2_num: Integer = (&neg_b - &sqrt_disc).into();
+                let r2 = Rational::from((&r2_num, &two_a));
+                let x = Value::Symbol(var.to_string());
+                let f1 = call(
+                    "Plus",
+                    vec![
+                        x.clone(),
+                        call(
+                            "Times",
+                            vec![
+                                Value::Integer(Integer::from(-1)),
+                                Value::Rational(Box::new(r1.clone())),
+                            ],
+                        ),
+                    ],
+                );
+                let f2 = call(
+                    "Plus",
+                    vec![
+                        x,
+                        call(
+                            "Times",
+                            vec![
+                                Value::Integer(Integer::from(-1)),
+                                Value::Rational(Box::new(r2.clone())),
+                            ],
+                        ),
+                    ],
+                );
+                let neg_r1: Rational = (-&r1).into();
+                let neg_r2: Rational = (-&r2).into();
+                return Some(vec![
+                    (Value::Rational(Box::new(neg_r1)), f1),
+                    (Value::Rational(Box::new(neg_r2)), f2),
+                ]);
             }
         }
+    }
     None
 }
 
@@ -1378,18 +1405,16 @@ fn collect_coeff_terms(expr: &Value, var: &str, coeffs: &mut Vec<Value>) {
                     } else {
                         coeff = simplify_call("Times", &[coeff, arg.clone()]);
                     }
-                } else if let Value::Call {
-                    head,
-                    args: pa,
-                } = arg
+                } else if let Value::Call { head, args: pa } = arg
                     && head == "Power"
                     && pa.len() == 2
                     && pa[0].struct_eq(&Value::Symbol(var.to_string()))
                 {
                     if let Value::Integer(n) = &pa[1]
-                        && let Some(ni) = n.to_i64() {
-                            var_power += ni;
-                        }
+                        && let Some(ni) = n.to_i64()
+                    {
+                        var_power += ni;
+                    }
                 } else {
                     coeff = simplify_call("Times", &[coeff, arg.clone()]);
                 }
@@ -1416,23 +1441,20 @@ fn collect_coeff_terms(expr: &Value, var: &str, coeffs: &mut Vec<Value>) {
 }
 
 fn degree_in(expr: &Value, var: &str) -> i64 {
-    
     get_polynomial_degree(expr, var)
 }
 
 fn get_polynomial_degree(expr: &Value, var: &str) -> i64 {
     match expr {
-        Value::Symbol(s)
-            if s == var => {
-                1
-            }
+        Value::Symbol(s) if s == var => 1,
         Value::Integer(_) | Value::Real(_) | Value::Rational(_) => 0,
         Value::Call { head, args } if head == "Power" && args.len() == 2 => {
             if args[0].struct_eq(&Value::Symbol(var.to_string()))
                 && let Value::Integer(n) = &args[1]
-                    && let Some(ni) = n.to_i64() {
-                        return ni;
-                    }
+                && let Some(ni) = n.to_i64()
+            {
+                return ni;
+            }
             0
         }
         Value::Call { head, args } if head == "Times" => {
@@ -1493,10 +1515,7 @@ fn polyn_div(num: &Value, den: &Value, var: &str) -> (Value, Value) {
         for (k, den_k) in den_coeffs.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub_term = expand_value(&simplify_call(
-                    "Times",
-                    &[q_i.clone(), den_k.clone()],
-                ));
+                let sub_term = expand_value(&simplify_call("Times", &[q_i.clone(), den_k.clone()]));
                 remainder[idx] = simplify_call(
                     "Plus",
                     &[
@@ -1755,65 +1774,47 @@ fn try_factor_cancel(expr: &Value) -> Value {
         Value::Call { head, args } if head == "Plus" => {
             // x^2 - 1 pattern: x^2 + (-1)
             if args.len() == 2 {
-                if let (
-                    Value::Call {
-                        head,
-                        args: pargs,
-                    },
-                    Value::Integer(c),
-                ) = (&args[0], &args[1])
+                if let (Value::Call { head, args: pargs }, Value::Integer(c)) = (&args[0], &args[1])
                     && head == "Power"
                     && pargs.len() == 2
                 {
                     let base = &pargs[0];
                     if let Value::Integer(exp) = &pargs[1]
                         && *exp == 2
-                            && let Some(c_i64) = c.to_i64()
-                                && c_i64 < 0
-                                    && (-c_i64) as f64 == (((-c_i64) as f64).sqrt()).floor()
-                                {
-                                    let sqrt_c = ((-c_i64) as f64).sqrt() as i64;
-                                    let x = base.clone();
-                                    let f1 = call(
-                                        "Plus",
-                                        vec![x.clone(), Value::Integer(Integer::from(sqrt_c))],
-                                    );
-                                    let f2 = call(
-                                        "Plus",
-                                        vec![x, Value::Integer(Integer::from(-sqrt_c))],
-                                    );
-                                    return call("Times", vec![f1, f2]);
-                                }
+                        && let Some(c_i64) = c.to_i64()
+                        && c_i64 < 0
+                        && (-c_i64) as f64 == (((-c_i64) as f64).sqrt()).floor()
+                    {
+                        let sqrt_c = ((-c_i64) as f64).sqrt() as i64;
+                        let x = base.clone();
+                        let f1 = call(
+                            "Plus",
+                            vec![x.clone(), Value::Integer(Integer::from(sqrt_c))],
+                        );
+                        let f2 = call("Plus", vec![x, Value::Integer(Integer::from(-sqrt_c))]);
+                        return call("Times", vec![f1, f2]);
+                    }
                 }
-                if let (
-                    Value::Integer(c),
-                    Value::Call {
-                        head,
-                        args: pargs,
-                    },
-                ) = (&args[0], &args[1])
+                if let (Value::Integer(c), Value::Call { head, args: pargs }) = (&args[0], &args[1])
                     && head == "Power"
                     && pargs.len() == 2
                 {
                     let base = &pargs[0];
                     if let Value::Integer(exp) = &pargs[1]
                         && *exp == 2
-                            && let Some(c_i64) = c.to_i64()
-                                && c_i64 < 0
-                                    && (-c_i64) as f64 == (((-c_i64) as f64).sqrt()).floor()
-                                {
-                                    let sqrt_c = ((-c_i64) as f64).sqrt() as i64;
-                                    let x = base.clone();
-                                    let f1 = call(
-                                        "Plus",
-                                        vec![x.clone(), Value::Integer(Integer::from(sqrt_c))],
-                                    );
-                                    let f2 = call(
-                                        "Plus",
-                                        vec![x, Value::Integer(Integer::from(-sqrt_c))],
-                                    );
-                                    return call("Times", vec![f1, f2]);
-                                }
+                        && let Some(c_i64) = c.to_i64()
+                        && c_i64 < 0
+                        && (-c_i64) as f64 == (((-c_i64) as f64).sqrt()).floor()
+                    {
+                        let sqrt_c = ((-c_i64) as f64).sqrt() as i64;
+                        let x = base.clone();
+                        let f1 = call(
+                            "Plus",
+                            vec![x.clone(), Value::Integer(Integer::from(sqrt_c))],
+                        );
+                        let f2 = call("Plus", vec![x, Value::Integer(Integer::from(-sqrt_c))]);
+                        return call("Times", vec![f1, f2]);
+                    }
                 }
             }
             expr.clone()
@@ -1999,20 +2000,19 @@ fn extract_var_coeff(term: &Value, var: &str) -> (i64, Value) {
             }
         }
         Value::Integer(_) | Value::Real(_) | Value::Rational(_) => (0, term.clone()),
-        Value::Call {
-            head,
-            args,
-        } if head == "Power" && args.len() == 2 && args[0].struct_eq(&Value::Symbol(var.to_string())) => {
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && args[0].struct_eq(&Value::Symbol(var.to_string())) =>
+        {
             if let Value::Integer(n) = &args[1]
-                && let Some(ni) = n.to_i64() {
-                    return (ni, Value::Integer(Integer::from(1)));
-                }
+                && let Some(ni) = n.to_i64()
+            {
+                return (ni, Value::Integer(Integer::from(1)));
+            }
             (0, term.clone())
         }
-        Value::Call {
-            head,
-            args,
-        } if head == "Times" => {
+        Value::Call { head, args } if head == "Times" => {
             let mut power = 0i64;
             let mut coeff = Value::Integer(Integer::from(1));
             for arg in args {
@@ -2020,16 +2020,16 @@ fn extract_var_coeff(term: &Value, var: &str) -> (i64, Value) {
                     Value::Symbol(s) if s == var => {
                         power += 1;
                     }
-                    Value::Call {
-                        head,
-                        args: pargs,
-                    } if head == "Power" && pargs.len() == 2
-                        && pargs[0].struct_eq(&Value::Symbol(var.to_string())) =>
+                    Value::Call { head, args: pargs }
+                        if head == "Power"
+                            && pargs.len() == 2
+                            && pargs[0].struct_eq(&Value::Symbol(var.to_string())) =>
                     {
                         if let Value::Integer(n) = &pargs[1]
-                            && let Some(ni) = n.to_i64() {
-                                power += ni;
-                            }
+                            && let Some(ni) = n.to_i64()
+                        {
+                            power += ni;
+                        }
                     }
                     _ => {
                         coeff = simplify_call("Times", &[coeff, arg.clone()]);
@@ -2083,20 +2083,14 @@ fn function_expand_value(expr: &Value) -> Value {
 
 fn expand_log(arg: &Value) -> Value {
     match arg {
-        Value::Call {
-            head,
-            args,
-        } if head == "Times" => {
+        Value::Call { head, args } if head == "Times" => {
             let terms: Vec<Value> = args
                 .iter()
                 .map(|a| call("Log", vec![function_expand_value(a)]))
                 .collect();
             simplify_call("Plus", &terms)
         }
-        Value::Call {
-            head,
-            args,
-        } if head == "Divide" && args.len() == 2 => simplify_call(
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => simplify_call(
             "Plus",
             &[
                 call("Log", vec![function_expand_value(&args[0])]),
@@ -2109,10 +2103,7 @@ fn expand_log(arg: &Value) -> Value {
                 ),
             ],
         ),
-        Value::Call {
-            head,
-            args: pargs,
-        } if head == "Power" && pargs.len() == 2 => {
+        Value::Call { head, args: pargs } if head == "Power" && pargs.len() == 2 => {
             // Log[x^n] -> n * Log[x]
             simplify_call(
                 "Times",
@@ -2128,11 +2119,9 @@ fn expand_log(arg: &Value) -> Value {
 
 fn expand_sin(arg: &Value) -> Value {
     // Sin[2*x] -> 2*Sin[x]*Cos[x]
-    if let Value::Call {
-        head,
-        args,
-    } = arg
-        && head == "Times" && args.len() == 2
+    if let Value::Call { head, args } = arg
+        && head == "Times"
+        && args.len() == 2
         && matches!(
             &args[0],
             Value::Integer(n) if *n == 2
@@ -2150,7 +2139,8 @@ fn expand_sin(arg: &Value) -> Value {
     }
     // Sin[x + y] -> Sin[x]*Cos[y] + Cos[x]*Sin[y]
     if let Value::Call { head, args } = arg
-        && head == "Plus" && args.len() == 2
+        && head == "Plus"
+        && args.len() == 2
     {
         let a = function_expand_value(&args[0]);
         let b = function_expand_value(&args[1]);
@@ -2170,11 +2160,9 @@ fn expand_sin(arg: &Value) -> Value {
 
 fn expand_cos(arg: &Value) -> Value {
     // Cos[2*x] -> Cos[x]^2 - Sin[x]^2
-    if let Value::Call {
-        head,
-        args,
-    } = arg
-        && head == "Times" && args.len() == 2
+    if let Value::Call { head, args } = arg
+        && head == "Times"
+        && args.len() == 2
         && matches!(
             &args[0],
             Value::Integer(n) if *n == 2
@@ -2206,7 +2194,8 @@ fn expand_cos(arg: &Value) -> Value {
     }
     // Cos[x + y] -> Cos[x]*Cos[y] - Sin[x]*Sin[y]
     if let Value::Call { head, args } = arg
-        && head == "Plus" && args.len() == 2
+        && head == "Plus"
+        && args.len() == 2
     {
         let a = function_expand_value(&args[0]);
         let b = function_expand_value(&args[1]);
@@ -2234,22 +2223,25 @@ fn expand_cos(arg: &Value) -> Value {
 fn expand_gamma(arg: &Value) -> Value {
     // Gamma[n+1] -> n * Gamma[n]
     if let Value::Call { head, args } = arg
-        && head == "Plus" && args.len() == 2
+        && head == "Plus"
+        && args.len() == 2
     {
         if let Value::Integer(n) = &args[1]
-            && *n == 1 {
-                return simplify_call(
-                    "Times",
-                    &[args[0].clone(), call("Gamma", vec![args[0].clone()])],
-                );
-            }
+            && *n == 1
+        {
+            return simplify_call(
+                "Times",
+                &[args[0].clone(), call("Gamma", vec![args[0].clone()])],
+            );
+        }
         if let Value::Integer(n) = &args[0]
-            && *n == 1 {
-                return simplify_call(
-                    "Times",
-                    &[args[1].clone(), call("Gamma", vec![args[1].clone()])],
-                );
-            }
+            && *n == 1
+        {
+            return simplify_call(
+                "Times",
+                &[args[1].clone(), call("Gamma", vec![args[1].clone()])],
+            );
+        }
     }
     call("Gamma", vec![arg.clone()])
 }
@@ -2257,50 +2249,48 @@ fn expand_gamma(arg: &Value) -> Value {
 fn expand_bessel_j(param: &Value, arg: &Value) -> Value {
     // BesselJ[1/2, x] -> Sqrt[2/(Pi*x)] * Sin[x]
     if let Value::Rational(r) = param
-        && *r.numer() == 1 && *r.denom() == 2 {
-            return simplify_call(
-                "Times",
-                &[
-                    call(
-                        "Sqrt",
-                        vec![call(
-                            "Divide",
-                            vec![
-                                Value::Integer(Integer::from(2)),
-                                simplify_call(
-                                    "Times",
-                                    &[Value::Symbol("Pi".to_string()), arg.clone()],
-                                ),
-                            ],
-                        )],
-                    ),
-                    call("Sin", vec![arg.clone()]),
-                ],
-            );
-        }
+        && *r.numer() == 1
+        && *r.denom() == 2
+    {
+        return simplify_call(
+            "Times",
+            &[
+                call(
+                    "Sqrt",
+                    vec![call(
+                        "Divide",
+                        vec![
+                            Value::Integer(Integer::from(2)),
+                            simplify_call("Times", &[Value::Symbol("Pi".to_string()), arg.clone()]),
+                        ],
+                    )],
+                ),
+                call("Sin", vec![arg.clone()]),
+            ],
+        );
+    }
     // BesselJ[-1/2, x] -> Sqrt[2/(Pi*x)] * Cos[x]
     if let Value::Rational(r) = param
-        && *r.numer() == -1 && *r.denom() == 2 {
-            return simplify_call(
-                "Times",
-                &[
-                    call(
-                        "Sqrt",
-                        vec![call(
-                            "Divide",
-                            vec![
-                                Value::Integer(Integer::from(2)),
-                                simplify_call(
-                                    "Times",
-                                    &[Value::Symbol("Pi".to_string()), arg.clone()],
-                                ),
-                            ],
-                        )],
-                    ),
-                    call("Cos", vec![arg.clone()]),
-                ],
-            );
-        }
+        && *r.numer() == -1
+        && *r.denom() == 2
+    {
+        return simplify_call(
+            "Times",
+            &[
+                call(
+                    "Sqrt",
+                    vec![call(
+                        "Divide",
+                        vec![
+                            Value::Integer(Integer::from(2)),
+                            simplify_call("Times", &[Value::Symbol("Pi".to_string()), arg.clone()]),
+                        ],
+                    )],
+                ),
+                call("Cos", vec![arg.clone()]),
+            ],
+        );
+    }
     call("BesselJ", vec![param.clone(), arg.clone()])
 }
 

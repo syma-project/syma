@@ -3,7 +3,6 @@ use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
-
 fn substitute_numeric(expr: &Value, var: &str, val: f64) -> Value {
     match expr {
         Value::Symbol(s) if s == var => super::real(val),
@@ -661,8 +660,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
 
             let mut coeffs_trimmed = coeffs;
-            while coeffs_trimmed.len() > 1
-                && coeffs_trimmed.last().is_none_or(|&c| c.abs() < 1e-15)
+            while coeffs_trimmed.len() > 1 && coeffs_trimmed.last().is_none_or(|&c| c.abs() < 1e-15)
             {
                 coeffs_trimmed.pop();
             }
@@ -754,24 +752,26 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 let fa = f(a);
                 let fb = f(b);
                 if fa * fb <= 0.0
-                    && let Ok(root) = brent_method(&f, a, b) {
-                        let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
-                        if !is_dup {
-                            roots.push(root);
-                        }
+                    && let Ok(root) = brent_method(&f, a, b)
+                {
+                    let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
+                    if !is_dup {
+                        roots.push(root);
                     }
+                }
             }
 
             for i in 0..grid_size {
                 let start =
                     search_lo + ((i as f64 + 0.5) / grid_size as f64) * (search_hi - search_lo);
                 if let Ok(root) = newton_method(&f, start)
-                    && f(root).abs() < 1e-6 {
-                        let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
-                        if !is_dup {
-                            roots.push(root);
-                        }
+                    && f(root).abs() < 1e-6
+                {
+                    let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
+                    if !is_dup {
+                        roots.push(root);
                     }
+                }
             }
 
             roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1233,7 +1233,10 @@ mod tests {
 
     #[test]
     fn test_to_f64() {
-        assert_eq!(super::super::to_f64(&Value::Integer(Integer::from(42))), Some(42.0));
+        assert_eq!(
+            super::super::to_f64(&Value::Integer(Integer::from(42))),
+            Some(42.0)
+        );
         assert_eq!(
             super::super::to_f64(&Value::Real(Float::with_val(DEFAULT_PRECISION, 3.14))),
             Some(3.14)

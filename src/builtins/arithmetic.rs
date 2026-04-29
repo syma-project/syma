@@ -285,12 +285,13 @@ pub fn builtin_times(args: &[Value]) -> Result<Value, EvalError> {
             head,
             args: inner_args,
         } = &v
-            && head == "Times" {
-                for f in inner_args {
-                    factors.push(f.clone());
-                }
-                return;
+            && head == "Times"
+        {
+            for f in inner_args {
+                factors.push(f.clone());
             }
+            return;
+        }
         factors.push(v);
     };
     for arg in args {
@@ -350,10 +351,11 @@ fn flatten_times(v: Value) -> Result<Value, EvalError> {
                     head: h,
                     args: inner,
                 } = &arg
-                    && h == "Times" {
-                        flat.extend(inner.clone());
-                        continue;
-                    }
+                    && h == "Times"
+                {
+                    flat.extend(inner.clone());
+                    continue;
+                }
                 flat.push(arg);
             }
             if flat.is_empty() {

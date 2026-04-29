@@ -1272,12 +1272,7 @@ pub fn builtin_perfect_power_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             if *n <= 1 {
                 return Ok(Value::Symbol(
-                    if *n == 1 {
-                        "True"
-                    } else {
-                        "False"
-                    }
-                    .to_string(),
+                    if *n == 1 { "True" } else { "False" }.to_string(),
                 ));
             }
             let factors = factor_integer(n);
@@ -1285,11 +1280,7 @@ pub fn builtin_perfect_power_q(args: &[Value]) -> Result<Value, EvalError> {
                 return Ok(Value::Symbol("False".to_string()));
             }
             // n is a perfect power if gcd of all exponents >= 2
-            let g = factors
-                .iter()
-                .map(|(_, e)| *e)
-                .reduce(gcd_u32)
-                .unwrap_or(1);
+            let g = factors.iter().map(|(_, e)| *e).reduce(gcd_u32).unwrap_or(1);
             Ok(Value::Symbol(
                 if g >= 2 { "True" } else { "False" }.to_string(),
             ))
@@ -1438,11 +1429,7 @@ fn char_to_digit(c: char, base: u32) -> Option<u32> {
     } else {
         return None;
     };
-    if d < base {
-        Some(d)
-    } else {
-        None
-    }
+    if d < base { Some(d) } else { None }
 }
 
 // ── ToDigits ────────────────────────────────────────────────────────────────
@@ -1503,9 +1490,7 @@ pub fn builtin_continued_fraction(args: &[Value]) -> Result<Value, EvalError> {
     }
     let max_terms = if args.len() == 2 {
         match &args[1] {
-            Value::Integer(n) if n.is_positive() => {
-                n.to_usize().unwrap_or(100)
-            }
+            Value::Integer(n) if n.is_positive() => n.to_usize().unwrap_or(100),
             _ => 100,
         }
     } else {
@@ -2051,13 +2036,7 @@ mod tests {
     #[test]
     fn test_from_digits() {
         assert_eq!(
-            builtin_from_digits(&[Value::List(vec![
-                int(1),
-                int(2),
-                int(3),
-                int(4)
-            ])])
-            .unwrap(),
+            builtin_from_digits(&[Value::List(vec![int(1), int(2), int(3), int(4)])]).unwrap(),
             int(1234)
         );
         // Binary
@@ -2072,16 +2051,10 @@ mod tests {
     #[test]
     fn test_to_digits() {
         let result = builtin_to_digits(&[int(1234)]).unwrap();
-        assert_eq!(
-            result,
-            Value::List(vec![int(1), int(2), int(3), int(4)])
-        );
+        assert_eq!(result, Value::List(vec![int(1), int(2), int(3), int(4)]));
         // Binary
         let result = builtin_to_digits(&[int(5), int(2)]).unwrap();
-        assert_eq!(
-            result,
-            Value::List(vec![int(1), int(0), int(1)])
-        );
+        assert_eq!(result, Value::List(vec![int(1), int(0), int(1)]));
         // Zero
         assert_eq!(
             builtin_to_digits(&[int(0)]).unwrap(),
@@ -2096,17 +2069,11 @@ mod tests {
         // CF of 3/2 = [1, 2]
         let r = Rational::from((3, 2));
         let result = builtin_continued_fraction(&[Value::Rational(Box::new(r))]).unwrap();
-        assert_eq!(
-            result,
-            Value::List(vec![int(1), int(2)])
-        );
+        assert_eq!(result, Value::List(vec![int(1), int(2)]));
         // CF of 7/5 = [1, 2, 2]
         let r = Rational::from((7, 5));
         let result = builtin_continued_fraction(&[Value::Rational(Box::new(r))]).unwrap();
-        assert_eq!(
-            result,
-            Value::List(vec![int(1), int(2), int(2)])
-        );
+        assert_eq!(result, Value::List(vec![int(1), int(2), int(2)]));
         // Integer
         assert_eq!(
             builtin_continued_fraction(&[int(5)]).unwrap(),
@@ -2119,8 +2086,7 @@ mod tests {
     #[test]
     fn test_from_continued_fraction() {
         // [1, 2] = 3/2
-        let result =
-            builtin_from_continued_fraction(&[Value::List(vec![int(1), int(2)])]).unwrap();
+        let result = builtin_from_continued_fraction(&[Value::List(vec![int(1), int(2)])]).unwrap();
         match &result {
             Value::Rational(r) => assert_eq!(r.to_f64(), 1.5),
             _ => panic!("Expected Rational"),
@@ -2143,10 +2109,7 @@ mod tests {
         );
         // Binary: 11 = 1011 in binary = 8+0+2+1
         let result = builtin_number_expand(&[int(11), int(2)]).unwrap();
-        assert_eq!(
-            result,
-            Value::List(vec![int(8), int(0), int(2), int(1)])
-        );
+        assert_eq!(result, Value::List(vec![int(8), int(0), int(2), int(1)]));
         // Zero
         assert_eq!(
             builtin_number_expand(&[int(0)]).unwrap(),

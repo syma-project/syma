@@ -1248,7 +1248,11 @@ pub fn builtin_darker(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         1.0 / 3.0
     };
-    Ok(make_rgb(r * (1.0 - amount), g * (1.0 - amount), b * (1.0 - amount)))
+    Ok(make_rgb(
+        r * (1.0 - amount),
+        g * (1.0 - amount),
+        b * (1.0 - amount),
+    ))
 }
 
 /// Blend[{c1, c2, ...}] — average colors equally.
@@ -1280,10 +1284,12 @@ pub fn builtin_blend(args: &[Value]) -> Result<Value, EvalError> {
             Value::List(w) => {
                 let ws: Vec<f64> = w
                     .iter()
-                    .map(|v| super::to_f64(v).ok_or_else(|| EvalError::TypeError {
-                        expected: "a number".to_string(),
-                        got: v.type_name().to_string(),
-                    }))
+                    .map(|v| {
+                        super::to_f64(v).ok_or_else(|| EvalError::TypeError {
+                            expected: "a number".to_string(),
+                            got: v.type_name().to_string(),
+                        })
+                    })
                     .collect::<Result<Vec<f64>, EvalError>>()?;
                 if ws.len() != colors.len() {
                     return Err(EvalError::Error(format!(

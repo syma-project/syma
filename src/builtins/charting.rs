@@ -245,10 +245,11 @@ fn parse_chart_options(opts: &Value) -> (f64, f64, bool) {
     if let Value::Assoc(map) = opts {
         if let Some(v) = map.get("ImageSize")
             && let Value::List(size) = v
-                && size.len() >= 2 {
-                    width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-                    height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
-                }
+            && size.len() >= 2
+        {
+            width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
+            height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+        }
         if let Some(v) = map.get("GridLines") {
             grid_lines = match v {
                 Value::Bool(b) => *b,
@@ -295,9 +296,10 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
             let mut result = Vec::new();
             for item in data {
                 if let Value::List(p) = item
-                    && let (Some(x), Some(y)) = (super::to_f64(&p[0]), super::to_f64(&p[1])) {
-                        result.push((x, y));
-                    }
+                    && let (Some(x), Some(y)) = (super::to_f64(&p[0]), super::to_f64(&p[1]))
+                {
+                    result.push((x, y));
+                }
             }
             result
         }

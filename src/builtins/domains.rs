@@ -61,36 +61,26 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     let result = match dom_name {
-        "Integers"
-            if is_concrete(x) => {
-                Value::Symbol(if matches!(x, Value::Integer(_)) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
-            }
-        "Rationals"
-            if is_concrete(x) => {
-                Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
-            }
-        "Reals"
-            if is_concrete(x) => {
-                Value::Symbol(
-                    if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
-                        "True".to_string()
-                    } else {
-                        "False".to_string()
-                    },
-                )
-            }
-        "Complexes"
-            if is_concrete(x) => {
-                Value::Symbol("True".to_string())
-            }
+        "Integers" if is_concrete(x) => Value::Symbol(if matches!(x, Value::Integer(_)) {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        }),
+        "Rationals" if is_concrete(x) => {
+            Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            })
+        }
+        "Reals" if is_concrete(x) => Value::Symbol(
+            if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            },
+        ),
+        "Complexes" if is_concrete(x) => Value::Symbol("True".to_string()),
         "Booleans" => match x {
             Value::Symbol(s) if s == "True" || s == "False" => Value::Symbol("True".to_string()),
             Value::Bool(_) => Value::Symbol("True".to_string()),
@@ -179,23 +169,25 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
                 head: ph,
                 args: pargs,
             } = &args[0]
-                && ph == "Power" && pargs.len() == 2
-                    && let Value::Integer(e) = &pargs[1]
-                        && *e == 2 {
-                            let var = &pargs[0];
-                            if implies_positive(var, assum) {
-                                return Ok(var.clone());
-                            }
-                            if implies_non_negative(var, assum) {
-                                return Ok(var.clone());
-                            }
-                            if implies_real(var, assum) {
-                                return Ok(Value::Call {
-                                    head: "Abs".to_string(),
-                                    args: vec![var.clone()],
-                                });
-                            }
-                        }
+                && ph == "Power"
+                && pargs.len() == 2
+                && let Value::Integer(e) = &pargs[1]
+                && *e == 2
+            {
+                let var = &pargs[0];
+                if implies_positive(var, assum) {
+                    return Ok(var.clone());
+                }
+                if implies_non_negative(var, assum) {
+                    return Ok(var.clone());
+                }
+                if implies_real(var, assum) {
+                    return Ok(Value::Call {
+                        head: "Abs".to_string(),
+                        args: vec![var.clone()],
+                    });
+                }
+            }
             // Recurse into argument
             let refined = refine_expr(&args[0], assum)?;
             if refined != args[0] {

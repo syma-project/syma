@@ -707,7 +707,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Binomial", combinatorics::builtin_binomial);
     register_builtin(env, "Multinomial", combinatorics::builtin_multinomial);
     register_builtin(env, "Factorial2", combinatorics::builtin_factorial2);
-    register_builtin(env, "AlternatingFactorial", combinatorics::builtin_alternating_factorial);
+    register_builtin(
+        env,
+        "AlternatingFactorial",
+        combinatorics::builtin_alternating_factorial,
+    );
     register_builtin(env, "Subfactorial", combinatorics::builtin_subfactorial);
     register_builtin(env, "Permutations", combinatorics::builtin_permutations);
     register_builtin(env, "Subsets", combinatorics::builtin_subsets);
@@ -718,7 +722,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "LucasL", combinatorics::builtin_lucas_l);
     register_builtin(env, "Fibonacci", combinatorics::builtin_fibonacci);
     register_builtin(env, "CatalanNumber", combinatorics::builtin_catalan_number);
-    register_builtin(env, "HarmonicNumber", combinatorics::builtin_harmonic_number);
+    register_builtin(
+        env,
+        "HarmonicNumber",
+        combinatorics::builtin_harmonic_number,
+    );
     register_builtin(env, "PartitionsP", combinatorics::builtin_partitions_p);
     register_builtin(env, "PartitionsQ", combinatorics::builtin_partitions_q);
     register_builtin(env, "BellB", combinatorics::builtin_bell_b);
@@ -858,10 +866,18 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "SquareFreeQ", number_theory::builtin_square_free_q);
     register_builtin(env, "CompositeQ", number_theory::builtin_composite_q);
     register_builtin(env, "PerfectPowerQ", number_theory::builtin_perfect_power_q);
-    register_builtin(env, "IntegerExponent", number_theory::builtin_integer_exponent);
+    register_builtin(
+        env,
+        "IntegerExponent",
+        number_theory::builtin_integer_exponent,
+    );
     register_builtin(env, "FromDigits", number_theory::builtin_from_digits);
     register_builtin(env, "ToDigits", number_theory::builtin_to_digits);
-    register_builtin(env, "ContinuedFraction", number_theory::builtin_continued_fraction);
+    register_builtin(
+        env,
+        "ContinuedFraction",
+        number_theory::builtin_continued_fraction,
+    );
     register_builtin(
         env,
         "FromContinuedFraction",
@@ -1661,4 +1677,3 @@ fn extract_held_symbol_name(v: &Value) -> String {
         other => other.to_string(),
     }
 }
-

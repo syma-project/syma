@@ -151,10 +151,7 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
                 let denom = integer_double_factorial(&adjusted);
                 Ok(Value::Call {
                     head: "Divide".to_string(),
-                    args: vec![
-                        Value::Integer(Integer::from(1)),
-                        Value::Integer(denom),
-                    ],
+                    args: vec![Value::Integer(Integer::from(1)), Value::Integer(denom)],
                 })
             } else if n.is_zero() || *n == -1 {
                 Ok(Value::Integer(Integer::from(1)))
@@ -295,10 +292,7 @@ pub fn builtin_permutations(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// Generate permutations with a specification (k or {kmin, kmax}).
-fn generate_permutations(
-    items: &[Value],
-    spec: &Value,
-) -> Result<Vec<Value>, EvalError> {
+fn generate_permutations(items: &[Value], spec: &Value) -> Result<Vec<Value>, EvalError> {
     match spec {
         Value::Integer(k) => {
             let k = k.clone();
@@ -433,11 +427,7 @@ pub fn builtin_subsets(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-fn generate_subsets_of_size(
-    items: &[Value],
-    n: usize,
-    k: usize,
-) -> Vec<Value> {
+fn generate_subsets_of_size(items: &[Value], n: usize, k: usize) -> Vec<Value> {
     if k == 0 {
         return vec![Value::List(vec![])];
     }
@@ -659,8 +649,7 @@ pub fn builtin_stirling_s1(args: &[Value]) -> Result<Value, EvalError> {
             dp[0] = Integer::from(1); // s(0, 0) = 1
             for row in 1..=n_val {
                 for col in (1..=k_val.min(row)).rev() {
-                    dp[col] = dp[col - 1].clone()
-                        + Integer::from(row - 1) * dp[col].clone();
+                    dp[col] = dp[col - 1].clone() + Integer::from(row - 1) * dp[col].clone();
                 }
                 dp[0] = Integer::from(0); // s(n, 0) = 0 for n >= 1
             }
@@ -755,9 +744,7 @@ fn fibonacci_polynomial(n: usize, x: &Value) -> Result<Value, EvalError> {
 fn add_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() + y)),
-        (Value::Real(x), Value::Real(y)) => {
-            Ok(Value::Real(x.clone() + y.clone()))
-        }
+        (Value::Real(x), Value::Real(y)) => Ok(Value::Real(x.clone() + y.clone())),
         (Value::Integer(x), Value::Real(y)) => {
             let xf = Float::with_val(crate::value::DEFAULT_PRECISION, x);
             Ok(Value::Real(xf + y.clone()))
@@ -777,9 +764,7 @@ fn add_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
 fn mul_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() * y)),
-        (Value::Real(x), Value::Real(y)) => {
-            Ok(Value::Real(x.clone() * y.clone()))
-        }
+        (Value::Real(x), Value::Real(y)) => Ok(Value::Real(x.clone() * y.clone())),
         (Value::Integer(x), Value::Real(y)) => {
             let xf = Float::with_val(crate::value::DEFAULT_PRECISION, x);
             Ok(Value::Real(xf * y.clone()))
@@ -878,11 +863,9 @@ pub fn builtin_harmonic_number(args: &[Value]) -> Result<Value, EvalError> {
     }
     let r = if args.len() == 2 {
         match &args[1] {
-            Value::Integer(r) if r.is_positive() => {
-                r.to_u32().ok_or_else(|| {
-                    EvalError::Error("HarmonicNumber: r too large".to_string())
-                })?
-            }
+            Value::Integer(r) if r.is_positive() => r
+                .to_u32()
+                .ok_or_else(|| EvalError::Error("HarmonicNumber: r too large".to_string()))?,
             _ => {
                 return Ok(Value::Call {
                     head: "HarmonicNumber".to_string(),
@@ -1050,9 +1033,9 @@ pub fn builtin_bell_b(args: &[Value]) -> Result<Value, EvalError> {
                 // BellB[n, k] — partial Bell polynomial (number of partitions into k blocks)
                 match &args[1] {
                     Value::Integer(k) if !k.is_negative() => {
-                        let k_val = k.to_usize().ok_or_else(|| {
-                            EvalError::Error("BellB: k too large".to_string())
-                        })?;
+                        let k_val = k
+                            .to_usize()
+                            .ok_or_else(|| EvalError::Error("BellB: k too large".to_string()))?;
                         // BellB[n, k] in Wolfram Language = StirlingS2[n, k]
                         // (the number of partitions of n elements into exactly k non-empty subsets)
                         Ok(Value::Integer(stirling_s2_val(n_val, k_val)))
@@ -1222,18 +1205,9 @@ mod tests {
     fn test_alternating_factorial() {
         assert_eq!(builtin_alternating_factorial(&[int(0)]).unwrap(), int(0));
         assert_eq!(builtin_alternating_factorial(&[int(1)]).unwrap(), int(1));
-        assert_eq!(
-            builtin_alternating_factorial(&[int(2)]).unwrap(),
-            int(-1)
-        ); // 1! - 2! = 1 - 2
-        assert_eq!(
-            builtin_alternating_factorial(&[int(3)]).unwrap(),
-            int(5)
-        ); // 1 - 2 + 6
-        assert_eq!(
-            builtin_alternating_factorial(&[int(4)]).unwrap(),
-            int(-19)
-        ); // 1 - 2 + 6 - 24
+        assert_eq!(builtin_alternating_factorial(&[int(2)]).unwrap(), int(-1)); // 1! - 2! = 1 - 2
+        assert_eq!(builtin_alternating_factorial(&[int(3)]).unwrap(), int(5)); // 1 - 2 + 6
+        assert_eq!(builtin_alternating_factorial(&[int(4)]).unwrap(), int(-19)); // 1 - 2 + 6 - 24
     }
 
     // ── Subfactorial ────────────────────────────────────────────────────────
@@ -1262,8 +1236,7 @@ mod tests {
 
     #[test]
     fn test_permutations_k() {
-        let result = builtin_permutations(&[list(vec![int(1), int(2), int(3)]), int(2)])
-            .unwrap();
+        let result = builtin_permutations(&[list(vec![int(1), int(2), int(3)]), int(2)]).unwrap();
         if let Value::List(perms) = result {
             assert_eq!(perms.len(), 6);
         } else {
@@ -1342,18 +1315,14 @@ mod tests {
     #[test]
     fn test_tuples_single() {
         let result = builtin_tuples(&[list(vec![int(1), int(2)]), int(1)]).unwrap();
-        assert_eq!(
-            result,
-            list(vec![list(vec![int(1)]), list(vec![int(2)])])
-        );
+        assert_eq!(result, list(vec![list(vec![int(1)]), list(vec![int(2)])]));
     }
 
     // ── Arrangements ────────────────────────────────────────────────────────
 
     #[test]
     fn test_arrangements() {
-        let result = builtin_arrangements(&[list(vec![int(1), int(2), int(3)]), int(2)])
-            .unwrap();
+        let result = builtin_arrangements(&[list(vec![int(1), int(2), int(3)]), int(2)]).unwrap();
         if let Value::List(arrs) = result {
             assert_eq!(arrs.len(), 6);
         } else {

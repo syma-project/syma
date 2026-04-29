@@ -507,26 +507,27 @@ fn call_to_int(v: &Value) -> Option<i64> {
 /// Extract (function_name, offset) from a[n] or a[n+k] form.
 fn parse_func_name_offset(expr: &Value, var_name: &str) -> Option<(String, i64)> {
     if let Value::Call { head, args } = expr
-        && args.len() == 1 {
-            let arg_expr = &args[0];
-            let offset = match arg_expr {
-                Value::Symbol(s) if s == var_name => Some(0),
-                Value::Call {
-                    head,
-                    args: plus_args,
-                } if head == "Plus" && plus_args.len() == 2 => {
-                    if plus_args[0].struct_eq(&Value::Symbol(var_name.to_string())) {
-                        call_to_int(&plus_args[1])
-                    } else if plus_args[1].struct_eq(&Value::Symbol(var_name.to_string())) {
-                        call_to_int(&plus_args[0])
-                    } else {
-                        None
-                    }
+        && args.len() == 1
+    {
+        let arg_expr = &args[0];
+        let offset = match arg_expr {
+            Value::Symbol(s) if s == var_name => Some(0),
+            Value::Call {
+                head,
+                args: plus_args,
+            } if head == "Plus" && plus_args.len() == 2 => {
+                if plus_args[0].struct_eq(&Value::Symbol(var_name.to_string())) {
+                    call_to_int(&plus_args[1])
+                } else if plus_args[1].struct_eq(&Value::Symbol(var_name.to_string())) {
+                    call_to_int(&plus_args[0])
+                } else {
+                    None
                 }
-                _ => None,
-            };
-            return offset.map(|o| (head.clone(), o));
-        }
+            }
+            _ => None,
+        };
+        return offset.map(|o| (head.clone(), o));
+    }
     None
 }
 
@@ -563,21 +564,22 @@ fn parse_term(expr: &Value, var_name: &str) -> Option<(String, i64, Value)> {
     let args_clone = args_flat.clone();
     for arg in &args_clone {
         if let Value::Call { .. } = arg
-            && let Some((name, offset)) = parse_func_name_offset(arg, var_name) {
-                let coeff_values: Vec<Value> = args_flat
-                    .into_iter()
-                    .filter(|a| !a.struct_eq(arg))
-                    .collect();
-                let coeff = match coeff_values.len() {
-                    0 => Value::Integer(Integer::from(1)),
-                    1 => coeff_values.into_iter().next().unwrap(),
-                    _ => Value::Call {
-                        head: "Times".to_string(),
-                        args: coeff_values,
-                    },
-                };
-                return Some((name, -offset, coeff));
-            }
+            && let Some((name, offset)) = parse_func_name_offset(arg, var_name)
+        {
+            let coeff_values: Vec<Value> = args_flat
+                .into_iter()
+                .filter(|a| !a.struct_eq(arg))
+                .collect();
+            let coeff = match coeff_values.len() {
+                0 => Value::Integer(Integer::from(1)),
+                1 => coeff_values.into_iter().next().unwrap(),
+                _ => Value::Call {
+                    head: "Times".to_string(),
+                    args: coeff_values,
+                },
+            };
+            return Some((name, -offset, coeff));
+        }
     }
     None
 }
@@ -606,10 +608,11 @@ fn parse_init_condition(expr: &Value) -> Option<(i64, Value)> {
         && let Value::Call {
             args: call_args, ..
         } = &args[0]
-            && call_args.len() == 1
-            && let Value::Integer(k) = &call_args[0] {
-                return k.to_i64().map(|k| (k, args[1].clone()));
-            }
+        && call_args.len() == 1
+        && let Value::Integer(k) = &call_args[0]
+    {
+        return k.to_i64().map(|k| (k, args[1].clone()));
+    }
     None
 }
 
@@ -812,7 +815,9 @@ fn simplify_times(mut args: Vec<Value>) -> Value {
         if *a == Value::Integer(Integer::from(-1)) {
             negative = !negative;
             false
-        } else { *a != Value::Integer(Integer::from(1)) }
+        } else {
+            *a != Value::Integer(Integer::from(1))
+        }
     });
     let result = match args.len() {
         0 => Value::Integer(Integer::from(if negative { -1 } else { 1 })),

@@ -371,7 +371,7 @@ pub fn builtin_padded_form(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "integer or {n, f}".to_string(),
                 got: args[1].type_name().to_string(),
-            })
+            });
         }
     };
 
@@ -427,7 +427,7 @@ pub fn builtin_string_form(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "String".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
 
@@ -764,7 +764,10 @@ mod tests {
         let result = builtin_matrix_form(&[v]).unwrap();
         let s = result.to_string();
         // Should contain bracket characters
-        assert!(s.contains('\u{23a1}') || s.contains('('), "MatrixForm should have brackets, got: {s}");
+        assert!(
+            s.contains('\u{23a1}') || s.contains('('),
+            "MatrixForm should have brackets, got: {s}"
+        );
         assert!(s.contains("1"));
         assert!(s.contains("4"));
     }
@@ -804,7 +807,10 @@ mod tests {
         ]);
         let result = builtin_padded_form(&[v, spec]).unwrap();
         let s = result.to_string();
-        assert!(s.contains("42.000"), "PaddedForm should show 42.000, got: {s}");
+        assert!(
+            s.contains("42.000"),
+            "PaddedForm should show 42.000, got: {s}"
+        );
     }
 
     // ── StringForm tests ──

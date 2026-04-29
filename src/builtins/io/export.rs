@@ -29,13 +29,14 @@ pub fn builtin_export(args: &[Value]) -> Result<Value, EvalError> {
     };
     // Expand leading ~ to home directory
     if (path.starts_with("~/") || path == "~")
-        && let Ok(home) = std::env::var("HOME") {
-            if path == "~" {
-                path = home;
-            } else {
-                path = format!("{}{}", home, &path[1..]);
-            }
+        && let Ok(home) = std::env::var("HOME")
+    {
+        if path == "~" {
+            path = home;
+        } else {
+            path = format!("{}{}", home, &path[1..]);
         }
+    }
     let data = &args[1];
 
     let format_name = args.get(2).and_then(|v| match v {

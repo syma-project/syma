@@ -825,7 +825,9 @@ pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
             .partial_cmp(&a.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(Value::List(eigenvalues.into_iter().map(super::real).collect()))
+    Ok(Value::List(
+        eigenvalues.into_iter().map(super::real).collect(),
+    ))
 }
 
 /// Eigenvectors[m] — numerical eigenvectors via QR iteration.

@@ -40,7 +40,10 @@ fn test_rest_basic() {
     assert!(out.contains("2"), "got: {out}");
     assert!(out.contains("3"), "got: {out}");
     // Should not contain 1
-    assert!(!out.contains("{1,"), "should not contain first element, got: {out}");
+    assert!(
+        !out.contains("{1,"),
+        "should not contain first element, got: {out}"
+    );
 }
 
 // ── Append ──
@@ -70,7 +73,10 @@ fn test_flatten_nested() {
     assert!(out.contains("1"), "got: {out}");
     assert!(out.contains("4"), "got: {out}");
     // Should be a flat list, not nested
-    assert!(!out.contains("{{"), "should not contain nested braces, got: {out}");
+    assert!(
+        !out.contains("{{"),
+        "should not contain nested braces, got: {out}"
+    );
 }
 
 // ── Sort ──

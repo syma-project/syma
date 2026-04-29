@@ -1,6 +1,6 @@
-use rug::Float;
 /// Numeric evaluation — high-precision numeric evaluation of symbolic expressions.
 use rug::ops::Pow;
+use rug::Float;
 
 use crate::ast::*;
 use crate::env::Env;
@@ -66,84 +66,18 @@ pub(super) fn numeric_eval_expr(
                         }
                     }
                     "Divide" if evaluated_args.len() == 2 => {
-                        let bf = to_float(&evaluated_args[0], prec_bits);
-                        let ef = to_float(&evaluated_args[1], prec_bits);
-                        match (bf, ef) {
-                            (Some(a), Some(b)) => Ok(Value::Real(a / b)),
-                            _ => crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            ),
-                        }
+                        try_binary_float("Divide", &evaluated_args, prec_bits, env, |a, b| a.clone() / b.clone())
                     }
-                    "Sin" if evaluated_args.len() == 1 => {
-                        if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.sin()))
-                        } else {
-                            crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            )
-                        }
-                    }
-                    "Cos" if evaluated_args.len() == 1 => {
-                        if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.cos()))
-                        } else {
-                            crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            )
-                        }
-                    }
+                    "Sin" => try_unary_float("Sin", &evaluated_args, prec_bits, env, |f| f.sin()),
+                    "Cos" => try_unary_float("Cos", &evaluated_args, prec_bits, env, |f| f.cos()),
                     "Log" if evaluated_args.len() == 1 => {
-                        if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.ln()))
-                        } else {
-                            crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            )
-                        }
+                        try_unary_float("Log", &evaluated_args, prec_bits, env, |f| f.ln())
                     }
                     "Log" if evaluated_args.len() == 2 => {
-                        let bf = to_float(&evaluated_args[0], prec_bits);
-                        let ef = to_float(&evaluated_args[1], prec_bits);
-                        match (bf, ef) {
-                            (Some(a), Some(b)) => Ok(Value::Real(b.ln() / a.ln())),
-                            _ => crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            ),
-                        }
+                        try_binary_float("Log", &evaluated_args, prec_bits, env, |a, b| b.ln() / a.ln())
                     }
-                    "Sqrt" if evaluated_args.len() == 1 => {
-                        if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.sqrt()))
-                        } else {
-                            crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            )
-                        }
-                    }
-                    "Abs" if evaluated_args.len() == 1 => {
-                        if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.abs()))
-                        } else {
-                            crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            )
-                        }
-                    }
+                    "Sqrt" => try_unary_float("Sqrt", &evaluated_args, prec_bits, env, Float::sqrt),
+                    "Abs" => try_unary_float("Abs", &evaluated_args, prec_bits, env, |f| f.abs()),
                     // For numeric evaluation of other functions, fall back to normal evaluation
                     // and coerce the result to a float.
                     _ => {
@@ -167,6 +101,36 @@ pub(super) fn numeric_eval_expr(
             coerce_to_float(v, prec_bits)
         }
     }
+}
+
+/// Evaluate unary float function, fall back to symbolic eval if args aren't numeric.
+fn try_unary_float(head: &str, args: &[Value], prec_bits: u32, env: &Env, op: fn(Float) -> Float) -> Result<Value, EvalError> {
+    if args.len() == 1 {
+        if let Some(f) = to_float(&args[0], prec_bits) {
+            return Ok(Value::Real(op(f)));
+        }
+    }
+    crate::eval::apply_function(
+        &super::eval(&Expr::Symbol(head.to_string()), env)?,
+        args,
+        env,
+    )
+}
+
+/// Evaluate binary float function, fall back to symbolic eval if args aren't numeric.
+fn try_binary_float(head: &str, args: &[Value], prec_bits: u32, env: &Env, op: fn(Float, Float) -> Float) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        let bf = to_float(&args[0], prec_bits);
+        let ef = to_float(&args[1], prec_bits);
+        if let (Some(a), Some(b)) = (bf, ef) {
+            return Ok(Value::Real(op(a, b)));
+        }
+    }
+    crate::eval::apply_function(
+        &super::eval(&Expr::Symbol(head.to_string()), env)?,
+        args,
+        env,
+    )
 }
 
 /// Helper: convert a Value to an optional high-precision float.

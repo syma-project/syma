@@ -1,13 +1,15 @@
 use crate::ast::Expr;
 use crate::env::Env;
-use crate::value::{Value, EvalError};
-use crate::eval::apply_function;
+use crate::eval::table;
+use crate::value::{EvalError, FunctionDef, FunctionDefinition, Value};
+use std::sync::Arc;
+
+use super::{eval, specificity};
 
 pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
     if s != "Set" && s != "SetDelayed" {
         return Ok(None);
     }
-    // Handle assignment specially
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Set requires exactly 2 arguments".to_string(),
@@ -19,7 +21,6 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
             env.set_propagate(name.clone(), val.clone());
             val
         }
-        // Attributes[sym] = value  via Set[Attributes[sym], value]
         Expr::Call {
             head,
             args: call_args,
@@ -44,11 +45,6 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
             env.set_attributes(&sym_name, attrs);
             val
         }
-        // f[args] = value  or SetDelayed[f[args], val]
-        // — function definition with immediate or delayed RHS.
-        // Also handles desugared OOP field access: this.field = val
-        // is parsed as Set[field[this], val]. When target is an
-        // Object, treat as field access.
         Expr::Call {
             head,
             args: call_args,
@@ -56,8 +52,6 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
             && !matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
         {
             if let Expr::Symbol(name) = head.as_ref() {
-                // Check for OOP field access: field[object] = value
-                // where object evaluates to an Object
                 if call_args.len() == 1 {
                     let target = eval(&call_args[0], env)?;
                     if let Value::Object {
@@ -75,9 +69,6 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
                         return Ok(Some(val));
                     }
                 }
-                // Otherwise: function definition via Set/SetDelayed
-                // SetDelayed[f[args], body] — use body as-is
-                // Set[f[args], val] — evaluate RHS then store as Expr
                 let body_expr = if s == "SetDelayed" {
                     args[1].clone()
                 } else {
@@ -98,10 +89,8 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
                     delayed: s == "SetDelayed",
                     guard: None,
                 });
-                // Sort definitions so more specific ones match first
-                func.definitions.sort_by(|a, b| {
-                    specificity(&b.params).cmp(&specificity(&a.params))
-                });
+                func.definitions
+                    .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
                 env.set(name.clone(), Value::Function(Arc::new(func)));
                 return Ok(Some(val));
             }
@@ -111,4 +100,3 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
     };
     Ok(Some(result))
 }
-

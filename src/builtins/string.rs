@@ -678,9 +678,10 @@ pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
         for code in codes {
             if let Value::Integer(n) = code
                 && let Some(val) = n.to_u32()
-                    && let Some(c) = char::from_u32(val) {
-                        s.push(c);
-                    }
+                && let Some(c) = char::from_u32(val)
+            {
+                s.push(c);
+            }
         }
         return Ok(Value::Str(s));
     }

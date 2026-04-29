@@ -1,9 +1,6 @@
 use crate::ast::Expr;
-use crate::env::Env;
-use crate::value::{Value, EvalError};
-use crate::eval::apply_function;
 
-pub(super) fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
+pub(crate) fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
     match expr {
         Expr::Symbol(name) => subs
             .iter()
@@ -192,7 +189,6 @@ pub(super) fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
         Expr::HoldComplete(inner) => Expr::HoldComplete(Box::new(substitute_in_expr(inner, subs))),
         Expr::ReleaseHold(inner) => Expr::ReleaseHold(Box::new(substitute_in_expr(inner, subs))),
         Expr::Information(inner) => Expr::Information(Box::new(substitute_in_expr(inner, subs))),
-        // Atoms and non-recursive variants pass through unchanged
         other => other.clone(),
     }
 }

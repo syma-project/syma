@@ -89,12 +89,7 @@ pub fn unwrap_expr_to_value(expr: &Expr) -> Value {
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Str(s) => Value::Str(s.clone()),
         Expr::Null => Value::Null,
-        Expr::List(items) => Value::List(
-            items
-                .iter()
-                .map(unwrap_expr_to_value)
-                .collect(),
-        ),
+        Expr::List(items) => Value::List(items.iter().map(unwrap_expr_to_value).collect()),
         Expr::Call { head, args } => {
             let h = unwrap_expr_to_value(head);
             let a: Vec<Value> = args.iter().map(unwrap_expr_to_value).collect();
@@ -743,7 +738,7 @@ fn match_repeated_pattern(
     }
 }
 
-/// Flatten nested calls with the same head (for Flat attribute).
+/// Flatten nested calls with same head (for Flat attribute).
 /// e.g., `Plus[Plus[x_, y_], z_]` → `[x_, y_, z_]` when head is "Plus".
 fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     let mut result = Vec::new();
@@ -760,7 +755,7 @@ fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     result
 }
 
-/// Flatten nested value calls with the same head (for Flat attribute).
+/// Flatten nested value calls with same head (for Flat attribute).
 fn flatten_value_args(head: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::new();
     for arg in args {
@@ -974,11 +969,11 @@ fn match_call_pattern(
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
             if let Expr::Symbol(s) = head
                 && args.len() == 1
-                    && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
-                    && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
-                {
-                    return MatchResult::Match(b);
-                }
+                && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
+                && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+            {
+                return MatchResult::Match(b);
+            }
             MatchResult::NoMatch
         }
     }

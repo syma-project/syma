@@ -241,10 +241,7 @@ pub fn make_monic(coeffs: &[Rational]) -> Vec<Rational> {
         return coeffs.to_vec();
     }
     let lead = &coeffs[deg];
-    coeffs
-        .iter()
-        .map(|c| c.clone() / lead.clone())
-        .collect()
+    coeffs.iter().map(|c| c.clone() / lead.clone()).collect()
 }
 
 /// Compute the derivative of a polynomial.
@@ -1000,11 +997,10 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     let mut _gcd_num = Rational::from(1);
     let mut gcd_set = false;
     for c in poly.iter() {
-        if !c.is_zero()
-            && !gcd_set {
-                _gcd_num = c.clone().abs();
-                gcd_set = true;
-            }
+        if !c.is_zero() && !gcd_set {
+            _gcd_num = c.clone().abs();
+            gcd_set = true;
+        }
     }
     if !gcd_set {
         return vec![Rational::from(0)];
@@ -1013,10 +1009,7 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     // Make content an integer gcd (take rational content, then integer part)
     // For simplicity, just divide by the first nonzero coefficient's abs to make monic-ish
     let lead = poly[deg].clone();
-    let mut result: Vec<Rational> = poly
-        .iter()
-        .map(|c| c.clone() / lead.clone())
-        .collect();
+    let mut result: Vec<Rational> = poly.iter().map(|c| c.clone() / lead.clone()).collect();
 
     // Ensure leading coefficient is positive
     if !result[deg].is_zero() && result[deg].is_negative() {
@@ -1041,10 +1034,7 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     };
 
     if common_den != 1 {
-        result = result
-            .into_iter()
-            .map(|c| c * &common_den)
-            .collect();
+        result = result.into_iter().map(|c| c * &common_den).collect();
         // Check if all are now integers
         let all_int = result.iter().all(|c| c.denom() == &Integer::from(1));
         if !all_int {

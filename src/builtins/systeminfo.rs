@@ -46,9 +46,10 @@ fn hostname() -> String {
     unsafe {
         let mut buf = [0u8; 256];
         if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0
-            && let Some(null_pos) = buf.iter().position(|&b| b == 0) {
-                return String::from_utf8_lossy(&buf[..null_pos]).to_string();
-            }
+            && let Some(null_pos) = buf.iter().position(|&b| b == 0)
+        {
+            return String::from_utf8_lossy(&buf[..null_pos]).to_string();
+        }
     }
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))

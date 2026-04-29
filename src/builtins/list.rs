@@ -2187,7 +2187,7 @@ pub fn builtin_array_pad(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "List".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
     let (before, after) = match &args[1] {
@@ -2204,7 +2204,7 @@ pub fn builtin_array_pad(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "integer or {before, after}".to_string(),
                 got: args[1].type_name().to_string(),
-            })
+            });
         }
     };
     let fill = if args.len() >= 3 {
@@ -2233,7 +2233,7 @@ pub fn builtin_array_reshape(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "List".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
     let dims = match &args[1] {
@@ -2257,7 +2257,7 @@ pub fn builtin_array_reshape(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "List of dimensions".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
 
@@ -2297,7 +2297,7 @@ pub fn builtin_string_cases(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "String".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
     let pattern = match &args[1] {
@@ -2306,7 +2306,7 @@ pub fn builtin_string_cases(args: &[Value]) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "String".to_string(),
                 got: other.type_name().to_string(),
-            })
+            });
         }
     };
 
@@ -3435,23 +3435,14 @@ mod tests {
     #[test]
     fn test_array_pad_basic() {
         let result = builtin_array_pad(&[list(vec![int(1), int(2)]), int(1)]).unwrap();
-        assert_eq!(
-            result,
-            list(vec![int(0), int(1), int(2), int(0)])
-        );
+        assert_eq!(result, list(vec![int(0), int(1), int(2), int(0)]));
     }
 
     #[test]
     fn test_array_pad_asymmetric() {
-        let result = builtin_array_pad(&[
-            list(vec![int(1), int(2)]),
-            list(vec![int(2), int(1)]),
-        ])
-        .unwrap();
-        assert_eq!(
-            result,
-            list(vec![int(0), int(0), int(1), int(2), int(0)])
-        );
+        let result =
+            builtin_array_pad(&[list(vec![int(1), int(2)]), list(vec![int(2), int(1)])]).unwrap();
+        assert_eq!(result, list(vec![int(0), int(0), int(1), int(2), int(0)]));
     }
 
     #[test]
@@ -3561,10 +3552,7 @@ mod tests {
             Value::Str("*".to_string()),
         ])
         .unwrap();
-        assert_eq!(
-            result,
-            list(vec![Value::Str("hello world".to_string())])
-        );
+        assert_eq!(result, list(vec![Value::Str("hello world".to_string())]));
     }
 
     #[test]

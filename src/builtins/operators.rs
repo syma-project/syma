@@ -160,7 +160,11 @@ pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     let expr = &args[0];
 
-    if let Value::Call { head: _, args: _inner } = expr {
+    if let Value::Call {
+        head: _,
+        args: _inner,
+    } = expr
+    {
         // head is String, not a Value, so we can't extract a list from it
         // Fall through to the general match below
     }
@@ -623,10 +627,13 @@ mod tests {
     fn test_position_first() {
         let env = test_env();
         assert_eq!(
-            builtin_position_first(&[
-                val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
-                val_int(2)
-            ], &env)
+            builtin_position_first(
+                &[
+                    val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
+                    val_int(2)
+                ],
+                &env
+            )
             .unwrap(),
             val_int(2)
         );
@@ -636,7 +643,8 @@ mod tests {
     fn test_position_first_not_found() {
         let env = test_env();
         let result =
-            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env).unwrap();
+            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env)
+                .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -650,10 +658,13 @@ mod tests {
     fn test_position_last() {
         let env = test_env();
         assert_eq!(
-            builtin_position_last(&[
-                val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
-                val_int(2)
-            ], &env)
+            builtin_position_last(
+                &[
+                    val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
+                    val_int(2)
+                ],
+                &env
+            )
             .unwrap(),
             val_int(4)
         );
@@ -663,7 +674,8 @@ mod tests {
     fn test_position_last_not_found() {
         let env = test_env();
         let result =
-            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env).unwrap();
+            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env)
+                .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -752,10 +764,7 @@ mod tests {
         let gt_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![
-                    Expr::Slot(None),
-                    Expr::Integer(Integer::from(10)),
-                ],
+                args: vec![Expr::Slot(None), Expr::Integer(Integer::from(10))],
             },
             slot_count: 1,
             params: vec![],
@@ -804,10 +813,7 @@ mod tests {
         let big_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![
-                    Expr::Slot(None),
-                    Expr::Integer(Integer::from(100)),
-                ],
+                args: vec![Expr::Slot(None), Expr::Integer(Integer::from(100))],
             },
             slot_count: 1,
             params: vec![],

@@ -780,8 +780,7 @@ fn apply_together(val: &Value) -> Value {
     match val {
         Value::Call { head, args } if head == "Plus" => {
             // Combine all terms over a common denominator
-            let fractions: Vec<(Value, Value)> =
-                args.iter().map(term_to_fraction).collect();
+            let fractions: Vec<(Value, Value)> = args.iter().map(term_to_fraction).collect();
 
             if fractions.is_empty() {
                 return val.clone();
@@ -814,9 +813,11 @@ fn apply_together(val: &Value) -> Value {
 /// Convert a value to (numerator, denominator).
 fn term_to_fraction(term: &Value) -> (Value, Value) {
     if let Value::Call { head, args } = term
-        && head == "Divide" && args.len() == 2 {
-            return (args[0].clone(), args[1].clone());
-        }
+        && head == "Divide"
+        && args.len() == 2
+    {
+        return (args[0].clone(), args[1].clone());
+    }
     (term.clone(), Value::Integer(Integer::from(1)))
 }
 
@@ -891,20 +892,22 @@ pub fn builtin_cancel(args: &[Value]) -> Result<Value, EvalError> {
 
 fn cancel_value(val: &Value) -> Value {
     if let Value::Call { head, args } = val
-        && head == "Divide" && args.len() == 2 {
-            // Factor both numerator and denominator
-            let num_factors = factor_value(&args[0]);
-            let den_factors = factor_value(&args[1]);
-            // Try to find and cancel common factors
-            let (cancelled_num, cancelled_den) = cancel_common_factors(&num_factors, &den_factors);
-            if is_one(&cancelled_den) {
-                return cancelled_num;
-            }
-            return Value::Call {
-                head: "Divide".to_string(),
-                args: vec![cancelled_num, cancelled_den],
-            };
+        && head == "Divide"
+        && args.len() == 2
+    {
+        // Factor both numerator and denominator
+        let num_factors = factor_value(&args[0]);
+        let den_factors = factor_value(&args[1]);
+        // Try to find and cancel common factors
+        let (cancelled_num, cancelled_den) = cancel_common_factors(&num_factors, &den_factors);
+        if is_one(&cancelled_den) {
+            return cancelled_num;
         }
+        return Value::Call {
+            head: "Divide".to_string(),
+            args: vec![cancelled_num, cancelled_den],
+        };
+    }
     val.clone()
 }
 
@@ -916,52 +919,54 @@ fn factor_value(val: &Value) -> Value {
 fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
     // Simple cancellation: if both are Times with matching factors
     if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den)
-        && h1 == "Times" && h2 == "Times" {
-            let mut remaining_num: Vec<Value> = Vec::new();
-            let mut remaining_den: Vec<Value> = Vec::new();
-            let mut used_den: Vec<bool> = vec![false; a2.len()];
+        && h1 == "Times"
+        && h2 == "Times"
+    {
+        let mut remaining_num: Vec<Value> = Vec::new();
+        let mut remaining_den: Vec<Value> = Vec::new();
+        let mut used_den: Vec<bool> = vec![false; a2.len()];
 
-            for n in a1 {
-                let mut found = false;
-                for (j, d) in a2.iter().enumerate() {
-                    if !used_den[j] && n.struct_eq(d) {
-                        used_den[j] = true;
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    remaining_num.push(n.clone());
-                }
-            }
+        for n in a1 {
+            let mut found = false;
             for (j, d) in a2.iter().enumerate() {
-                if !used_den[j] {
-                    remaining_den.push(d.clone());
+                if !used_den[j] && n.struct_eq(d) {
+                    used_den[j] = true;
+                    found = true;
+                    break;
                 }
             }
-
-            let result_num = if remaining_num.is_empty() {
-                Value::Integer(Integer::from(1))
-            } else if remaining_num.len() == 1 {
-                remaining_num.into_iter().next().unwrap()
-            } else {
-                Value::Call {
-                    head: "Times".to_string(),
-                    args: remaining_num,
-                }
-            };
-            let result_den = if remaining_den.is_empty() {
-                Value::Integer(Integer::from(1))
-            } else if remaining_den.len() == 1 {
-                remaining_den.into_iter().next().unwrap()
-            } else {
-                Value::Call {
-                    head: "Times".to_string(),
-                    args: remaining_den,
-                }
-            };
-            return (result_num, result_den);
+            if !found {
+                remaining_num.push(n.clone());
+            }
         }
+        for (j, d) in a2.iter().enumerate() {
+            if !used_den[j] {
+                remaining_den.push(d.clone());
+            }
+        }
+
+        let result_num = if remaining_num.is_empty() {
+            Value::Integer(Integer::from(1))
+        } else if remaining_num.len() == 1 {
+            remaining_num.into_iter().next().unwrap()
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: remaining_num,
+            }
+        };
+        let result_den = if remaining_den.is_empty() {
+            Value::Integer(Integer::from(1))
+        } else if remaining_den.len() == 1 {
+            remaining_den.into_iter().next().unwrap()
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: remaining_den,
+            }
+        };
+        return (result_num, result_den);
+    }
     (num.clone(), den.clone())
 }
 

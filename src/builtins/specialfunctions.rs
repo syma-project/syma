@@ -23,14 +23,16 @@ const ERF_A5: f64 = 1.061405429;
 fn erf_approx(x: f64) -> f64 {
     let ax = x.abs();
     let t = 1.0 / (1.0 + ERF_P * ax);
-    let poly = ERF_A1*t + (ERF_A2*t + (ERF_A3*t + (ERF_A4*t + ERF_A5*t))*t)*t;
+    let poly = ERF_A1 * t + (ERF_A2 * t + (ERF_A3 * t + (ERF_A4 * t + ERF_A5 * t)) * t) * t;
     let result = 1.0 - poly * (-ax * ax).exp();
     if x < 0.0 { -result } else { result }
 }
 
 pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Erf requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Erf requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
@@ -43,7 +45,11 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::Real(r) => {
             if r.is_infinite() {
-                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 1 } else { -1 })));
+                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() {
+                    1
+                } else {
+                    -1
+                })));
             }
             Ok(super::real(erf_approx(r.to_f64())))
         }
@@ -53,7 +59,9 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Erfc requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Erfc requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
@@ -66,7 +74,11 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::Real(r) => {
             if r.is_infinite() {
-                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 0 } else { 2 })));
+                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() {
+                    0
+                } else {
+                    2
+                })));
             }
             Ok(super::real(1.0 - erf_approx(r.to_f64())))
         }
@@ -87,13 +99,20 @@ fn inverse_erf_approx(x: f64) -> f64 {
         let c3 = c0 / 105.0;
         let c4 = 3.0 * c0 / 3763.0;
         let ax2 = ax * ax;
-        s * (ax * (c0 + c1*ax2 + c2*ax2*ax2 + c3*ax2*ax2*ax2*ax2 + c4*ax2*ax2*ax2*ax2*ax2*ax2))
+        s * (ax
+            * (c0
+                + c1 * ax2
+                + c2 * ax2 * ax2
+                + c3 * ax2 * ax2 * ax2 * ax2
+                + c4 * ax2 * ax2 * ax2 * ax2 * ax2 * ax2))
     } else {
         let mut w = s * (-2.0 * (1.0 - ax) * (1.0 + 0.5 * (1.0 - ax))).ln() / std::f64::consts::PI;
         for _ in 0..20 {
             let ew = erf_approx(w);
             let diff = ew - x;
-            if diff.abs() < 1e-16 { break; }
+            if diff.abs() < 1e-16 {
+                break;
+            }
             let deriv = 2.0 / std::f64::consts::PI.sqrt() * (-w * w).exp();
             w -= diff / deriv;
         }
@@ -103,21 +122,27 @@ fn inverse_erf_approx(x: f64) -> f64 {
 
 pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ErfInverse requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ErfInverse requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(n) => {
             let x = n.to_f64();
             if x.abs() >= 1.0 {
-                return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
+                return Err(EvalError::Error(
+                    "ErfInverse: argument must be in (-1, 1)".to_string(),
+                ));
             }
             Ok(super::real(inverse_erf_approx(x)))
         }
         Value::Real(r) => {
             let x = r.to_f64();
             if x.abs() >= 1.0 {
-                return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
+                return Err(EvalError::Error(
+                    "ErfInverse: argument must be in (-1, 1)".to_string(),
+                ));
             }
             Ok(super::real(inverse_erf_approx(x)))
         }
@@ -129,7 +154,9 @@ pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Beta requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Beta requires exactly 2 arguments".to_string(),
+        ));
     }
     match (&args[0], &args[1]) {
         (Value::Integer(x), Value::Integer(y)) => {
@@ -231,7 +258,9 @@ fn zeta_even(k: u64) -> Float {
 
 pub fn builtin_zeta(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Zeta requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Zeta requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) => {
@@ -366,18 +395,18 @@ fn digamma_approx(z: f64) -> f64 {
     let z4 = z2 * z2;
     let z6 = z4 * z2;
     let z8 = z4 * z4;
-    offset + z.ln() - 1.0 / (2.0 * z) - 1.0 / (12.0 * z2)
-        + 1.0 / (120.0 * z4) - 1.0 / (252.0 * z6) + 691.0 / (240.0 * z8)
+    offset + z.ln() - 1.0 / (2.0 * z) - 1.0 / (12.0 * z2) + 1.0 / (120.0 * z4) - 1.0 / (252.0 * z6)
+        + 691.0 / (240.0 * z8)
 }
 
 pub fn builtin_digamma(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Digamma requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Digamma requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if *n == 1 => {
-            Ok(super::real(-EULER_GAMMA_F64))
-        }
+        Value::Integer(n) if *n == 1 => Ok(super::real(-EULER_GAMMA_F64)),
         Value::Integer(n) => {
             if n.is_negative() || n.is_zero() {
                 return Ok(unevaluated("Digamma", args));
@@ -482,7 +511,8 @@ fn airy_ai_approx(z: f64) -> f64 {
             let leading = exp_factor / (2.0 * std::f64::consts::PI.sqrt() * z14);
             // First few terms of the asymptotic series
             let u = 1.0 / (z32);
-            let p = 1.0 - 5.0/144.0*u + 2005.0/21504.0*u*u - 156205.0/2129920.0*u*u*u;
+            let p =
+                1.0 - 5.0 / 144.0 * u + 2005.0 / 21504.0 * u * u - 156205.0 / 2129920.0 * u * u * u;
             leading * p
         }
     } else {
@@ -493,19 +523,19 @@ fn airy_ai_approx(z: f64) -> f64 {
         let az14 = az.sqrt().sqrt(); // |z|^(1/4)
         let leading = 1.0 / (std::f64::consts::PI.sqrt() * az14);
         let u = 1.0 / (az32);
-        let p = 1.0 - 5.0/144.0*u + 2005.0/21504.0*u*u;
+        let p = 1.0 - 5.0 / 144.0 * u + 2005.0 / 21504.0 * u * u;
         leading * p * theta.sin()
     }
 }
 
 pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("AiryAi requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "AiryAi requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(super::real(0.3550280538878172))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(super::real(0.3550280538878172)),
         Value::Integer(n) => Ok(super::real(airy_ai_approx(n.to_f64()))),
         Value::Real(r) => Ok(super::real(airy_ai_approx(r.to_f64()))),
         _ => Ok(unevaluated("AiryAi", args)),
@@ -608,8 +638,7 @@ pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match (&args[0], &args[1]) {
-        (Value::Integer(n), &_) if !n.is_negative() =>
-        {
+        (Value::Integer(n), &_) if !n.is_negative() => {
             if let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) {
                 return Ok(super::real(bessel_i_series(n as u64, z)));
             }
@@ -701,11 +730,7 @@ fn lambert_w_approx(z: f64) -> f64 {
         return -1.0;
     }
     // Initial guess
-    let mut w = if z > 0.0 {
-        z.ln()
-    } else {
-        -1.0
-    };
+    let mut w = if z > 0.0 { z.ln() } else { -1.0 };
     // Halley's method
     for _ in 0..30 {
         let ew = (-w).exp();
@@ -730,9 +755,7 @@ pub fn builtin_dirichlet_eta(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) if *n == 1 => {
-            Ok(super::real(std::f64::consts::LN_2))
-        }
+        Value::Integer(n) if *n == 1 => Ok(super::real(std::f64::consts::LN_2)),
         Value::Integer(n) => {
             if n.is_negative() || n.is_zero() {
                 return Ok(unevaluated("DirichletEta", args));
@@ -1144,7 +1167,8 @@ mod tests {
     #[test]
     fn test_erfc_erf_complement() {
         let erf_val = builtin_erf(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
-        let erfc_val = builtin_erfc(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
+        let erfc_val =
+            builtin_erfc(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
         if let (Value::Real(e), Value::Real(c)) = (erf_val, erfc_val) {
             let sum = e.to_f64() + c.to_f64();
             assert!((sum - 1.0).abs() < 1e-10);
@@ -1177,7 +1201,7 @@ mod tests {
         .unwrap();
         if let Value::Real(r) = result {
             // B(2,3) = 1! * 2! / 4! = 2/24 = 1/12 ≈ 0.08333
-            assert!((r.to_f64() - 1.0/12.0).abs() < 1e-8);
+            assert!((r.to_f64() - 1.0 / 12.0).abs() < 1e-8);
         }
     }
 
@@ -1352,9 +1376,10 @@ mod tests {
 
     #[test]
     fn test_lambert_w_e() {
-        let result = builtin_lambert_w(&[
-            Value::Real(Float::with_val(DEFAULT_PRECISION, std::f64::consts::E)),
-        ])
+        let result = builtin_lambert_w(&[Value::Real(Float::with_val(
+            DEFAULT_PRECISION,
+            std::f64::consts::E,
+        ))])
         .unwrap();
         if let Value::Real(r) = result {
             // W(e) = 1
@@ -1364,9 +1389,10 @@ mod tests {
 
     #[test]
     fn test_lambert_w_neg_inv_e() {
-        let result = builtin_lambert_w(&[
-            Value::Real(Float::with_val(DEFAULT_PRECISION, -1.0 / std::f64::consts::E)),
-        ])
+        let result = builtin_lambert_w(&[Value::Real(Float::with_val(
+            DEFAULT_PRECISION,
+            -1.0 / std::f64::consts::E,
+        ))])
         .unwrap();
         if let Value::Real(r) = result {
             assert!((r.to_f64() + 1.0).abs() < 1e-6);

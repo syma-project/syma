@@ -301,9 +301,14 @@ fn simplify_sin(args: &[Value]) -> Value {
         // sin(-x) -> -sin(x)
         Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
             if let Value::Integer(n) = &a[0]
-                && *n == -1 && a.len() == 2 {
-                    return simplify_call("Times", &[Value::Integer((-1).into()), call("Sin", vec![a[1].clone()])]);
-                }
+                && *n == -1
+                && a.len() == 2
+            {
+                return simplify_call(
+                    "Times",
+                    &[Value::Integer((-1).into()), call("Sin", vec![a[1].clone()])],
+                );
+            }
             call_ref("Sin", args)
         }
         _ => call_ref("Sin", args),
@@ -319,9 +324,11 @@ fn simplify_cos(args: &[Value]) -> Value {
         // cos(-x) -> cos(x)
         Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
             if let Value::Integer(n) = &a[0]
-                && *n == -1 && a.len() == 2 {
-                    return call("Cos", vec![a[1].clone()]);
-                }
+                && *n == -1
+                && a.len() == 2
+            {
+                return call("Cos", vec![a[1].clone()]);
+            }
             call_ref("Cos", args)
         }
         _ => call_ref("Cos", args),
@@ -533,8 +540,7 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
         for (k, den_k) in den_coeffs.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub =
-                    expand_value(&simplify_call("Times", &[q.clone(), den_k.clone()]));
+                let sub = expand_value(&simplify_call("Times", &[q.clone(), den_k.clone()]));
                 let neg = expand_value(&simplify_call(
                     "Times",
                     &[Value::Integer(Integer::from(-1)), sub],
@@ -756,45 +762,48 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     // Check if second argument is a List {x, n} or {x, n, x0}
     if let Value::List(items) = &unwrapped[1]
-        && !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
-            let var = items[0].clone();
-            let n = items[1].to_integer().ok_or_else(|| {
-                EvalError::Error("D: order n must be a non-negative integer".to_string())
-            })?;
-            if n < 0 {
-                return Err(EvalError::Error(
-                    "D: order n must be a non-negative integer".to_string(),
-                ));
-            }
-            // Repeatedly differentiate n times w.r.t. var
-            let mut result = unwrapped[0].clone();
-            for _ in 0..n as usize {
-                result = eval_d_2(result, var.clone(), env)?;
-            }
-            if items.len() == 3 {
-                // D[f, {x, n, x0}] — evaluate at x = x0
-                let var_name = match &var {
-                    Value::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "D: variable in {x, n, x0} must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                if unwrapped.len() > 2 {
-                    for arg in &unwrapped[2..] {
-                        result = eval_d_2(result, arg.clone(), env)?;
-                    }
+        && !items.is_empty()
+        && items.len() >= 2
+        && items.len() <= 3
+    {
+        let var = items[0].clone();
+        let n = items[1].to_integer().ok_or_else(|| {
+            EvalError::Error("D: order n must be a non-negative integer".to_string())
+        })?;
+        if n < 0 {
+            return Err(EvalError::Error(
+                "D: order n must be a non-negative integer".to_string(),
+            ));
+        }
+        // Repeatedly differentiate n times w.r.t. var
+        let mut result = unwrapped[0].clone();
+        for _ in 0..n as usize {
+            result = eval_d_2(result, var.clone(), env)?;
+        }
+        if items.len() == 3 {
+            // D[f, {x, n, x0}] — evaluate at x = x0
+            let var_name = match &var {
+                Value::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "D: variable in {x, n, x0} must be a symbol".to_string(),
+                    ));
                 }
-                return Ok(substitute_and_eval(&result, &var_name, &items[2]));
-            }
+            };
             if unwrapped.len() > 2 {
                 for arg in &unwrapped[2..] {
                     result = eval_d_2(result, arg.clone(), env)?;
                 }
             }
-            return Ok(result);
+            return Ok(substitute_and_eval(&result, &var_name, &items[2]));
         }
+        if unwrapped.len() > 2 {
+            for arg in &unwrapped[2..] {
+                result = eval_d_2(result, arg.clone(), env)?;
+            }
+        }
+        return Ok(result);
+    }
 
     // Multi-arg: D[f, x, y, z, ...] — fold left: D[D[D[f, x], y], z]
     if unwrapped.len() > 2 {
@@ -829,17 +838,17 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
         head: ref h,
         ref args,
     } = concrete
-        && h == "D" && args.len() == 2 {
-            // Call eval_d_2 directly with already-unwrapped args
-            let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
-            return eval_d_2(inner_result, var, env);
-        }
+        && h == "D"
+        && args.len() == 2
+    {
+        // Call eval_d_2 directly with already-unwrapped args
+        let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
+        return eval_d_2(inner_result, var, env);
+    }
 
     // Flatten nested Plus/Times (parser builds nested, Flat flattens at runtime)
     let flattened = match &concrete {
-        Value::Call { head, args }
-            if (head == "Plus" || head == "Times") && args.len() >= 2 =>
-        {
+        Value::Call { head, args } if (head == "Plus" || head == "Times") && args.len() >= 2 => {
             let flat_args = crate::eval::flatten_flat_args(head, args);
             if flat_args.len() != args.len() {
                 Some(Value::Call {
@@ -904,7 +913,11 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
             Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => var.clone(),
         };
-        return match crate::eval::apply_function(&d_func, &[concrete.clone(), concrete_var.clone()], env) {
+        return match crate::eval::apply_function(
+            &d_func,
+            &[concrete.clone(), concrete_var.clone()],
+            env,
+        ) {
             Ok(v) => Ok(v),
             Err(EvalError::NoMatch { .. }) => {
                 // No D rule matched — return unevaluated D with concrete (unwrapped) args
@@ -1023,9 +1036,10 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
     // After loading, ensure the D function is in the root scope so it's
     // accessible from all child scopes.
     if let Some(d_func) = env.get("D")
-        && let Value::Function(_) = &d_func {
-            env.root_env().set("D".to_string(), d_func);
-        }
+        && let Value::Function(_) = &d_func
+    {
+        env.root_env().set("D".to_string(), d_func);
+    }
 
     Ok(())
 }
@@ -1052,18 +1066,16 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     };
     // Normalize Divide[a, b] → Times[a, Power[b, -1]] for Rubi rule matching
     let expr = match &expr {
-        Value::Call { head, args: dargs } if head == "Divide" && dargs.len() == 2 => {
-            Value::Call {
-                head: "Times".to_string(),
-                args: vec![
-                    dargs[0].clone(),
-                    Value::Call {
-                        head: "Power".to_string(),
-                        args: vec![dargs[1].clone(), Value::Integer(Integer::from(-1))],
-                    },
-                ],
-            }
-        }
+        Value::Call { head, args: dargs } if head == "Divide" && dargs.len() == 2 => Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                dargs[0].clone(),
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![dargs[1].clone(), Value::Integer(Integer::from(-1))],
+                },
+            ],
+        },
         _ => expr,
     };
 
@@ -1207,11 +1219,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
             if candidate.exists() {
                 if let Ok(source) = std::fs::read_to_string(&candidate)
                     && let Ok(tokens) = crate::lexer::tokenize(&source)
-                        && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                            for (expr, _suppress) in stmts {
-                                let _ = crate::eval::eval(&expr, env);
-                            }
-                        }
+                    && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+                {
+                    for (expr, _suppress) in stmts {
+                        let _ = crate::eval::eval(&expr, env);
+                    }
+                }
                 return;
             }
         }
@@ -1230,11 +1243,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
         if candidate.exists() {
             if let Ok(source) = std::fs::read_to_string(&candidate)
                 && let Ok(tokens) = crate::lexer::tokenize(&source)
-                    && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                        for (expr, _suppress) in stmts {
-                            let _ = crate::eval::eval(&expr, env);
-                        }
-                    }
+                && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+            {
+                for (expr, _suppress) in stmts {
+                    let _ = crate::eval::eval(&expr, env);
+                }
+            }
             return;
         }
     }
@@ -1242,11 +1256,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
     // Fallback: embedded source
     if let Some(source) = embedded_integrate_source(fname)
         && let Ok(tokens) = crate::lexer::tokenize(&source)
-            && let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                for (expr, _suppress) in stmts {
-                    let _ = crate::eval::eval(&expr, env);
-                }
-            }
+        && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+    {
+        for (expr, _suppress) in stmts {
+            let _ = crate::eval::eval(&expr, env);
+        }
+    }
 }
 
 /// Embedded Integrate rule files — fallback for cargo run.

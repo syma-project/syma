@@ -31,13 +31,22 @@ pub(crate) mod table;
 use crate::builtins::dataset;
 
 /// Evaluate a program (list of statements) in the given environment.
+pub(crate) mod assign;
 pub(crate) mod call;
+pub(crate) mod class;
 pub(crate) mod control_flow;
 pub(crate) mod information;
 pub(crate) mod set;
 pub(crate) mod specificity;
 pub(crate) mod substitute;
 
+use call::normalize_flat_result;
+use control_flow::eval_control_flow;
+use information::eval_information;
+use set::eval_set;
+pub(crate) use specificity::try_match_params;
+use specificity::{flatten_sequences, specificity};
+pub(crate) use substitute::substitute_in_expr;
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
     let mut result = Value::Null;
     for stmt in stmts {
@@ -277,33 +286,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Switch { expr, cases } => {
             let val = eval(expr, env)?;
             'next_case: for (pattern, result) in cases {
-                let (inner_pat, guard) = extract_guard_expr(pattern);
+                let (inner_pat, _) = extract_guard_expr(pattern);
                 if let MatchResult::Match(bindings) =
                     match_pattern(inner_pat, &val, Some(&_attr_checker))
                 {
-                    // Evaluate top-level guard if present
-                    if let Some(guard_expr) = guard {
-                        let guard_env = env.child();
-                        for (name, value) in &bindings {
-                            guard_env.set(name.clone(), value.clone());
-                        }
-                        guard_env.set("#".to_string(), val.clone());
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue 'next_case;
-                        }
-                    }
-                    // Evaluate nested guards inside compound patterns (e.g., {a_, b_ /; a < b})
-                    let mut guard_exprs = Vec::new();
-                    collect_nested_guards(inner_pat, &mut guard_exprs);
-                    for guard_expr in &guard_exprs {
-                        let guard_env = env.child();
-                        for (name, value) in &bindings {
-                            guard_env.set(name.clone(), value.clone());
-                        }
-                        guard_env.set("#".to_string(), val.clone());
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue 'next_case;
-                        }
+                    if !check_guards(pattern, &bindings, &val, env)? {
+                        continue 'next_case;
                     }
                     let child_env = env.child();
                     for (name, value) in &bindings {
@@ -319,33 +307,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Match { expr, branches } => {
             let val = eval(expr, env)?;
             for branch in branches {
-                let (inner_pat, guard) = extract_guard_expr(&branch.pattern);
+                let (inner_pat, _) = extract_guard_expr(&branch.pattern);
                 if let MatchResult::Match(bindings) =
                     match_pattern(inner_pat, &val, Some(&_attr_checker))
                 {
-                    // Evaluate top-level guard if present
-                    if let Some(guard_expr) = guard {
-                        let guard_env = env.child();
-                        for (name, value) in &bindings {
-                            guard_env.set(name.clone(), value.clone());
-                        }
-                        guard_env.set("#".to_string(), val.clone());
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue;
-                        }
-                    }
-                    // Evaluate nested guards inside compound patterns
-                    let mut guard_exprs = Vec::new();
-                    collect_nested_guards(inner_pat, &mut guard_exprs);
-                    for guard_expr in &guard_exprs {
-                        let guard_env = env.child();
-                        for (name, value) in &bindings {
-                            guard_env.set(name.clone(), value.clone());
-                        }
-                        guard_env.set("#".to_string(), val.clone());
-                        if !eval(guard_expr, &guard_env)?.to_bool() {
-                            continue;
-                        }
+                    if !check_guards(&branch.pattern, &bindings, &val, env)? {
+                        continue;
                     }
                     let child_env = env.child();
                     for (name, value) in &bindings {
@@ -501,155 +468,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         }
 
         // ── Assignment ──
-        Expr::Assign { lhs, rhs } => {
-            let val = eval(rhs, env)?;
-            match lhs.as_ref() {
-                Expr::Symbol(s) => {
-                    // Check if symbol is protected
-                    if env.has_attribute(s, "Protected") && env.get(s).is_some() {
-                        return Err(EvalError::Error(format!(
-                            "Symbol {} is protected; cannot assign",
-                            s
-                        )));
-                    }
-                    // Propagate assignment to the scope where the symbol was defined,
-                    // so that assignments inside Do/For/While bodies update outer bindings.
-                    env.set_propagate(s.clone(), val.clone());
-                    Ok(val)
-                }
-                // LocalSymbol["name"] = value
-                Expr::Call {
-                    head,
-                    args: call_args,
-                } if call_args.len() == 1
-                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "LocalSymbol") =>
-                {
-                    let name = eval(&call_args[0], env)?;
-                    match name {
-                        Value::Str(s) => crate::builtins::localsymbol::write_local_symbol(&s, &val),
-                        _ => Err(EvalError::Error(
-                            "LocalSymbol requires a string name".to_string(),
-                        )),
-                    }
-                }
-                // Attributes[sym] = {attr1, attr2}  — set attributes
-                Expr::Call {
-                    head,
-                    args: call_args,
-                } if call_args.len() == 1
-                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
-                {
-                    let sym_name = match &call_args[0] {
-                        Expr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Error(
-                                "Attributes assignment requires a symbol name".to_string(),
-                            ));
-                        }
-                    };
-                    if env.has_attribute(&sym_name, "Locked") {
-                        return Ok(Value::Null);
-                    }
-                    let attrs = match &val {
-                        Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
-                        other => vec![other.to_string()],
-                    };
-                    env.set_attributes(&sym_name, attrs);
-                    Ok(val)
-                }
-                // f[args] = value  — set a function definition with immediate RHS
-                // Mathematica: Set[f[args], val]  defines a specific rule for f.
-                // Also handles desugared OOP field access: this.field = val
-                // is parsed as Assign(Call(field[this]), val). When the target
-                // evaluates to an Object, treat as field access.
-                // Guard: Part[...] = val is handled by the next branch.
-                Expr::Call {
-                    head,
-                    args: call_args,
-                } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part") => {
-                    if let Expr::Symbol(name) = head.as_ref() {
-                        // Check for OOP field access: field[object] = value
-                        // where object evaluates to an Object
-                        if call_args.len() == 1 {
-                            let target = eval(&call_args[0], env)?;
-                            if let Value::Object {
-                                class_name,
-                                mut fields,
-                            } = target
-                            {
-                                fields.insert(name.clone(), val.clone());
-                                let updated = Value::Object { class_name, fields };
-                                if let Expr::Symbol(s) = &call_args[0]
-                                    && s == "this"
-                                {
-                                    env.set("this".to_string(), updated.clone());
-                                }
-                                return Ok(val);
-                            }
-                        }
-                        // Otherwise: function definition via assignment
-                        // f[args] = val  → add FunctionDefinition for name with
-                        // params = args (as patterns), body = val (converted to Expr)
-                        let body_expr = table::value_to_expr(&val);
-                        let func = if let Some(Value::Function(f)) = env.get(name) {
-                            Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
-                        } else {
-                            FunctionDef {
-                                name: name.clone(),
-                                definitions: Vec::new(),
-                            }
-                        };
-                        let mut func = func;
-                        func.definitions.push(FunctionDefinition {
-                            params: call_args.clone(),
-                            body: body_expr,
-                            delayed: false,
-                            guard: None,
-                        });
-                        // Sort definitions so more specific ones match first
-                        func.definitions
-                            .sort_by_key(|a| std::cmp::Reverse(specificity(&a.params)));
-                        env.set(name.clone(), Value::Function(Arc::new(func)));
-                        return Ok(val);
-                    }
-                    Err(EvalError::Error("Invalid assignment target".to_string()))
-                }
-                // x[[i]] = val  (desugared to Assign(Part[x, i], val))
-                Expr::Call {
-                    head,
-                    args: part_args,
-                } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
-                    && !part_args.is_empty() =>
-                {
-                    let var_name = match &part_args[0] {
-                        Expr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Error(
-                                "Part assignment: collection must be a symbol".to_string(),
-                            ));
-                        }
-                    };
-                    let current = env.get(&var_name).ok_or_else(|| {
-                        EvalError::Error(format!("Symbol {} is not defined", var_name))
-                    })?;
-                    let indices: Vec<i64> = part_args[1..]
-                        .iter()
-                        .map(|idx| {
-                            eval(idx, env)?
-                                .to_integer()
-                                .ok_or_else(|| EvalError::TypeError {
-                                    expected: "Integer".to_string(),
-                                    got: "non-Integer".to_string(),
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let updated = set_part(current, &indices, val.clone())?;
-                    env.set_propagate(var_name, updated);
-                    Ok(val)
-                }
-                _ => Err(EvalError::Error("Invalid assignment target".to_string())),
-            }
-        }
+        Expr::Assign { lhs, rhs } => assign::eval_assign(lhs, rhs, false, env),
 
         // ── Destructuring assignment ──
         Expr::DestructAssign { patterns, rhs } => {
@@ -693,55 +512,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             }
         }
 
-        // ── Post-increment: expr++ (evaluate, increment, return old value) ──
-        Expr::PostIncrement { expr } => {
-            let val = eval(expr, env)?;
-            let new_val = eval(
-                &Expr::Call {
-                    head: Box::new(Expr::Symbol("Plus".to_string())),
-                    args: vec![expr.as_ref().clone(), Expr::Integer(Integer::from(1))],
-                },
-                env,
-            )?;
-            match expr.as_ref() {
-                Expr::Symbol(s) => {
-                    if env.has_attribute(s, "Protected") && env.get(s).is_some() {
-                        return Err(EvalError::Error(format!(
-                            "Symbol {} is protected; cannot modify",
-                            s
-                        )));
-                    }
-                    env.set_propagate(s.clone(), new_val);
-                    Ok(val) // return old value
-                }
-                _ => Err(EvalError::Error("Invalid increment target".to_string())),
-            }
-        }
-
-        // ── Post-decrement: expr-- (evaluate, decrement, return old value) ──
-        Expr::PostDecrement { expr } => {
-            let val = eval(expr, env)?;
-            let new_val = eval(
-                &Expr::Call {
-                    head: Box::new(Expr::Symbol("Plus".to_string())),
-                    args: vec![expr.as_ref().clone(), Expr::Integer(Integer::from(-1))],
-                },
-                env,
-            )?;
-            match expr.as_ref() {
-                Expr::Symbol(s) => {
-                    if env.has_attribute(s, "Protected") && env.get(s).is_some() {
-                        return Err(EvalError::Error(format!(
-                            "Symbol {} is protected; cannot modify",
-                            s
-                        )));
-                    }
-                    env.set_propagate(s.clone(), new_val);
-                    Ok(val) // return old value
-                }
-                _ => Err(EvalError::Error("Invalid decrement target".to_string())),
-            }
-        }
+        // ── Post-increment/Post-decrement: expr++, expr-- ──
+        Expr::PostIncrement { expr } => eval_post_op(expr, 1, env),
+        Expr::PostDecrement { expr } => eval_post_op(expr, -1, env),
 
         // ── Unset: expr =. ──
         Expr::Unset { expr } => match expr.as_ref() {
@@ -783,113 +556,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             parent,
             mixins,
             members,
-        } => {
-            let mut fields = Vec::new();
-            let mut methods = HashMap::new();
-            let mut constructor = None;
-            let mut transforms = Vec::new();
-
-            for member in members {
-                match member {
-                    crate::ast::MemberDef::Field {
-                        name: field_name,
-                        type_hint,
-                        default,
-                    } => {
-                        fields.push(crate::value::ClassField {
-                            name: field_name.clone(),
-                            type_hint: type_hint.clone(),
-                            default: default.clone(),
-                        });
-                    }
-                    crate::ast::MemberDef::Method {
-                        name: method_name,
-                        params,
-                        body,
-                        ..
-                    } => {
-                        let body_expr = match body {
-                            crate::ast::MethodBody::Expr(e) => e.clone(),
-                            crate::ast::MethodBody::Block(stmts) => Expr::Sequence(stmts.clone()),
-                        };
-                        methods.insert(
-                            method_name.clone(),
-                            crate::value::ClassMethod {
-                                name: method_name.clone(),
-                                params: params.clone(),
-                                body: body_expr,
-                            },
-                        );
-                    }
-                    crate::ast::MemberDef::Constructor { params, body } => {
-                        let body_expr = if body.len() == 1 {
-                            body[0].clone()
-                        } else {
-                            Expr::Sequence(body.clone())
-                        };
-                        constructor = Some(crate::value::ClassConstructor {
-                            params: params.clone(),
-                            body: body_expr,
-                        });
-                    }
-                    crate::ast::MemberDef::Transform { name: _, rules } => {
-                        transforms.extend(rules.clone());
-                    }
-                }
-            }
-
-            // Resolve parent class and merge its fields/methods
-            let parent_name = parent.clone();
-            if let Some(ref parent_name) = parent_name
-                && let Some(parent_val) = env.get(parent_name)
-                && let Value::Class(parent_class) = parent_val
-            {
-                // Merge parent fields (child fields override)
-                let child_field_names: std::collections::HashSet<String> =
-                    fields.iter().map(|f| f.name.clone()).collect();
-                for parent_field in &parent_class.fields {
-                    if !child_field_names.contains(&parent_field.name) {
-                        fields.insert(0, parent_field.clone());
-                    }
-                }
-                // Merge parent methods (child methods override)
-                for (method_name, method) in &parent_class.methods {
-                    methods
-                        .entry(method_name.clone())
-                        .or_insert_with(|| method.clone());
-                }
-                // Use parent constructor if child doesn't have one
-                if constructor.is_none() {
-                    constructor = parent_class.constructor.clone();
-                }
-            }
-
-            // Resolve mixins and merge their methods
-            for mixin_name in mixins {
-                if let Some(mixin_val) = env.get(mixin_name)
-                    && let Value::Class(mixin_class) = mixin_val
-                {
-                    for (method_name, method) in &mixin_class.methods {
-                        methods
-                            .entry(method_name.clone())
-                            .or_insert_with(|| method.clone());
-                    }
-                }
-            }
-
-            let class_def = crate::value::ClassDef {
-                name: name.clone(),
-                parent: parent_name,
-                mixins: mixins.clone(),
-                fields,
-                methods,
-                constructor,
-                transforms,
-            };
-            let class_val = Value::Class(std::sync::Arc::new(class_def));
-            env.set(name.clone(), class_val);
-            Ok(Value::Null)
-        }
+        } => class::eval_class_def(name, parent, mixins, members, env),
 
         // ── Module definition ──
         Expr::ModuleDef {
@@ -1166,6 +833,42 @@ pub(super) fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
     }
 }
 
+/// Evaluate top-level guard and nested guards for a matched pattern.
+/// Returns `Ok(true)` if all guards pass, `Ok(false)` if any fails.
+/// `matched_val` is bound to `#` for guard evaluation.
+pub(super) fn check_guards(
+    inner_pat: &Expr,
+    bindings: &Bindings,
+    matched_val: &Value,
+    env: &Env,
+) -> Result<bool, EvalError> {
+    let (inner, guard) = extract_guard_expr(inner_pat);
+    let guard_env = env.child();
+    for (name, value) in bindings {
+        guard_env.set(name.clone(), value.clone());
+    }
+    guard_env.set("#".to_string(), matched_val.clone());
+
+    if let Some(guard_expr) = guard {
+        if !eval(guard_expr, &guard_env)?.to_bool() {
+            return Ok(false);
+        }
+    }
+    let mut guard_exprs = Vec::new();
+    collect_nested_guards(inner, &mut guard_exprs);
+    for guard_expr in &guard_exprs {
+        let ge = env.child();
+        for (name, value) in bindings {
+            ge.set(name.clone(), value.clone());
+        }
+        ge.set("#".to_string(), matched_val.clone());
+        if !eval(guard_expr, &ge)?.to_bool() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Convert a symbol string containing `_` into the corresponding pattern AST node.
 /// Handles _Integer, x_, x_Integer, __, ___, x__, x___ and all typed variants.
 fn convert_blank_pattern(s: &str) -> Expr {
@@ -1319,7 +1022,7 @@ fn eval_args_with_attributes(
 /// - `Expr::Call { head: Symbol("Set"), args: [Symbol(name), rhs] }` — same via Set
 ///
 /// Returns `Vec<(String, Option<Expr>)>` — variable name and optional initializer expr.
-fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)>, EvalError> {
+pub(super) fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)>, EvalError> {
     let items = match arg {
         Expr::List(items) => items,
         other => {
@@ -1369,18 +1072,6 @@ fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)>, EvalErro
     }
     Ok(specs)
 }
-
-/// Recursively substitute symbols in an expression using a substitution map.
-///
-/// Walks the AST and replaces any `Expr::Symbol` matching a key in `subs`
-/// with the corresponding replacement expression.
-
-/// Handle Set and SetDelayed assignment forms.
-///
-/// Returns `Ok(Some(value))` if this is a Set/SetDelayed call, `Ok(None)` otherwise.
-/// Handle control flow forms: While, For, Module, With, Block.
-///
-/// Returns `Ok(Some(value))` if the form was handled, `Ok(None)` otherwise.
 
 /// Evaluate a function call.
 fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
@@ -1531,7 +1222,8 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 Err(EvalError::Continue)
             }
             "While" | "For" => {
-                Ok(eval_control_flow(s, args, env)?.expect("While/For handled by eval_control_flow"))
+                Ok(eval_control_flow(s, args, env)?
+                    .expect("While/For handled by eval_control_flow"))
             }
             "ReleaseHold" => {
                 if args.len() != 1 {
@@ -1575,9 +1267,8 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                 };
                 numeric::numeric_eval_expr(&args[0], prec_bits, env)
             }
-            "Module" | "With" | "Block" => {
-                Ok(eval_control_flow(s, args, env)?.expect("Module/With/Block handled by eval_control_flow"))
-            }
+            "Module" | "With" | "Block" => Ok(eval_control_flow(s, args, env)?
+                .expect("Module/With/Block handled by eval_control_flow")),
             _ => {
                 // Check if this is a custom operator symbol registered in the operator table.
                 // If so, resolve it to the actual head name and dispatch.
@@ -1618,10 +1309,11 @@ pub(crate) fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
         if let Value::Call { head, args: inner } = arg
-            && head == name {
-                result.extend(flatten_flat_args(name, inner));
-                continue;
-            }
+            && head == name
+        {
+            result.extend(flatten_flat_args(name, inner));
+            continue;
+        }
         result.push(arg.clone());
     }
     result
@@ -2103,7 +1795,32 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 /// Higher score = more specific (tried first in rule ordering).
 /// Recursively update a nested structure at the given index path.
 /// Used to implement `x[[i]] = val` and `x[[i, j]] = val`.
-fn set_part(current: Value, indices: &[i64], val: Value) -> Result<Value, EvalError> {
+/// Evaluate `expr++` (increment: delta=1) or `expr--` (decrement: delta=-1).
+fn eval_post_op(expr: &Expr, delta: i32, env: &Env) -> Result<Value, EvalError> {
+    let val = eval(expr, env)?;
+    let new_val = eval(
+        &Expr::Call {
+            head: Box::new(Expr::Symbol("Plus".to_string())),
+            args: vec![expr.clone(), Expr::Integer(Integer::from(delta))],
+        },
+        env,
+    )?;
+    match expr {
+        Expr::Symbol(s) => {
+            if env.has_attribute(s, "Protected") && env.get(s).is_some() {
+                return Err(EvalError::Error(format!(
+                    "Symbol {} is protected; cannot modify",
+                    s
+                )));
+            }
+            env.set_propagate(s.clone(), new_val);
+            Ok(val)
+        }
+        _ => Err(EvalError::Error("Invalid increment/decrement target".to_string())),
+    }
+}
+
+pub(super) fn set_part(current: Value, indices: &[i64], val: Value) -> Result<Value, EvalError> {
     if indices.is_empty() {
         return Ok(val);
     }

@@ -1785,7 +1785,9 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
         "Uniform" => {
             let lo = dist.get("Min").and_then(super::to_f64).unwrap_or(0.0);
             let hi = dist.get("Max").and_then(super::to_f64).unwrap_or(1.0);
-            (0..n).map(|_| super::real(lo + (hi - lo) * rng.f64())).collect()
+            (0..n)
+                .map(|_| super::real(lo + (hi - lo) * rng.f64()))
+                .collect()
         }
         "Poisson" => {
             let lambda = dist.get("Lambda").and_then(super::to_f64).unwrap_or(1.0);

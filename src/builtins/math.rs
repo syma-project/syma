@@ -2225,7 +2225,9 @@ pub fn builtin_positive_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Rational(r) => **r > 0,
         _ => false,
     };
-    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+    Ok(Value::Symbol(
+        if result { "True" } else { "False" }.to_string(),
+    ))
 }
 
 /// NegativeQ[x] — true if x < 0 (works for Integer, Real, Rational).
@@ -2237,7 +2239,9 @@ pub fn builtin_negative_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Rational(r) => **r < 0,
         _ => false,
     };
-    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+    Ok(Value::Symbol(
+        if result { "True" } else { "False" }.to_string(),
+    ))
 }
 
 /// NonNegativeQ[x] — true if x >= 0 (works for Integer, Real, Rational).
@@ -2249,7 +2253,9 @@ pub fn builtin_non_negative_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Rational(r) => **r >= 0,
         _ => false,
     };
-    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+    Ok(Value::Symbol(
+        if result { "True" } else { "False" }.to_string(),
+    ))
 }
 
 /// ZeroQ[x] — true if x == 0 (works for Integer, Real, Rational).
@@ -2261,7 +2267,9 @@ pub fn builtin_zero_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Rational(r) => r.numer().is_zero(),
         _ => false,
     };
-    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+    Ok(Value::Symbol(
+        if result { "True" } else { "False" }.to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -2878,43 +2886,109 @@ mod tests {
 
     #[test]
     fn test_even_q() {
-        assert_eq!(builtin_even_q(&[int(2)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_even_q(&[int(3)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_even_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_even_q(&[int(-4)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_even_q(&[real(2.5)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(
+            builtin_even_q(&[int(2)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_even_q(&[int(3)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_even_q(&[int(0)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_even_q(&[int(-4)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_even_q(&[real(2.5)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
     }
 
     #[test]
     fn test_positive_q() {
-        assert_eq!(builtin_positive_q(&[int(1)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_positive_q(&[int(0)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_positive_q(&[int(-1)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_positive_q(&[real(0.5)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_positive_q(&[real(-0.5)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(
+            builtin_positive_q(&[int(1)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_positive_q(&[int(0)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_positive_q(&[int(-1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_positive_q(&[real(0.5)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_positive_q(&[real(-0.5)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
     }
 
     #[test]
     fn test_negative_q() {
-        assert_eq!(builtin_negative_q(&[int(-1)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_negative_q(&[int(0)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_negative_q(&[int(1)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_negative_q(&[real(-0.5)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(
+            builtin_negative_q(&[int(-1)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_negative_q(&[int(0)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_negative_q(&[int(1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_negative_q(&[real(-0.5)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
     }
 
     #[test]
     fn test_non_negative_q() {
-        assert_eq!(builtin_non_negative_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_non_negative_q(&[int(1)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_non_negative_q(&[int(-1)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_non_negative_q(&[real(0.0)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(
+            builtin_non_negative_q(&[int(0)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_non_negative_q(&[int(1)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_non_negative_q(&[int(-1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_non_negative_q(&[real(0.0)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
     }
 
     #[test]
     fn test_zero_q() {
-        assert_eq!(builtin_zero_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_zero_q(&[int(1)]).unwrap(), Value::Symbol("False".to_string()));
-        assert_eq!(builtin_zero_q(&[real(0.0)]).unwrap(), Value::Symbol("True".to_string()));
-        assert_eq!(builtin_zero_q(&[real(0.1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(
+            builtin_zero_q(&[int(0)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_zero_q(&[int(1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_zero_q(&[real(0.0)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_zero_q(&[real(0.1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
     }
 }
