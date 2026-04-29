@@ -1319,7 +1319,6 @@ pub(crate) fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     result
 }
 
-/// If the result is a Call with the same Flat head, flatten nested calls.
 // ── Recursion limit ($RecursionLimit) ──
 
 thread_local! {
@@ -1579,10 +1578,10 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             Ok(if let Some(r) = found_result {
                 r?
             } else {
-                return Err(EvalError::NoMatch {
+                Value::Call {
                     head: func_def.name.clone(),
-                    args: Box::new(args.to_vec()),
-                });
+                    args: args.to_vec(),
+                }
             })
         }
 
@@ -1763,9 +1762,9 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 method_args.extend(args.to_vec());
                 apply_function(&method, &method_args, env)
             } else {
-                Err(EvalError::NoMatch {
+                Ok(Value::Call {
                     head: class_name.clone(),
-                    args: Box::new(args.to_vec()),
+                    args: args.to_vec(),
                 })
             }
         }
@@ -1816,7 +1815,9 @@ fn eval_post_op(expr: &Expr, delta: i32, env: &Env) -> Result<Value, EvalError> 
             env.set_propagate(s.clone(), new_val);
             Ok(val)
         }
-        _ => Err(EvalError::Error("Invalid increment/decrement target".to_string())),
+        _ => Err(EvalError::Error(
+            "Invalid increment/decrement target".to_string(),
+        )),
     }
 }
 

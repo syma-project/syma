@@ -755,21 +755,6 @@ fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     result
 }
 
-/// Flatten nested value calls with same head (for Flat attribute).
-fn flatten_value_args(head: &str, args: &[Value]) -> Vec<Value> {
-    let mut result = Vec::new();
-    for arg in args {
-        if let Value::Call { head: h, args: a } = arg
-            && h == head
-        {
-            result.extend(flatten_value_args(head, a));
-            continue;
-        }
-        result.push(arg.clone());
-    }
-    result
-}
-
 /// Generate all permutations of a slice of indices (Heap's algorithm).
 fn generate_permutations(indices: &[usize]) -> Vec<Vec<usize>> {
     if indices.is_empty() {
@@ -909,7 +894,7 @@ fn match_call_pattern(
                 args.to_vec()
             };
             let val_args: Vec<Value> = if is_flat {
-                flatten_value_args(&head_name, vargs)
+                crate::eval::flatten_flat_args(&head_name, vargs)
             } else {
                 vargs.clone()
             };

@@ -30,8 +30,10 @@ use crate::format::{bold_red, dim};
 
 pub const VERSION: &str = "0.1.0";
 
-/// Returns the value if successful, None on error.
-pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
+/// Helper: tokenize and parse input. `suppress=true` uses parse_with_suppress.
+type ParseResult = Vec<(ast::Expr, bool)>;
+
+fn tokenize_and_parse<'a>(input: &'a str, suppress: bool) -> Option<ParseResult> {
     let tokens = match lexer::tokenize(input) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -39,14 +41,31 @@ pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
             return None;
         }
     };
-    let ast = match parser::parse(tokens) {
-        Ok(ast) => ast,
-        Err(e) => {
-            print_error("ParseError", &e.to_string(), input);
-            return None;
+    let result = if suppress {
+        match parser::parse_with_suppress(tokens) {
+            Ok(ast) => ast,
+            Err(e) => {
+                print_error("ParseError", &e.to_string(), input);
+                return None;
+            }
+        }
+    } else {
+        match parser::parse(tokens) {
+            Ok(ast) => ast.into_iter().map(|e| (e, false)).collect(),
+            Err(e) => {
+                print_error("ParseError", &e.to_string(), input);
+                return None;
+            }
         }
     };
-    match eval::eval_program(&ast, env) {
+    Some(result)
+}
+
+/// Returns the value if successful, None on error.
+pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
+    let parsed = tokenize_and_parse(input, false)?;
+    let exprs: Vec<ast::Expr> = parsed.into_iter().map(|(e, _)| e).collect();
+    match eval::eval_program(&exprs, env) {
         Ok(value) => Some(value),
         Err(e) => {
             print_error("Error", &e.to_string(), input);
@@ -58,21 +77,8 @@ pub fn eval_input(input: &str, env: &env::Env) -> Option<value::Value> {
 /// Evaluate multi-statement input, returning the result of each statement.
 /// `None` in the returned vector means the statement was suppressed by `;`.
 pub fn eval_input_with_results(input: &str, env: &env::Env) -> Option<Vec<Option<value::Value>>> {
-    let tokens = match lexer::tokenize(input) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            print_error("LexError", &e.to_string(), input);
-            return None;
-        }
-    };
-    let ast = match parser::parse_with_suppress(tokens) {
-        Ok(ast) => ast,
-        Err(e) => {
-            print_error("ParseError", &e.to_string(), input);
-            return None;
-        }
-    };
-    match eval::eval_program_with_results(&ast, env) {
+    let parsed = tokenize_and_parse(input, true)?;
+    match eval::eval_program_with_results(&parsed, env) {
         Ok(results) => Some(results),
         Err(e) => {
             print_error("Error", &e.to_string(), input);

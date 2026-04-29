@@ -673,6 +673,7 @@ pub fn builtin_numerator(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
+        Value::Rational(r) => Ok(Value::Integer(r.numer().clone())),
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[0].clone()),
         Value::Call { head, args }
             if head == "Power"
@@ -693,13 +694,17 @@ pub fn builtin_denominator(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
+        Value::Rational(r) => Ok(Value::Integer(r.denom().clone())),
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[1].clone()),
         Value::Call { head, args }
             if head == "Power"
                 && args.len() == 2
                 && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
         {
-            Ok(args[0].clone())
+            Ok(Value::Call {
+                head: "Power".to_string(),
+                args: vec![args[0].clone(), Value::Integer(Integer::from(1))],
+            })
         }
         _ => Ok(Value::Integer(Integer::from(1))),
     }
@@ -722,6 +727,19 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
             "Exponent requires exactly 2 arguments".to_string(),
         ));
     }
+    // For symbolic base, extract polynomial coefficients and find highest degree
+    if let Value::Symbol(var_name) = &args[1] {
+        let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], var_name);
+        if !coeffs.is_empty() {
+            // Find highest non-zero coefficient index
+            for i in (0..coeffs.len()).rev() {
+                if !is_zero(&coeffs[i]) {
+                    return Ok(Value::Integer(Integer::from(i)));
+                }
+            }
+        }
+    }
+    // Fallback: direct Power[base, exp] match
     match &args[0] {
         Value::Call {
             head,
@@ -731,6 +749,16 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ if args[0].struct_eq(&args[1]) => Ok(Value::Integer(Integer::from(1))),
         _ => Ok(Value::Integer(Integer::from(0))),
+    }
+}
+
+/// Check if a Value is zero (Integer(0), Real(0.0), Rational(0/1))
+fn is_zero(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Rational(r) => r.numer().is_zero(),
+        _ => false,
     }
 }
 
@@ -987,11 +1015,17 @@ pub fn builtin_function_of_linear(args: &[Value]) -> Result<Value, EvalError> {
     };
     // If expr is Call[head, arg] and arg is linear in var, decompose
     match &args[0] {
-        Value::Call { head, args: call_args } if call_args.len() == 1 => {
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => {
             let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&call_args[0], &var);
             if coeffs.len() <= 2 && !is_constant_wrt(&call_args[0], &Value::Symbol(var.clone())) {
                 let f = Value::Symbol(head.clone());
-                let a = coeffs.first().cloned().unwrap_or(Value::Integer(Integer::from(0)));
+                let a = coeffs
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
                 let b = if coeffs.len() >= 2 {
                     coeffs[1].clone()
                 } else {
@@ -1080,7 +1114,8 @@ pub fn builtin_nice_sqrt_q(args: &[Value]) -> Result<Value, EvalError> {
     let inner = match expr {
         Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => &args[0],
         Value::Call { head, args }
-            if head == "Power" && args.len() == 2
+            if head == "Power"
+                && args.len() == 2
                 && matches!(&args[1], Value::Rational(r) if *r.denom() == 2) =>
         {
             &args[0]
@@ -1090,9 +1125,9 @@ pub fn builtin_nice_sqrt_q(args: &[Value]) -> Result<Value, EvalError> {
     // Check if inner is a perfect square integer, or has a perfect square factor
     let is_nice = match inner {
         Value::Integer(n) => n.is_perfect_square(),
-        Value::Call { head, args } if head == "Times" => {
-            args.iter().any(|a| matches!(a, Value::Integer(n) if n.is_perfect_square()))
-        }
+        Value::Call { head, args } if head == "Times" => args
+            .iter()
+            .any(|a| matches!(a, Value::Integer(n) if n.is_perfect_square())),
         _ => true, // non-numeric expressions are "nice enough"
     };
     Ok(Value::Bool(is_nice))
@@ -1112,14 +1147,25 @@ pub fn builtin_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
     let expr = &args[0];
     // expr should be Power[inner, p] or just inner
     match expr {
-        Value::Call { head, args: inner_args } if head == "Power" && inner_args.len() == 2 => {
+        Value::Call {
+            head,
+            args: inner_args,
+        } if head == "Power" && inner_args.len() == 2 => {
             let base = &inner_args[0];
             let _exp = &inner_args[1];
             let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(base, &var);
             if coeffs.len() <= 2 {
-                let c = coeffs.first().cloned().unwrap_or(Value::Integer(Integer::from(0)));
-                let b = coeffs.get(1).cloned().unwrap_or(Value::Integer(Integer::from(0)));
-                Ok(Value::Bool(builtin_match_q_inner(&c, &args[1]) && builtin_match_q_inner(&b, &args[2])))
+                let c = coeffs
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
+                let b = coeffs
+                    .get(1)
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
+                Ok(Value::Bool(
+                    builtin_match_q_inner(&c, &args[1]) && builtin_match_q_inner(&b, &args[2]),
+                ))
             } else {
                 Ok(Value::Bool(false))
             }
@@ -1325,9 +1371,18 @@ pub fn builtin_quadratic_match_q(args: &[Value]) -> Result<Value, EvalError> {
         return Ok(Value::Bool(false));
     }
     // Check a (x^2 coeff), b (x^1 coeff), c (x^0 coeff)
-    let a = coeffs.get(2).cloned().unwrap_or(Value::Integer(Integer::from(0)));
-    let b = coeffs.get(1).cloned().unwrap_or(Value::Integer(Integer::from(0)));
-    let c = coeffs.get(0).cloned().unwrap_or(Value::Integer(Integer::from(0)));
+    let a = coeffs
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    let b = coeffs
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    let c = coeffs
+        .get(0)
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
     // Match allocated a, b, c against the passed patterns
     let matches_a = builtin_match_q_inner(&a, &args[1]);
     let matches_b = builtin_match_q_inner(&b, &args[2]);
@@ -1381,7 +1436,10 @@ pub fn builtin_generalized_trinomial_q(args: &[Value]) -> Result<Value, EvalErro
         _ => return Ok(Value::Bool(false)),
     };
     match &args[0] {
-        Value::Call { head, args: plus_args } if head == "Plus" && plus_args.len() == 3 => {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 3 => {
             // Count terms involving powers of var
             let power_terms: Vec<_> = plus_args
                 .iter()
@@ -1389,9 +1447,10 @@ pub fn builtin_generalized_trinomial_q(args: &[Value]) -> Result<Value, EvalErro
                 .collect();
             Ok(Value::Bool(power_terms.len() >= 2))
         }
-        Value::Call { head, args: plus_args } if head == "Plus" => {
-            Ok(Value::Bool(false))
-        }
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" => Ok(Value::Bool(false)),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1409,11 +1468,12 @@ pub fn builtin_linear_pair_q(args: &[Value]) -> Result<Value, EvalError> {
     };
     // Must be Plus with exactly 2 args, each linear in var
     match &args[0] {
-        Value::Call { head, args: plus_args } if head == "Plus" && plus_args.len() == 2 => {
-            Ok(Value::Bool(
-                is_linear_in(&plus_args[0], &var) && is_linear_in(&plus_args[1], &var),
-            ))
-        }
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => Ok(Value::Bool(
+            is_linear_in(&plus_args[0], &var) && is_linear_in(&plus_args[1], &var),
+        )),
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1501,15 +1561,26 @@ pub fn builtin_function_of_log(args: &[Value]) -> Result<Value, EvalError> {
     };
     // expr should be outer[Log[inner]] where inner is linear in var
     match &args[0] {
-        Value::Call { head, args: call_args } if call_args.len() == 1 => {
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => {
             match &call_args[0] {
-                Value::Call { head: log_head, args: log_args }
-                    if log_head == "Log" && log_args.len() == 1 && is_linear_in(&log_args[0], &var) =>
+                Value::Call {
+                    head: log_head,
+                    args: log_args,
+                } if log_head == "Log"
+                    && log_args.len() == 1
+                    && is_linear_in(&log_args[0], &var) =>
                 {
                     // Return {f, a, b} where f is outer head, Log[a + b*x] is inner
                     let f = Value::Symbol(head.clone());
-                    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&log_args[0], &var);
-                    let a = coeffs.first().cloned().unwrap_or(Value::Integer(Integer::from(0)));
+                    let coeffs =
+                        crate::builtins::symbolic::extract_polynomial_coeffs(&log_args[0], &var);
+                    let a = coeffs
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Integer(Integer::from(0)));
                     let b = if coeffs.len() >= 2 {
                         coeffs[1].clone()
                     } else {
@@ -1553,7 +1624,8 @@ fn has_exponential_of_linear(expr: &Value, var: &str) -> bool {
             args.iter().any(|a| has_exponential_of_linear(a, var))
         }
         Value::Call { head, args } if head == "Exp" && args.len() == 1 => {
-            is_linear_in(&args[0], var) && !is_constant_wrt(&args[0], &Value::Symbol(var.to_string()))
+            is_linear_in(&args[0], var)
+                && !is_constant_wrt(&args[0], &Value::Symbol(var.to_string()))
         }
         Value::Call { args, .. } => args.iter().any(|a| has_exponential_of_linear(a, var)),
         Value::List(items) => items.iter().any(|a| has_exponential_of_linear(a, var)),
@@ -1574,26 +1646,31 @@ pub fn builtin_function_of_exponential(args: &[Value]) -> Result<Value, EvalErro
     };
     // Try to decompose: if expr is f[E^(c*x)], return {f, E, c}
     match &args[0] {
-        Value::Call { head, args: call_args } if call_args.len() == 1 => {
-            match &call_args[0] {
-                Value::Call { head: exp_head, args: exp_args }
-                    if exp_head == "Power" && exp_args.len() == 2
-                        && matches!(&exp_args[0], Value::Symbol(s) if s == "E")
-                        && is_linear_in(&exp_args[1], &var)
-                        && !is_constant_wrt(&exp_args[1], &Value::Symbol(var.clone())) =>
-                {
-                    let f = Value::Symbol(head.clone());
-                    let _coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&exp_args[1], &var);
-                    let b = if _coeffs.len() >= 2 {
-                        _coeffs[1].clone()
-                    } else {
-                        Value::Integer(Integer::from(1))
-                    };
-                    Ok(Value::List(vec![f, Value::Symbol("E".to_string()), b]))
-                }
-                _ => Ok(args[0].clone()),
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => match &call_args[0] {
+            Value::Call {
+                head: exp_head,
+                args: exp_args,
+            } if exp_head == "Power"
+                && exp_args.len() == 2
+                && matches!(&exp_args[0], Value::Symbol(s) if s == "E")
+                && is_linear_in(&exp_args[1], &var)
+                && !is_constant_wrt(&exp_args[1], &Value::Symbol(var.clone())) =>
+            {
+                let f = Value::Symbol(head.clone());
+                let _coeffs =
+                    crate::builtins::symbolic::extract_polynomial_coeffs(&exp_args[1], &var);
+                let b = if _coeffs.len() >= 2 {
+                    _coeffs[1].clone()
+                } else {
+                    Value::Integer(Integer::from(1))
+                };
+                Ok(Value::List(vec![f, Value::Symbol("E".to_string()), b]))
             }
-        }
+            _ => Ok(args[0].clone()),
+        },
         _ => Ok(args[0].clone()),
     }
 }
@@ -1923,9 +2000,7 @@ pub fn builtin_pseudo_binomial_pair_q(args: &[Value]) -> Result<Value, EvalError
             Value::Call { head, args: ca } if head == "Power" && ca.len() == 2 => {
                 !is_constant_wrt(&ca[0], &args[2])
             }
-            Value::Call { head, args: ca }
-                if head == "Times" && ca.len() == 2 =>
-            {
+            Value::Call { head, args: ca } if head == "Times" && ca.len() == 2 => {
                 ca.iter().any(|a| !is_constant_wrt(a, &args[2]))
             }
             _ => !is_constant_wrt(expr, &args[2]),
@@ -1979,15 +2054,23 @@ pub fn builtin_every_q(args: &[Value]) -> Result<Value, EvalError> {
 fn match_item_q(item: &Value, pattern: &Value) -> bool {
     match pattern {
         Value::Symbol(_) => true,
-        Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Str(_) | Value::Bool(_) => {
-            item.struct_eq(pattern)
-        }
+        Value::Integer(_)
+        | Value::Real(_)
+        | Value::Rational(_)
+        | Value::Str(_)
+        | Value::Bool(_) => item.struct_eq(pattern),
         Value::Call { head, args } => {
-            if let Value::Call { head: item_head, args: item_args } = item {
+            if let Value::Call {
+                head: item_head,
+                args: item_args,
+            } = item
+            {
                 if head != item_head || args.len() != item_args.len() {
                     return false;
                 }
-                args.iter().zip(item_args.iter()).all(|(p, i)| match_item_q(i, p))
+                args.iter()
+                    .zip(item_args.iter())
+                    .all(|(p, i)| match_item_q(i, p))
             } else {
                 false
             }
@@ -1995,7 +2078,10 @@ fn match_item_q(item: &Value, pattern: &Value) -> bool {
         Value::List(pat_items) => {
             if let Value::List(item_items) = item {
                 pat_items.len() == item_items.len()
-                    && pat_items.iter().zip(item_items.iter()).all(|(p, i)| match_item_q(i, p))
+                    && pat_items
+                        .iter()
+                        .zip(item_items.iter())
+                        .all(|(p, i)| match_item_q(i, p))
             } else {
                 false
             }
@@ -2046,7 +2132,10 @@ pub fn builtin_generalized_binomial_q(args: &[Value]) -> Result<Value, EvalError
         _ => return Ok(Value::Bool(false)),
     };
     match &args[0] {
-        Value::Call { head, args: plus_args } if head == "Plus" && plus_args.len() == 2 => {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => {
             let c1 = is_constant_wrt(&plus_args[0], &args[1]);
             let c2 = is_constant_wrt(&plus_args[1], &args[1]);
             Ok(Value::Bool(c1 || c2)) // at least one constant term
@@ -2068,7 +2157,10 @@ pub fn builtin_generalized_binomial_match_q(args: &[Value]) -> Result<Value, Eva
     };
     // Check if expr is a sum of 2 terms, one constant
     match &args[0] {
-        Value::Call { head, args: plus_args } if head == "Plus" && plus_args.len() == 2 => {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => {
             let (_const_term, var_term) = if is_constant_wrt(&plus_args[0], &args[1]) {
                 (&plus_args[0], &plus_args[1])
             } else if is_constant_wrt(&plus_args[1], &args[1]) {
@@ -2096,7 +2188,10 @@ pub fn builtin_generalized_trinomial_match_q(args: &[Value]) -> Result<Value, Ev
     };
     // Must be Plus with 3 terms
     match &args[0] {
-        Value::Call { head, args: plus_args } if head == "Plus" && plus_args.len() == 3 => {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 3 => {
             let non_const: Vec<_> = plus_args
                 .iter()
                 .filter(|a| !is_constant_wrt(a, &args[1]))
@@ -2246,7 +2341,9 @@ pub fn builtin_quadratic_product_q(args: &[Value]) -> Result<Value, EvalError> {
         Value::Call { head, args: ta } if head == "Times" && ta.len() == 2 => {
             let q1 = crate::builtins::symbolic::extract_polynomial_coeffs(&ta[0], &var);
             let q2 = crate::builtins::symbolic::extract_polynomial_coeffs(&ta[1], &var);
-            Ok(Value::Bool(q1.len() <= 3 && q2.len() <= 3 && q1.len() >= 2 && q2.len() >= 2))
+            Ok(Value::Bool(
+                q1.len() <= 3 && q2.len() <= 3 && q1.len() >= 2 && q2.len() >= 2,
+            ))
         }
         _ => Ok(Value::Bool(false)),
     }
@@ -2382,7 +2479,9 @@ pub fn builtin_minimum_monomial_exponent(args: &[Value]) -> Result<Value, EvalEr
         }
     };
     let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    if coeffs.is_empty() || (coeffs.len() == 1 && matches!(&coeffs[0], Value::Integer(n) if n.is_zero())) {
+    if coeffs.is_empty()
+        || (coeffs.len() == 1 && matches!(&coeffs[0], Value::Integer(n) if n.is_zero()))
+    {
         Ok(Value::Integer(Integer::from(0)))
     } else {
         // Find first non-zero coefficient index
@@ -2560,17 +2659,12 @@ fn expression_depth(val: &Value) -> usize {
 }
 
 const INVERSE_FN_NAMES: &[&str] = &[
-    "ArcSin", "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc",
-    "ArcSinh", "ArcCosh", "ArcTanh",
+    "ArcSin", "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc", "ArcSinh", "ArcCosh", "ArcTanh",
 ];
 
-const TRIG_FN_NAMES: &[&str] = &[
-    "Sin", "Cos", "Tan", "Cot", "Sec", "Csc",
-];
+const TRIG_FN_NAMES: &[&str] = &["Sin", "Cos", "Tan", "Cot", "Sec", "Csc"];
 
-const CALCULUS_FN_NAMES: &[&str] = &[
-    "Integrate", "D", "Integral", "Sum", "Product", "Limit",
-];
+const CALCULUS_FN_NAMES: &[&str] = &["Integrate", "D", "Integral", "Sum", "Product", "Limit"];
 
 fn contains_any_head(val: &Value, heads: &[&str]) -> bool {
     match val {
@@ -2607,9 +2701,12 @@ fn has_trig_with_linear_arg(expr: &Value, trig_head: &str, var: Option<&str>) ->
                 }
                 return true;
             }
-            args.iter().any(|a| has_trig_with_linear_arg(a, trig_head, var))
+            args.iter()
+                .any(|a| has_trig_with_linear_arg(a, trig_head, var))
         }
-        Value::List(items) => items.iter().any(|a| has_trig_with_linear_arg(a, trig_head, var)),
+        Value::List(items) => items
+            .iter()
+            .any(|a| has_trig_with_linear_arg(a, trig_head, var)),
         _ => false,
     }
 }
@@ -2648,7 +2745,10 @@ fn reconstruct_polynomial(coeffs: &[Value], var: &str) -> Value {
     } else if terms.len() == 1 {
         terms.into_iter().next().unwrap()
     } else {
-        Value::Call { head: "Plus".to_string(), args: terms }
+        Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        }
     }
 }
 
@@ -2661,7 +2761,7 @@ fn leading_term_divide(a: &Value, b: &Value) -> Value {
             }
             let xr = x.clone();
             let yr = y.clone();
-            Value::Rational(rug::Rational::from((xr, yr)))
+            Value::Rational(Box::new(rug::Rational::from((xr, yr))))
         }
         _ => {
             // Fall back to Divide[a, b]
@@ -2673,9 +2773,7 @@ fn leading_term_divide(a: &Value, b: &Value) -> Value {
 
 /// Polynomial long division: returns (quotient, remainder) of p1 / p2 in var
 fn polynomial_long_division(p1: &Value, p2: &Value, var: &str) -> (Value, Value) {
-    use crate::builtins::arithmetic::{
-        add_values_public, mul_values_public, sub_values_public,
-    };
+    use crate::builtins::arithmetic::{add_values_public, mul_values_public, sub_values_public};
     use crate::builtins::symbolic::extract_polynomial_coeffs;
     let p1_coeffs = extract_polynomial_coeffs(p1, var);
     let p2_coeffs = extract_polynomial_coeffs(p2, var);
@@ -2719,13 +2817,18 @@ fn polynomial_long_division(p1: &Value, p2: &Value, var: &str) -> (Value, Value)
         };
         q_terms.push(q_term.clone());
         // Multiply q_term * p2 and subtract from remainder
-        let q_term_poly = crate::builtins::symbolic::builtin_expand(&[&q_term]);
-        let q_times_p2 = mul_values_public(
-            &q_term_poly,
-            &reconstruct_polynomial(&p2_coeffs, var),
-        );
+        let q_term_poly = crate::builtins::symbolic::builtin_expand(&[q_term.clone()]);
+        let q_term_poly_val = match q_term_poly {
+            Ok(v) => v,
+            Err(_) => q_term,
+        };
+        let q_times_p2 =
+            mul_values_public(&q_term_poly_val, &reconstruct_polynomial(&p2_coeffs, var));
         let subtrahend = match &q_times_p2 {
-            Ok(v) => crate::builtins::symbolic::builtin_expand(&[v]),
+            Ok(v) => match crate::builtins::symbolic::builtin_expand(&[v.clone()]) {
+                Ok(vv) => vv,
+                Err(_) => v.clone(),
+            },
             Err(_) => Value::Integer(Integer::from(0)),
         };
         let rem_expr = reconstruct_polynomial(&rem, var);
@@ -2735,8 +2838,7 @@ fn polynomial_long_division(p1: &Value, p2: &Value, var: &str) -> (Value, Value)
         };
         let new_coeffs = extract_polynomial_coeffs(&new_rem_expr, var);
         rem = new_coeffs;
-        if rem.is_empty()
-            || (rem.len() == 1 && matches!(&rem[0], Value::Integer(n) if n.is_zero()))
+        if rem.is_empty() || (rem.len() == 1 && matches!(&rem[0], Value::Integer(n) if n.is_zero()))
         {
             break;
         }

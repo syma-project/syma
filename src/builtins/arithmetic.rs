@@ -1133,6 +1133,15 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
                 Ok(Value::Integer(Integer::from(-1)))
             }
         }
+        Value::Rational(r) => {
+            if r.numer().is_zero() {
+                Ok(Value::Integer(Integer::from(0)))
+            } else if r.is_positive() {
+                Ok(Value::Integer(Integer::from(1)))
+            } else {
+                Ok(Value::Integer(Integer::from(-1)))
+            }
+        }
         Value::Real(r) => {
             if r.is_zero() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))

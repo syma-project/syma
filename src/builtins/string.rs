@@ -55,7 +55,7 @@ pub fn builtin_string_length(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    Ok(Value::Integer(Integer::from(s.len() as i64)))
+    Ok(Value::Integer(Integer::from(s.chars().count() as i64)))
 }
 
 pub fn builtin_to_string(args: &[Value]) -> Result<Value, EvalError> {
@@ -121,7 +121,7 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
         } => {
             let old = str_of(lhs.as_ref())?;
             let new = str_of(rhs.as_ref())?;
-            Ok(Value::Str(s.replace(old, new)))
+            Ok(Value::Str(s.replacen(old, new, 1)))
         }
         Value::List(rules) => {
             let mut result = s;
@@ -134,7 +134,7 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
                     && let Ok(old) = str_of(lhs.as_ref())
                     && let Ok(new) = str_of(rhs.as_ref())
                 {
-                    result = result.replace(old, new);
+                    result = result.replacen(old, new, 1);
                 }
             }
             Ok(Value::Str(result))
@@ -288,11 +288,12 @@ pub fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         ' '.to_string()
     };
-    if n <= 0 || s.len() >= n as usize {
+    let char_len = s.chars().count();
+    if n <= 0 || char_len >= n as usize {
         return Ok(Value::Str(s));
     }
     let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
+    let padding: String = std::iter::repeat_n(pad_char, n as usize - char_len).collect();
     Ok(Value::Str(format!("{}{}", padding, s)))
 }
 
@@ -313,11 +314,12 @@ pub fn builtin_string_pad_right(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         ' '.to_string()
     };
-    if n <= 0 || s.len() >= n as usize {
+    let char_len = s.chars().count();
+    if n <= 0 || char_len >= n as usize {
         return Ok(Value::Str(s));
     }
     let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
+    let padding: String = std::iter::repeat_n(pad_char, n as usize - char_len).collect();
     Ok(Value::Str(format!("{}{}", s, padding)))
 }
 
@@ -395,9 +397,13 @@ pub fn builtin_string_position(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let (s, sub) = str_args(args, 0, 1)?;
+    // match_indices returns byte offsets; convert to char indices
     let positions: Vec<Value> = s
         .match_indices(sub)
-        .map(|(pos, _)| Value::Integer(Integer::from(pos as i64 + 1)))
+        .map(|(byte_pos, _)| {
+            let char_pos = s[..byte_pos].chars().count();
+            Value::Integer(Integer::from(char_pos as i64 + 1))
+        })
         .collect();
     Ok(Value::List(positions))
 }

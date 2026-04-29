@@ -1,6 +1,6 @@
+use rug::Float;
 /// Numeric evaluation — high-precision numeric evaluation of symbolic expressions.
 use rug::ops::Pow;
-use rug::Float;
 
 use crate::ast::*;
 use crate::env::Env;
@@ -53,20 +53,12 @@ pub(super) fn numeric_eval_expr(
                     "Plus" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a + b),
                     "Times" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a * b),
                     "Power" if evaluated_args.len() == 2 => {
-                        let (b, e) = (&evaluated_args[0], &evaluated_args[1]);
-                        let bf = to_float(b, prec_bits);
-                        let ef = to_float(e, prec_bits);
-                        match (bf, ef) {
-                            (Some(b), Some(e)) => Ok(Value::Real(b.pow(e))),
-                            _ => crate::eval::apply_function(
-                                &super::eval(head, env)?,
-                                &evaluated_args,
-                                env,
-                            ),
-                        }
+                        try_binary_float("Power", &evaluated_args, prec_bits, env, |a, b| a.pow(b))
                     }
                     "Divide" if evaluated_args.len() == 2 => {
-                        try_binary_float("Divide", &evaluated_args, prec_bits, env, |a, b| a.clone() / b.clone())
+                        try_binary_float("Divide", &evaluated_args, prec_bits, env, |a, b| {
+                            a.clone() / b.clone()
+                        })
                     }
                     "Sin" => try_unary_float("Sin", &evaluated_args, prec_bits, env, |f| f.sin()),
                     "Cos" => try_unary_float("Cos", &evaluated_args, prec_bits, env, |f| f.cos()),
@@ -74,7 +66,9 @@ pub(super) fn numeric_eval_expr(
                         try_unary_float("Log", &evaluated_args, prec_bits, env, |f| f.ln())
                     }
                     "Log" if evaluated_args.len() == 2 => {
-                        try_binary_float("Log", &evaluated_args, prec_bits, env, |a, b| b.ln() / a.ln())
+                        try_binary_float("Log", &evaluated_args, prec_bits, env, |a, b| {
+                            b.ln() / a.ln()
+                        })
                     }
                     "Sqrt" => try_unary_float("Sqrt", &evaluated_args, prec_bits, env, Float::sqrt),
                     "Abs" => try_unary_float("Abs", &evaluated_args, prec_bits, env, |f| f.abs()),
@@ -104,7 +98,13 @@ pub(super) fn numeric_eval_expr(
 }
 
 /// Evaluate unary float function, fall back to symbolic eval if args aren't numeric.
-fn try_unary_float(head: &str, args: &[Value], prec_bits: u32, env: &Env, op: fn(Float) -> Float) -> Result<Value, EvalError> {
+fn try_unary_float(
+    head: &str,
+    args: &[Value],
+    prec_bits: u32,
+    env: &Env,
+    op: fn(Float) -> Float,
+) -> Result<Value, EvalError> {
     if args.len() == 1 {
         if let Some(f) = to_float(&args[0], prec_bits) {
             return Ok(Value::Real(op(f)));
@@ -118,7 +118,13 @@ fn try_unary_float(head: &str, args: &[Value], prec_bits: u32, env: &Env, op: fn
 }
 
 /// Evaluate binary float function, fall back to symbolic eval if args aren't numeric.
-fn try_binary_float(head: &str, args: &[Value], prec_bits: u32, env: &Env, op: fn(Float, Float) -> Float) -> Result<Value, EvalError> {
+fn try_binary_float(
+    head: &str,
+    args: &[Value],
+    prec_bits: u32,
+    env: &Env,
+    op: fn(Float, Float) -> Float,
+) -> Result<Value, EvalError> {
     if args.len() == 2 {
         let bf = to_float(&args[0], prec_bits);
         let ef = to_float(&args[1], prec_bits);

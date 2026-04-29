@@ -73,7 +73,10 @@ pub fn builtin_length(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::List(items) => Ok(Value::Integer(Integer::from(items.len() as i64))),
-        Value::Str(s) => Ok(Value::Integer(Integer::from(s.len() as i64))),
+        Value::Str(s) => Ok(Value::Integer(Integer::from(s.chars().count() as i64))),
+        Value::Call { args: call_args, .. } => {
+            Ok(Value::Integer(Integer::from(call_args.len() as i64)))
+        }
         _ => Ok(Value::Integer(Integer::from(1))),
     }
 }
@@ -393,13 +396,17 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
             };
             let idx = if index > 0 {
                 (index - 1) as usize
+            } else if index < 0 {
+                let len = s.chars().count();
+                let from_end = (-index) as usize;
+                if from_end > len { 0 } else { len - from_end }
             } else {
                 return Err(EvalError::IndexOutOfBounds {
                     index,
-                    length: s.len(),
+                    length: s.len() as i64,
                 });
             };
-            if idx < s.len() {
+            if idx < s.chars().count() {
                 Ok(Value::Str(s.chars().nth(idx).unwrap().to_string()))
             } else {
                 Err(EvalError::IndexOutOfBounds {
@@ -947,47 +954,78 @@ pub fn builtin_union(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     }
+    seen.sort_by(compare_values);
     Ok(Value::List(seen))
 }
 
 pub fn builtin_intersection(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Intersection requires exactly 2 arguments".to_string(),
+            "Intersection requires at least 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::List(a), Value::List(b)) => Ok(Value::List(
-            a.iter()
-                .filter(|item| b.iter().any(|bitem| bitem.struct_eq(item)))
-                .cloned()
-                .collect(),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+    let lists: Vec<&[Value]> = args
+        .iter()
+        .map(|a| match a {
+            Value::List(items) => Ok(items.as_slice()),
+            _ => Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: a.type_name().to_string(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut result: Vec<Value> = lists[0]
+        .iter()
+        .filter(|item| {
+            lists[1..]
+                .iter()
+                .all(|list| list.iter().any(|x| x.struct_eq(item)))
+        })
+        .cloned()
+        .collect();
+    let mut deduped = Vec::new();
+    for v in result {
+        if !deduped.iter().any(|d: &Value| d.struct_eq(&v)) {
+            deduped.push(v);
+        }
     }
+    deduped.sort_by(compare_values);
+    Ok(Value::List(deduped))
 }
 
 pub fn builtin_complement(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Complement requires exactly 2 arguments".to_string(),
+            "Complement requires at least 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::List(a), Value::List(b)) => Ok(Value::List(
-            a.iter()
-                .filter(|item| !b.iter().any(|bitem| bitem.struct_eq(item)))
-                .cloned()
-                .collect(),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+    let lists: Vec<&[Value]> = args
+        .iter()
+        .map(|a| match a {
+            Value::List(items) => Ok(items.as_slice()),
+            _ => Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: a.type_name().to_string(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut result: Vec<Value> = lists[0]
+        .iter()
+        .filter(|item| {
+            !lists[1..]
+                .iter()
+                .any(|list| list.iter().any(|x| x.struct_eq(item)))
+        })
+        .cloned()
+        .collect();
+    let mut deduped = Vec::new();
+    for v in result {
+        if !deduped.iter().any(|d: &Value| d.struct_eq(&v)) {
+            deduped.push(v);
+        }
     }
+    deduped.sort_by(compare_values);
+    Ok(Value::List(deduped))
 }
 
 pub fn builtin_tally(args: &[Value]) -> Result<Value, EvalError> {
@@ -1037,7 +1075,7 @@ pub fn builtin_pad_left(args: &[Value]) -> Result<Value, EvalError> {
             let pad_val = if args.len() == 3 {
                 args[2].clone()
             } else {
-                Value::Null
+                Value::Integer(Integer::from(0))
             };
             if n <= items.len() {
                 Ok(Value::List(items[items.len() - n..].to_vec()))
