@@ -1,5 +1,5 @@
 use crate::value::{EvalError, Value};
-use rug::Integer;
+use rug::{Float, Integer};
 
 // ── Extractors ────────────────────────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ fn get_list(val: &Value) -> Result<&[Value], EvalError> {
 fn non_neg_int(val: &Value) -> Result<Integer, EvalError> {
     match val {
         Value::Integer(n) if !n.is_negative() => Ok(n.clone()),
-        Value::Integer(n) => Err(EvalError::TypeError {
+        Value::Integer(_n) => Err(EvalError::TypeError {
             expected: "non-negative Integer".to_string(),
             got: "negative Integer".to_string(),
         }),
@@ -105,7 +105,7 @@ pub fn builtin_binomial(args: &[Value]) -> Result<Value, EvalError> {
 /// Multinomial[n1, n2, ...] and Multinomial[{n1, n2, ...}] — the multinomial coefficient.
 /// Returns (n1+n2+...!) / (n1! * n2! * ...).
 pub fn builtin_multinomial(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "Multinomial requires at least 1 argument".to_string(),
         ));
@@ -125,7 +125,7 @@ pub fn builtin_multinomial(args: &[Value]) -> Result<Value, EvalError> {
     let sum: Integer = ints.iter().cloned().fold(Integer::from(0), |a, b| a + b);
     let mut result = integer_factorial(&sum);
     for k in &ints {
-        result /= integer_factorial(&k);
+        result /= integer_factorial(k);
     }
     Ok(Value::Integer(result))
 }
@@ -144,7 +144,7 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) => {
-            if *n <= Integer::from(-2) {
+            if *n <= -2 {
                 // Negative odd n: 1 / ((-n - 2)!!)
                 let neg = -n.clone();
                 let adjusted = neg - Integer::from(2);
@@ -156,7 +156,7 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
                         Value::Integer(denom),
                     ],
                 })
-            } else if *n == Integer::from(0) || *n == Integer::from(-1) {
+            } else if n.is_zero() || *n == -1 {
                 Ok(Value::Integer(Integer::from(1)))
             } else if !n.is_negative() {
                 Ok(Value::Integer(integer_double_factorial(n)))
@@ -178,9 +178,9 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
 fn integer_double_factorial(n: &Integer) -> Integer {
     let mut result = Integer::from(1);
     let mut i = n.clone();
-    while i > Integer::from(0) {
+    while i.is_positive() {
         result *= i.clone();
-        i -= Integer::from(2);
+        i -= 2;
     }
     result
 }
@@ -301,8 +301,8 @@ fn generate_permutations(
 ) -> Result<Vec<Value>, EvalError> {
     match spec {
         Value::Integer(k) => {
-            let k = *k;
-            if k <= Integer::from(0) {
+            let k = k.clone();
+            if k <= 0 {
                 return Ok(vec![Value::List(vec![])]);
             }
             let k_usize = k
@@ -317,8 +317,8 @@ fn generate_permutations(
             // or simpler: generate all permutations of size k from the n items.
             let mut result = Vec::new();
             let used = vec![false; len];
-            let mut current = Vec::with_capacity(k_usize);
-            partial_permutations(items, &used, &mut current, k_usize, &mut result);
+            let current = Vec::with_capacity(k_usize);
+            partial_permutations(items, &used, &current, k_usize, &mut result);
             Ok(result)
         }
         Value::List(spec_list) if spec_list.len() == 2 => {
@@ -451,7 +451,7 @@ fn generate_subsets_of_size(
         result.push(Value::List(subset));
         // Next combination using standard algorithm.
         let mut j = k - 1;
-        while j >= 0 && indices[j] == n - k + j {
+        while indices[j] == n - k + j {
             j -= 1;
         }
         if j == usize::MAX {
@@ -473,7 +473,7 @@ fn generate_subsets_specified(
     match spec {
         Value::Integer(k) => {
             let k = k.clone();
-            if k < Integer::from(0) {
+            if k.is_negative() {
                 return Ok(Vec::new());
             }
             let k_usize = k
@@ -605,9 +605,7 @@ pub fn builtin_stirling_s2(args: &[Value]) -> Result<Value, EvalError> {
                 for col in (1..=k_val.min(row)).rev() {
                     dp[col] = Integer::from(col) * dp[col].clone() + dp[col - 1].clone();
                 }
-                if k_val <= row {
-                    dp[0] = Integer::from(0);
-                }
+                dp[0] = Integer::from(0); // S(n, 0) = 0 for n >= 1
             }
             Ok(Value::Integer(dp[k_val].clone()))
         }
@@ -664,9 +662,7 @@ pub fn builtin_stirling_s1(args: &[Value]) -> Result<Value, EvalError> {
                     dp[col] = dp[col - 1].clone()
                         + Integer::from(row - 1) * dp[col].clone();
                 }
-                if k_val <= row {
-                    dp[0] = Integer::from(0);
-                }
+                dp[0] = Integer::from(0); // s(n, 0) = 0 for n >= 1
             }
             Ok(Value::Integer(dp[k_val].clone()))
         }
@@ -712,6 +708,411 @@ pub fn builtin_lucas_l(args: &[Value]) -> Result<Value, EvalError> {
             args: args.to_vec(),
         }),
     }
+}
+
+// ── Fibonacci ────────────────────────────────────────────────────────────────
+
+/// Fast doubling Fibonacci algorithm. Returns (F(n), F(n+1)).
+fn fib_pair(n: usize) -> (Integer, Integer) {
+    if n == 0 {
+        return (Integer::from(0), Integer::from(1));
+    }
+    let (a, b) = fib_pair(n >> 1);
+    // c = a * (2*b - a), d = a^2 + b^2
+    let a2 = a.clone() * &a;
+    let b2 = b.clone() * &b;
+    let c = a.clone() * (Integer::from(2) * &b - &a);
+    let d = a2 + b2;
+    if n & 1 == 0 {
+        (c, d)
+    } else {
+        (d.clone(), c + d)
+    }
+}
+
+/// Evaluate the Fibonacci polynomial F_n(x) at the given x value.
+/// Uses the recurrence F_0(x)=0, F_1(x)=1, F_n(x) = x*F_{n-1}(x) + F_{n-2}(x).
+fn fibonacci_polynomial(n: usize, x: &Value) -> Result<Value, EvalError> {
+    if n == 0 {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    if n == 1 {
+        return Ok(Value::Integer(Integer::from(1)));
+    }
+    let mut prev = Value::Integer(Integer::from(0));
+    let mut curr = Value::Integer(Integer::from(1));
+    for _ in 2..=n {
+        // next = x * curr + prev
+        let x_times_curr = mul_val(x, &curr)?;
+        let next = add_val(&x_times_curr, &prev)?;
+        prev = curr;
+        curr = next;
+    }
+    Ok(curr)
+}
+
+/// Add two Values (Integer + Integer → Integer, mixed → symbolic).
+fn add_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() + y)),
+        (Value::Real(x), Value::Real(y)) => {
+            Ok(Value::Real(x.clone() + y.clone()))
+        }
+        (Value::Integer(x), Value::Real(y)) => {
+            let xf = Float::with_val(crate::value::DEFAULT_PRECISION, x);
+            Ok(Value::Real(xf + y.clone()))
+        }
+        (Value::Real(x), Value::Integer(y)) => {
+            let yf = Float::with_val(crate::value::DEFAULT_PRECISION, y);
+            Ok(Value::Real(x.clone() + yf))
+        }
+        _ => Ok(Value::Call {
+            head: "Plus".to_string(),
+            args: vec![a.clone(), b.clone()],
+        }),
+    }
+}
+
+/// Multiply two Values (Integer * Integer → Integer, mixed → symbolic).
+fn mul_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() * y)),
+        (Value::Real(x), Value::Real(y)) => {
+            Ok(Value::Real(x.clone() * y.clone()))
+        }
+        (Value::Integer(x), Value::Real(y)) => {
+            let xf = Float::with_val(crate::value::DEFAULT_PRECISION, x);
+            Ok(Value::Real(xf * y.clone()))
+        }
+        (Value::Real(x), Value::Integer(y)) => {
+            let yf = Float::with_val(crate::value::DEFAULT_PRECISION, y);
+            Ok(Value::Real(x.clone() * yf))
+        }
+        _ => Ok(Value::Call {
+            head: "Times".to_string(),
+            args: vec![a.clone(), b.clone()],
+        }),
+    }
+}
+
+/// Fibonacci[n] — the n-th Fibonacci number using fast doubling.
+/// Fibonacci[n, x] — the Fibonacci polynomial F_n(x).
+pub fn builtin_fibonacci(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "Fibonacci requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("Fibonacci: n too large".to_string()))?;
+            if args.len() == 1 {
+                // Fast doubling
+                let (f_n, _) = fib_pair(n_val);
+                Ok(Value::Integer(f_n))
+            } else {
+                // Fibonacci polynomial
+                fibonacci_polynomial(n_val, &args[1])
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "Fibonacci".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+// ── CatalanNumber ───────────────────────────────────────────────────────────
+
+/// CatalanNumber[n] — the n-th Catalan number = Binomial[2n, n] / (n + 1).
+pub fn builtin_catalan_number(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "CatalanNumber requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("CatalanNumber: n too large".to_string()))?;
+            // C_n = Binomial(2n, n) / (n+1)
+            // Use GCD-safe computation to avoid intermediate growth.
+            let mut result = Integer::from(1);
+            for i in 0..n_val {
+                let mut numerator = Integer::from(2 * n_val - i);
+                let mut denominator = Integer::from(i + 1);
+                let g = gcd_int(result.clone(), denominator.clone());
+                result /= g.clone();
+                denominator /= g;
+                let g2 = gcd_int(numerator.clone(), denominator.clone());
+                numerator /= g2.clone();
+                denominator /= g2;
+                result *= numerator;
+                result /= denominator;
+            }
+            // Now divide by (n+1)
+            let n_plus_1 = Integer::from(n_val + 1);
+            result /= n_plus_1;
+            Ok(Value::Integer(result))
+        }
+        _ => Ok(Value::Call {
+            head: "CatalanNumber".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+// ── HarmonicNumber ──────────────────────────────────────────────────────────
+
+/// HarmonicNumber[n] — the n-th harmonic number = sum(1/k, k=1..n).
+/// HarmonicNumber[n, r] = sum(1/k^r, k=1..n).
+/// Returns Rational for exact integer results, Real for approximate.
+pub fn builtin_harmonic_number(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "HarmonicNumber requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let r = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(r) if r.is_positive() => {
+                r.to_u32().ok_or_else(|| {
+                    EvalError::Error("HarmonicNumber: r too large".to_string())
+                })?
+            }
+            _ => {
+                return Ok(Value::Call {
+                    head: "HarmonicNumber".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+        }
+    } else {
+        1
+    };
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("HarmonicNumber: n too large".to_string()))?;
+            if n_val == 0 {
+                return Ok(Value::Integer(Integer::from(0)));
+            }
+            if r == 1 {
+                // H_n = sum(1/k, k=1..n). Compute as exact rational.
+                // Use rug::Rational for exact computation.
+                let mut sum = rug::Rational::from(0);
+                for k in 1..=n_val {
+                    sum += rug::Rational::from((1, k as u64));
+                }
+                Ok(Value::Rational(Box::new(sum)))
+            } else {
+                // sum(1/k^r, k=1..n)
+                let mut sum = rug::Rational::from(0);
+                for k in 1..=n_val {
+                    let kr = (k as u64).pow(r);
+                    sum += rug::Rational::from((1, kr));
+                }
+                Ok(Value::Rational(Box::new(sum)))
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "HarmonicNumber".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+// ── PartitionsP ─────────────────────────────────────────────────────────────
+
+/// PartitionsP[n] — the number of unrestricted integer partitions of n.
+/// Uses the pentagonal number theorem for efficient computation.
+pub fn builtin_partitions_p(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PartitionsP requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("PartitionsP: n too large".to_string()))?;
+            Ok(Value::Integer(partitions_p(n_val)))
+        }
+        _ => Ok(Value::Call {
+            head: "PartitionsP".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Compute p(n) using the pentagonal number theorem recurrence:
+/// p(0) = 1, p(n) = sum((-1)^(k-1) * p(n - g(k)), k in Z\{0})
+/// where g(k) = k(3k-1)/2 (generalized pentagonal numbers).
+/// Sign pattern for pairs (pent1 from k>0, pent2 from k<0):
+/// k=1: pent1 -, pent2 -; k=2: pent1 +, pent2 +; k=3: pent1 -, pent2 -; ...
+fn partitions_p(n: usize) -> Integer {
+    if n == 0 {
+        return Integer::from(1);
+    }
+    let mut p = vec![Integer::from(0); n + 1];
+    p[0] = Integer::from(1);
+    for i in 1..=n {
+        let mut sum = Integer::from(0);
+        for k in 1.. {
+            let pent1 = k * (3 * k - 1) / 2;
+            let pent2 = k * (3 * k + 1) / 2;
+            if pent1 > i {
+                break;
+            }
+            // k odd: both pentagonal numbers contribute positively
+            // k even: both contribute negatively
+            let sign = if k % 2 == 1 { 1 } else { -1 };
+            sum += Integer::from(sign) * &p[i - pent1];
+            if pent2 <= i {
+                sum += Integer::from(sign) * &p[i - pent2];
+            }
+        }
+        p[i] = sum;
+    }
+    p[n].clone()
+}
+
+// ── PartitionsQ ─────────────────────────────────────────────────────────────
+
+/// PartitionsQ[n] — the number of partitions of n into distinct parts.
+/// Uses DP: q(n) = q(n-1) + q(n-2) - q(n-5) - q(n-7) + ...
+/// (same pentagonal recurrence but with alternating signs in pairs).
+pub fn builtin_partitions_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PartitionsQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("PartitionsQ: n too large".to_string()))?;
+            Ok(Value::Integer(partitions_q(n_val)))
+        }
+        _ => Ok(Value::Call {
+            head: "PartitionsQ".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Compute q(n) — partitions into distinct parts.
+/// Uses DP: q(n) = q(n, n) where q(n, k) is the number of partitions of n
+/// into distinct parts with each part ≤ k.
+/// Recurrence: q(n, k) = q(n, k-1) + q(n-k, k-1), q(0, k) = 1, q(n, 0) = 0.
+fn partitions_q(n: usize) -> Integer {
+    if n == 0 {
+        return Integer::from(1);
+    }
+    // 1D DP: q[j] = number of partitions of j into distinct parts ≤ current k
+    let mut q = vec![Integer::from(0); n + 1];
+    q[0] = Integer::from(1);
+    for k in 1..=n {
+        // Process in reverse to avoid using the same k twice
+        for j in (k..=n).rev() {
+            let add = q[j - k].clone();
+            q[j] += add;
+        }
+    }
+    q[n].clone()
+}
+
+// ── BellB ───────────────────────────────────────────────────────────────────
+
+/// BellB[n] — the n-th Bell number using the Bell triangle.
+/// BellB[n, k] — the partial Bell polynomial B_{n,k}.
+pub fn builtin_bell_b(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "BellB requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("BellB: n too large".to_string()))?;
+            if args.len() == 1 {
+                // Bell number via Bell triangle
+                Ok(Value::Integer(bell_number(n_val)))
+            } else {
+                // BellB[n, k] — partial Bell polynomial (number of partitions into k blocks)
+                match &args[1] {
+                    Value::Integer(k) if !k.is_negative() => {
+                        let k_val = k.to_usize().ok_or_else(|| {
+                            EvalError::Error("BellB: k too large".to_string())
+                        })?;
+                        // BellB[n, k] in Wolfram Language = StirlingS2[n, k]
+                        // (the number of partitions of n elements into exactly k non-empty subsets)
+                        Ok(Value::Integer(stirling_s2_val(n_val, k_val)))
+                    }
+                    _ => Ok(Value::Call {
+                        head: "BellB".to_string(),
+                        args: args.to_vec(),
+                    }),
+                }
+            }
+        }
+        _ => Ok(Value::Call {
+            head: "BellB".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Compute StirlingS2(n, k) as a plain value.
+fn stirling_s2_val(n: usize, k: usize) -> Integer {
+    if k == 0 {
+        return Integer::from(if n == 0 { 1 } else { 0 });
+    }
+    if n == 0 || k > n {
+        return Integer::from(0);
+    }
+    let mut dp = vec![Integer::from(0); k + 1];
+    dp[0] = Integer::from(1);
+    for row in 1..=n {
+        // Iterate backward to avoid overwriting values we still need
+        for col in (1..=k.min(row)).rev() {
+            dp[col] = Integer::from(col) * dp[col].clone() + dp[col - 1].clone();
+        }
+        if row >= 1 {
+            dp[0] = Integer::from(0);
+        }
+    }
+    dp[k].clone()
+}
+
+/// Compute the n-th Bell number using the Bell triangle.
+fn bell_number(n: usize) -> Integer {
+    if n == 0 {
+        return Integer::from(1);
+    }
+    // Bell triangle: row 0 = [B(0)] = [1]
+    // Each subsequent row starts with the last element of the previous row,
+    // then each element is the sum of the element to its left and the element
+    // above-left.
+    let mut prev_row = vec![Integer::from(1)]; // B(0) = 1
+    for _ in 1..=n {
+        let mut new_row = Vec::with_capacity(prev_row.len() + 1);
+        new_row.push(prev_row.last().unwrap().clone());
+        for prev_val in &prev_row {
+            let val = new_row.last().unwrap().clone() + prev_val;
+            new_row.push(val);
+        }
+        prev_row = new_row;
+    }
+    prev_row[0].clone()
 }
 
 // ── Helper: exact factorial ──────────────────────────────────────────────────
@@ -806,11 +1207,8 @@ mod tests {
         assert_eq!(builtin_factorial2(&[int(-1)]).unwrap(), int(1));
         // Factorial2[-3] = 1 / ((-(-3) - 2)!!) = 1 / (1!!) = 1
         let result = builtin_factorial2(&[int(-3)]).unwrap();
-        if let Value::Call {
-            head: "Divide",
-            args,
-        } = result
-        {
+        if let Value::Call { head, args } = result {
+            assert_eq!(head, "Divide");
             assert_eq!(args[0], int(1));
             assert_eq!(args[1], int(1));
         } else {
@@ -1000,5 +1398,130 @@ mod tests {
         assert_eq!(builtin_lucas_l(&[int(5)]).unwrap(), int(11));
         assert_eq!(builtin_lucas_l(&[int(6)]).unwrap(), int(18));
         assert_eq!(builtin_lucas_l(&[int(7)]).unwrap(), int(29));
+    }
+
+    // ── Fibonacci ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fibonacci_basic() {
+        assert_eq!(builtin_fibonacci(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_fibonacci(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_fibonacci(&[int(2)]).unwrap(), int(1));
+        assert_eq!(builtin_fibonacci(&[int(10)]).unwrap(), int(55));
+        assert_eq!(builtin_fibonacci(&[int(20)]).unwrap(), int(6765));
+    }
+
+    #[test]
+    fn test_fibonacci_polynomial() {
+        // F_0(x) = 0
+        assert_eq!(builtin_fibonacci(&[int(0), int(5)]).unwrap(), int(0));
+        // F_1(x) = 1
+        assert_eq!(builtin_fibonacci(&[int(1), int(5)]).unwrap(), int(1));
+        // F_2(x) = x
+        assert_eq!(builtin_fibonacci(&[int(2), int(3)]).unwrap(), int(3));
+        // F_3(x) = x^2 + 1
+        assert_eq!(builtin_fibonacci(&[int(3), int(2)]).unwrap(), int(5));
+        // F_4(x) = x^3 + 2x
+        assert_eq!(builtin_fibonacci(&[int(4), int(2)]).unwrap(), int(12));
+    }
+
+    // ── CatalanNumber ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_catalan_number() {
+        assert_eq!(builtin_catalan_number(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_catalan_number(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_catalan_number(&[int(2)]).unwrap(), int(2));
+        assert_eq!(builtin_catalan_number(&[int(3)]).unwrap(), int(5));
+        assert_eq!(builtin_catalan_number(&[int(4)]).unwrap(), int(14));
+        assert_eq!(builtin_catalan_number(&[int(5)]).unwrap(), int(42));
+        assert_eq!(builtin_catalan_number(&[int(10)]).unwrap(), int(16796));
+    }
+
+    // ── HarmonicNumber ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_harmonic_number() {
+        // H_0 = 0
+        assert_eq!(builtin_harmonic_number(&[int(0)]).unwrap(), int(0));
+        // H_1 = 1
+        let result = builtin_harmonic_number(&[int(1)]).unwrap();
+        match &result {
+            Value::Rational(r) => assert_eq!(r.to_f64(), 1.0),
+            _ => panic!("Expected Rational for H_1"),
+        }
+        // H_2 = 1 + 1/2 = 3/2
+        let result = builtin_harmonic_number(&[int(2)]).unwrap();
+        match &result {
+            Value::Rational(r) => assert_eq!(r.to_f64(), 1.5),
+            _ => panic!("Expected Rational for H_2"),
+        }
+    }
+
+    #[test]
+    fn test_harmonic_number_r() {
+        // H(3, 2) = 1 + 1/4 + 1/9 = 49/36
+        let result = builtin_harmonic_number(&[int(3), int(2)]).unwrap();
+        match &result {
+            Value::Rational(r) => {
+                let expected = 1.0 + 0.25 + 1.0 / 9.0;
+                assert!((r.to_f64() - expected).abs() < 1e-10);
+            }
+            _ => panic!("Expected Rational"),
+        }
+    }
+
+    // ── PartitionsP ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_partitions_p() {
+        assert_eq!(builtin_partitions_p(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_partitions_p(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_partitions_p(&[int(2)]).unwrap(), int(2));
+        assert_eq!(builtin_partitions_p(&[int(3)]).unwrap(), int(3));
+        assert_eq!(builtin_partitions_p(&[int(4)]).unwrap(), int(5));
+        assert_eq!(builtin_partitions_p(&[int(5)]).unwrap(), int(7));
+        assert_eq!(builtin_partitions_p(&[int(10)]).unwrap(), int(42));
+        assert_eq!(builtin_partitions_p(&[int(20)]).unwrap(), int(627));
+    }
+
+    // ── PartitionsQ ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_partitions_q() {
+        assert_eq!(builtin_partitions_q(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_partitions_q(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_partitions_q(&[int(2)]).unwrap(), int(1));
+        assert_eq!(builtin_partitions_q(&[int(3)]).unwrap(), int(2));
+        assert_eq!(builtin_partitions_q(&[int(4)]).unwrap(), int(2));
+        assert_eq!(builtin_partitions_q(&[int(5)]).unwrap(), int(3));
+        assert_eq!(builtin_partitions_q(&[int(10)]).unwrap(), int(10));
+    }
+
+    // ── BellB ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bell_b() {
+        assert_eq!(builtin_bell_b(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_bell_b(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_bell_b(&[int(2)]).unwrap(), int(2));
+        assert_eq!(builtin_bell_b(&[int(3)]).unwrap(), int(5));
+        assert_eq!(builtin_bell_b(&[int(4)]).unwrap(), int(15));
+        assert_eq!(builtin_bell_b(&[int(5)]).unwrap(), int(52));
+        assert_eq!(builtin_bell_b(&[int(6)]).unwrap(), int(203));
+    }
+
+    #[test]
+    fn test_bell_b_nk() {
+        // BellB[n, k] = StirlingS2[n, k]
+        assert_eq!(builtin_bell_b(&[int(3), int(1)]).unwrap(), int(1)); // S(3,1)=1
+        assert_eq!(builtin_bell_b(&[int(3), int(2)]).unwrap(), int(3)); // S(3,2)=3
+        assert_eq!(builtin_bell_b(&[int(3), int(3)]).unwrap(), int(1)); // S(3,3)=1
+        // Sum of BellB[n,k] for k=1..n = BellB[n]
+        assert_eq!(builtin_bell_b(&[int(4), int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_bell_b(&[int(4), int(2)]).unwrap(), int(7));
+        assert_eq!(builtin_bell_b(&[int(4), int(3)]).unwrap(), int(6));
+        assert_eq!(builtin_bell_b(&[int(4), int(4)]).unwrap(), int(1));
+        // Sum = 1+7+6+1 = 15 = BellB[4] ✓
     }
 }

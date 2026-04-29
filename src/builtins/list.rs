@@ -2176,6 +2176,175 @@ pub fn builtin_fixed_point_list(args: &[Value], env: &Env) -> Result<Value, Eval
     Ok(Value::List(result))
 }
 
+/// ArrayPad[list, n] — pad list with n zeros on each side.
+/// ArrayPad[list, {before, after}] — pad with different amounts.
+/// ArrayPad[list, n, val] — pad with val instead of 0.
+pub fn builtin_array_pad(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("ArrayPad", args, 2)?;
+    let list = match &args[0] {
+        Value::List(l) => l.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+    let (before, after) = match &args[1] {
+        Value::Integer(n) => {
+            let v = n.to_i32().unwrap_or(0);
+            (v, v)
+        }
+        Value::List(ab) if ab.len() == 2 => {
+            let b = super::require_f64(&ab[0], "ArrayPad", 2)? as i32;
+            let a = super::require_f64(&ab[1], "ArrayPad", 2)? as i32;
+            (b, a)
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "integer or {before, after}".to_string(),
+                got: args[1].type_name().to_string(),
+            })
+        }
+    };
+    let fill = if args.len() >= 3 {
+        args[2].clone()
+    } else {
+        Value::Integer(Integer::from(0))
+    };
+    let mut result = Vec::new();
+    for _ in 0..before.max(0) {
+        result.push(fill.clone());
+    }
+    result.extend(list);
+    for _ in 0..after.max(0) {
+        result.push(fill.clone());
+    }
+    Ok(Value::List(result))
+}
+
+/// ArrayReshape[list, {d1, d2, ...}] — reshape a flat list into the given dimensions.
+/// Total elements must match the product of dimensions.
+pub fn builtin_array_reshape(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ArrayReshape", args, 2)?;
+    let flat = match &args[0] {
+        Value::List(l) => l.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+    let dims = match &args[1] {
+        Value::List(d) => {
+            let mut result = Vec::new();
+            for v in d {
+                let n = v.to_integer().ok_or_else(|| EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: v.type_name().to_string(),
+                })? as usize;
+                if n == 0 {
+                    return Err(EvalError::Error(
+                        "ArrayReshape: dimension must be positive".to_string(),
+                    ));
+                }
+                result.push(n);
+            }
+            result
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List of dimensions".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+
+    let total: usize = dims.iter().product();
+    if total != flat.len() {
+        return Err(EvalError::Error(format!(
+            "ArrayReshape: total elements ({}) does not match product of dimensions ({})",
+            flat.len(),
+            total
+        )));
+    }
+
+    // Build nested list structure from flat list
+    fn build_nested(flat: &[Value], dims: &[usize], offset: usize) -> Value {
+        if dims.len() == 1 {
+            Value::List(flat[offset..offset + dims[0]].to_vec())
+        } else {
+            let stride: usize = dims[1..].iter().product();
+            let mut result = Vec::with_capacity(dims[0]);
+            for i in 0..dims[0] {
+                result.push(build_nested(flat, &dims[1..], offset + i * stride));
+            }
+            Value::List(result)
+        }
+    }
+
+    Ok(build_nested(&flat, &dims, 0))
+}
+
+/// StringCases[string, pattern] — find all substrings matching a literal pattern.
+/// For now, supports literal string matching and `"*"` as a wildcard (matches any substring).
+pub fn builtin_string_cases(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("StringCases", args, 2)?;
+    let haystack = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+    let pattern = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+
+    let mut matches = Vec::new();
+
+    if pattern == "*" {
+        // Wildcard: match the entire string
+        if !haystack.is_empty() {
+            matches.push(Value::Str(haystack));
+        }
+    } else if pattern.contains('*') {
+        // Simple wildcard pattern: split by '*' and match prefix/suffix
+        let parts: Vec<&str> = pattern.splitn(2, '*').collect();
+        let prefix = parts[0];
+        let suffix = parts.get(1).unwrap_or(&"");
+        // Find all occurrences of the pattern
+        for i in 0..haystack.len() {
+            if haystack[i..].starts_with(prefix) {
+                let after_prefix = i + prefix.len();
+                // Find suffix starting from after_prefix
+                if let Some(pos) = haystack[after_prefix..].find(suffix) {
+                    let end = after_prefix + pos + suffix.len();
+                    matches.push(Value::Str(haystack[i..end].to_string()));
+                }
+            }
+        }
+    } else {
+        // Literal match: find all occurrences
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(&pattern) {
+            matches.push(Value::Str(pattern.clone()));
+            start += pos + pattern.len();
+        }
+    }
+
+    Ok(Value::List(matches))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3259,5 +3428,147 @@ mod tests {
     fn test_fixedpointlist_wrong_count() {
         let env = test_env();
         assert!(builtin_fixed_point_list(&[], &env).is_err());
+    }
+
+    // ── ArrayPad tests ──
+
+    #[test]
+    fn test_array_pad_basic() {
+        let result = builtin_array_pad(&[list(vec![int(1), int(2)]), int(1)]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![int(0), int(1), int(2), int(0)])
+        );
+    }
+
+    #[test]
+    fn test_array_pad_asymmetric() {
+        let result = builtin_array_pad(&[
+            list(vec![int(1), int(2)]),
+            list(vec![int(2), int(1)]),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![int(0), int(0), int(1), int(2), int(0)])
+        );
+    }
+
+    #[test]
+    fn test_array_pad_custom_value() {
+        let result =
+            builtin_array_pad(&[list(vec![int(1)]), int(2), Value::Str("x".to_string())]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                Value::Str("x".to_string()),
+                Value::Str("x".to_string()),
+                int(1),
+                Value::Str("x".to_string()),
+                Value::Str("x".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_pad_non_list() {
+        assert!(builtin_array_pad(&[int(5), int(1)]).is_err());
+    }
+
+    #[test]
+    fn test_array_pad_few_args() {
+        assert!(builtin_array_pad(&[list(vec![int(1)])]).is_err());
+    }
+
+    // ── ArrayReshape tests ──
+
+    #[test]
+    fn test_array_reshape_2x3() {
+        let flat = list(vec![int(1), int(2), int(3), int(4), int(5), int(6)]);
+        let dims = list(vec![int(2), int(3)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(2), int(3)]),
+                list(vec![int(4), int(5), int(6)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_reshape_3x2() {
+        let flat = list(vec![int(1), int(2), int(3), int(4), int(5), int(6)]);
+        let dims = list(vec![int(3), int(2)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(2)]),
+                list(vec![int(3), int(4)]),
+                list(vec![int(5), int(6)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_reshape_size_mismatch() {
+        let flat = list(vec![int(1), int(2), int(3)]);
+        let dims = list(vec![int(2), int(2)]);
+        assert!(builtin_array_reshape(&[flat, dims]).is_err());
+    }
+
+    #[test]
+    fn test_array_reshape_1d() {
+        let flat = list(vec![int(1), int(2), int(3)]);
+        let dims = list(vec![int(3)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2), int(3)]));
+    }
+
+    // ── StringCases tests ──
+
+    #[test]
+    fn test_string_cases_literal() {
+        let result = builtin_string_cases(&[
+            Value::Str("abcabc".to_string()),
+            Value::Str("ab".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                Value::Str("ab".to_string()),
+                Value::Str("ab".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_string_cases_no_match() {
+        let result = builtin_string_cases(&[
+            Value::Str("hello".to_string()),
+            Value::Str("xyz".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_string_cases_wildcard() {
+        let result = builtin_string_cases(&[
+            Value::Str("hello world".to_string()),
+            Value::Str("*".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![Value::Str("hello world".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_string_cases_non_string() {
+        assert!(builtin_string_cases(&[int(5), Value::Str("a".to_string())]).is_err());
     }
 }

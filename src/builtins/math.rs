@@ -2197,6 +2197,73 @@ pub fn builtin_unit_triangle(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── Predicate functions ──
+
+/// EvenQ[n] — true if n is an even integer.
+pub fn builtin_even_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EvenQ", args, 1)?;
+    Ok(Value::Symbol(
+        if let Value::Integer(n) = &args[0] {
+            if n.is_divisible(&Integer::from(2)) {
+                "True"
+            } else {
+                "False"
+            }
+        } else {
+            "False"
+        }
+        .to_string(),
+    ))
+}
+
+/// PositiveQ[x] — true if x > 0 (works for Integer, Real, Rational).
+pub fn builtin_positive_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("PositiveQ", args, 1)?;
+    let result = match &args[0] {
+        Value::Integer(n) => n.is_positive(),
+        Value::Real(r) => r.is_sign_positive() && !r.is_zero(),
+        Value::Rational(r) => **r > 0,
+        _ => false,
+    };
+    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+}
+
+/// NegativeQ[x] — true if x < 0 (works for Integer, Real, Rational).
+pub fn builtin_negative_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("NegativeQ", args, 1)?;
+    let result = match &args[0] {
+        Value::Integer(n) => n.is_negative(),
+        Value::Real(r) => r.is_sign_negative(),
+        Value::Rational(r) => **r < 0,
+        _ => false,
+    };
+    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+}
+
+/// NonNegativeQ[x] — true if x >= 0 (works for Integer, Real, Rational).
+pub fn builtin_non_negative_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("NonNegativeQ", args, 1)?;
+    let result = match &args[0] {
+        Value::Integer(n) => !n.is_negative(),
+        Value::Real(r) => !r.is_sign_negative(),
+        Value::Rational(r) => **r >= 0,
+        _ => false,
+    };
+    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+}
+
+/// ZeroQ[x] — true if x == 0 (works for Integer, Real, Rational).
+pub fn builtin_zero_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ZeroQ", args, 1)?;
+    let result = match &args[0] {
+        Value::Integer(n) => n.is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Rational(r) => r.numer().is_zero(),
+        _ => false,
+    };
+    Ok(Value::Symbol(if result { "True" } else { "False" }.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2805,5 +2872,49 @@ mod tests {
     fn test_lcm_coprime() {
         let result = builtin_lcm(&[int(3), int(5)]).unwrap();
         assert_eq!(result, int(15));
+    }
+
+    // ── Predicate tests ──
+
+    #[test]
+    fn test_even_q() {
+        assert_eq!(builtin_even_q(&[int(2)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_even_q(&[int(3)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_even_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_even_q(&[int(-4)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_even_q(&[real(2.5)]).unwrap(), Value::Symbol("False".to_string()));
+    }
+
+    #[test]
+    fn test_positive_q() {
+        assert_eq!(builtin_positive_q(&[int(1)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_positive_q(&[int(0)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_positive_q(&[int(-1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_positive_q(&[real(0.5)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_positive_q(&[real(-0.5)]).unwrap(), Value::Symbol("False".to_string()));
+    }
+
+    #[test]
+    fn test_negative_q() {
+        assert_eq!(builtin_negative_q(&[int(-1)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_negative_q(&[int(0)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_negative_q(&[int(1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_negative_q(&[real(-0.5)]).unwrap(), Value::Symbol("True".to_string()));
+    }
+
+    #[test]
+    fn test_non_negative_q() {
+        assert_eq!(builtin_non_negative_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_non_negative_q(&[int(1)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_non_negative_q(&[int(-1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_non_negative_q(&[real(0.0)]).unwrap(), Value::Symbol("True".to_string()));
+    }
+
+    #[test]
+    fn test_zero_q() {
+        assert_eq!(builtin_zero_q(&[int(0)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_zero_q(&[int(1)]).unwrap(), Value::Symbol("False".to_string()));
+        assert_eq!(builtin_zero_q(&[real(0.0)]).unwrap(), Value::Symbol("True".to_string()));
+        assert_eq!(builtin_zero_q(&[real(0.1)]).unwrap(), Value::Symbol("False".to_string()));
     }
 }

@@ -262,6 +262,214 @@ pub fn builtin_syntax_length(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// TableForm[list] — format a list as a table.
+/// For 1D list, print each element on its own line.
+/// For 2D list (list of lists), format as aligned columns.
+pub fn builtin_table_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("TableForm", args, 1)?;
+    match &args[0] {
+        Value::List(rows) => {
+            let mut result = String::new();
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    result.push('\n');
+                }
+                match row {
+                    Value::List(cols) => {
+                        let strs: Vec<String> = cols.iter().map(|c| format!("{c}")).collect();
+                        result.push_str(&strs.join("\t"));
+                    }
+                    _ => result.push_str(&format!("{row}")),
+                }
+            }
+            Ok(Value::Str(result))
+        }
+        other => Ok(Value::Str(format!("{other}"))),
+    }
+}
+
+/// MatrixForm[list] — format a 2D list as a matrix with brackets.
+/// Each row on its own line, elements aligned.
+pub fn builtin_matrix_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("MatrixForm", args, 1)?;
+    match &args[0] {
+        Value::List(rows) => {
+            // Collect all row strings first to compute column widths
+            let row_strs: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| match row {
+                    Value::List(cols) => cols.iter().map(|c| format!("{c}")).collect(),
+                    other => vec![format!("{other}")],
+                })
+                .collect();
+
+            // Compute max column count and per-column widths
+            let max_cols = row_strs.iter().map(|r| r.len()).max().unwrap_or(0);
+            let mut col_widths = vec![0usize; max_cols];
+            for row in &row_strs {
+                for (j, cell) in row.iter().enumerate() {
+                    col_widths[j] = col_widths[j].max(cell.len());
+                }
+            }
+
+            // Render rows with alignment and bracket notation
+            let n_rows = row_strs.len();
+            let mut lines: Vec<String> = Vec::with_capacity(n_rows);
+            for row in &row_strs {
+                let mut line = String::new();
+                for (j, cell) in row.iter().enumerate() {
+                    if j > 0 {
+                        line.push_str("  ");
+                    }
+                    let pad = col_widths.get(j).copied().unwrap_or(0);
+                    line.push_str(&format!("{cell:>pad$}"));
+                }
+                lines.push(line);
+            }
+
+            // Find the widest line for bracket alignment
+            let max_line_width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+
+            let mut result = String::new();
+            for (i, line) in lines.iter().enumerate() {
+                let padded = format!("{line:<max_line_width$}");
+                if n_rows == 1 {
+                    result.push_str(&format!("( {padded} )"));
+                } else if i == 0 {
+                    result.push_str(&format!("\u{23a1} {padded} \u{23a4}"));
+                } else if i == n_rows - 1 {
+                    result.push_str(&format!("\u{23a3} {padded} \u{23a6}"));
+                } else {
+                    result.push_str(&format!("\u{23a6} {padded} \u{23a9}"));
+                }
+                if i < n_rows - 1 {
+                    result.push('\n');
+                }
+            }
+            Ok(Value::Str(result))
+        }
+        other => Ok(Value::Str(format!("{other}"))),
+    }
+}
+
+/// PaddedForm[expr, n] — format number padded to n digits total.
+/// PaddedForm[expr, {n, f}] — n digits total, f after decimal.
+pub fn builtin_padded_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("PaddedForm", args, 2)?;
+    let val = &args[0];
+    let (total_width, frac_digits) = match &args[1] {
+        Value::Integer(n) => {
+            let w = n.to_i32().unwrap_or(6);
+            (w as usize, None)
+        }
+        Value::List(pair) if pair.len() == 2 => {
+            let w = super::require_f64(&pair[0], "PaddedForm", 2)? as usize;
+            let f = super::require_f64(&pair[1], "PaddedForm", 2)? as usize;
+            (w, Some(f))
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "integer or {n, f}".to_string(),
+                got: args[1].type_name().to_string(),
+            })
+        }
+    };
+
+    let formatted = match (val, frac_digits) {
+        (Value::Integer(n), Some(f)) => {
+            let s = n.to_string();
+            if f == 0 {
+                format!("{s:>total_width$}")
+            } else {
+                let frac_part = "0".repeat(f);
+                let full = format!("{s}.{frac_part}");
+                format!("{full:>total_width$}")
+            }
+        }
+        (Value::Integer(n), None) => {
+            let s = n.to_string();
+            format!("{s:>total_width$}")
+        }
+        (Value::Real(r), Some(f)) => {
+            format!("{r:>total_width$.f$}")
+        }
+        (Value::Real(r), None) => {
+            let s = format!("{}", r.to_f64());
+            format!("{s:>total_width$}")
+        }
+        (Value::Rational(r), Some(f)) => {
+            let v = r.to_f64();
+            format!("{v:>total_width$.f$}")
+        }
+        (Value::Rational(r), None) => {
+            let s = format!("{}", r.to_f64());
+            format!("{s:>total_width$}")
+        }
+        (other, None) => {
+            let s = format!("{other}");
+            format!("{s:>total_width$}")
+        }
+        (other, Some(_)) => {
+            let s = format!("{other}");
+            format!("{s:>total_width$}")
+        }
+    };
+    Ok(Value::Str(formatted))
+}
+
+/// StringForm["template", args...] — printf-style string formatting.
+/// Replaces `1`, `2`, etc. in the template with corresponding arguments.
+pub fn builtin_string_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("StringForm", args, 1)?;
+    let template = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            })
+        }
+    };
+
+    let mut result = String::new();
+    let chars: Vec<char> = template.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '`' && i + 1 < len {
+            // Try to parse a numbered slot: `1`, `2`, etc.
+            let mut num_str = String::new();
+            let mut j = i + 1;
+            while j < len && chars[j].is_ascii_digit() {
+                num_str.push(chars[j]);
+                j += 1;
+            }
+            if !num_str.is_empty() && j < len && chars[j] == '`' {
+                // Valid slot like `1`
+                if let Ok(idx) = num_str.parse::<usize>() {
+                    if idx >= 1 && idx < args.len() {
+                        result.push_str(&format!("{}", args[idx]));
+                    } else {
+                        // Out of range: leave as-is
+                        result.push('`');
+                        result.push_str(&num_str);
+                        result.push('`');
+                    }
+                }
+                i = j + 1; // skip past closing backtick
+            } else {
+                // Not a valid slot, just output the backtick
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    Ok(Value::Str(result))
+}
+
 // ── Symbol list for lazy package loading ─────────────────────────────────────────
 
 /// All symbols provided by this module.
@@ -279,6 +487,10 @@ pub const SYMBOLS: &[&str] = &[
     "Defer",
     "SyntaxQ",
     "SyntaxLength",
+    "TableForm",
+    "MatrixForm",
+    "PaddedForm",
+    "StringForm",
 ];
 
 /// Register all format builtins in the environment.
@@ -297,6 +509,10 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Defer", builtin_defer);
     register_builtin(env, "SyntaxQ", builtin_syntax_q);
     register_builtin(env, "SyntaxLength", builtin_syntax_length);
+    register_builtin(env, "TableForm", builtin_table_form);
+    register_builtin(env, "MatrixForm", builtin_matrix_form);
+    register_builtin(env, "PaddedForm", builtin_padded_form);
+    register_builtin(env, "StringForm", builtin_string_form);
 }
 
 #[cfg(test)]
@@ -483,5 +699,144 @@ mod tests {
             s.contains("<<...>>"),
             "Shallow output should contain <<...>>, got: {s}"
         );
+    }
+
+    // ── TableForm tests ──
+
+    #[test]
+    fn test_table_form_1d() {
+        let v = Value::List(vec![
+            Value::Integer(rug::Integer::from(1)),
+            Value::Integer(rug::Integer::from(2)),
+            Value::Integer(rug::Integer::from(3)),
+        ]);
+        let result = builtin_table_form(&[v]).unwrap();
+        let s = result.to_string();
+        assert!(s.contains("1"));
+        assert!(s.contains("2"));
+        assert!(s.contains("3"));
+        // Each on its own line
+        assert!(s.contains('\n'));
+    }
+
+    #[test]
+    fn test_table_form_2d() {
+        let v = Value::List(vec![
+            Value::List(vec![
+                Value::Integer(rug::Integer::from(1)),
+                Value::Integer(rug::Integer::from(2)),
+            ]),
+            Value::List(vec![
+                Value::Integer(rug::Integer::from(3)),
+                Value::Integer(rug::Integer::from(4)),
+            ]),
+        ]);
+        let result = builtin_table_form(&[v]).unwrap();
+        let s = result.to_string();
+        assert!(s.contains("1"));
+        assert!(s.contains("4"));
+        // Should use tab separator
+        assert!(s.contains('\t'));
+    }
+
+    #[test]
+    fn test_table_form_non_list() {
+        let v = Value::Integer(rug::Integer::from(42));
+        let result = builtin_table_form(&[v]).unwrap();
+        let s = result.to_string();
+        assert_eq!(s, "42");
+    }
+
+    // ── MatrixForm tests ──
+
+    #[test]
+    fn test_matrix_form_basic() {
+        let v = Value::List(vec![
+            Value::List(vec![
+                Value::Integer(rug::Integer::from(1)),
+                Value::Integer(rug::Integer::from(2)),
+            ]),
+            Value::List(vec![
+                Value::Integer(rug::Integer::from(3)),
+                Value::Integer(rug::Integer::from(4)),
+            ]),
+        ]);
+        let result = builtin_matrix_form(&[v]).unwrap();
+        let s = result.to_string();
+        // Should contain bracket characters
+        assert!(s.contains('\u{23a1}') || s.contains('('), "MatrixForm should have brackets, got: {s}");
+        assert!(s.contains("1"));
+        assert!(s.contains("4"));
+    }
+
+    #[test]
+    fn test_matrix_form_single_row() {
+        let v = Value::List(vec![Value::List(vec![
+            Value::Integer(rug::Integer::from(1)),
+            Value::Integer(rug::Integer::from(2)),
+            Value::Integer(rug::Integer::from(3)),
+        ])]);
+        let result = builtin_matrix_form(&[v]).unwrap();
+        let s = result.to_string();
+        // Single row uses ( ) notation
+        assert!(s.contains('('));
+        assert!(s.contains(')'));
+    }
+
+    // ── PaddedForm tests ──
+
+    #[test]
+    fn test_padded_form_integer() {
+        let v = Value::Integer(rug::Integer::from(42));
+        let n = Value::Integer(rug::Integer::from(10));
+        let result = builtin_padded_form(&[v, n]).unwrap();
+        let s = result.to_string();
+        assert_eq!(s.len(), 10);
+        assert!(s.contains("42"));
+    }
+
+    #[test]
+    fn test_padded_form_with_frac() {
+        let v = Value::Integer(rug::Integer::from(42));
+        let spec = Value::List(vec![
+            Value::Integer(rug::Integer::from(10)),
+            Value::Integer(rug::Integer::from(3)),
+        ]);
+        let result = builtin_padded_form(&[v, spec]).unwrap();
+        let s = result.to_string();
+        assert!(s.contains("42.000"), "PaddedForm should show 42.000, got: {s}");
+    }
+
+    // ── StringForm tests ──
+
+    #[test]
+    fn test_string_form_basic() {
+        let result = builtin_string_form(&[
+            Value::Str("Hello `1`, you are `2` years old.".to_string()),
+            Value::Str("Alice".to_string()),
+            Value::Integer(rug::Integer::from(30)),
+        ])
+        .unwrap();
+        let s = result.to_string();
+        assert_eq!(s, "Hello Alice, you are 30 years old.");
+    }
+
+    #[test]
+    fn test_string_form_no_slots() {
+        let result = builtin_string_form(&[Value::Str("Hello world".to_string())]).unwrap();
+        let s = result.to_string();
+        assert_eq!(s, "Hello world");
+    }
+
+    #[test]
+    fn test_string_form_out_of_range() {
+        let result = builtin_string_form(&[
+            Value::Str("val = `5`".to_string()),
+            Value::Integer(rug::Integer::from(1)),
+        ])
+        .unwrap();
+        let s = result.to_string();
+        // Out of range slot is left as-is
+        assert_eq!(s, "val = `5`");
     }
 }

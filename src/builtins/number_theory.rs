@@ -3,6 +3,7 @@ use crate::eval::apply_function;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+use rug::Rational;
 use rug::ops::Pow;
 
 // ── Primality ─────────────────────────────────────────────────────────────
@@ -1168,6 +1169,524 @@ pub fn builtin_divisor_sum(args: &[Value], env: &Env) -> Result<Value, EvalError
     Ok(Value::Integer(sum))
 }
 
+// ── PrimePowerQ ─────────────────────────────────────────────────────────────
+
+/// PrimePowerQ[n] — true if n = p^k for some prime p, k >= 1.
+pub fn builtin_prime_power_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PrimePowerQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if *n <= 1 {
+                return Ok(Value::Symbol("False".to_string()));
+            }
+            let factors = factor_integer(n);
+            // A prime power has exactly one distinct prime factor
+            let result = factors.len() == 1;
+            Ok(Value::Symbol(
+                if result { "True" } else { "False" }.to_string(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── SquareFreeQ ─────────────────────────────────────────────────────────────
+
+/// SquareFreeQ[n] — true if no prime^2 divides n.
+/// Uses the fact that MoebiusMu(n) != 0 iff n is squarefree.
+pub fn builtin_square_free_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "SquareFreeQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::Symbol("False".to_string()));
+            }
+            let n_abs = n.clone().abs();
+            let factors = factor_integer(&n_abs);
+            for (_, e) in &factors {
+                if *e > 1 {
+                    return Ok(Value::Symbol("False".to_string()));
+                }
+            }
+            Ok(Value::Symbol("True".to_string()))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── CompositeQ ──────────────────────────────────────────────────────────────
+
+/// CompositeQ[n] — true if n > 1 and not prime.
+pub fn builtin_composite_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "CompositeQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if *n <= 1 {
+                return Ok(Value::Symbol("False".to_string()));
+            }
+            let n64 = n.to_u64().unwrap_or(u64::MAX);
+            let result = if *n <= u64::MAX {
+                !is_prime_u64(n64)
+            } else {
+                !trial_prime_check(n)
+            };
+            Ok(Value::Symbol(
+                if result { "True" } else { "False" }.to_string(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── PerfectPowerQ ───────────────────────────────────────────────────────────
+
+/// PerfectPowerQ[n] — true if n = a^b for some integer a >= 1, b >= 2.
+pub fn builtin_perfect_power_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PerfectPowerQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if *n <= 1 {
+                return Ok(Value::Symbol(
+                    if *n == 1 {
+                        "True"
+                    } else {
+                        "False"
+                    }
+                    .to_string(),
+                ));
+            }
+            let factors = factor_integer(n);
+            if factors.is_empty() {
+                return Ok(Value::Symbol("False".to_string()));
+            }
+            // n is a perfect power if gcd of all exponents >= 2
+            let g = factors
+                .iter()
+                .map(|(_, e)| *e)
+                .reduce(gcd_u32)
+                .unwrap_or(1);
+            Ok(Value::Symbol(
+                if g >= 2 { "True" } else { "False" }.to_string(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+// ── IntegerExponent ─────────────────────────────────────────────────────────
+
+/// IntegerExponent[n, b] — largest k such that b^k divides n.
+/// Default b = 10.
+pub fn builtin_integer_exponent(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "IntegerExponent requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 => b.clone(),
+            _ => {
+                return Err(EvalError::Error(
+                    "IntegerExponent: base must be an integer >= 2".to_string(),
+                ));
+            }
+        }
+    } else {
+        Integer::from(10)
+    };
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                // Convention: IntegerExponent[0, b] = Infinity, but return a large value
+                return Ok(Value::Symbol("Infinity".to_string()));
+            }
+            let mut m = n.clone().abs();
+            let mut count = 0u32;
+            while (m.clone() % base.clone()).is_zero() {
+                m /= base.clone();
+                count += 1;
+            }
+            Ok(Value::Integer(Integer::from(count)))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── FromDigits ──────────────────────────────────────────────────────────────
+
+/// FromDigits[list, b] — convert digit list to integer in base b (default 10).
+/// Also handles string input.
+pub fn builtin_from_digits(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "FromDigits requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 => b.to_u32().unwrap_or(10),
+            _ => {
+                return Err(EvalError::Error(
+                    "FromDigits: base must be an integer >= 2".to_string(),
+                ));
+            }
+        }
+    } else {
+        10
+    };
+    match &args[0] {
+        Value::List(digits) => {
+            let base_int = Integer::from(base);
+            let mut result = Integer::from(0);
+            for d in digits {
+                match d {
+                    Value::Integer(d) => {
+                        if d.is_negative() || *d >= base_int {
+                            return Err(EvalError::Error(
+                                "FromDigits: digit out of range for base".to_string(),
+                            ));
+                        }
+                        result = result * &base_int + d;
+                    }
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: d.type_name().to_string(),
+                        });
+                    }
+                }
+            }
+            Ok(Value::Integer(result))
+        }
+        Value::Str(s) => {
+            // Parse string as a number in the given base
+            let base_int = Integer::from(base);
+            let mut result = Integer::from(0);
+            let chars: Vec<char> = s.chars().collect();
+            let has_sign = !chars.is_empty() && (chars[0] == '-' || chars[0] == '+');
+            let start = if has_sign { 1 } else { 0 };
+            let negative = has_sign && chars[0] == '-';
+            for &c in &chars[start..] {
+                let digit = char_to_digit(c, base).ok_or_else(|| {
+                    EvalError::Error(format!(
+                        "FromDigits: invalid character '{}' for base {}",
+                        c, base
+                    ))
+                })?;
+                result = result * &base_int + Integer::from(digit);
+            }
+            if negative {
+                result = -result;
+            }
+            Ok(Value::Integer(result))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List or String".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn char_to_digit(c: char, base: u32) -> Option<u32> {
+    let d = if c.is_ascii_digit() {
+        c as u32 - '0' as u32
+    } else if c.is_ascii_lowercase() {
+        c as u32 - 'a' as u32 + 10
+    } else if c.is_ascii_uppercase() {
+        c as u32 - 'A' as u32 + 10
+    } else {
+        return None;
+    };
+    if d < base {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+// ── ToDigits ────────────────────────────────────────────────────────────────
+
+/// ToDigits[n, b] — convert integer to digit list in base b (default 10).
+pub fn builtin_to_digits(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "ToDigits requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 => b.to_u32().unwrap_or(10),
+            _ => {
+                return Err(EvalError::Error(
+                    "ToDigits: base must be an integer >= 2".to_string(),
+                ));
+            }
+        }
+    } else {
+        10
+    };
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
+            }
+            let mut m = n.clone().abs();
+            let base_int = Integer::from(base);
+            let mut digits: Vec<Integer> = Vec::new();
+            while m > 0 {
+                digits.push(m.clone() % base_int.clone());
+                m /= base_int.clone();
+            }
+            digits.reverse();
+            Ok(Value::List(
+                digits.into_iter().map(Value::Integer).collect(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── ContinuedFraction ───────────────────────────────────────────────────────
+
+/// ContinuedFraction[x] — continued fraction representation.
+/// For rationals, returns the exact CF expansion.
+/// ContinuedFraction[x, n] — at most n terms for reals.
+pub fn builtin_continued_fraction(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "ContinuedFraction requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let max_terms = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(n) if n.is_positive() => {
+                n.to_usize().unwrap_or(100)
+            }
+            _ => 100,
+        }
+    } else {
+        100
+    };
+    match &args[0] {
+        Value::Integer(n) => {
+            // Integer: just [n]
+            Ok(Value::List(vec![Value::Integer(n.clone())]))
+        }
+        Value::Rational(r) => {
+            // Exact CF expansion of a rational
+            let cf = continued_fraction_rational(r, max_terms);
+            Ok(Value::List(cf.into_iter().map(Value::Integer).collect()))
+        }
+        Value::Real(r) => {
+            // CF expansion of a real (floating point)
+            let cf = continued_fraction_real(r, max_terms);
+            Ok(Value::List(cf.into_iter().map(Value::Integer).collect()))
+        }
+        _ => Ok(Value::Call {
+            head: "ContinuedFraction".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+fn continued_fraction_rational(r: &Rational, max_terms: usize) -> Vec<Integer> {
+    let mut cf = Vec::new();
+    let mut num = r.numer().clone();
+    let mut den = r.denom().clone();
+    for _ in 0..max_terms {
+        if den.is_zero() {
+            break;
+        }
+        let a = num.clone() / den.clone();
+        let remainder = num.clone() - a.clone() * den.clone();
+        cf.push(a);
+        num = den;
+        den = remainder;
+    }
+    cf
+}
+
+fn continued_fraction_real(r: &Float, max_terms: usize) -> Vec<Integer> {
+    let mut cf = Vec::new();
+    let mut x = r.clone();
+    for _ in 0..max_terms {
+        let prec = x.prec();
+        let a_int = x.clone().floor().to_integer().unwrap_or(Integer::from(0));
+        cf.push(a_int.clone());
+        let frac = x.clone() - Float::with_val(prec, &a_int);
+        if frac.clone().abs() < Float::with_val(prec, 1e-14_f64) {
+            break;
+        }
+        x = Float::with_val(prec, 1u32) / frac;
+        if x.is_infinite() || x.is_nan() {
+            break;
+        }
+    }
+    cf
+}
+
+// ── FromContinuedFraction ───────────────────────────────────────────────────
+
+/// FromContinuedFraction[list] — reconstruct number from continued fraction list.
+pub fn builtin_from_continued_fraction(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FromContinuedFraction requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::List(items) => {
+            if items.is_empty() {
+                return Err(EvalError::Error(
+                    "FromContinuedFraction: list must not be empty".to_string(),
+                ));
+            }
+            // Use the recurrence: h_{-1}=1, h_0=a_0, h_n = a_n*h_{n-1} + h_{n-2}
+            // Similarly for k (denominators)
+            // Recurrence: h_{-1}=1, h_0=a_0, h_n = a_n*h_{n-1} + h_{n-2}
+            // We iterate through items computing convergents.
+            let mut h_prev = Integer::from(1); // h_{-1}
+            let mut h_curr = Integer::from(0); // will be set on first iteration
+            let mut k_prev = Integer::from(0); // k_{-1}
+            let mut k_curr = Integer::from(1); // will be set on first iteration
+            let mut first = true;
+            for item in items {
+                let a = match item {
+                    Value::Integer(a) => a.clone(),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: item.type_name().to_string(),
+                        });
+                    }
+                };
+                if first {
+                    // h_0 = a_0, k_0 = 1
+                    h_curr = a.clone();
+                    k_curr = Integer::from(1);
+                    first = false;
+                } else {
+                    let h_new = a.clone() * h_curr.clone() + h_prev.clone();
+                    let k_new = a.clone() * k_curr.clone() + k_prev.clone();
+                    h_prev = h_curr;
+                    h_curr = h_new;
+                    k_prev = k_curr;
+                    k_curr = k_new;
+                }
+            }
+            // Return as a Rational (h_curr / k_curr) if denominator is not 1
+            if k_curr == 1 {
+                Ok(Value::Integer(h_curr))
+            } else {
+                let r = Rational::from((h_curr, k_curr));
+                Ok(Value::Rational(Box::new(r)))
+            }
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── NumberExpand ────────────────────────────────────────────────────────────
+
+/// NumberExpand[n, b] — digit expansion as list of digit * base^position.
+/// Example: NumberExpand[1234] = {1000, 200, 30, 4}
+pub fn builtin_number_expand(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "NumberExpand requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 => b.to_u32().unwrap_or(10),
+            _ => {
+                return Err(EvalError::Error(
+                    "NumberExpand: base must be an integer >= 2".to_string(),
+                ));
+            }
+        }
+    } else {
+        10
+    };
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
+            }
+            let base_int = Integer::from(base);
+            let mut m = n.clone().abs();
+            let mut digits: Vec<Integer> = Vec::new();
+            while m > 0 {
+                digits.push(m.clone() % base_int.clone());
+                m /= base_int.clone();
+            }
+            digits.reverse();
+            // Now multiply each digit by its positional value
+            let mut power = Integer::from(1);
+            let mut expanded: Vec<Integer> = Vec::with_capacity(digits.len());
+            for d in digits.iter().rev() {
+                expanded.push(d.clone() * power.clone());
+                power *= base_int.clone();
+            }
+            expanded.reverse();
+            Ok(Value::List(
+                expanded.into_iter().map(Value::Integer).collect(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,5 +1910,247 @@ mod tests {
         assert_eq!(builtin_liouville_lambda(&[int(2)]).unwrap(), int(-1));
         assert_eq!(builtin_liouville_lambda(&[int(4)]).unwrap(), int(1));
         assert_eq!(builtin_liouville_lambda(&[int(12)]).unwrap(), int(-1));
+    }
+
+    // ── PrimePowerQ ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prime_power_q() {
+        assert_eq!(
+            builtin_prime_power_q(&[int(2)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_prime_power_q(&[int(8)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 2^3
+        assert_eq!(
+            builtin_prime_power_q(&[int(9)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 3^2
+        assert_eq!(
+            builtin_prime_power_q(&[int(6)]).unwrap(),
+            Value::Symbol("False".to_string())
+        ); // 2*3
+        assert_eq!(
+            builtin_prime_power_q(&[int(1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_prime_power_q(&[int(12)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+    }
+
+    // ── SquareFreeQ ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_square_free_q() {
+        assert_eq!(
+            builtin_square_free_q(&[int(1)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_square_free_q(&[int(6)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 2*3
+        assert_eq!(
+            builtin_square_free_q(&[int(4)]).unwrap(),
+            Value::Symbol("False".to_string())
+        ); // 2^2
+        assert_eq!(
+            builtin_square_free_q(&[int(12)]).unwrap(),
+            Value::Symbol("False".to_string())
+        ); // 2^2 * 3
+        assert_eq!(
+            builtin_square_free_q(&[int(30)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 2*3*5
+    }
+
+    // ── CompositeQ ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_composite_q() {
+        assert_eq!(
+            builtin_composite_q(&[int(1)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_composite_q(&[int(2)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_composite_q(&[int(4)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_composite_q(&[int(6)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_composite_q(&[int(7)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+    }
+
+    // ── PerfectPowerQ ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_perfect_power_q() {
+        assert_eq!(
+            builtin_perfect_power_q(&[int(1)]).unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_perfect_power_q(&[int(4)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 2^2
+        assert_eq!(
+            builtin_perfect_power_q(&[int(8)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 2^3
+        assert_eq!(
+            builtin_perfect_power_q(&[int(36)]).unwrap(),
+            Value::Symbol("True".to_string())
+        ); // 6^2
+        assert_eq!(
+            builtin_perfect_power_q(&[int(6)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_perfect_power_q(&[int(12)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+    }
+
+    // ── IntegerExponent ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_exponent() {
+        assert_eq!(builtin_integer_exponent(&[int(100)]).unwrap(), int(2)); // 10^2 divides 100
+        assert_eq!(builtin_integer_exponent(&[int(1000)]).unwrap(), int(3));
+        assert_eq!(builtin_integer_exponent(&[int(123)]).unwrap(), int(0));
+        // With base 2
+        assert_eq!(
+            builtin_integer_exponent(&[int(16), int(2)]).unwrap(),
+            int(4)
+        ); // 2^4 = 16
+        assert_eq!(
+            builtin_integer_exponent(&[int(12), int(2)]).unwrap(),
+            int(2)
+        ); // 2^2 divides 12
+        assert_eq!(
+            builtin_integer_exponent(&[int(0)]).unwrap(),
+            Value::Symbol("Infinity".to_string())
+        );
+    }
+
+    // ── FromDigits ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_digits() {
+        assert_eq!(
+            builtin_from_digits(&[Value::List(vec![
+                int(1),
+                int(2),
+                int(3),
+                int(4)
+            ])])
+            .unwrap(),
+            int(1234)
+        );
+        // Binary
+        assert_eq!(
+            builtin_from_digits(&[Value::List(vec![int(1), int(0), int(1)]), int(2)]).unwrap(),
+            int(5)
+        );
+    }
+
+    // ── ToDigits ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_to_digits() {
+        let result = builtin_to_digits(&[int(1234)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(1), int(2), int(3), int(4)])
+        );
+        // Binary
+        let result = builtin_to_digits(&[int(5), int(2)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(1), int(0), int(1)])
+        );
+        // Zero
+        assert_eq!(
+            builtin_to_digits(&[int(0)]).unwrap(),
+            Value::List(vec![int(0)])
+        );
+    }
+
+    // ── ContinuedFraction ───────────────────────────────────────────────
+
+    #[test]
+    fn test_continued_fraction() {
+        // CF of 3/2 = [1, 2]
+        let r = Rational::from((3, 2));
+        let result = builtin_continued_fraction(&[Value::Rational(Box::new(r))]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(1), int(2)])
+        );
+        // CF of 7/5 = [1, 2, 2]
+        let r = Rational::from((7, 5));
+        let result = builtin_continued_fraction(&[Value::Rational(Box::new(r))]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(1), int(2), int(2)])
+        );
+        // Integer
+        assert_eq!(
+            builtin_continued_fraction(&[int(5)]).unwrap(),
+            Value::List(vec![int(5)])
+        );
+    }
+
+    // ── FromContinuedFraction ───────────────────────────────────────────
+
+    #[test]
+    fn test_from_continued_fraction() {
+        // [1, 2] = 3/2
+        let result =
+            builtin_from_continued_fraction(&[Value::List(vec![int(1), int(2)])]).unwrap();
+        match &result {
+            Value::Rational(r) => assert_eq!(r.to_f64(), 1.5),
+            _ => panic!("Expected Rational"),
+        }
+        // [3] = 3
+        assert_eq!(
+            builtin_from_continued_fraction(&[Value::List(vec![int(3)])]).unwrap(),
+            int(3)
+        );
+    }
+
+    // ── NumberExpand ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_number_expand() {
+        let result = builtin_number_expand(&[int(1234)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(1000), int(200), int(30), int(4)])
+        );
+        // Binary: 11 = 1011 in binary = 8+0+2+1
+        let result = builtin_number_expand(&[int(11), int(2)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![int(8), int(0), int(2), int(1)])
+        );
+        // Zero
+        assert_eq!(
+            builtin_number_expand(&[int(0)]).unwrap(),
+            Value::List(vec![int(0)])
+        );
     }
 }

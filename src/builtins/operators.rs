@@ -5,33 +5,6 @@ use crate::value::{EvalError, Value};
 use rug::Integer;
 use std::rc::Rc;
 
-// ── Helper: value to expr conversion ──
-
-#[allow(dead_code)]
-fn value_to_expr(v: &Value) -> Expr {
-    match v {
-        Value::Integer(n) => Expr::Integer(n.clone()),
-        Value::Real(r) => Expr::Real(r.clone()),
-        Value::Rational(r) => Expr::Call {
-            head: Box::new(Expr::Symbol("Rational".to_string())),
-            args: vec![
-                Expr::Integer(r.numer().clone()),
-                Expr::Integer(r.denom().clone()),
-            ],
-        },
-        Value::Str(s) => Expr::Str(s.clone()),
-        Value::Bool(b) => Expr::Bool(*b),
-        Value::Null => Expr::Null,
-        Value::Symbol(s) => Expr::Symbol(s.clone()),
-        Value::List(items) => Expr::List(items.iter().map(value_to_expr).collect()),
-        Value::Call { head, args } => Expr::Call {
-            head: Box::new(Expr::Symbol(head.clone())),
-            args: args.iter().map(value_to_expr).collect(),
-        },
-        _ => Expr::Null,
-    }
-}
-
 // ── Helper: create env with stored function values ──
 
 fn func_env_with_stored(parent: &Env, values: Rc<Vec<Value>>) -> (Env, Vec<String>) {
@@ -300,40 +273,6 @@ pub fn builtin_curry(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(current)
 }
 
-/// curry_internal collects arguments via an internal curried function.
-#[allow(dead_code)]
-fn curry_build(func: &Value, n: usize, env: &Env) -> Value {
-    if n == 0 {
-        return func.clone();
-    }
-    if n == 1 {
-        let child = env.child();
-        child.set("__cf".to_string(), func.clone());
-        return Value::PureFunction {
-            body: Expr::Call {
-                head: Box::new(Expr::Symbol("__cf".to_string())),
-                args: vec![Expr::Slot(None)],
-            },
-            slot_count: 1,
-            params: vec![],
-            env: Some(child),
-        };
-    }
-
-    let inner = curry_build(func, n - 1, env);
-    let child = env.child();
-    child.set("__cf_inner".to_string(), inner);
-    Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("__cf_inner".to_string())),
-            args: vec![Expr::Slot(None)],
-        },
-        slot_count: 1,
-        params: vec![],
-        env: Some(child),
-    }
-}
-
 // ── UnCurry ──
 
 /// UnCurry[f] converts a curried function back to one taking a list of arguments.
@@ -577,55 +516,6 @@ pub fn builtin_undulate(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
     Ok(Value::List(flatten_all(&args[0])))
-}
-
-// ── Curry internal helper ──
-
-/// Internal curry builder that correctly chains unary applications.
-#[allow(dead_code)]
-fn curry_inner(func: &Value, n: usize, env: &Env) -> Value {
-    if n == 0 {
-        return func.clone();
-    }
-    if n == 1 {
-        let child = env.child();
-        child.set("__cf".to_string(), func.clone());
-        return Value::PureFunction {
-            body: Expr::Call {
-                head: Box::new(Expr::Symbol("__cf".to_string())),
-                args: vec![Expr::Slot(None)],
-            },
-            slot_count: 1,
-            params: vec![],
-            env: Some(child),
-        };
-    }
-    let inner = curry_inner(func, n - 1, env);
-    let child = env.child();
-    child.set("__cf_inner".to_string(), inner);
-    Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("__cf_inner".to_string())),
-            args: vec![Expr::Slot(None)],
-        },
-        slot_count: 1,
-        params: vec![],
-        env: Some(child),
-    }
-}
-
-// ── uncurry apply helper ──
-
-/// Internal: applies a curried function to a list of arguments one at a time.
-#[allow(dead_code)]
-fn uncurry_apply(curried: &Value, args_list: &[Value], env: &Env) -> Result<Value, EvalError> {
-    match args_list.len() {
-        0 => Ok(curried.clone()),
-        _ => {
-            let result = apply_function(curried, &[args_list[0].clone()], env)?;
-            uncurry_apply(&result, &args_list[1..], env)
-        }
-    }
 }
 
 #[cfg(test)]

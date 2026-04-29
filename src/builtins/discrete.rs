@@ -598,28 +598,6 @@ fn parse_recurrence_rhs(rhs: &Value, var_name: &str) -> Vec<(String, i64, Value)
     }
 }
 
-/// Given a Times[...] call and one of its arguments, return the product of the rest.
-#[allow(dead_code)]
-fn other_factor_in_times(times_call: &Value, known_arg: &Value) -> Value {
-    if let Value::Call { args, .. } = times_call {
-        let others: Vec<Value> = args
-            .iter()
-            .filter(|a| !a.struct_eq(known_arg))
-            .cloned()
-            .collect();
-        match others.len() {
-            0 => Value::Integer(Integer::from(1)),
-            1 => others.into_iter().next().unwrap(),
-            _ => Value::Call {
-                head: "Times".to_string(),
-                args: others,
-            },
-        }
-    } else {
-        Value::Integer(Integer::from(1))
-    }
-}
-
 /// Parse an initial condition a[k] == v into (k, v).
 fn parse_init_condition(expr: &Value) -> Option<(i64, Value)> {
     if let Value::Call { head, args } = expr

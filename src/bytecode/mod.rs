@@ -94,7 +94,7 @@ pub struct JitModule {
 
 #[cfg(not(feature = "jit"))]
 impl JitModule {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "non-JIT fallback stub")]
     pub(crate) unsafe fn new(_ptr: *mut u8, _size: usize) -> Self {
         Self { _private: () }
     }
