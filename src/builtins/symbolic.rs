@@ -2755,6 +2755,71 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
     Ok(Value::List(list))
 }
 
+// ── CoefficientList ──────────────────────────────────────────────────────────
+
+/// CoefficientList[poly, x] — Extract coefficients of a polynomial in variable x,
+/// starting from the constant term.
+/// CoefficientList[1 + 3*x + 5*x^2, x] -> {1, 3, 5}
+/// CoefficientList[3*x^2 + 1, x] -> {1, 0, 3}
+pub fn builtin_coefficient_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "CoefficientList requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+
+    let coeffs = extract_polynomial_coeffs(&args[0], &var);
+    if coeffs.is_empty() {
+        return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
+    }
+    Ok(Value::List(coeffs))
+}
+
+// ── FromCoefficientList ──────────────────────────────────────────────────────
+
+/// FromCoefficientList[list, x] — Construct a polynomial from a list of coefficients
+/// (constant term first).
+/// FromCoefficientList[{1, 3, 5}, x] -> 1 + 3*x + 5*x^2
+pub fn builtin_from_coefficient_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FromCoefficientList requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let coeffs = match &args[0] {
+        Value::List(items) => items,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+
+    Ok(rebuild_poly_from_coeffs(coeffs, &var))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2766,6 +2831,17 @@ mod tests {
 
     fn int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(items)
+    }
+
+    fn call(head: &str, args: Vec<Value>) -> Value {
+        Value::Call {
+            head: head.to_string(),
+            args,
+        }
     }
 
     fn env() -> crate::env::Env {
@@ -3081,5 +3157,137 @@ mod tests {
         // Simplify[x] = x
         let result = builtin_simplify(&[sym("x")]).unwrap();
         assert_eq!(result, sym("x"));
+    }
+
+    // ── CoefficientList ──
+
+    #[test]
+    fn test_coefficient_list_basic() {
+        // CoefficientList[1 + 3*x + 5*x^2, x] -> {1, 3, 5}
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), sym("x")]),
+                call("Times", vec![int(5), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(3), int(5)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_with_gaps() {
+        // CoefficientList[3*x^2 + 1, x] -> {1, 0, 3}
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(0), int(3)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_constant() {
+        // CoefficientList[7, x] -> {7}
+        let result = builtin_coefficient_list(&[int(7), sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(7)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_zero() {
+        // CoefficientList[0, x] -> {0}
+        let result = builtin_coefficient_list(&[int(0), sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(0)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_linear() {
+        // CoefficientList[2*x + 3, x] -> {3, 2}
+        let poly = call(
+            "Plus",
+            vec![int(3), call("Times", vec![int(2), sym("x")])],
+        );
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(3), int(2)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_bad_args() {
+        assert!(builtin_coefficient_list(&[]).is_err());
+        assert!(builtin_coefficient_list(&[int(1)]).is_err());
+    }
+
+    // ── FromCoefficientList ──
+
+    #[test]
+    fn test_from_coefficient_list_basic() {
+        // FromCoefficientList[{1, 3, 5}, x] -> 1 + 3*x + 5*x^2
+        let result = builtin_from_coefficient_list(&[list(vec![int(1), int(3), int(5)]), sym("x")])
+            .unwrap();
+        // Verify structure: Plus[1, Times[3, x], Times[5, Power[x, 2]]]
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "Plus");
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("Expected Plus Call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_from_coefficient_list_constant() {
+        // FromCoefficientList[{7}, x] -> 7
+        let result = builtin_from_coefficient_list(&[list(vec![int(7)]), sym("x")]).unwrap();
+        assert_eq!(result, int(7));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_with_zeros() {
+        // FromCoefficientList[{1, 0, 3}, x] -> 1 + 3*x^2
+        let result = builtin_from_coefficient_list(&[list(vec![int(1), int(0), int(3)]), sym("x")])
+            .unwrap();
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "Plus");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Plus Call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_from_coefficient_list_round_trip() {
+        // Round-trip: FromCoefficientList[CoefficientList[poly, x], x] should simplify to poly
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), sym("x")]),
+                call("Times", vec![int(5), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let coeffs = builtin_coefficient_list(&[poly.clone(), sym("x")]).unwrap();
+        let reconstructed = builtin_from_coefficient_list(&[coeffs, sym("x")]).unwrap();
+        // Both should be structurally equal (or equal after simplification)
+        let simplified_orig = builtin_simplify(&[poly]).unwrap();
+        let simplified_recon = builtin_simplify(&[reconstructed]).unwrap();
+        assert!(simplified_orig.struct_eq(&simplified_recon));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_empty() {
+        // FromCoefficientList[{}, x] -> 0
+        let result = builtin_from_coefficient_list(&[list(vec![]), sym("x")]).unwrap();
+        assert_eq!(result, int(0));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_bad_args() {
+        assert!(builtin_from_coefficient_list(&[]).is_err());
+        assert!(builtin_from_coefficient_list(&[int(1)]).is_err());
     }
 }

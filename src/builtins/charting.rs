@@ -9,8 +9,9 @@ use std::collections::HashMap;
 // ── Color Palette ──────────────────────────────────────────────────────────────
 
 const DEFAULT_PALETTE: &[&str] = &[
-    "#4285F4", "#EA4335", "#FBBC05", "#34A853", "#FF6D01", "#46BDC6", "#9C27B0", "#795548",
-    "#607D8B", "#F44336", "#E91E63", "#9E9E9E",
+    "#4285F4", "#EA4335", "#FBBC05", "#34A853", "#FF6D01", "#46BDC6",
+    "#9C27B0", "#795548", "#F44336", "#E91E63", "#9E9E9E", "#00BCD4",
+    "#FF5722", "#8BC34A", "#CDDC39", "#607D8B",
 ];
 
 /// Get a color from the palette by index (wraps around).
@@ -1091,9 +1092,9 @@ pub fn builtin_dendrogram(args: &[Value]) -> Result<Value, EvalError> {
 // ── RegionPlot ────────────────────────────────────────────────────────────────
 
 pub fn builtin_region_plot(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 4 {
+    if args.len() < 3 {
         return Err(EvalError::Error(
-            "RegionPlot requires at least 4 arguments: REGION, {x, xmin, xmax}, {y, ymin, ymax}, options.".to_string(),
+            "RegionPlot requires at least 3 arguments: REGION, {x, xmin, xmax}, {y, ymin, ymax}.".to_string(),
         ));
     }
     Ok(Value::Call {

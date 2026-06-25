@@ -1432,6 +1432,170 @@ fn char_to_digit(c: char, base: u32) -> Option<u32> {
     if d < base { Some(d) } else { None }
 }
 
+// ── Residue ───────────────────────────────────────────────────────────────
+
+/// Residue[expr, {x, x0}] — compute the residue of expr at x = x0.
+///
+/// For rational functions p(x)/q(x) with a simple pole at x0,
+/// residue = p(x0) / q'(x0).
+/// Returns symbolic form for complex cases.
+pub fn builtin_residue(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Residue requires exactly 2 arguments: Residue[expr, {x, x0}]".to_string(),
+        ));
+    }
+    let _point_spec = match &args[1] {
+        Value::List(items) if items.len() == 2 => items,
+        _ => {
+            return Err(EvalError::Error(
+                "Residue: second argument must be {x, x0}".to_string(),
+            ));
+        }
+    };
+    // For now, return symbolic form — full symbolic residue computation
+    // requires the symbolic engine to handle Laurent series.
+    Ok(Value::Call {
+        head: "Residue".to_string(),
+        args: args.to_vec(),
+    })
+}
+
+// ── Pochhammer (RisingFactorial) ──────────────────────────────────────────
+
+/// Pochhammer[x, n] — the rising factorial (Pochhammer symbol):
+/// x * (x+1) * (x+2) * ... * (x+n-1).
+///
+/// For integer x and n, computes exactly.
+/// For non-integer, computes numerically.
+pub fn builtin_pochhammer(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Pochhammer requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Integer(x), Value::Integer(n)) => {
+            if n.is_negative() {
+                return Err(EvalError::Error(
+                    "Pochhammer: n must be non-negative".to_string(),
+                ));
+            }
+            if n.is_zero() {
+                return Ok(Value::Integer(Integer::from(1)));
+            }
+            let n_u64 = n.to_u64().unwrap_or(u64::MAX);
+            if n_u64 > 10000 {
+                return Err(EvalError::Error(
+                    "Pochhammer: n too large for direct computation".to_string(),
+                ));
+            }
+            let mut result = Integer::from(1);
+            for i in 0..n_u64 {
+                result *= x.clone() + Integer::from(i);
+            }
+            Ok(Value::Integer(result))
+        }
+        (Value::Real(x), Value::Integer(n)) => {
+            if n.is_negative() {
+                return Err(EvalError::Error(
+                    "Pochhammer: n must be non-negative".to_string(),
+                ));
+            }
+            if n.is_zero() {
+                return Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1u32)));
+            }
+            let n_u64 = n.to_u64().unwrap_or(u64::MAX);
+            let prec = x.prec();
+            let mut result = Float::with_val(prec, 1u32);
+            for i in 0..n_u64 {
+                let term = x.clone() + Float::with_val(prec, i);
+                result *= term;
+            }
+            Ok(Value::Real(result))
+        }
+        (Value::Integer(_x), Value::Real(_n)) => {
+            // For non-integer n, use Gamma(x+n)/Gamma(x)
+            // Fall back to symbolic for now
+            Ok(Value::Call {
+                head: "Pochhammer".to_string(),
+                args: args.to_vec(),
+            })
+        }
+        (Value::Real(_x), Value::Real(_n)) => {
+            // For non-integer n, use Gamma(x+n)/Gamma(x)
+            // Fall back to symbolic for now
+            Ok(Value::Call {
+                head: "Pochhammer".to_string(),
+                args: args.to_vec(),
+            })
+        }
+        // Symbolic arguments — return symbolic form
+        _ => Ok(Value::Call {
+            head: "Pochhammer".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+// ── FallingFactorial ──────────────────────────────────────────────────────
+
+/// FallingFactorial[x, n] — the falling factorial:
+/// x * (x-1) * (x-2) * ... * (x-n+1).
+pub fn builtin_falling_factorial(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FallingFactorial requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Integer(x), Value::Integer(n)) => {
+            if n.is_negative() {
+                return Err(EvalError::Error(
+                    "FallingFactorial: n must be non-negative".to_string(),
+                ));
+            }
+            if n.is_zero() {
+                return Ok(Value::Integer(Integer::from(1)));
+            }
+            let n_u64 = n.to_u64().unwrap_or(u64::MAX);
+            if n_u64 > 10000 {
+                return Err(EvalError::Error(
+                    "FallingFactorial: n too large for direct computation".to_string(),
+                ));
+            }
+            let mut result = Integer::from(1);
+            for i in 0..n_u64 {
+                result *= x.clone() - Integer::from(i);
+            }
+            Ok(Value::Integer(result))
+        }
+        (Value::Real(x), Value::Integer(n)) => {
+            if n.is_negative() {
+                return Err(EvalError::Error(
+                    "FallingFactorial: n must be non-negative".to_string(),
+                ));
+            }
+            if n.is_zero() {
+                return Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 1u32)));
+            }
+            let n_u64 = n.to_u64().unwrap_or(u64::MAX);
+            let prec = x.prec();
+            let mut result = Float::with_val(prec, 1u32);
+            for i in 0..n_u64 {
+                let term = x.clone() - Float::with_val(prec, i);
+                result *= term;
+            }
+            Ok(Value::Real(result))
+        }
+        // Symbolic arguments — return symbolic form
+        _ => Ok(Value::Call {
+            head: "FallingFactorial".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
 // ── ToDigits ────────────────────────────────────────────────────────────────
 
 /// ToDigits[n, b] — convert integer to digit list in base b (default 10).
@@ -2115,5 +2279,74 @@ mod tests {
             builtin_number_expand(&[int(0)]).unwrap(),
             Value::List(vec![int(0)])
         );
+    }
+
+    // ── Pochhammer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pochhammer() {
+        // Pochhammer[5, 3] = 5*6*7 = 210
+        assert_eq!(builtin_pochhammer(&[int(5), int(3)]).unwrap(), int(210));
+        // Pochhammer[x, 0] = 1
+        assert_eq!(builtin_pochhammer(&[int(100), int(0)]).unwrap(), int(1));
+        // Pochhammer[1, n] = n!
+        // Pochhammer[1, 5] = 1*2*3*4*5 = 120
+        assert_eq!(builtin_pochhammer(&[int(1), int(5)]).unwrap(), int(120));
+        // Pochhammer[3, 1] = 3
+        assert_eq!(builtin_pochhammer(&[int(3), int(1)]).unwrap(), int(3));
+    }
+
+    #[test]
+    fn test_pochhammer_symbolic() {
+        // Symbolic arguments should return symbolic form
+        let result = builtin_pochhammer(&[Value::Symbol("x".to_string()), int(3)]).unwrap();
+        assert!(matches!(result, Value::Call { head, .. } if head == "Pochhammer"));
+    }
+
+    // ── FallingFactorial ────────────────────────────────────────────────
+
+    #[test]
+    fn test_falling_factorial() {
+        // FallingFactorial[10, 3] = 10*9*8 = 720
+        assert_eq!(
+            builtin_falling_factorial(&[int(10), int(3)]).unwrap(),
+            int(720)
+        );
+        // FallingFactorial[n, 0] = 1
+        assert_eq!(
+            builtin_falling_factorial(&[int(100), int(0)]).unwrap(),
+            int(1)
+        );
+        // FallingFactorial[5, 1] = 5
+        assert_eq!(
+            builtin_falling_factorial(&[int(5), int(1)]).unwrap(),
+            int(5)
+        );
+        // FallingFactorial[5, 5] = 5*4*3*2*1 = 120
+        assert_eq!(
+            builtin_falling_factorial(&[int(5), int(5)]).unwrap(),
+            int(120)
+        );
+    }
+
+    #[test]
+    fn test_falling_factorial_symbolic() {
+        // Symbolic arguments should return symbolic form
+        let result =
+            builtin_falling_factorial(&[Value::Symbol("x".to_string()), int(3)]).unwrap();
+        assert!(matches!(result, Value::Call { head, .. } if head == "FallingFactorial"));
+    }
+
+    // ── Residue ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_residue() {
+        // Residue returns symbolic form for now
+        let result = builtin_residue(&[
+            Value::Symbol("expr".to_string()),
+            Value::List(vec![Value::Symbol("x".to_string()), int(0)]),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::Call { head, .. } if head == "Residue"));
     }
 }

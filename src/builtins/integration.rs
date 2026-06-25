@@ -2773,7 +2773,7 @@ fn leading_term_divide(a: &Value, b: &Value) -> Value {
 
 /// Polynomial long division: returns (quotient, remainder) of p1 / p2 in var
 fn polynomial_long_division(p1: &Value, p2: &Value, var: &str) -> (Value, Value) {
-    use crate::builtins::arithmetic::{add_values_public, mul_values_public, sub_values_public};
+    use crate::builtins::arithmetic::{mul_values_public, sub_values_public};
     use crate::builtins::symbolic::extract_polynomial_coeffs;
     let p1_coeffs = extract_polynomial_coeffs(p1, var);
     let p2_coeffs = extract_polynomial_coeffs(p2, var);

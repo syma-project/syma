@@ -136,6 +136,10 @@ pub enum Format {
     Grid,
     /// Deferred evaluation — display placeholder (e.g. `Defer[1 + 1]` → `1 + 1`).
     Deferred,
+    /// Plain-text display — show the inner string value without quotes.
+    /// Used by format builtins (`StringForm`, `TableForm`, `PaddedForm`, etc.)
+    /// that produce a pre-formatted string result.
+    Text,
 }
 
 /// Convert rug's `to_string_radix` output (e.g. `"3.14159e0"`, `"-1.5e2"`)
@@ -529,7 +533,7 @@ impl fmt::Display for EvalError {
             EvalError::Return(v) => write!(f, "Return: {}", v.as_ref()),
             EvalError::Break => write!(f, "Break"),
             EvalError::Continue => write!(f, "Continue"),
-            EvalError::Error(s) => write!(f, "Error: {}", s),
+            EvalError::Error(s) => write!(f, "{}", s),
             EvalError::FfiError(s) => write!(f, "FFI error: {}", s),
         }
     }
@@ -740,7 +744,7 @@ impl Value {
                 Format::BaseForm(_) => "BaseForm",
                 Format::Grid => "Grid",
                 Format::Deferred => "Deferred",
-                Format::Standard | Format::FullForm | Format::StandardForm | Format::OutputForm => {
+                Format::Standard | Format::FullForm | Format::StandardForm | Format::OutputForm | Format::Text => {
                     value.type_name()
                 }
             },
@@ -803,6 +807,7 @@ impl Value {
             Value::Null => false,
             Value::List(l) => !l.is_empty(),
             Value::PackedArray(pa) => !pa.is_empty(),
+            Value::Symbol(s) => s == "True",
             _ => true,
         }
     }
@@ -1481,6 +1486,10 @@ impl fmt::Display for Value {
                 Format::BaseForm(base) => format_base_form(value, *base, f),
                 Format::Grid => format_grid(value, f),
                 Format::Deferred => write!(f, "{}", value),
+                Format::Text => match value.as_ref() {
+                    Value::Str(s) => write!(f, "{}", s),
+                    other => write!(f, "{}", other),
+                },
             },
         }
     }

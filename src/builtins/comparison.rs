@@ -1,6 +1,5 @@
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
-use rug::Rational;
 
 /// Helper: compare two values numerically, return Some(bool) or None for incomparable
 fn compare_two<F: Fn(&Float, &Float) -> bool>(a: &Value, b: &Value, op: F) -> Option<bool> {

@@ -240,7 +240,6 @@ pub fn builtin_subfactorial(args: &[Value]) -> Result<Value, EvalError> {
                 return Ok(Value::Integer(Integer::from(0)));
             }
             // Iterative: !n = n * !(n-1) + (-1)^n.
-            let mut prev = Integer::from(1); // !0
             let mut curr = Integer::from(0); // !1
             for i in 2..=n_val {
                 let sign = if i % 2 == 0 {
@@ -248,8 +247,8 @@ pub fn builtin_subfactorial(args: &[Value]) -> Result<Value, EvalError> {
                 } else {
                     Integer::from(-1)
                 };
-                curr = Integer::from(i) * prev.clone() + sign;
-                prev = curr.clone();
+                let next = Integer::from(i) * curr.clone() + sign;
+                curr = next;
             }
             Ok(Value::Integer(curr))
         }
@@ -440,13 +439,14 @@ fn generate_subsets_of_size(items: &[Value], n: usize, k: usize) -> Vec<Value> {
         let subset: Vec<Value> = indices.iter().map(|&i| items[i].clone()).collect();
         result.push(Value::List(subset));
         // Next combination using standard algorithm.
-        let mut j = k - 1;
-        while indices[j] == n - k + j {
+        let mut j = k;
+        while j > 0 && indices[j - 1] == n - k + (j - 1) {
             j -= 1;
         }
-        if j == usize::MAX {
+        if j == 0 {
             break;
         }
+        let j = j - 1;
         indices[j] += 1;
         for m in (j + 1)..k {
             indices[m] = indices[m - 1] + 1;
@@ -1098,6 +1098,79 @@ fn bell_number(n: usize) -> Integer {
     prev_row[0].clone()
 }
 
+// ── IntegerPartitions ────────────────────────────────────────────────────────
+
+/// IntegerPartitions[n] — all partitions of integer n as a list of lists,
+/// sorted in reverse lexicographic order (Mathematica convention).
+/// IntegerPartitions[n, k] — partitions with at most k parts.
+pub fn builtin_integer_partitions(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "IntegerPartitions requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("IntegerPartitions: n too large".to_string()))?;
+            let max_parts = if args.len() == 2 {
+                match &args[1] {
+                    Value::Integer(k) if k.is_positive() => Some(
+                        k.to_usize()
+                            .ok_or_else(|| EvalError::Error("IntegerPartitions: k too large".to_string()))?,
+                    ),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "positive Integer".to_string(),
+                            got: args[1].type_name().to_string(),
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            let mut partitions = Vec::new();
+            generate_partitions(n_val, max_parts, n_val, &mut Vec::new(), &mut partitions);
+            Ok(Value::List(partitions))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "non-negative Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// Recursively generate partitions of `remaining` into parts <= `max_allowed`,
+/// with at most `max_parts` parts (if Some). Results are collected in reverse
+/// lexicographic order by construction (we try largest parts first).
+fn generate_partitions(
+    remaining: usize,
+    max_parts: Option<usize>,
+    max_allowed: usize,
+    current: &mut Vec<usize>,
+    result: &mut Vec<Value>,
+) {
+    if remaining == 0 {
+        result.push(Value::List(
+            current.iter().map(|&p| Value::Integer(Integer::from(p))).collect(),
+        ));
+        return;
+    }
+    if let Some(k) = max_parts {
+        if current.len() >= k {
+            return;
+        }
+    }
+    // Try parts from min(remaining, max_allowed) down to 1 to get reverse lex order.
+    let upper = remaining.min(max_allowed);
+    for part in (1..=upper).rev() {
+        current.push(part);
+        generate_partitions(remaining - part, max_parts, part, current, result);
+        current.pop();
+    }
+}
+
 // ── Helper: exact factorial ──────────────────────────────────────────────────
 
 fn integer_factorial(n: &Integer) -> Integer {
@@ -1492,5 +1565,85 @@ mod tests {
         assert_eq!(builtin_bell_b(&[int(4), int(3)]).unwrap(), int(6));
         assert_eq!(builtin_bell_b(&[int(4), int(4)]).unwrap(), int(1));
         // Sum = 1+7+6+1 = 15 = BellB[4] ✓
+    }
+
+    // ── IntegerPartitions ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_partitions_basic() {
+        // IntegerPartitions[0] = {{}}
+        let result = builtin_integer_partitions(&[int(0)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0], list(vec![]));
+        } else {
+            panic!("Expected List");
+        }
+
+        // IntegerPartitions[1] = {{1}}
+        let result = builtin_integer_partitions(&[int(1)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0], list(vec![int(1)]));
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_integer_partitions_four() {
+        // IntegerPartitions[4] = {{4}, {3,1}, {2,2}, {2,1,1}, {1,1,1,1}}
+        let result = builtin_integer_partitions(&[int(4)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 5);
+            assert_eq!(parts[0], list(vec![int(4)]));
+            assert_eq!(parts[1], list(vec![int(3), int(1)]));
+            assert_eq!(parts[2], list(vec![int(2), int(2)]));
+            assert_eq!(parts[3], list(vec![int(2), int(1), int(1)]));
+            assert_eq!(parts[4], list(vec![int(1), int(1), int(1), int(1)]));
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_integer_partitions_max_parts() {
+        // IntegerPartitions[4, 2] = {{4}, {3,1}, {2,2}} (at most 2 parts)
+        let result = builtin_integer_partitions(&[int(4), int(2)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 3);
+            assert_eq!(parts[0], list(vec![int(4)]));
+            assert_eq!(parts[1], list(vec![int(3), int(1)]));
+            assert_eq!(parts[2], list(vec![int(2), int(2)]));
+        } else {
+            panic!("Expected List");
+        }
+
+        // IntegerPartitions[4, 1] = {{4}}
+        let result = builtin_integer_partitions(&[int(4), int(1)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0], list(vec![int(4)]));
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_integer_partitions_count() {
+        // p(5) = 7
+        let result = builtin_integer_partitions(&[int(5)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 7);
+        } else {
+            panic!("Expected List");
+        }
+        // p(10) = 42
+        let result = builtin_integer_partitions(&[int(10)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 42);
+        } else {
+            panic!("Expected List");
+        }
     }
 }

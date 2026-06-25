@@ -282,9 +282,15 @@ pub fn builtin_table_form(args: &[Value]) -> Result<Value, EvalError> {
                     _ => result.push_str(&format!("{row}")),
                 }
             }
-            Ok(Value::Str(result))
+            Ok(Value::Formatted {
+                format: Format::Text,
+                value: Box::new(Value::Str(result)),
+            })
         }
-        other => Ok(Value::Str(format!("{other}"))),
+        other => Ok(Value::Formatted {
+            format: Format::Text,
+            value: Box::new(Value::Str(format!("{other}"))),
+        }),
     }
 }
 
@@ -414,7 +420,10 @@ pub fn builtin_padded_form(args: &[Value]) -> Result<Value, EvalError> {
             format!("{s:>total_width$}")
         }
     };
-    Ok(Value::Str(formatted))
+    Ok(Value::Formatted {
+        format: Format::Text,
+        value: Box::new(Value::Str(formatted)),
+    })
 }
 
 /// StringForm["template", args...] — printf-style string formatting.
@@ -448,7 +457,12 @@ pub fn builtin_string_form(args: &[Value]) -> Result<Value, EvalError> {
                 // Valid slot like `1`
                 if let Ok(idx) = num_str.parse::<usize>() {
                     if idx >= 1 && idx < args.len() {
-                        result.push_str(&format!("{}", args[idx]));
+                        // For strings, insert the raw content without quotes;
+                        // for other types, use standard Display formatting.
+                        match &args[idx] {
+                            Value::Str(s) => result.push_str(s),
+                            other => result.push_str(&format!("{}", other)),
+                        }
                     } else {
                         // Out of range: leave as-is
                         result.push('`');
@@ -467,7 +481,10 @@ pub fn builtin_string_form(args: &[Value]) -> Result<Value, EvalError> {
             i += 1;
         }
     }
-    Ok(Value::Str(result))
+    Ok(Value::Formatted {
+        format: Format::Text,
+        value: Box::new(Value::Str(result)),
+    })
 }
 
 // ── Symbol list for lazy package loading ─────────────────────────────────────────

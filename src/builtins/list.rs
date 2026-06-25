@@ -403,7 +403,7 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
             } else {
                 return Err(EvalError::IndexOutOfBounds {
                     index,
-                    length: s.len() as i64,
+                    length: s.len(),
                 });
             };
             if idx < s.chars().count() {
@@ -974,7 +974,7 @@ pub fn builtin_intersection(args: &[Value]) -> Result<Value, EvalError> {
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut result: Vec<Value> = lists[0]
+    let result: Vec<Value> = lists[0]
         .iter()
         .filter(|item| {
             lists[1..]
@@ -1009,7 +1009,7 @@ pub fn builtin_complement(args: &[Value]) -> Result<Value, EvalError> {
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut result: Vec<Value> = lists[0]
+    let result: Vec<Value> = lists[0]
         .iter()
         .filter(|item| {
             !lists[1..]
@@ -2381,6 +2381,254 @@ pub fn builtin_string_cases(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::List(matches))
+}
+
+// ── TakeWhile ──────────────────────────────────────────────────────────────
+
+/// TakeWhile[list, crit] — takes elements from the front of list while crit returns True.
+pub fn builtin_take_while(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "TakeWhile requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let mut result = Vec::new();
+    for item in items {
+        let keep = apply_function(&args[1], &[item.clone()], env)?;
+        match keep {
+            Value::Bool(true) => result.push(item.clone()),
+            _ => break,
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── DropWhile ──────────────────────────────────────────────────────────────
+
+/// DropWhile[list, crit] — drops elements from the front of list while crit returns True.
+pub fn builtin_drop_while(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "DropWhile requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let mut drop_count = 0;
+    for item in items {
+        let keep = apply_function(&args[1], &[item.clone()], env)?;
+        match keep {
+            Value::Bool(true) => drop_count += 1,
+            _ => break,
+        }
+    }
+    Ok(Value::List(items[drop_count..].to_vec()))
+}
+
+// ── MapIf ──────────────────────────────────────────────────────────────────
+
+/// MapIf[f, list, crit] — applies f only to elements matching crit.
+pub fn builtin_map_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "MapIf requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[1])?;
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        let test = apply_function(&args[2], &[item.clone()], env)?;
+        match test {
+            Value::Bool(true) => {
+                let mapped = apply_function(&args[0], &[item.clone()], env)?;
+                result.push(mapped);
+            }
+            _ => result.push(item.clone()),
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── LongestCommonSubsequence ───────────────────────────────────────────────
+
+/// LongestCommonSubsequence[list1, list2] — finds the LCS of two lists or strings.
+pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubsequence requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Str(s1), Value::Str(s2)) => {
+            let chars1: Vec<char> = s1.chars().collect();
+            let chars2: Vec<char> = s2.chars().collect();
+            let lcs_chars = lcs_generic(&chars1, &chars2);
+            Ok(Value::Str(lcs_chars.into_iter().collect()))
+        }
+        (Value::List(l1), Value::List(l2)) => {
+            let lcs = lcs_generic(l1, l2);
+            Ok(Value::List(lcs))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "two Lists or two Strings".to_string(),
+            got: format!(
+                "{} and {}",
+                args[0].type_name(),
+                args[1].type_name()
+            ),
+        }),
+    }
+}
+
+/// Generic LCS using dynamic programming.
+fn lcs_generic<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    // Backtrack
+    let mut result = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result.push(a[i - 1].clone());
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    result.reverse();
+    result
+}
+
+// ── LongestCommonSubsequencePositions ──────────────────────────────────────
+
+/// LongestCommonSubsequencePositions[list1, list2] — positions of LCS in both lists.
+pub fn builtin_longest_common_subsequence_positions(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubsequencePositions requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::List(l1), Value::List(l2)) => {
+            let (pos1, pos2) = lcs_positions(l1, l2);
+            Ok(Value::List(vec![
+                Value::List(pos1.into_iter().map(|i| Value::Integer(Integer::from(i as i64 + 1))).collect()),
+                Value::List(pos2.into_iter().map(|i| Value::Integer(Integer::from(i as i64 + 1))).collect()),
+            ]))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "two Lists".to_string(),
+            got: format!(
+                "{} and {}",
+                args[0].type_name(),
+                args[1].type_name()
+            ),
+        }),
+    }
+}
+
+/// Compute LCS positions using DP backtracking.
+fn lcs_positions(a: &[Value], b: &[Value]) -> (Vec<usize>, Vec<usize>) {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    let mut pos1 = Vec::new();
+    let mut pos2 = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            pos1.push(i - 1);
+            pos2.push(j - 1);
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    pos1.reverse();
+    pos2.reverse();
+    (pos1, pos2)
+}
+
+// ── FindTransientRepeat ────────────────────────────────────────────────────
+
+/// FindTransientRepeat[list, n] — find transient prefix and repeating part.
+pub fn builtin_find_transient_repeat(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FindTransientRepeat requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let max_period = match &args[1] {
+        Value::Integer(n) => n.to_usize().ok_or_else(|| EvalError::Error("max period too large".to_string()))?,
+        _ => return Err(EvalError::TypeError {
+            expected: "positive Integer".to_string(),
+            got: args[1].type_name().to_string(),
+        }),
+    };
+    if items.is_empty() || max_period == 0 {
+        return Ok(Value::List(vec![Value::List(vec![]), Value::List(vec![])]));
+    }
+    // Try periods from 1 to max_period
+    for period in 1..=max_period.min(items.len()) {
+        // Find the shortest transient such that the rest is repeating with this period
+        let min_transient = items.len().saturating_sub(period * 2);
+        for transient_len in (0..=min_transient).rev() {
+            let remaining = &items[transient_len..];
+            if remaining.is_empty() {
+                continue;
+            }
+            if remaining.len() % period != 0 {
+                continue;
+            }
+            let pattern = &remaining[0..period];
+            let mut valid = true;
+            for chunk in remaining.chunks(period) {
+                if chunk != pattern {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                let transient: Vec<Value> = items[..transient_len].to_vec();
+                let repeat: Vec<Value> = pattern.to_vec();
+                return Ok(Value::List(vec![
+                    Value::List(transient),
+                    Value::List(repeat),
+                ]));
+            }
+        }
+    }
+    // No repeating pattern found
+    Ok(Value::List(vec![
+        Value::List(items.to_vec()),
+        Value::List(vec![]),
+    ]))
 }
 
 #[cfg(test)]

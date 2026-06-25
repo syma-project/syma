@@ -56,6 +56,11 @@ pub fn builtin_head(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Symbol(args[0].type_name().to_string()))
 }
 
+/// Identity[x] returns x unchanged.
+pub fn builtin_identity(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(args.first().cloned().unwrap_or(Value::Null))
+}
+
 pub fn builtin_type_of(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(

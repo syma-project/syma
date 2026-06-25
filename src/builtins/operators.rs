@@ -151,6 +151,7 @@ pub fn builtin_right_composition(args: &[Value], env: &Env) -> Result<Value, Eva
 // ── Through ──
 
 /// Through[{f, g, h}[expr]] applies each function to the same expression.
+/// Through[f[args]] evaluates f[args] and returns the result in a list.
 pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -160,16 +161,13 @@ pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
     let expr = &args[0];
 
-    if let Value::Call {
-        head: _,
-        args: _inner,
-    } = expr
-    {
-        // head is String, not a Value, so we can't extract a list from it
-        // Fall through to the general match below
-    }
-
     match expr {
+        Value::Call { head, args: call_args } => {
+            // Evaluate the call: look up the head as a function and apply to args
+            let head_val = Value::Symbol(head.clone());
+            let result = apply_function(&head_val, call_args, env)?;
+            Ok(Value::List(vec![result]))
+        }
         Value::List(funcs) => {
             let mut result = Vec::with_capacity(funcs.len());
             for f in funcs {
@@ -467,8 +465,7 @@ pub fn builtin_map_all(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 }
 
 fn map_all_inner(f: &Value, val: &Value, env: &Env) -> Result<Value, EvalError> {
-    let applied = apply_function(f, &[val.clone()], env)?;
-    match &applied {
+    match val {
         Value::List(items) => {
             let mapped: Result<Vec<Value>, EvalError> = items
                 .iter()
@@ -480,21 +477,19 @@ fn map_all_inner(f: &Value, val: &Value, env: &Env) -> Result<Value, EvalError> 
             head,
             args: call_args,
         } => {
-            let mapped_head = map_all_inner(f, &Value::Symbol(head.clone()), env)?;
-            let head_name = match &mapped_head {
-                Value::Symbol(s) => s.clone(),
-                _ => mapped_head.to_string(),
-            };
             let mapped_args: Result<Vec<Value>, EvalError> = call_args
                 .iter()
                 .map(|arg| map_all_inner(f, arg, env))
                 .collect();
             Ok(Value::Call {
-                head: head_name,
+                head: head.clone(),
                 args: mapped_args?,
             })
         }
-        other => Ok(other.clone()),
+        leaf => {
+            let result = apply_function(f, &[leaf.clone()], env)?;
+            Ok(result)
+        }
     }
 }
 
@@ -926,21 +921,13 @@ mod tests {
     #[test]
     fn test_through_multi() {
         let env = test_env();
-        // Through with multiple functions: Abs and Sign applied in sequence
+        // Through evaluates the call and wraps the result in a list
         let expr = Value::Call {
             head: "Abs".to_string(),
             args: vec![val_int(-3)],
         };
-        // Note: The original test intended to apply multiple functions through a chain.
-        // This is a simplified version to fix the type error.
         let result = builtin_through(&[expr], &env).unwrap();
-        if let Value::List(items) = result {
-            assert_eq!(items.len(), 2);
-            assert_eq!(items[0], val_int(3));
-            assert_eq!(items[1], val_int(-1));
-        } else {
-            panic!("Expected List");
-        }
+        assert_eq!(result, val_list(vec![val_int(3)]));
     }
 
     #[test]

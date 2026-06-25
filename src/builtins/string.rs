@@ -822,6 +822,36 @@ pub fn builtin_word_count(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Integer(Integer::from(count as i64)))
 }
 
+/// StringPartition[s, n] — splits string s into substrings of length n.
+///
+/// The last substring may be shorter if the string length is not a multiple of n.
+/// StringPartition["abcde", 2] → {"ab", "cd", "e"}
+/// StringPartition["abcde", 3] → {"abc", "de"}
+pub fn builtin_string_partition(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "StringPartition requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let s = str_arg(args, 0)?;
+    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    if n <= 0 {
+        return Err(EvalError::Error(
+            "StringPartition: partition size must be positive".to_string(),
+        ));
+    }
+    let n = n as usize;
+    let chars: Vec<char> = s.chars().collect();
+    let result: Vec<Value> = chars
+        .chunks(n)
+        .map(|chunk| Value::Str(chunk.iter().collect()))
+        .collect();
+    Ok(Value::List(result))
+}
+
 pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -837,6 +867,84 @@ pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
         .filter(|s| !s.trim().is_empty())
         .collect();
     Ok(Value::Integer(Integer::from(sentences.len() as i64)))
+}
+
+// ── StringToByteArray ─────────────────────────────────────────────────────
+
+/// StringToByteArray[s] — convert a string to a list of byte values (UTF-8 encoding).
+///
+/// StringToByteArray["abc"] → {97, 98, 99}
+pub fn builtin_string_to_byte_array(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "StringToByteArray requires exactly 1 argument".to_string(),
+        ));
+    }
+    let s = str_arg(args, 0)?;
+    let bytes: Vec<Value> = s
+        .bytes()
+        .map(|b| Value::Integer(Integer::from(b as i64)))
+        .collect();
+    Ok(Value::List(bytes))
+}
+
+// ── IntegerString ─────────────────────────────────────────────────────────
+
+/// IntegerString[n, base] — convert integer n to its string representation in the given base (2-36).
+///
+/// IntegerString[255, 16] → "ff"
+/// IntegerString[10, 2] → "1010"
+pub fn builtin_integer_string(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "IntegerString requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let n = match &args[0] {
+        Value::Integer(n) => n.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 && *b <= 36 => b.to_u32().unwrap_or(10),
+            _ => {
+                return Err(EvalError::Error(
+                    "IntegerString: base must be an integer between 2 and 36".to_string(),
+                ));
+            }
+        }
+    } else {
+        10
+    };
+    if n.is_zero() {
+        return Ok(Value::Str("0".to_string()));
+    }
+    let negative = n.is_negative();
+    let mut m = n.clone().abs();
+    let base_int = Integer::from(base);
+    let mut digits: Vec<char> = Vec::new();
+    while m > 0 {
+        let remainder_val: Integer = (&m % &base_int).into();
+        let remainder = remainder_val.to_u32().unwrap_or(0);
+        let c = if remainder < 10 {
+            (b'0' + remainder as u8) as char
+        } else {
+            (b'a' + (remainder - 10) as u8) as char
+        };
+        digits.push(c);
+        m /= &base_int;
+    }
+    digits.reverse();
+    let mut result: String = digits.into_iter().collect();
+    if negative {
+        result.insert(0, '-');
+    }
+    Ok(Value::Str(result))
 }
 
 #[cfg(test)]
@@ -1329,5 +1437,137 @@ mod tests {
     fn test_string_split_empty() {
         let result = builtin_string_split(&[string(""), string(",")]).unwrap();
         assert_eq!(result, Value::List(vec![string("")]));
+    }
+
+    // ── StringPartition tests ──
+
+    #[test]
+    fn test_string_partition_even() {
+        // StringPartition["abcde", 2] → {"ab", "cd", "e"}
+        let result = builtin_string_partition(&[string("abcde"), int(2)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![string("ab"), string("cd"), string("e")])
+        );
+    }
+
+    #[test]
+    fn test_string_partition_exact() {
+        // StringPartition["abcdef", 3] → {"abc", "def"}
+        let result = builtin_string_partition(&[string("abcdef"), int(3)]).unwrap();
+        assert_eq!(result, Value::List(vec![string("abc"), string("def")]));
+    }
+
+    #[test]
+    fn test_string_partition_uneven() {
+        // StringPartition["abcde", 3] → {"abc", "de"}
+        let result = builtin_string_partition(&[string("abcde"), int(3)]).unwrap();
+        assert_eq!(result, Value::List(vec![string("abc"), string("de")]));
+    }
+
+    #[test]
+    fn test_string_partition_size_one() {
+        // StringPartition["abc", 1] → {"a", "b", "c"}
+        let result = builtin_string_partition(&[string("abc"), int(1)]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![string("a"), string("b"), string("c")])
+        );
+    }
+
+    #[test]
+    fn test_string_partition_size_larger_than_string() {
+        // StringPartition["ab", 5] → {"ab"}
+        let result = builtin_string_partition(&[string("ab"), int(5)]).unwrap();
+        assert_eq!(result, Value::List(vec![string("ab")]));
+    }
+
+    #[test]
+    fn test_string_partition_empty_string() {
+        // StringPartition["", 3] → {}
+        let result = builtin_string_partition(&[string(""), int(3)]).unwrap();
+        assert_eq!(result, Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_string_partition_wrong_count() {
+        assert!(builtin_string_partition(&[string("abc")]).is_err());
+    }
+
+    #[test]
+    fn test_string_partition_zero_size() {
+        assert!(builtin_string_partition(&[string("abc"), int(0)]).is_err());
+    }
+
+    #[test]
+    fn test_string_partition_negative_size() {
+        assert!(builtin_string_partition(&[string("abc"), int(-1)]).is_err());
+    }
+
+    // ── StringToByteArray ───────────────────────────────────────────────
+
+    #[test]
+    fn test_string_to_byte_array() {
+        // "abc" → {97, 98, 99}
+        let result = builtin_string_to_byte_array(&[string("abc")]).unwrap();
+        assert_eq!(result, Value::List(vec![int(97), int(98), int(99)]));
+    }
+
+    #[test]
+    fn test_string_to_byte_array_empty() {
+        // "" → {}
+        let result = builtin_string_to_byte_array(&[string("")]).unwrap();
+        assert_eq!(result, Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_string_to_byte_array_special_chars() {
+        // "A" → {65}
+        let result = builtin_string_to_byte_array(&[string("A")]).unwrap();
+        assert_eq!(result, Value::List(vec![int(65)]));
+    }
+
+    // ── IntegerString ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_string_hex() {
+        // IntegerString[255, 16] → "ff"
+        let result = builtin_integer_string(&[int(255), int(16)]).unwrap();
+        assert_eq!(result, string("ff"));
+    }
+
+    #[test]
+    fn test_integer_string_binary() {
+        // IntegerString[10, 2] → "1010"
+        let result = builtin_integer_string(&[int(10), int(2)]).unwrap();
+        assert_eq!(result, string("1010"));
+    }
+
+    #[test]
+    fn test_integer_string_decimal() {
+        // IntegerString[42] → "42"
+        let result = builtin_integer_string(&[int(42)]).unwrap();
+        assert_eq!(result, string("42"));
+    }
+
+    #[test]
+    fn test_integer_string_zero() {
+        // IntegerString[0] → "0"
+        let result = builtin_integer_string(&[int(0)]).unwrap();
+        assert_eq!(result, string("0"));
+    }
+
+    #[test]
+    fn test_integer_string_negative() {
+        // IntegerString[-42] → "-42"
+        let result = builtin_integer_string(&[int(-42)]).unwrap();
+        assert_eq!(result, string("-42"));
+    }
+
+    #[test]
+    fn test_integer_string_octal() {
+        // IntegerString[8, 8] → "10"
+        let result = builtin_integer_string(&[int(8), int(8)]).unwrap();
+        assert_eq!(result, string("10"));
     }
 }

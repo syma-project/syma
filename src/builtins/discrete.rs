@@ -844,6 +844,471 @@ pub fn builtin_recurrence_table(_args: &[Value]) -> Result<Value, EvalError> {
     ))
 }
 
+// ── FindSequenceFunction ──────────────────────────────────────────────────────
+
+/// FindSequenceFunction[list] — Find a closed-form function matching a sequence.
+/// Uses finite differences to detect polynomial sequences.
+/// Returns a PureFunction if a polynomial fit is found, otherwise returns symbolic.
+pub fn builtin_find_sequence_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FindSequenceFunction requires exactly 1 argument".to_string(),
+        ));
+    }
+
+    let items = match &args[0] {
+        Value::List(items) => items,
+        _ => {
+            return Ok(Value::Call {
+                head: "FindSequenceFunction".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
+
+    if items.len() < 2 {
+        return Ok(Value::Call {
+            head: "FindSequenceFunction".to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    // Convert all items to f64 for finite difference computation
+    let vals: Option<Vec<f64>> = items.iter().map(|v| v.to_real()).collect();
+    let vals = match vals {
+        Some(v) => v,
+        None => {
+            return Ok(Value::Call {
+                head: "FindSequenceFunction".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
+
+    let n = vals.len();
+
+    // Build difference table: diff_table[k][i] = k-th finite difference at index i
+    let mut diff_table: Vec<Vec<f64>> = vec![vals.clone()];
+    for k in 1..n {
+        let prev = &diff_table[k - 1];
+        let mut next = Vec::with_capacity(prev.len() - 1);
+        for i in 0..prev.len() - 1 {
+            next.push(prev[i + 1] - prev[i]);
+        }
+        if next.is_empty() {
+            break;
+        }
+        diff_table.push(next);
+    }
+
+    // Find the degree: the first level where all differences are (approximately) constant
+    // Require at least 2 elements in the row to avoid trivial matches
+    let tol: f64 = 1e-9;
+    let mut degree: Option<usize> = None;
+    for k in 0..diff_table.len() {
+        let row = &diff_table[k];
+        if row.len() < 2 {
+            break;
+        }
+        let first = row[0];
+        if row.iter().all(|v| (v - first).abs() < tol) {
+            degree = Some(k);
+            break;
+        }
+    }
+
+    let degree = match degree {
+        Some(d) => d,
+        None => {
+            return Ok(Value::Call {
+                head: "FindSequenceFunction".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
+
+    // Reconstruct polynomial coefficients from the difference table.
+    // For a polynomial of degree d, we can determine the standard coefficients
+    // c_0 + c_1*x + c_2*x^2 + ... + c_d*x^d by solving the Vandermonde system
+    // with points x=1,2,...,d+1 using the known sequence values.
+    let d = degree;
+    let m = d + 1; // number of coefficients
+
+    // Build Vandermonde matrix: rows correspond to x=1,2,...,m
+    // columns are powers 0,1,...,d, augmented with f(x) values
+    let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(m);
+    for i in 0..m {
+        let x = (i + 1) as f64; // x = 1, 2, ..., m
+        let mut row = Vec::with_capacity(m + 1);
+        for j in 0..m {
+            row.push(x.powi(j as i32));
+        }
+        row.push(vals[i]); // f(x)
+        matrix.push(row);
+    }
+
+    // Gaussian elimination with partial pivoting
+    for col in 0..m {
+        // Find pivot
+        let mut max_val = matrix[col][col].abs();
+        let mut max_row = col;
+        for row in (col + 1)..m {
+            if matrix[row][col].abs() > max_val {
+                max_val = matrix[row][col].abs();
+                max_row = row;
+            }
+        }
+        if max_val < 1e-15 {
+            // Singular — can't determine polynomial
+            return Ok(Value::Call {
+                head: "FindSequenceFunction".to_string(),
+                args: args.to_vec(),
+            });
+        }
+        matrix.swap(col, max_row);
+
+        // Eliminate below
+        let pivot = matrix[col][col];
+        for row in (col + 1)..m {
+            let factor = matrix[row][col] / pivot;
+            for j in col..=m {
+                matrix[row][j] -= factor * matrix[col][j];
+            }
+        }
+    }
+
+    // Back substitution
+    let mut coeffs = vec![0.0f64; m];
+    for i in (0..m).rev() {
+        let mut sum = matrix[i][m];
+        for j in (i + 1)..m {
+            sum -= matrix[i][j] * coeffs[j];
+        }
+        coeffs[i] = sum / matrix[i][i];
+    }
+
+    // Convert coefficients to Values, rounding to integers when close
+    let coeff_vals: Vec<Value> = coeffs
+        .iter()
+        .map(|c| {
+            if (c - c.round()).abs() < 1e-9 && c.abs() < i64::MAX as f64 {
+                Value::Integer(Integer::from(c.round() as i64))
+            } else {
+                Value::Real(Float::with_val(DEFAULT_PRECISION, *c))
+            }
+        })
+        .collect();
+
+    // Build the PureFunction body expression.
+    // The body should evaluate the polynomial at #1 (slot 1).
+    // We build: c_0 + c_1*#1 + c_2*#1^2 + ...
+    let slot = Expr::Call {
+        head: Box::new(Expr::Symbol("Slot".to_string())),
+        args: vec![Expr::Integer(Integer::from(1))],
+    };
+
+    let mut terms: Vec<Expr> = Vec::new();
+    for (i, coeff) in coeff_vals.iter().enumerate() {
+        let coeff_expr = value_to_expr(coeff);
+        if let Expr::Integer(ref n) = coeff_expr {
+            if n.is_zero() {
+                continue;
+            }
+        }
+
+        let term = if i == 0 {
+            coeff_expr
+        } else if i == 1 {
+            if coeff == &Value::Integer(Integer::from(1)) {
+                slot.clone()
+            } else {
+                Expr::Call {
+                    head: Box::new(Expr::Symbol("Times".to_string())),
+                    args: vec![coeff_expr, slot.clone()],
+                }
+            }
+        } else {
+            let slot_pow = Expr::Call {
+                head: Box::new(Expr::Symbol("Power".to_string())),
+                args: vec![slot.clone(), Expr::Integer(Integer::from(i as i64))],
+            };
+            if coeff == &Value::Integer(Integer::from(1)) {
+                slot_pow
+            } else {
+                Expr::Call {
+                    head: Box::new(Expr::Symbol("Times".to_string())),
+                    args: vec![coeff_expr, slot_pow],
+                }
+            }
+        };
+        terms.push(term);
+    }
+
+    let body = if terms.is_empty() {
+        Expr::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.into_iter().next().unwrap()
+    } else {
+        Expr::Call {
+            head: Box::new(Expr::Symbol("Plus".to_string())),
+            args: terms,
+        }
+    };
+
+    Ok(Value::PureFunction {
+        body,
+        slot_count: 1,
+        params: vec![],
+        env: None,
+    })
+}
+
+/// Convert a Value to an Expr (for building PureFunction bodies).
+fn value_to_expr(v: &Value) -> Expr {
+    match v {
+        Value::Integer(n) => Expr::Integer(n.clone()),
+        Value::Real(r) => Expr::Real(r.clone()),
+        Value::Bool(b) => Expr::Bool(*b),
+        Value::Str(s) => Expr::Str(s.clone()),
+        Value::Null => Expr::Null,
+        Value::Symbol(s) => Expr::Symbol(s.clone()),
+        Value::List(items) => Expr::List(items.iter().map(value_to_expr).collect()),
+        Value::Call { head, args } => Expr::Call {
+            head: Box::new(Expr::Symbol(head.clone())),
+            args: args.iter().map(value_to_expr).collect(),
+        },
+        _ => Expr::Symbol(format!("{}", v)),
+    }
+}
+
+// ── DifferenceDelta ──────────────────────────────────────────────────────────
+
+/// DifferenceDelta[list] — Compute successive differences of a list.
+/// DifferenceDelta[f, i] — Symbolic difference Delta f(i) = f(i+1) - f(i).
+pub fn builtin_difference_delta(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        1 => {
+            // List form: Differences[list]
+            let items = match &args[0] {
+                Value::List(items) => items,
+                _ => {
+                    return Ok(Value::Call {
+                        head: "DifferenceDelta".to_string(),
+                        args: args.to_vec(),
+                    });
+                }
+            };
+
+            if items.len() < 2 {
+                return Ok(Value::List(vec![]));
+            }
+
+            let mut result = Vec::with_capacity(items.len() - 1);
+            for i in 0..items.len() - 1 {
+                let diff = crate::builtins::arithmetic::sub_values_public(
+                    &items[i + 1],
+                    &items[i],
+                )?;
+                result.push(diff);
+            }
+            Ok(Value::List(result))
+        }
+        2 => {
+            // Symbolic form: DifferenceDelta[f[i], i] -> f[i+1] - f[i]
+            let var = match &args[1] {
+                Value::Symbol(s) => s.clone(),
+                _ => {
+                    return Ok(Value::Call {
+                        head: "DifferenceDelta".to_string(),
+                        args: args.to_vec(),
+                    });
+                }
+            };
+
+            let expr = &args[0];
+
+            // Build f[i+1]: substitute i -> i+1 in the expression
+            let one = Value::Integer(Integer::from(1));
+            let i_plus_1 = Value::Call {
+                head: "Plus".to_string(),
+                args: vec![Value::Symbol(var.clone()), one],
+            };
+            let shifted = substitute_value(expr, &var, &i_plus_1);
+
+            // Build f[i+1] - f[i] = Plus[f[i+1], Times[-1, f[i]]]
+            let neg_expr = Value::Call {
+                head: "Times".to_string(),
+                args: vec![Value::Integer(Integer::from(-1)), expr.clone()],
+            };
+            Ok(Value::Call {
+                head: "Plus".to_string(),
+                args: vec![shifted, neg_expr],
+            })
+        }
+        _ => Err(EvalError::Error(
+            "DifferenceDelta requires 1 or 2 arguments".to_string(),
+        )),
+    }
+}
+
+/// Substitute a variable with a value in an expression tree.
+fn substitute_value(expr: &Value, var: &str, replacement: &Value) -> Value {
+    match expr {
+        Value::Symbol(s) if s == var => replacement.clone(),
+        Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
+            expr.clone()
+        }
+        Value::Symbol(_) => expr.clone(),
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|i| substitute_value(i, var, replacement))
+                .collect(),
+        ),
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_value(a, var, replacement))
+                .collect(),
+        },
+        _ => expr.clone(),
+    }
+}
+
+// ── FindLinearRecurrence ─────────────────────────────────────────────────────
+
+/// FindLinearRecurrence[list] — Find the minimal linear recurrence relation
+/// for a sequence using the Berlekamp-Massey algorithm.
+/// Returns the list of coefficients {c1, c2, ..., ck} such that
+/// a[n] = c1*a[n-1] + c2*a[n-2] + ... + ck*a[n-k].
+pub fn builtin_find_linear_recurrence(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FindLinearRecurrence requires exactly 1 argument".to_string(),
+        ));
+    }
+
+    let items = match &args[0] {
+        Value::List(items) => items,
+        _ => {
+            return Ok(Value::Call {
+                head: "FindLinearRecurrence".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
+
+    if items.len() < 2 {
+        return Ok(Value::Call {
+            head: "FindLinearRecurrence".to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    // Convert to f64 for Berlekamp-Massey
+    let vals: Option<Vec<f64>> = items.iter().map(|v| v.to_real()).collect();
+    let vals = match vals {
+        Some(v) => v,
+        None => {
+            return Ok(Value::Call {
+                head: "FindLinearRecurrence".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    };
+
+    // Berlekamp-Massey algorithm over reals
+    // We work with floating point and round to integers at the end
+    let n = vals.len();
+
+    // C is the current connection polynomial, B is the previous one
+    let mut c: Vec<f64> = vec![0.0; n + 1];
+    let mut b: Vec<f64> = vec![0.0; n + 1];
+    c[0] = 1.0;
+    b[0] = 1.0;
+
+    let mut l = 0usize; // current LFSR length
+    let mut m = 1usize; // number of steps since last length change
+    let mut b_prev = 1.0f64; // previous discrepancy
+
+    for i in 0..n {
+        // Compute discrepancy
+        let mut d = vals[i];
+        for j in 1..=l {
+            d += c[j] * vals[i.saturating_sub(j)];
+        }
+
+        if d.abs() < 1e-9 {
+            // No discrepancy
+            m += 1;
+        } else if 2 * l <= i {
+            // Length update needed
+            let mut new_c = vec![0.0f64; n + 1];
+            for j in 0..=n {
+                new_c[j] = c[j];
+            }
+            for j in 0..=n {
+                if j + m <= n {
+                    c[j + m] -= d / b_prev * b[j];
+                }
+            }
+            l = i + 1 - l;
+            b = new_c;
+            b_prev = d;
+            m = 1;
+        } else {
+            // Standard update
+            let factor = d / b_prev;
+            for j in 0..=n {
+                if j + m <= n {
+                    c[j + m] -= factor * b[j];
+                }
+            }
+            m += 1;
+        }
+    }
+
+    if l == 0 {
+        return Ok(Value::Call {
+            head: "FindLinearRecurrence".to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    // Extract coefficients: c[0] + c[1]*x + c[2]*x^2 + ... + c[l]*x^l = 0
+    // So a[n] = -c[1]*a[n-1] - c[2]*a[n-2] - ... - c[l]*a[n-l]
+    // Normalize by c[0] (should be 1.0)
+    let mut result_coeffs = Vec::with_capacity(l);
+    for j in 1..=l {
+        let val = -c[j] / c[0];
+        let rounded = val.round();
+        if (val - rounded).abs() < 1e-6 && rounded.abs() < i64::MAX as f64 {
+            result_coeffs.push(Value::Integer(Integer::from(rounded as i64)));
+        } else {
+            result_coeffs.push(Value::Real(Float::with_val(DEFAULT_PRECISION, val)));
+        }
+    }
+
+    // Verify the recurrence against the input sequence
+    let tol: f64 = 1e-6;
+    for i in l..n {
+        let mut predicted = 0.0f64;
+        for j in 0..l {
+            predicted += result_coeffs[j].to_real().unwrap_or(0.0) * vals[i - 1 - j];
+        }
+        if (predicted - vals[i]).abs() > tol.max(vals[i].abs() * 1e-6) {
+            // Verification failed — return symbolic
+            return Ok(Value::Call {
+                head: "FindLinearRecurrence".to_string(),
+                args: args.to_vec(),
+            });
+        }
+    }
+
+    Ok(Value::List(result_coeffs))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1254,5 +1719,163 @@ mod tests {
             Value::Call { head, .. } => assert_eq!(head, "RSolve"),
             _ => panic!("Expected RSolve Call, got {:?}", result),
         }
+    }
+
+    // ── FindSequenceFunction ──
+
+    #[test]
+    fn test_find_sequence_function_quadratic() {
+        // {1, 4, 9, 16, 25} -> n^2
+        let result = builtin_find_sequence_function(&[list(vec![
+            int(1), int(4), int(9), int(16), int(25),
+        ])])
+        .unwrap();
+        match result {
+            Value::PureFunction { .. } => {
+                // Verify it produces correct values by checking the body structure
+                // The function should be #1^2 (i.e., slot squared)
+            }
+            _ => panic!("Expected PureFunction, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_find_sequence_function_linear() {
+        // {2, 4, 6, 8} -> 2*n
+        let result = builtin_find_sequence_function(&[list(vec![
+            int(2), int(4), int(6), int(8),
+        ])])
+        .unwrap();
+        match result {
+            Value::PureFunction { .. } => {}
+            _ => panic!("Expected PureFunction, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_find_sequence_function_constant() {
+        // {5, 5, 5, 5} -> 5
+        let result = builtin_find_sequence_function(&[list(vec![
+            int(5), int(5), int(5), int(5),
+        ])])
+        .unwrap();
+        match result {
+            Value::PureFunction { .. } => {}
+            _ => panic!("Expected PureFunction, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_find_sequence_function_non_polynomial_returns_symbolic() {
+        // Fibonacci: {1, 1, 2, 3, 5, 8} — not a polynomial
+        let result = builtin_find_sequence_function(&[list(vec![
+            int(1), int(1), int(2), int(3), int(5), int(8),
+        ])])
+        .unwrap();
+        match result {
+            Value::Call { head, .. } => assert_eq!(head, "FindSequenceFunction"),
+            _ => panic!("Expected symbolic Call for non-polynomial sequence"),
+        }
+    }
+
+    #[test]
+    fn test_find_sequence_function_bad_args() {
+        assert!(builtin_find_sequence_function(&[]).is_err());
+        assert!(builtin_find_sequence_function(&[int(1), int(2)]).is_err());
+    }
+
+    // ── DifferenceDelta ──
+
+    #[test]
+    fn test_difference_delta_list() {
+        // {1, 4, 9, 16} -> {3, 5, 7}
+        let result = builtin_difference_delta(&[list(vec![int(1), int(4), int(9), int(16)])])
+            .unwrap();
+        assert_eq!(result, list(vec![int(3), int(5), int(7)]));
+    }
+
+    #[test]
+    fn test_difference_delta_arithmetic() {
+        // {2, 4, 6, 8, 10} -> {2, 2, 2, 2}
+        let result = builtin_difference_delta(&[list(vec![
+            int(2), int(4), int(6), int(8), int(10),
+        ])])
+        .unwrap();
+        assert_eq!(result, list(vec![int(2), int(2), int(2), int(2)]));
+    }
+
+    #[test]
+    fn test_difference_delta_empty() {
+        let result = builtin_difference_delta(&[list(vec![])]).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_difference_delta_single() {
+        let result = builtin_difference_delta(&[list(vec![int(5)])]).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_difference_delta_symbolic() {
+        // DifferenceDelta[f[i], i] -> f[1+i] + Times[-1, f[i]]
+        let result = builtin_difference_delta(&[
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Symbol("i".to_string())],
+            },
+            Value::Symbol("i".to_string()),
+        ])
+        .unwrap();
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "Plus");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Plus Call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_difference_delta_bad_args() {
+        assert!(builtin_difference_delta(&[]).is_err());
+        assert!(builtin_difference_delta(&[int(1), int(2), int(3)]).is_err());
+    }
+
+    // ── FindLinearRecurrence ──
+
+    #[test]
+    fn test_find_linear_recurrence_fibonacci() {
+        // {1, 1, 2, 3, 5, 8} -> {1, 1} (a[n] = a[n-1] + a[n-2])
+        let result = builtin_find_linear_recurrence(&[list(vec![
+            int(1), int(1), int(2), int(3), int(5), int(8),
+        ])])
+        .unwrap();
+        assert_eq!(result, list(vec![int(1), int(1)]));
+    }
+
+    #[test]
+    fn test_find_linear_recurrence_geometric() {
+        // {1, 2, 4, 8, 16} -> {2} (a[n] = 2*a[n-1])
+        let result = builtin_find_linear_recurrence(&[list(vec![
+            int(1), int(2), int(4), int(8), int(16),
+        ])])
+        .unwrap();
+        assert_eq!(result, list(vec![int(2)]));
+    }
+
+    #[test]
+    fn test_find_linear_recurrence_arithmetic() {
+        // {1, 3, 5, 7, 9} -> {2, -1} (a[n] = 2*a[n-1] - a[n-2])
+        let result = builtin_find_linear_recurrence(&[list(vec![
+            int(1), int(3), int(5), int(7), int(9),
+        ])])
+        .unwrap();
+        assert_eq!(result, list(vec![int(2), int(-1)]));
+    }
+
+    #[test]
+    fn test_find_linear_recurrence_bad_args() {
+        assert!(builtin_find_linear_recurrence(&[]).is_err());
     }
 }

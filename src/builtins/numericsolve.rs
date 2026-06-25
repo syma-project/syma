@@ -155,25 +155,42 @@ fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError
 }
 
 fn golden_section<F: Fn(f64) -> f64>(f: F, a: f64, b: f64) -> (f64, f64) {
-    let phi = (1.0 + 5.0f64.sqrt()) / 2.0;
-    let tol = 1e-12;
-    let mut a = a;
-    let mut b = b;
+    let inv_phi = 2.0 / (1.0 + 5.0f64.sqrt());
+    let mut lo = a;
+    let mut hi = b;
+    let mut c = hi - (hi - lo) * inv_phi;
+    let mut d = lo + (hi - lo) * inv_phi;
+    let mut fc = f(c);
+    let mut fd = f(d);
 
-    loop {
-        if (b - a).abs() < tol {
+    for _ in 0..200 {
+        if (hi - lo) < 1e-14 {
             break;
         }
-        let c = b - (b - a) / phi;
-        let d = a + (b - a) / phi;
-        if f(c) < f(d) {
-            b = d;
+        if fc < fd {
+            hi = d;
+            d = c;
+            fd = fc;
+            c = hi - (hi - lo) * inv_phi;
+            fc = f(c);
+        } else if fd < fc {
+            lo = c;
+            c = d;
+            fc = fd;
+            d = lo + (hi - lo) * inv_phi;
+            fd = f(d);
         } else {
-            a = c;
+            // fc == fd (within floating point): narrow from both sides
+            lo = c;
+            hi = d;
+            c = hi - (hi - lo) * inv_phi;
+            d = lo + (hi - lo) * inv_phi;
+            fc = f(c);
+            fd = f(d);
         }
     }
 
-    let x_opt = (a + b) / 2.0;
+    let x_opt = (lo + hi) / 2.0;
     (f(x_opt), x_opt)
 }
 
@@ -925,121 +942,135 @@ fn qr_eigenvalues(matrix: &mut [Vec<f64>], n: usize) -> Vec<(f64, f64)> {
 
     let max_iter = 1000;
     let tol = 1e-12;
-    let mut converged = vec![false; n];
     let mut eigenvalues: Vec<(f64, f64)> = Vec::new();
-    let m = n;
+    let mut active_size = n; // size of the active trailing block
 
     for _ in 0..max_iter {
-        let mut split = m;
-        for i in (1..m).rev() {
-            if a[i - 1][i].abs() < tol && !converged[i] {
-                split = i;
-                converged[i] = true;
-            }
-        }
-
-        if split == 0 {
-            break;
-        }
-
-        if split == 1 {
-            eigenvalues.push((a[0][0], 0.0));
-            converged[0] = true;
-        } else if split == 2 {
-            let tr = a[0][0] + a[1][1];
-            let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-            let disc = tr * tr - 4.0 * det;
-            if disc >= 0.0 {
-                let sqrt_disc = disc.sqrt();
-                eigenvalues.push(((tr + sqrt_disc) / 2.0, 0.0));
-                eigenvalues.push(((tr - sqrt_disc) / 2.0, 0.0));
-            } else {
-                let re = tr / 2.0;
-                let im = (-disc).sqrt() / 2.0;
-                eigenvalues.push((re, im));
-                eigenvalues.push((re, -im));
-            }
-            for i in 0..split {
-                converged[i] = true;
-            }
-        } else {
-            let mut shift = a[split - 1][split - 1];
-            if a[split - 2][split - 2].abs() > a[split - 1][split - 1].abs() {
-                let tr = a[split - 2][split - 2] + a[split - 1][split - 1];
-                let det = a[split - 2][split - 2] * a[split - 1][split - 1]
-                    - a[split - 2][split - 1] * a[split - 1][split - 2];
+        // Check for deflation: scan sub-diagonal entries from the bottom
+        // of the active block upward to find where to split
+        while active_size > 2 {
+            if a[active_size - 2][active_size - 1].abs() < tol {
+                // Bottom 1x1 block has converged
+                eigenvalues.push((a[active_size - 1][active_size - 1], 0.0));
+                active_size -= 1;
+            } else if active_size > 2
+                && a[active_size - 3][active_size - 2].abs() < tol
+            {
+                // Bottom 2x2 block is decoupled
+                let i = active_size - 2;
+                let tr = a[i][i] + a[i + 1][i + 1];
+                let det = a[i][i] * a[i + 1][i + 1] - a[i][i + 1] * a[i + 1][i];
                 let disc = tr * tr - 4.0 * det;
                 if disc >= 0.0 {
                     let sqrt_disc = disc.sqrt();
-                    let r1 = (tr + sqrt_disc) / 2.0;
-                    let r2 = (tr - sqrt_disc) / 2.0;
-                    shift = if (r1 - a[split - 1][split - 1]).abs()
-                        < (r2 - a[split - 1][split - 1]).abs()
-                    {
-                        r1
-                    } else {
-                        r2
-                    };
-                }
-            }
-
-            let mut q = identity_matrix(split);
-            let mut r = a[..split]
-                .iter()
-                .map(|row| row[..split].to_vec())
-                .collect::<Vec<_>>();
-
-            for i in 0..split {
-                r[i][i] -= shift;
-            }
-
-            for i in 0..split - 1 {
-                let rr = (r[i][i] * r[i][i] + r[i + 1][i] * r[i + 1][i]).sqrt();
-                let c = if rr.abs() < 1e-30 { 0.0 } else { r[i][i] / rr };
-                let s = if rr.abs() < 1e-30 {
-                    1.0
+                    eigenvalues.push(((tr + sqrt_disc) / 2.0, 0.0));
+                    eigenvalues.push(((tr - sqrt_disc) / 2.0, 0.0));
                 } else {
-                    -r[i + 1][i] / rr
+                    let re = tr / 2.0;
+                    let im = (-disc).sqrt() / 2.0;
+                    eigenvalues.push((re, im));
+                    eigenvalues.push((re, -im));
+                }
+                active_size -= 2;
+            } else {
+                break;
+            }
+        }
+
+        if active_size <= 2 {
+            break;
+        }
+
+        // QR iteration with Wilkinson shift on the active block
+        let mut shift = a[active_size - 1][active_size - 1];
+        if a[active_size - 2][active_size - 2].abs() > a[active_size - 1][active_size - 1].abs() {
+            let tr = a[active_size - 2][active_size - 2] + a[active_size - 1][active_size - 1];
+            let det = a[active_size - 2][active_size - 2] * a[active_size - 1][active_size - 1]
+                - a[active_size - 2][active_size - 1] * a[active_size - 1][active_size - 2];
+            let disc = tr * tr - 4.0 * det;
+            if disc >= 0.0 {
+                let sqrt_disc = disc.sqrt();
+                let r1 = (tr + sqrt_disc) / 2.0;
+                let r2 = (tr - sqrt_disc) / 2.0;
+                shift = if (r1 - a[active_size - 1][active_size - 1]).abs()
+                    < (r2 - a[active_size - 1][active_size - 1]).abs()
+                {
+                    r1
+                } else {
+                    r2
                 };
+            }
+        }
 
-                for j in 0..split {
-                    let rt = r[i][j] * c + r[i + 1][j] * s;
-                    r[i + 1][j] = -r[i][j] * s + r[i + 1][j] * c;
-                    r[i][j] = rt;
-                }
+        let mut q = identity_matrix(active_size);
+        let mut r = a[..active_size]
+            .iter()
+            .map(|row| row[..active_size].to_vec())
+            .collect::<Vec<_>>();
 
-                for j in 0..split {
-                    let qt = q[j][i] * c + q[j][i + 1] * s;
-                    q[j][i + 1] = -q[j][i] * s + q[j][i + 1] * c;
-                    q[j][i] = qt;
-                }
+        for i in 0..active_size {
+            r[i][i] -= shift;
+        }
+
+        for i in 0..active_size - 1 {
+            let rr = (r[i][i] * r[i][i] + r[i + 1][i] * r[i + 1][i]).sqrt();
+            let c = if rr.abs() < 1e-30 { 0.0 } else { r[i][i] / rr };
+            let s = if rr.abs() < 1e-30 {
+                1.0
+            } else {
+                -r[i + 1][i] / rr
+            };
+
+            for j in 0..active_size {
+                let rt = r[i][j] * c + r[i + 1][j] * s;
+                r[i + 1][j] = -r[i][j] * s + r[i + 1][j] * c;
+                r[i][j] = rt;
             }
 
-            let mut rq = zero_matrix(split);
-            for i in 0..split {
-                for j in 0..split {
-                    for k in 0..split {
-                        rq[i][j] += r[i][k] * q[k][j];
-                    }
+            for j in 0..active_size {
+                let qt = q[j][i] * c + q[j][i + 1] * s;
+                q[j][i + 1] = -q[j][i] * s + q[j][i + 1] * c;
+                q[j][i] = qt;
+            }
+        }
+
+        let mut rq = zero_matrix(active_size);
+        for i in 0..active_size {
+            for j in 0..active_size {
+                for k in 0..active_size {
+                    rq[i][j] += r[i][k] * q[k][j];
                 }
             }
+        }
 
-            for i in 0..split {
-                rq[i][i] += shift;
-            }
+        for i in 0..active_size {
+            rq[i][i] += shift;
+        }
 
-            for i in 0..split {
-                for j in 0..split {
-                    a[i][j] = rq[i][j];
-                }
+        for i in 0..active_size {
+            for j in 0..active_size {
+                a[i][j] = rq[i][j];
             }
         }
     }
 
-    for i in 0..n {
-        if !converged[i] {
-            eigenvalues.push((a[i][i], 0.0));
+    // Extract remaining eigenvalues from the active block
+    if active_size == 2 {
+        let tr = a[0][0] + a[1][1];
+        let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+        let disc = tr * tr - 4.0 * det;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            eigenvalues.push(((tr + sqrt_disc) / 2.0, 0.0));
+            eigenvalues.push(((tr - sqrt_disc) / 2.0, 0.0));
+        } else {
+            let re = tr / 2.0;
+            let im = (-disc).sqrt() / 2.0;
+            eigenvalues.push((re, im));
+            eigenvalues.push((re, -im));
         }
+    } else if active_size == 1 {
+        eigenvalues.push((a[0][0], 0.0));
     }
 
     eigenvalues

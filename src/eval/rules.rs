@@ -278,6 +278,7 @@ pub fn builtin_replace_all(args: &[Value], env: &Env) -> Result<Value, EvalError
 }
 
 /// Builtin: ReplaceRepeated[expr, rules] — apply rules repeatedly until no change.
+#[allow(dead_code)]
 pub fn builtin_replace_repeated(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(

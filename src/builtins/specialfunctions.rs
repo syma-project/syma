@@ -23,7 +23,8 @@ const ERF_A5: f64 = 1.061405429;
 fn erf_approx(x: f64) -> f64 {
     let ax = x.abs();
     let t = 1.0 / (1.0 + ERF_P * ax);
-    let poly = ERF_A1 * t + (ERF_A2 * t + (ERF_A3 * t + (ERF_A4 * t + ERF_A5 * t)) * t) * t;
+    // Horner form: t * (A1 + t * (A2 + t * (A3 + t * (A4 + t * A5))))
+    let poly = t * (ERF_A1 + t * (ERF_A2 + t * (ERF_A3 + t * (ERF_A4 + t * ERF_A5))));
     let result = 1.0 - poly * (-ax * ax).exp();
     if x < 0.0 { -result } else { result }
 }
@@ -87,37 +88,29 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn inverse_erf_approx(x: f64) -> f64 {
-    if x.abs() < 1e-10 {
-        return x / std::f64::consts::PI * (2.0 + std::f64::consts::PI * x * x);
+    if x.abs() < 1e-15 {
+        return 0.0;
     }
     let s = x.signum();
     let ax = x.abs();
-    if ax < 0.7 {
-        let c0 = 0.5 * std::f64::consts::PI;
-        let c1 = c0 / 3.0;
-        let c2 = 3.0 * c0 / 40.0;
-        let c3 = c0 / 105.0;
-        let c4 = 3.0 * c0 / 3763.0;
-        let ax2 = ax * ax;
-        s * (ax
-            * (c0
-                + c1 * ax2
-                + c2 * ax2 * ax2
-                + c3 * ax2 * ax2 * ax2 * ax2
-                + c4 * ax2 * ax2 * ax2 * ax2 * ax2 * ax2))
+    // Initial guess
+    let mut w = if ax < 0.5 {
+        ax * (std::f64::consts::PI / 2.0).sqrt()
     } else {
-        let mut w = s * (-2.0 * (1.0 - ax) * (1.0 + 0.5 * (1.0 - ax))).ln() / std::f64::consts::PI;
-        for _ in 0..20 {
-            let ew = erf_approx(w);
-            let diff = ew - x;
-            if diff.abs() < 1e-16 {
-                break;
-            }
-            let deriv = 2.0 / std::f64::consts::PI.sqrt() * (-w * w).exp();
-            w -= diff / deriv;
+        (-2.0 * (1.0 - ax).ln()).sqrt()
+    };
+    w *= s;
+    // Newton's method: solve erf(w) = x, erf'(w) = 2/sqrt(pi) * exp(-w^2)
+    for _ in 0..50 {
+        let ew = erf_approx(w);
+        let diff = ew - x;
+        if diff.abs() < 1e-15 {
+            break;
         }
-        w
+        let deriv = 2.0 / std::f64::consts::PI.sqrt() * (-w * w).exp();
+        w -= diff / deriv;
     }
+    w
 }
 
 pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
@@ -637,6 +630,12 @@ pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
             "BesselI requires exactly 2 arguments: BesselI[n, z]".to_string(),
         ));
     }
+    // I_n(0) special cases for Integer inputs
+    if let (Value::Integer(n), Value::Integer(z)) = (&args[0], &args[1]) {
+        if z.is_zero() {
+            return Ok(Value::Integer(Integer::from(if n.is_zero() { 1 } else { 0 })));
+        }
+    }
     match (&args[0], &args[1]) {
         (Value::Integer(n), &_) if !n.is_negative() => {
             if let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) {
@@ -731,9 +730,9 @@ fn lambert_w_approx(z: f64) -> f64 {
     }
     // Initial guess
     let mut w = if z > 0.0 { z.ln() } else { -1.0 };
-    // Halley's method
+    // Halley's method: solve w*e^w = z
     for _ in 0..30 {
-        let ew = (-w).exp();
+        let ew = w.exp();
         let f = w * ew - z;
         let fp = ew * (w + 1.0);
         let fp2 = ew * (w + 2.0);

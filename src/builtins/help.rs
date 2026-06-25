@@ -421,6 +421,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
              Drop[list, {m, n}] removes elements m through n (inclusive).",
         ),
         (
+            "DropWhile",
+            "DropWhile[list, crit] drops elements from the front of list while crit returns True.\n\
+             Returns the remaining elements starting from the first element that fails the test.\n\
+             DropWhile[{1, 3, 5, 2, 4}, OddQ] gives {2, 4}.",
+        ),
+        (
             "E",
             "E is the base of the natural logarithm, approximately 2.71828.",
         ),
@@ -869,6 +875,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "MapApply",
             "MapApply[f, expr] (f @@@ expr) replaces heads at level 1, using elements of lists as arguments.\n\
              MapApply[f, {{a,b}, {c,d}}] → {f[a,b], f[c,d]}.",
+        ),
+        (
+            "MapIf",
+            "MapIf[f, list, crit] applies f only to elements of list matching the criterion crit.\n\
+             Non-matching elements are left unchanged.\n\
+             MapIf[Sqrt, {1, 4, 9, 16}, EvenQ] gives {1, 2, 9, 4}.",
         ),
         (
             "MatchQ",
@@ -1397,6 +1409,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "StringPart[s, n] gives the n-th character in string s.",
         ),
         (
+            "StringPartition",
+            "StringPartition[s, n] splits string s into substrings of length n.\n\
+             The last substring may be shorter if the string length is not a multiple of n.\n\
+             StringPartition[\"abcde\", 2] gives {\"ab\", \"cd\", \"e\"}.",
+        ),
+        (
             "StringPosition",
             "StringPosition[s, pat] gives the start and end positions of all matches of pat in s.",
         ),
@@ -1472,6 +1490,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
              Table[expr, {i, imin, imax}, {j, jmin, jmax}, ...] gives a nested list.",
         ),
         ("Take", "Take[list, n] gives the first n elements of list."),
+        (
+            "TakeWhile",
+            "TakeWhile[list, crit] takes elements from the front of list while crit returns True.\n\
+             Stops at the first element that fails the test.\n\
+             TakeWhile[{1, 3, 5, 2, 4}, OddQ] gives {1, 3, 5}.",
+        ),
         (
             "Tally",
             "Tally[list] counts occurrences of each distinct element in list.",

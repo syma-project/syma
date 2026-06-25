@@ -362,7 +362,9 @@ pub fn resultant(a: &[Rational], b: &[Rational]) -> Rational {
         }
     }
 
-    determinant_rational(&matrix)
+    let det = determinant_rational(&matrix);
+    // Sylvester matrix convention: multiply by (-1)^(m*n)
+    if (m * n) % 2 == 1 { -det } else { det }
 }
 
 /// Compute determinant using Gaussian elimination with partial pivoting.
