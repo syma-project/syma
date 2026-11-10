@@ -2705,16 +2705,6 @@ pub fn builtin_power_variable_expn(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
-/// NormalizeNormalizedPseudoBinomial[expr, x] — stub
-pub fn builtin_normalize_normalize_pseudo_binomial(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "NormalizeNormalizePseudoBinomial requires exactly 2 arguments".to_string(),
-        ));
-    }
-    Ok(args[0].clone())
-}
-
 // ─── Helper Functions ───
 
 fn compare_numeric<F>(a: &Value, b: &Value, cmp: F) -> Option<bool>

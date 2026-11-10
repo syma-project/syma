@@ -2199,23 +2199,6 @@ pub fn builtin_unit_triangle(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Predicate functions ──
 
-/// EvenQ[n] — true if n is an even integer.
-pub fn builtin_even_q(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_args("EvenQ", args, 1)?;
-    Ok(Value::Symbol(
-        if let Value::Integer(n) = &args[0] {
-            if n.is_divisible(&Integer::from(2)) {
-                "True"
-            } else {
-                "False"
-            }
-        } else {
-            "False"
-        }
-        .to_string(),
-    ))
-}
-
 /// PositiveQ[x] — true if x > 0 (works for Integer, Real, Rational).
 pub fn builtin_positive_q(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("PositiveQ", args, 1)?;
@@ -2883,30 +2866,6 @@ mod tests {
     }
 
     // ── Predicate tests ──
-
-    #[test]
-    fn test_even_q() {
-        assert_eq!(
-            builtin_even_q(&[int(2)]).unwrap(),
-            Value::Symbol("True".to_string())
-        );
-        assert_eq!(
-            builtin_even_q(&[int(3)]).unwrap(),
-            Value::Symbol("False".to_string())
-        );
-        assert_eq!(
-            builtin_even_q(&[int(0)]).unwrap(),
-            Value::Symbol("True".to_string())
-        );
-        assert_eq!(
-            builtin_even_q(&[int(-4)]).unwrap(),
-            Value::Symbol("True".to_string())
-        );
-        assert_eq!(
-            builtin_even_q(&[real(2.5)]).unwrap(),
-            Value::Symbol("False".to_string())
-        );
-    }
 
     #[test]
     fn test_positive_q() {
