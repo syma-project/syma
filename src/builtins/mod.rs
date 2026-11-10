@@ -245,6 +245,10 @@ pub fn register_builtins(env: &Env) {
         ("Dispatch", pattern::builtin_dispatch),
         ("Dist", integration::builtin_dist),
         ("Distrib", integration::builtin_distrib),
+        (
+            "DistributeDefinitions",
+            parallel::builtin_distribute_definitions,
+        ),
         ("Divisible", number_theory::builtin_divisible),
         ("DivisorSigma", number_theory::builtin_divisor_sigma),
         ("Divisors", number_theory::builtin_divisors),
@@ -519,6 +523,8 @@ pub fn register_builtins(env: &Env) {
             "SeriesCoefficient",
             symbolicmanip::builtin_series_coefficient,
         ),
+        ("SetSharedVariable", parallel::builtin_shared_variables),
+        ("SharedVariables", parallel::builtin_shared_variables),
         ("ShowStep", integration::builtin_show_step),
         ("Sign", arithmetic::builtin_sign),
         ("Simp", integration::builtin_simp),
@@ -648,6 +654,7 @@ pub fn register_builtins(env: &Env) {
         ("DivisorSum", number_theory::builtin_divisor_sum),
         ("DropWhile", list::builtin_drop_while),
         ("ExternalEvaluate", ffi::builtin_external_evaluate),
+        ("FindLibrary", crate::ffi::builtin_find_library),
         ("FindMaximum", numericsolve::builtin_find_maximum),
         ("FindMinimum", numericsolve::builtin_find_minimum),
         ("FindRoot", numericsolve::builtin_find_root),
@@ -691,6 +698,7 @@ pub fn register_builtins(env: &Env) {
         ("OperatorApply", operators::builtin_operator_apply),
         ("Or", logical::builtin_or),
         ("Outer", list::builtin_outer),
+        ("ParallelApply", parallel::builtin_parallel_apply),
         ("ParallelCombine", parallel::builtin_parallel_combine),
         ("ParallelMap", parallel::builtin_parallel_map),
         ("PositionFirst", operators::builtin_position_first),
@@ -1218,13 +1226,15 @@ pub fn register_builtins(env: &Env) {
     control::register(env);
     boolean::register(env);
     bitextra::register(env);
-    specialfuncmore::register(env);
     stringpatterns::register(env);
     imageproc::register(env);
     datamore::register(env);
     association::register(env);
     dataset::register(env);
     streams::register(env);
+    // `io` re-registers Import/Export/ImportString/ExportString as env-aware so
+    // option values and the session directory resolve at evaluation time.
+    io::register(env);
     mllite::register(env);
     graphtheory2::register(env);
     timeseries::register(env);
@@ -1242,6 +1252,13 @@ pub fn register_builtins(env: &Env) {
     // so it is authoritative over the overlapping session helpers.
     names::register(env);
     predicates::register(env);
+    // `linalgmore` supplies the sparse-aware dispatch for the shared
+    // `Dot`/`Tr`/`Part`/`Transpose`/`Total` surface plus the SVD `PseudoInverse`
+    // fallback; install it last so it is authoritative over `tensor`/`dataset`.
+    linalgmore::register_sparse(env);
+    // `expression` owns the FullSimplify/transform overrides; run last so they
+    // are authoritative over the gap-fill modules registered above.
+    expression::register_overrides(env);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
@@ -1301,11 +1318,15 @@ pub fn register_builtins(env: &Env) {
     // -- Eagerly-registered packages --
     developer::register(env);
     systeminfo::register(env);
+    crate::ffi::register(env);
     algebraic::register(env);
     // Message-aware overrides (Message/Assert/Quiet/On/Off/HoldForm) run last
     // so they take precedence over the earlier core registrations.
     error::register(env);
     specialfunctions::register_sfs(env);
+    // `specialfuncmore` re-registers the Bessel/Airy surface (general real
+    // order) on top of the sibling `specialfunctions` module, so it runs last.
+    specialfuncmore::register(env);
 
     // ── Add SYMA_HOME/Packages and SystemFiles to module search path ──
     if let Some(syma_home) = std::env::var_os("SYMA_HOME") {

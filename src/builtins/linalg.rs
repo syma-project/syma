@@ -51,6 +51,63 @@ fn matrix_dims(m: &[Value]) -> Option<(usize, usize)> {
     }
 }
 
+/// Return `f[args]` unevaluated (used when a builtin does not apply).
+fn unevaluated(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+/// True when `m` is a (possibly empty) rectangular matrix whose entries are all
+/// exact rationals. Used to select the exact-arithmetic path.
+fn matrix_all_exact(m: &[Value]) -> bool {
+    for row in m {
+        match row {
+            Value::List(inner) => {
+                if !inner
+                    .iter()
+                    .all(|v| matches!(v, Value::Integer(_) | Value::Rational(_)))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// True when every entry of the matrix is a real number (exact rational or
+/// machine `Real`) — suitable for the `f64` fallback path.
+fn matrix_all_real(m: &[Value]) -> bool {
+    for row in m {
+        match row {
+            Value::List(inner) => {
+                if !inner
+                    .iter()
+                    .all(|v| matches!(v, Value::Integer(_) | Value::Rational(_) | Value::Real(_)))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// True when `v` is a numeric zero, for singularity tests.
+fn is_numeric_zero(v: &Value) -> bool {
+    match v {
+        Value::Integer(i) => i.is_zero(),
+        Value::Rational(r) => r.is_zero(),
+        Value::Real(f) => f.is_zero(),
+        Value::Complex { re, im } => *re == 0.0 && *im == 0.0,
+        _ => false,
+    }
+}
+
 // ── Rational helpers ────────────────────────────────────────────────────────
 
 /// Convert a Value to a rug::Rational (accepts Integer and Rational variants).
@@ -93,6 +150,101 @@ fn rational_matrix_to_value(m: &[Vec<Rational>]) -> Value {
             .map(|row| Value::List(row.iter().map(|r| rational_to_value(r.clone())).collect()))
             .collect(),
     )
+}
+
+// ── Fraction-free (Bareiss) determinants ────────────────────────────────────
+
+/// Exact determinant of a square rational matrix via the Bareiss algorithm.
+/// All divisions are exact, so the result is the true determinant (and no
+/// intermediate entry growth beyond the final minors).
+fn det_bareiss_rational(a: &[Vec<Rational>]) -> Rational {
+    let n = a.len();
+    if n == 0 {
+        return Rational::from(1);
+    }
+    if n == 1 {
+        return a[0][0].clone();
+    }
+    let zero = Rational::from(0);
+    let mut m = a.to_vec();
+    let mut negate = false;
+    let mut prev = Rational::from(1);
+
+    for k in 0..n - 1 {
+        if m[k][k].is_zero() {
+            // Swap in a non-zero pivot from below (exact row-reduction swap).
+            match (k + 1..n).find(|&r| m[r][k] != zero) {
+                Some(r) => {
+                    m.swap(k, r);
+                    negate = !negate;
+                }
+                None => return zero,
+            }
+        }
+        let pivot = m[k][k].clone();
+        for i in k + 1..n {
+            for j in k + 1..n {
+                let t = Rational::from(&m[i][j] * &pivot) - Rational::from(&m[i][k] * &m[k][j]);
+                m[i][j] = Rational::from(&t / &prev);
+            }
+            m[i][k] = zero.clone();
+        }
+        prev = pivot;
+    }
+    let d = m[n - 1][n - 1].clone();
+    if negate { -d } else { d }
+}
+
+/// Inexact determinant of a square real matrix via Bareiss (f64).
+fn det_bareiss_f64(a: &[Vec<f64>]) -> f64 {
+    let n = a.len();
+    if n == 0 {
+        return 1.0;
+    }
+    if n == 1 {
+        return a[0][0];
+    }
+    let mut m = a.to_vec();
+    let mut sign = 1.0f64;
+    let mut prev = 1.0f64;
+    for k in 0..n - 1 {
+        if m[k][k] == 0.0 {
+            match (k + 1..n).find(|&r| m[r][k] != 0.0) {
+                Some(r) => {
+                    m.swap(k, r);
+                    sign = -sign;
+                }
+                None => return 0.0,
+            }
+        }
+        let pivot = m[k][k];
+        for i in k + 1..n {
+            for j in k + 1..n {
+                m[i][j] = (m[i][j] * pivot - m[i][k] * m[k][j]) / prev;
+            }
+            m[i][k] = 0.0;
+        }
+        prev = pivot;
+    }
+    sign * m[n - 1][n - 1]
+}
+
+/// Determinant of a square matrix, using exact Bareiss for rational input,
+/// an f64 Bareiss fallback for real input, and recursive cofactor expansion for
+/// symbolic (or complex) entries.
+fn det_value_fast(m: &[Value]) -> Result<Value, EvalError> {
+    if m.is_empty() {
+        return Ok(int(1));
+    }
+    if matrix_all_exact(m) {
+        let a = value_to_rational_matrix(m)?;
+        Ok(rational_to_value(det_bareiss_rational(&a)))
+    } else if matrix_all_real(m) {
+        let a = matrix_to_f64(m)?;
+        Ok(super::real(det_bareiss_f64(&a)))
+    } else {
+        det_recursive(m)
+    }
 }
 
 // ── Exact characteristic-polynomial / eigenvalue helpers ────────────────────
@@ -467,26 +619,27 @@ pub fn builtin_identity_matrix(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(matrix))
 }
 
-/// Det[m] — determinant via recursive cofactor expansion.
+/// Det[m] — determinant. Exact (Bareiss) over the rationals, f64 fallback for
+/// machine reals, recursive cofactor expansion for symbolic entries.
 pub fn builtin_det(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Det requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("Det", args));
     }
-    let m = as_list(&args[0])?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("Det", args)),
+    };
     if m.is_empty() {
         return Ok(int(1));
     }
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("Det: argument must be a matrix".to_string()))?;
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("Det", args)),
+    };
     if rows != cols {
-        return Err(EvalError::Error(format!(
-            "Det: matrix must be square (got {}×{})",
-            rows, cols
-        )));
+        return Ok(unevaluated("Det", args));
     }
-    det_recursive(m)
+    det_value_fast(m)
 }
 
 fn det_recursive(m: &[Value]) -> Result<Value, EvalError> {
@@ -571,36 +724,28 @@ pub fn builtin_linalg_transpose(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(result))
 }
 
-/// Inverse[m] — matrix inverse via adjugate method.
+/// Inverse[m] — matrix inverse via the adjugate (exact for rational input).
 pub fn builtin_inverse(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Inverse requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("Inverse", args));
     }
-    let m = as_list(&args[0])?;
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("Inverse: argument must be a matrix".to_string()))?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("Inverse", args)),
+    };
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("Inverse", args)),
+    };
     if rows != cols {
-        return Err(EvalError::Error(format!(
-            "Inverse: matrix must be square (got {}×{})",
-            rows, cols
-        )));
+        return Ok(unevaluated("Inverse", args));
     }
-    let d = det_recursive(m)?;
-    // Check for zero determinant
-    match &d {
-        Value::Integer(n) if n.is_zero() => {
-            return Err(EvalError::Error(
-                "Inverse: singular matrix (determinant is zero)".to_string(),
-            ));
-        }
-        Value::Real(r) if r.is_zero() => {
-            return Err(EvalError::Error(
-                "Inverse: singular matrix (determinant is zero)".to_string(),
-            ));
-        }
-        _ => {}
+    let d = det_value_fast(m)?;
+    if is_numeric_zero(&d) {
+        return Err(EvalError::NoMatch {
+            head: "Inverse".to_string(),
+            args: Box::new(args.to_vec()),
+        });
     }
     // Compute cofactor matrix
     let n = rows;
@@ -609,7 +754,7 @@ pub fn builtin_inverse(args: &[Value]) -> Result<Value, EvalError> {
         let mut row = Vec::with_capacity(n);
         for j in 0..n {
             let minor = minor_matrix(m, i, j)?;
-            let minor_det = det_recursive(&minor)?;
+            let minor_det = det_value_fast(&minor)?;
             let sign = if (i + j) % 2 == 0 { int(1) } else { int(-1) };
             let cofactor = builtin_times(&[sign, minor_det])?;
             row.push(cofactor);
@@ -739,86 +884,272 @@ pub fn builtin_cross(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(vec![r0, r1, r2]))
 }
 
-/// LinearSolve[A, b] — solve Ax = b via exact rational Gaussian elimination.
+/// LinearSolve[A, b] — solve A·x = b exactly.
+///
+/// `b` may be a vector (single right-hand side) or a matrix (one right-hand
+/// side per column, solved simultaneously). `A` may be rectangular; an
+/// over/under-determined system yields the particular solution with free
+/// variables set to zero. Exact rational input stays exact, real input uses an
+/// f64 fallback.
 pub fn builtin_linear_solve(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error(
-            "LinearSolve requires exactly 2 arguments".to_string(),
-        ));
+        return Ok(unevaluated("LinearSolve", args));
     }
-    let a = as_list(&args[0])?;
-    let b_list = as_list(&args[1])?;
+    let a = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("LinearSolve", args)),
+    };
+    let b = match &args[1] {
+        Value::List(_) => as_list(&args[1])?,
+        _ => return Ok(unevaluated("LinearSolve", args)),
+    };
+    let (m, n) = match matrix_dims(a) {
+        Some(d) => d,
+        None => return Ok(unevaluated("LinearSolve", args)),
+    };
 
-    let (n, cols) = matrix_dims(a).ok_or_else(|| {
-        EvalError::Error("LinearSolve: first argument must be a matrix".to_string())
-    })?;
-    if n != cols {
-        return Err(EvalError::Error(format!(
-            "LinearSolve: coefficient matrix must be square (got {}×{})",
-            n, cols
-        )));
-    }
-    if b_list.len() != n {
-        return Err(EvalError::Error(format!(
-            "LinearSolve: RHS vector length ({}) must match matrix size ({})",
-            b_list.len(),
-            n
-        )));
+    // Classify b: vector (m entries) or matrix (m rows × k columns).
+    let b_is_matrix = !b.is_empty() && matches!(b[0], Value::List(_));
+    let k = if b_is_matrix {
+        let (br, bc) = match matrix_dims(b) {
+            Some(d) => d,
+            None => return Ok(unevaluated("LinearSolve", args)),
+        };
+        if br != m {
+            return Ok(unevaluated("LinearSolve", args));
+        }
+        bc
+    } else {
+        if b.len() != m {
+            return Ok(unevaluated("LinearSolve", args));
+        }
+        1
+    };
+
+    let exact = matrix_all_exact(a)
+        && if b_is_matrix {
+            matrix_all_exact(b)
+        } else {
+            b.iter()
+                .all(|v| matches!(v, Value::Integer(_) | Value::Rational(_)))
+        };
+
+    // Build the augmented matrix [A | B] and reduce it to RREF.
+    if exact {
+        let mut aug: Vec<Vec<Rational>> = Vec::with_capacity(m);
+        for i in 0..m {
+            let row = as_list(&a[i])?;
+            let mut ar: Vec<Rational> = Vec::with_capacity(n + k);
+            for j in 0..n {
+                ar.push(value_to_rational(&row[j])?);
+            }
+            if b_is_matrix {
+                let brow = as_list(&b[i])?;
+                for j in 0..k {
+                    ar.push(value_to_rational(&brow[j])?);
+                }
+            } else {
+                ar.push(value_to_rational(&b[i])?);
+            }
+            aug.push(ar);
+        }
+        let pivots = rref_aug_rational(&mut aug, m, n);
+        if inconsistent_rational(&aug, m, n, k, pivots.len()) {
+            return Ok(Value::List(vec![]));
+        }
+        let sol = build_solution_rational(&aug, n, k, &pivots);
+        return Ok(solution_to_value(&sol, b_is_matrix));
     }
 
-    // Build augmented matrix [A|b] as Vec<Vec<Rational>>
-    let mut aug: Vec<Vec<Rational>> = Vec::with_capacity(n);
-    for i in 0..n {
+    // f64 fallback for inexact input.
+    let mut aug: Vec<Vec<f64>> = Vec::with_capacity(m);
+    for i in 0..m {
         let row = as_list(&a[i])?;
-        let mut aug_row = Vec::with_capacity(n + 1);
+        let mut ar: Vec<f64> = Vec::with_capacity(n + k);
         for j in 0..n {
-            aug_row.push(value_to_rational(&row[j])?);
+            ar.push(super::to_f64(&row[j]).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: row[j].type_name().to_string(),
+            })?);
         }
-        aug_row.push(value_to_rational(&b_list[i])?);
-        aug.push(aug_row);
+        if b_is_matrix {
+            let brow = as_list(&b[i])?;
+            for j in 0..k {
+                ar.push(super::to_f64(&brow[j]).ok_or_else(|| EvalError::TypeError {
+                    expected: "Number".to_string(),
+                    got: brow[j].type_name().to_string(),
+                })?);
+            }
+        } else {
+            ar.push(super::to_f64(&b[i]).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: b[i].type_name().to_string(),
+            })?);
+        }
+        aug.push(ar);
     }
+    let pivots = rref_aug_f64(&mut aug, m, n);
+    if inconsistent_f64(&aug, m, n, k, pivots.len()) {
+        return Ok(Value::List(vec![]));
+    }
+    let sol = build_solution_f64(&aug, n, k, &pivots);
+    Ok(solution_to_value_f64(&sol, b_is_matrix))
+}
 
-    // Forward elimination with exact pivot detection
-    for col in 0..n {
-        // Find pivot: first non-zero element at or below current row
-        let mut pivot_row = None;
-        for row in col..n {
-            if aug[row][col] != 0 {
-                pivot_row = Some(row);
-                break;
+/// Gauss–Jordan reduce the first `acols` columns of `aug` to RREF (exact).
+/// Returns the pivot columns found in the coefficient part.
+fn rref_aug_rational(aug: &mut [Vec<Rational>], rows: usize, acols: usize) -> Vec<usize> {
+    let total = if rows == 0 { 0 } else { aug[0].len() };
+    let mut pivots = Vec::new();
+    let mut r = 0;
+    for c in 0..acols {
+        if r >= rows {
+            break;
+        }
+        let Some(p) = (r..rows).find(|&i| aug[i][c] != 0) else {
+            continue;
+        };
+        aug.swap(r, p);
+        let pivot = aug[r][c].clone();
+        for j in c..total {
+            aug[r][j] = Rational::from(&aug[r][j] / &pivot);
+        }
+        for i in 0..rows {
+            if i != r && aug[i][c] != 0 {
+                let factor = aug[i][c].clone();
+                for j in c..total {
+                    let sub = Rational::from(&factor * &aug[r][j]);
+                    aug[i][j] = Rational::from(&aug[i][j] - &sub);
+                }
             }
         }
-        let pr = pivot_row
-            .ok_or_else(|| EvalError::Error("LinearSolve: singular matrix".to_string()))?;
-        aug.swap(col, pr);
+        pivots.push(c);
+        r += 1;
+    }
+    pivots
+}
 
-        // Eliminate below
-        for row in (col + 1)..n {
-            if aug[row][col] == 0 {
-                continue;
+fn rref_aug_f64(aug: &mut [Vec<f64>], rows: usize, acols: usize) -> Vec<usize> {
+    let total = if rows == 0 { 0 } else { aug[0].len() };
+    let mut pivots = Vec::new();
+    let mut r = 0;
+    for c in 0..acols {
+        if r >= rows {
+            break;
+        }
+        let mut p = r;
+        for i in (r + 1)..rows {
+            if aug[i][c].abs() > aug[p][c].abs() {
+                p = i;
             }
-            // factor = aug[row][col] / aug[col][col]
-            let factor = Rational::from(&aug[row][col] / &aug[col][col]);
-            for j in col..=n {
-                let sub = Rational::from(&factor * &aug[col][j]);
-                aug[row][j] = Rational::from(&aug[row][j] - &sub);
+        }
+        if aug[p][c].abs() <= 1e-14 {
+            continue;
+        }
+        aug.swap(r, p);
+        let pivot = aug[r][c];
+        for j in c..total {
+            aug[r][j] /= pivot;
+        }
+        for i in 0..rows {
+            if i != r && aug[i][c] != 0.0 {
+                let factor = aug[i][c];
+                for j in c..total {
+                    aug[i][j] -= factor * aug[r][j];
+                }
+            }
+        }
+        pivots.push(c);
+        r += 1;
+    }
+    pivots
+}
+
+#[allow(clippy::needless_range_loop)]
+fn build_solution_rational(
+    aug: &[Vec<Rational>],
+    n: usize,
+    k: usize,
+    pivots: &[usize],
+) -> Vec<Vec<Rational>> {
+    // x[col][rhs]; free variables default to zero.
+    let mut sol = vec![vec![Rational::from(0); k]; n];
+    for (r, &c) in pivots.iter().enumerate() {
+        for rhs in 0..k {
+            sol[c][rhs] = aug[r][n + rhs].clone();
+        }
+    }
+    sol
+}
+
+fn build_solution_f64(aug: &[Vec<f64>], n: usize, k: usize, pivots: &[usize]) -> Vec<Vec<f64>> {
+    let mut sol = vec![vec![0.0f64; k]; n];
+    for (r, &c) in pivots.iter().enumerate() {
+        for rhs in 0..k {
+            sol[c][rhs] = aug[r][n + rhs];
+        }
+    }
+    sol
+}
+
+/// True if the reduced augmented system is inconsistent for some RHS column.
+fn inconsistent_rational(
+    aug: &[Vec<Rational>],
+    rows: usize,
+    n: usize,
+    k: usize,
+    rank: usize,
+) -> bool {
+    for row in aug.iter().take(rows).skip(rank) {
+        for rhs in 0..k {
+            if row[n + rhs] != 0 {
+                // Only inconsistent when the coefficient part of the row is zero.
+                if row[..n].iter().all(|v| v.is_zero()) {
+                    return true;
+                }
             }
         }
     }
+    false
+}
 
-    // Back substitution
-    let mut x = vec![Rational::from(0); n];
-    for i in (0..n).rev() {
-        let mut sum = Rational::from(&aug[i][n]);
-        for j in (i + 1)..n {
-            let prod = Rational::from(&aug[i][j] * &x[j]);
-            sum = Rational::from(&sum - &prod);
+fn inconsistent_f64(aug: &[Vec<f64>], rows: usize, n: usize, k: usize, rank: usize) -> bool {
+    for row in aug.iter().take(rows).skip(rank) {
+        for rhs in 0..k {
+            if row[n + rhs].abs() > 1e-12 && row[..n].iter().all(|v| v.abs() <= 1e-12) {
+                return true;
+            }
         }
-        x[i] = Rational::from(&sum / &aug[i][i]);
     }
+    false
+}
 
-    let result: Vec<Value> = x.into_iter().map(rational_to_value).collect();
-    Ok(Value::List(result))
+fn solution_to_value(sol: &[Vec<Rational>], b_is_matrix: bool) -> Value {
+    if b_is_matrix {
+        Value::List(
+            sol.iter()
+                .map(|row| Value::List(row.iter().map(|r| rational_to_value(r.clone())).collect()))
+                .collect(),
+        )
+    } else {
+        Value::List(
+            sol.iter()
+                .map(|r| rational_to_value(r[0].clone()))
+                .collect(),
+        )
+    }
+}
+
+fn solution_to_value_f64(sol: &[Vec<f64>], b_is_matrix: bool) -> Value {
+    if b_is_matrix {
+        Value::List(
+            sol.iter()
+                .map(|row| Value::List(row.iter().map(|&x| super::real(x)).collect()))
+                .collect(),
+        )
+    } else {
+        Value::List(sol.iter().map(|r| super::real(r[0])).collect())
+    }
 }
 
 // ── f64 matrix helpers (used by eigenvalue / QR routines) ───────────────────
@@ -1280,16 +1611,19 @@ pub fn builtin_unit_vector(args: &[Value]) -> Result<Value, EvalError> {
 /// Returns the RREF of matrix m using exact rational arithmetic.
 pub fn builtin_row_reduce(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "RowReduce requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("RowReduce", args));
     }
-    let m = as_list(&args[0])?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("RowReduce", args)),
+    };
     if m.is_empty() {
         return Ok(Value::List(vec![]));
     }
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("RowReduce: argument must be a matrix".to_string()))?;
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("RowReduce", args)),
+    };
     let a = value_to_rational_matrix(m)?;
     let (rref, _) = rref_rational(&a, rows, cols);
     Ok(rational_matrix_to_value(&rref))
@@ -1299,16 +1633,19 @@ pub fn builtin_row_reduce(args: &[Value]) -> Result<Value, EvalError> {
 /// Computed via exact rational Gaussian elimination.
 pub fn builtin_matrix_rank(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "MatrixRank requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("MatrixRank", args));
     }
-    let m = as_list(&args[0])?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("MatrixRank", args)),
+    };
     if m.is_empty() {
         return Ok(int(0));
     }
-    let dims = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("MatrixRank: argument must be a matrix".to_string()))?;
+    let dims = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("MatrixRank", args)),
+    };
     let a = value_to_rational_matrix(m)?;
     let (_, rank) = rref_rational(&a, dims.0, dims.1);
     Ok(int(rank as i64))
@@ -1362,16 +1699,19 @@ fn rref_rational(a: &[Vec<Rational>], rows: usize, cols: usize) -> (Vec<Vec<Rati
 /// Returns exact rational basis vectors satisfying m·v = 0.
 pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "NullSpace requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("NullSpace", args));
     }
-    let m = as_list(&args[0])?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("NullSpace", args)),
+    };
     if m.is_empty() {
         return Ok(Value::List(vec![]));
     }
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("NullSpace: argument must be a matrix".to_string()))?;
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("NullSpace", args)),
+    };
     let a = value_to_rational_matrix(m)?;
     let (rref, rank) = rref_rational(&a, rows, cols);
 
@@ -1384,7 +1724,7 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     let mut pivot_cols = vec![false; cols];
     let mut r = 0;
     for c in 0..cols {
-        if r < rows && rref[r][c] == 1 {
+        if r < rows && !rref[r][c].is_zero() {
             pivot_cols[c] = true;
             r += 1;
         }
@@ -1415,7 +1755,173 @@ pub fn builtin_null_space(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(basis))
 }
 
-/// Row[m, i] — extract the i-th row (1-indexed).
+/// `pivot_columns` — leading (pivot) columns of a matrix in RREF.
+fn pivot_columns(rref: &[Vec<Rational>], rows: usize, cols: usize) -> Vec<usize> {
+    let mut pivots = Vec::new();
+    let mut r = 0;
+    for c in 0..cols {
+        if r < rows && !rref[r][c].is_zero() {
+            pivots.push(c);
+            r += 1;
+        }
+    }
+    pivots
+}
+
+/// RowSpace[m] — a basis of the row space (the non-zero rows of the RREF).
+pub fn builtin_row_space(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("RowSpace", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("RowSpace", args)),
+    };
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("RowSpace", args)),
+    };
+    let a = value_to_rational_matrix(m)?;
+    let (rref, rank) = rref_rational(&a, rows, cols);
+    let basis: Vec<Value> = rref[..rank]
+        .iter()
+        .map(|row| Value::List(row.iter().map(|r| rational_to_value(r.clone())).collect()))
+        .collect();
+    Ok(Value::List(basis))
+}
+
+/// ColumnSpace[m] — a basis of the column space (columns of `m` at the RREF
+/// pivot positions).
+pub fn builtin_column_space(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("ColumnSpace", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("ColumnSpace", args)),
+    };
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("ColumnSpace", args)),
+    };
+    let a = value_to_rational_matrix(m)?;
+    let (rref, _) = rref_rational(&a, rows, cols);
+    let pivots = pivot_columns(&rref, rows, cols);
+    let mut basis = Vec::with_capacity(pivots.len());
+    for c in pivots {
+        let col: Vec<Value> = (0..rows)
+            .map(|i| rational_to_value(a[i][c].clone()))
+            .collect();
+        basis.push(Value::List(col));
+    }
+    Ok(Value::List(basis))
+}
+
+/// CofactorMatrix[m] — the matrix of signed minors
+/// `(-1)^(i+j) Det[delete row i, col j]`.
+pub fn builtin_cofactor_matrix(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("CofactorMatrix", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("CofactorMatrix", args)),
+    };
+    if m.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("CofactorMatrix", args)),
+    };
+    let mut result = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let mut new_row = Vec::with_capacity(cols);
+        for j in 0..cols {
+            let minor = minor_matrix(m, i, j)?;
+            let d = det_value_fast(&minor)?;
+            let sign = if (i + j) % 2 == 0 { int(1) } else { int(-1) };
+            new_row.push(builtin_times(&[sign, d])?);
+        }
+        result.push(Value::List(new_row));
+    }
+    Ok(Value::List(result))
+}
+
+/// HankelMatrix[...] — constant along anti-diagonals.
+///
+/// * `HankelMatrix[n]` — n×n with `h[i][j] = i+j-1` when `i+j-1 <= n`, else 0.
+/// * `HankelMatrix[col]` — square with first column `col` (zero padded).
+/// * `HankelMatrix[col, row]` — first column `col`, last row `row`.
+pub fn builtin_hankel_matrix(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("HankelMatrix", args));
+    }
+    // First argument: dimension or column vector.
+    let (r, c, col, row): (usize, usize, Vec<Value>, Option<Vec<Value>>) = match &args[0] {
+        Value::Integer(i) => match i.to_usize() {
+            Some(n) => {
+                if args.len() == 2 {
+                    return Ok(unevaluated("HankelMatrix", args));
+                }
+                let col = (0..n).map(|k| int((k + 1) as i64)).collect();
+                (n, n, col, None)
+            }
+            None => return Ok(unevaluated("HankelMatrix", args)),
+        },
+        Value::List(items) => {
+            if items.is_empty() || !items.iter().all(|v| !matches!(v, Value::List(_))) {
+                return Ok(unevaluated("HankelMatrix", args));
+            }
+            let m = items.len();
+            if args.len() == 1 {
+                (m, m, items.clone(), None)
+            } else {
+                let rvals = match &args[1] {
+                    Value::List(rv) => rv.clone(),
+                    _ => return Ok(unevaluated("HankelMatrix", args)),
+                };
+                if rvals.is_empty() || rvals.iter().any(|v| matches!(v, Value::List(_))) {
+                    return Ok(unevaluated("HankelMatrix", args));
+                }
+                let nn = rvals.len();
+                (m, nn, items.clone(), Some(rvals))
+            }
+        }
+        _ => return Ok(unevaluated("HankelMatrix", args)),
+    };
+
+    let zero = int(0);
+    let mut matrix = Vec::with_capacity(r);
+    for i in 0..r {
+        let mut new_row = Vec::with_capacity(c);
+        for j in 0..c {
+            let s = i + j; // 0-based anti-diagonal index
+            let val = if s < r {
+                col[s].clone()
+            } else if let Some(ref row) = row {
+                // Beyond the column vector: read the last row, offset by rows.
+                let idx = s + 1 - r;
+                if idx < row.len() {
+                    row[idx].clone()
+                } else {
+                    zero.clone()
+                }
+            } else {
+                zero.clone()
+            };
+            new_row.push(val);
+        }
+        matrix.push(Value::List(new_row));
+    }
+    Ok(Value::List(matrix))
+}
 pub fn builtin_row(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -1719,24 +2225,26 @@ pub fn builtin_vector_angle(args: &[Value]) -> Result<Value, EvalError> {
 /// Returns a matrix of the same dimensions.
 pub fn builtin_minors(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error(
-            "Minors requires exactly 1 argument".to_string(),
-        ));
+        return Ok(unevaluated("Minors", args));
     }
-    let m = as_list(&args[0])?;
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("Minors", args)),
+    };
     if m.is_empty() {
         return Ok(Value::List(vec![]));
     }
-    let (rows, cols) = matrix_dims(m)
-        .ok_or_else(|| EvalError::Error("Minors: argument must be a matrix".to_string()))?;
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("Minors", args)),
+    };
 
     let mut result = Vec::with_capacity(rows);
     for i in 0..rows {
         let mut new_row = Vec::with_capacity(cols);
         for j in 0..cols {
             let minor = minor_matrix(m, i, j)?;
-            let d = det_recursive(&minor)?;
-            new_row.push(d);
+            new_row.push(det_value_fast(&minor)?);
         }
         result.push(Value::List(new_row));
     }
@@ -1768,6 +2276,10 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "RowReduce", builtin_row_reduce);
     register_builtin(env, "MatrixRank", builtin_matrix_rank);
     register_builtin(env, "NullSpace", builtin_null_space);
+    register_builtin(env, "RowSpace", builtin_row_space);
+    register_builtin(env, "ColumnSpace", builtin_column_space);
+    register_builtin(env, "CofactorMatrix", builtin_cofactor_matrix);
+    register_builtin(env, "HankelMatrix", builtin_hankel_matrix);
     register_builtin(env, "Row", builtin_row);
     register_builtin(env, "Column", builtin_column);
     register_builtin(env, "VectorAngle", builtin_vector_angle);
@@ -1776,6 +2288,10 @@ pub fn register(env: &crate::env::Env) {
     // handle higher-rank tensors; re-install them after this package's versions
     // so they are not shadowed once LinearAlgebra loads lazily.
     super::tensor::register(env);
+    // `linalgmore` re-installs its sparse-aware dispatch (and the SVD-backed
+    // `PseudoInverse` fallback) last so a lazy LinearAlgebra load does not
+    // shadow the sparse surface with the plain `tensor`/exact versions.
+    super::linalgmore::register_sparse(env);
 }
 
 /// Symbol names exported by the LinearAlgebra package.
@@ -1801,6 +2317,10 @@ pub const SYMBOLS: &[&str] = &[
     "RowReduce",
     "MatrixRank",
     "NullSpace",
+    "RowSpace",
+    "ColumnSpace",
+    "CofactorMatrix",
+    "HankelMatrix",
     "Row",
     "Column",
     "KroneckerProduct",
@@ -1828,6 +2348,14 @@ mod tests {
                 .map(|row| list(row.into_iter().map(int_val).collect()))
                 .collect(),
         )
+    }
+
+    fn rat(n: i64, d: i64) -> Value {
+        rational_value(Integer::from(n), Integer::from(d))
+    }
+
+    fn is_unevaluated(v: &Value, head: &str) -> bool {
+        matches!(v, Value::Call { head: h, .. } if h == head)
     }
 
     #[test]
@@ -2172,5 +2700,289 @@ mod tests {
     fn test_unit_vector_out_of_range() {
         assert!(builtin_unit_vector(&[int_val(3), int_val(0)]).is_err());
         assert!(builtin_unit_vector(&[int_val(3), int_val(4)]).is_err());
+    }
+
+    // ── Exact determinant (Bareiss) ────────────────────────────────────────
+
+    #[test]
+    fn test_det_bareiss_exact_integer() {
+        let m = matrix(vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 10]]);
+        assert_eq!(builtin_det(&[m]).unwrap(), int_val(-3));
+    }
+
+    #[test]
+    fn test_det_bareiss_zero_diagonal_needs_swap() {
+        // (0,0) is zero, forcing a fraction-free pivot swap with sign flip.
+        let m = matrix(vec![vec![0, 1, 2], vec![1, 0, 3], vec![2, 3, 0]]);
+        assert_eq!(builtin_det(&[m]).unwrap(), int_val(12));
+    }
+
+    #[test]
+    fn test_det_4x4_integer() {
+        let m = matrix(vec![
+            vec![1, 2, 3, 4],
+            vec![2, 3, 4, 1],
+            vec![3, 4, 1, 2],
+            vec![4, 1, 2, 3],
+        ]);
+        // Left-circulant with entries 1 + (i+j) mod 4 → determinant 160.
+        assert_eq!(builtin_det(&[m]).unwrap(), int_val(160));
+    }
+
+    #[test]
+    fn test_det_bareiss_matches_recursive() {
+        let cases = vec![
+            matrix(vec![vec![1, 2], vec![3, 4]]),
+            matrix(vec![vec![2, 1, 3], vec![0, -1, 2], vec![1, 0, 1]]),
+            matrix(vec![
+                vec![3, 1, 4, 1],
+                vec![5, 9, 2, 6],
+                vec![5, 3, 5, 8],
+                vec![9, 7, 9, 3],
+            ]),
+            matrix(vec![
+                vec![2, 0, 0, 1, 0],
+                vec![1, 3, 0, 0, 0],
+                vec![0, 1, 4, 0, 0],
+                vec![0, 0, 1, 5, 0],
+                vec![0, 0, 0, 1, 6],
+            ]),
+        ];
+        for m in cases {
+            assert_eq!(
+                builtin_det(&[m.clone()]).unwrap(),
+                det_recursive(as_list(&m).unwrap()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_det_exact_rational() {
+        let m = list(vec![
+            list(vec![rat(1, 2), rat(1, 3)]),
+            list(vec![rat(1, 4), rat(1, 5)]),
+        ]);
+        assert_eq!(builtin_det(&[m]).unwrap(), rat(1, 60));
+    }
+
+    #[test]
+    fn test_det_symbolic_unchanged() {
+        let a = Value::Symbol("a".into());
+        let b = Value::Symbol("b".into());
+        let c = Value::Symbol("c".into());
+        let d = Value::Symbol("d".into());
+        let m = list(vec![list(vec![a, b]), list(vec![c, d])]);
+        assert_eq!(
+            builtin_det(&[m.clone()]).unwrap(),
+            det_recursive(as_list(&m).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_det_unevaluated_non_matrix() {
+        assert!(is_unevaluated(&builtin_det(&[int_val(5)]).unwrap(), "Det"));
+        let rect = matrix(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        assert!(is_unevaluated(&builtin_det(&[rect]).unwrap(), "Det"));
+    }
+
+    // ── Inverse ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_inverse_3x3_exact_rational() {
+        let m = matrix(vec![vec![1, 2, 3], vec![0, 1, 4], vec![5, 6, 0]]);
+        let inv = builtin_inverse(&[m.clone()]).unwrap();
+        // m · m⁻¹ must be the identity, exactly.
+        let prod = builtin_dot(&[m, inv]).unwrap();
+        assert_eq!(
+            prod,
+            matrix(vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]])
+        );
+    }
+
+    #[test]
+    fn test_inverse_2x2_exact_values() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let inv = builtin_inverse(&[m]).unwrap();
+        let expected = list(vec![
+            list(vec![int_val(-2), int_val(1)]),
+            list(vec![rat(3, 2), rat(-1, 2)]),
+        ]);
+        assert_eq!(inv, expected);
+    }
+
+    #[test]
+    fn test_inverse_singular_unevaluated_input() {
+        // Non-square inverse stays unevaluated.
+        let rect = matrix(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        assert!(is_unevaluated(
+            &builtin_inverse(&[rect]).unwrap(),
+            "Inverse"
+        ));
+    }
+
+    // ── LinearSolve ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_linear_solve_multi_rhs() {
+        let a = matrix(vec![vec![2, 0], vec![0, 3]]);
+        let b = matrix(vec![vec![4, 2], vec![9, 3]]);
+        let x = builtin_linear_solve(&[a, b]).unwrap();
+        assert_eq!(x, matrix(vec![vec![2, 1], vec![3, 1]]));
+    }
+
+    #[test]
+    fn test_linear_solve_underdetermined() {
+        // x1 + x2 = 1, x2 + x3 = 1 → free x3 = 0 gives (0, 1, 0).
+        let a = matrix(vec![vec![1, 1, 0], vec![0, 1, 1]]);
+        let b = list(vec![int_val(1), int_val(1)]);
+        let x = builtin_linear_solve(&[a, b]).unwrap();
+        assert_eq!(x, list(vec![int_val(0), int_val(1), int_val(0)]));
+    }
+
+    #[test]
+    fn test_linear_solve_rectangular_consistent() {
+        // Overdetermined but consistent: (1,1,0) solves both.
+        let a = matrix(vec![vec![1, 1, 0], vec![0, 1, 1], vec![1, 2, 1]]);
+        let b = list(vec![int_val(1), int_val(1), int_val(2)]);
+        let x = builtin_linear_solve(&[a, b]).unwrap();
+        assert_eq!(x, list(vec![int_val(0), int_val(1), int_val(0)]));
+    }
+
+    #[test]
+    fn test_linear_solve_inconsistent() {
+        let a = matrix(vec![vec![1, 0], vec![0, 1], vec![1, 1]]);
+        let b = list(vec![int_val(1), int_val(1), int_val(3)]);
+        assert_eq!(builtin_linear_solve(&[a, b]).unwrap(), list(vec![]));
+    }
+
+    #[test]
+    fn test_linear_solve_inexact_fallback() {
+        let a = list(vec![
+            list(vec![super::super::real(2.0), super::super::real(0.0)]),
+            list(vec![super::super::real(0.0), super::super::real(4.0)]),
+        ]);
+        let b = list(vec![super::super::real(4.0), super::super::real(8.0)]);
+        let x = builtin_linear_solve(&[a, b]).unwrap();
+        let xs = as_list(&x).unwrap();
+        assert!((super::super::to_f64(&xs[0]).unwrap() - 2.0).abs() < 1e-10);
+        assert!((super::super::to_f64(&xs[1]).unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    // ── RREF / rank / spaces ───────────────────────────────────────────────
+
+    #[test]
+    fn test_row_reduce_exact_rational() {
+        let m = matrix(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        let rref = builtin_row_reduce(&[m]).unwrap();
+        let expected = list(vec![
+            list(vec![int_val(1), int_val(0), int_val(-1)]),
+            list(vec![int_val(0), int_val(1), int_val(2)]),
+        ]);
+        assert_eq!(rref, expected);
+    }
+
+    #[test]
+    fn test_matrix_rank() {
+        let m = matrix(vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]);
+        assert_eq!(builtin_matrix_rank(&[m]).unwrap(), int_val(2));
+    }
+
+    #[test]
+    fn test_null_space_exact() {
+        let m = matrix(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        let ns = builtin_null_space(&[m]).unwrap();
+        assert_eq!(
+            ns,
+            list(vec![list(vec![int_val(1), int_val(-2), int_val(1)])])
+        );
+    }
+
+    #[test]
+    fn test_row_space() {
+        let m = matrix(vec![vec![1, 2, 3], vec![2, 4, 6]]);
+        let rs = builtin_row_space(&[m]).unwrap();
+        assert_eq!(
+            rs,
+            list(vec![list(vec![int_val(1), int_val(2), int_val(3)])])
+        );
+    }
+
+    #[test]
+    fn test_column_space() {
+        let m = matrix(vec![vec![1, 2], vec![2, 4], vec![3, 6]]);
+        let cs = builtin_column_space(&[m]).unwrap();
+        assert_eq!(
+            cs,
+            list(vec![list(vec![int_val(1), int_val(2), int_val(3)])])
+        );
+    }
+
+    #[test]
+    fn test_cofactor_matrix() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let cof = builtin_cofactor_matrix(&[m]).unwrap();
+        assert_eq!(cof, matrix(vec![vec![4, -3], vec![-2, 1]]));
+    }
+
+    #[test]
+    fn test_cofactor_times_transpose_is_adjugate() {
+        let m = matrix(vec![vec![1, 2, 3], vec![0, 1, 4], vec![5, 6, 0]]);
+        let cof = builtin_cofactor_matrix(&[m.clone()]).unwrap();
+        let adj = builtin_linalg_transpose(&[cof]).unwrap();
+        // m · adj = det(m) · I
+        let prod = builtin_dot(&[m, adj]).unwrap();
+        let d = builtin_det(&[matrix(vec![vec![1, 2, 3], vec![0, 1, 4], vec![5, 6, 0]])]).unwrap();
+        assert_eq!(d, int_val(1));
+        assert_eq!(
+            prod,
+            matrix(vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]])
+        );
+    }
+
+    #[test]
+    fn test_minors_exact() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let mi = builtin_minors(&[m]).unwrap();
+        assert_eq!(mi, matrix(vec![vec![4, 3], vec![2, 1]]));
+    }
+
+    // ── HankelMatrix ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hankel_matrix_integer_n() {
+        let h = builtin_hankel_matrix(&[int_val(3)]).unwrap();
+        assert_eq!(h, matrix(vec![vec![1, 2, 3], vec![2, 3, 0], vec![3, 0, 0]]));
+    }
+
+    #[test]
+    fn test_hankel_matrix_list() {
+        let h = builtin_hankel_matrix(&[list(vec![int_val(1), int_val(2), int_val(3)])]).unwrap();
+        assert_eq!(h, matrix(vec![vec![1, 2, 3], vec![2, 3, 0], vec![3, 0, 0]]));
+    }
+
+    #[test]
+    fn test_hankel_matrix_column_row() {
+        let c = list(vec![int_val(1), int_val(2), int_val(3), int_val(4)]);
+        let r = list(vec![int_val(5), int_val(6), int_val(7), int_val(8)]);
+        let h = builtin_hankel_matrix(&[c, r]).unwrap();
+        let rows = as_list(&h).unwrap();
+        // Last row uses the column tail plus the row's tail (row[0] ignored).
+        assert_eq!(
+            rows[3],
+            list(vec![int_val(4), int_val(6), int_val(7), int_val(8)])
+        );
+        // First row is the (zero-padded) first column.
+        assert_eq!(
+            rows[0],
+            list(vec![int_val(1), int_val(2), int_val(3), int_val(4)])
+        );
+    }
+
+    #[test]
+    fn test_hankel_matrix_unevaluated_bad_input() {
+        assert!(is_unevaluated(
+            &builtin_hankel_matrix(&[Value::Symbol("x".into())]).unwrap(),
+            "HankelMatrix"
+        ));
     }
 }

@@ -134,7 +134,7 @@ fn missing_key(key: &str) -> Value {
 /// ds[{i, j}]           -> row selection by a list of positions
 /// ds[i, "field"]       -> cell value
 /// ds[All, {"a","b"}]   -> column subset (returns list of assocs with only those keys)
-pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Value, EvalError> {
+pub fn dataset_query(data: &Value, indices: &[Value], env: &Env) -> Result<Value, EvalError> {
     let mut current: Value = data.clone();
 
     for idx in indices {
@@ -147,6 +147,10 @@ pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Valu
             }
             Value::Str(key) => {
                 current = extract_column(&current, key)?;
+            }
+            Value::Call { head, args } if head == "Span" => {
+                // `a;;b` — row range (see `Span`).
+                current = select_span(&current, args)?;
             }
             Value::List(sel)
                 if !sel.is_empty() && sel.iter().all(|x| matches!(x, Value::Integer(_))) =>
@@ -172,9 +176,14 @@ pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Valu
                     .collect::<Result<Vec<_>, _>>()?;
                 current = select_columns(&current, &str_keys)?;
             }
+            // A function-valued specification is a query operator: apply it to
+            // the data accumulated so far (e.g. ds[All, "a", Total]).
+            Value::Builtin(..) | Value::PureFunction { .. } => {
+                current = apply_function(idx, std::slice::from_ref(&current), env)?;
+            }
             _ => {
                 return Err(EvalError::TypeError {
-                    expected: "Integer, String, List, or All".to_string(),
+                    expected: "Integer, String, List, All, or a function".to_string(),
                     got: idx.type_name().to_string(),
                 });
             }
@@ -182,6 +191,77 @@ pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Valu
     }
 
     Ok(current)
+}
+
+/// Select rows from a list by a `Span[start, end, step]` specification.
+///
+/// `All` (or a missing bound) stands for the first/last position and negative
+/// positions count from the end, mirroring `Part`'s `;;` row ranges.
+fn select_span(data: &Value, spec: &[Value]) -> Result<Value, EvalError> {
+    let items = match data {
+        Value::List(items) => items,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: data.type_name().to_string(),
+            });
+        }
+    };
+    if spec.is_empty() || spec.len() > 3 {
+        return Err(EvalError::Error(
+            "Span: expected 1 to 3 arguments".to_string(),
+        ));
+    }
+    let n = items.len() as i64;
+    let bound = |v: &Value, default: i64| -> Result<i64, EvalError> {
+        match v {
+            Value::Symbol(s) if s == "All" => Ok(default),
+            other => other.to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "Integer or All".to_string(),
+                got: other.type_name().to_string(),
+            }),
+        }
+    };
+    let start = bound(&spec[0], 1)?;
+    let end = if spec.len() >= 2 {
+        bound(&spec[1], n)?
+    } else {
+        start
+    };
+    let step = if spec.len() >= 3 {
+        spec[2].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: spec[2].type_name().to_string(),
+        })?
+    } else {
+        1
+    };
+    if step == 0 {
+        return Err(EvalError::Error("Span: step cannot be zero".to_string()));
+    }
+    // Resolve a possibly-negative 1-based bound to a 0-based index.
+    let resolve = |i: i64| -> Option<i64> {
+        let idx = if i > 0 { i - 1 } else { n + i };
+        if idx < 0 || idx >= n { None } else { Some(idx) }
+    };
+    let (start, end) = match (resolve(start), resolve(end)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Ok(Value::List(vec![])),
+    };
+    let mut out = Vec::new();
+    let mut cur = start;
+    if step > 0 {
+        while cur <= end {
+            out.push(items[cur as usize].clone());
+            cur += step;
+        }
+    } else {
+        while cur >= end {
+            out.push(items[cur as usize].clone());
+            cur += step;
+        }
+    }
+    Ok(Value::List(out))
 }
 
 /// Select one (possibly negative) 1-indexed position from a list.
@@ -986,5 +1066,237 @@ mod tests {
     fn test_part_still_delegates_for_plain_lists() {
         assert_eq!(eval_str("Part[{10, 20, 30}, 2]"), int(20));
         assert_eq!(eval_str("Part[{10, 20, 30}, -1]"), int(30));
+    }
+
+    // ── Dataset construction shapes ──
+
+    #[test]
+    fn test_dataset_from_assoc() {
+        let ds = eval_str("Dataset[<|\"a\"->1, \"b\"->2|>]");
+        assert!(matches!(ds, Value::Dataset(_)));
+        assert_eq!(eval_str("Dataset[<|\"a\"->1, \"b\"->2|>][\"a\"]"), int(1));
+    }
+
+    #[test]
+    fn test_dataset_from_list_of_assocs_unevaluated_head() {
+        // A Dataset of rows round-trips through Normal.
+        assert_eq!(
+            eval_str("Normal[Dataset[{<|\"a\"->1|>, <|\"a\"->2|>}]]"),
+            Value::List(vec![assoc(vec![("a", int(1))]), assoc(vec![("a", int(2))])])
+        );
+    }
+
+    // ── Query: row ranges (`;;`) and operators ──
+
+    #[test]
+    fn test_span_parses_to_span_head() {
+        assert_eq!(eval_str("Head[1;;3]"), Value::Symbol("Span".to_string()));
+        assert_eq!(
+            eval_str("1;;3"),
+            Value::Call {
+                head: "Span".to_string(),
+                args: vec![int(1), int(3)],
+            }
+        );
+    }
+
+    #[test]
+    fn test_query_row_span() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>, <|\"a\"->3|>, <|\"a\"->4|>}];
+            ds[2;;3]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![assoc(vec![("a", int(2))]), assoc(vec![("a", int(3))])])
+        );
+    }
+
+    #[test]
+    fn test_query_row_span_open_ended() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>, <|\"a\"->3|>}];
+            ds[2;;]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![assoc(vec![("a", int(2))]), assoc(vec![("a", int(3))])])
+        );
+    }
+
+    #[test]
+    fn test_query_span_then_column() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"b\"->10|>, <|\"b\"->20|>, <|\"b\"->30|>}];
+            ds[1;;2, \"b\"]
+        )",
+        );
+        assert_eq!(result, Value::List(vec![int(10), int(20)]));
+    }
+
+    #[test]
+    fn test_query_operator_total() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}];
+            ds[All, \"a\", Total]
+        )",
+        );
+        assert_eq!(result, int(6));
+    }
+
+    #[test]
+    fn test_query_operator_reverse() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>}];
+            ds[Reverse]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![assoc(vec![("a", int(2))]), assoc(vec![("a", int(1))])])
+        );
+    }
+
+    // ── Normal / Values / Keys ──
+
+    #[test]
+    fn test_keys_values_assoc() {
+        assert_eq!(
+            eval_str("Keys[<|\"a\"->1, \"b\"->2|>]"),
+            Value::List(vec![
+                Value::Str("a".to_string()),
+                Value::Str("b".to_string())
+            ])
+        );
+        assert_eq!(
+            eval_str("Values[<|\"a\"->1, \"b\"->2|>]"),
+            Value::List(vec![int(1), int(2)])
+        );
+    }
+
+    #[test]
+    fn test_keys_values_unwrap_dataset() {
+        assert_eq!(
+            eval_str("Keys[Dataset[<|\"a\"->1, \"b\"->2|>]]"),
+            Value::List(vec![
+                Value::Str("a".to_string()),
+                Value::Str("b".to_string())
+            ])
+        );
+        assert_eq!(
+            eval_str("Values[Dataset[<|\"a\"->1, \"b\"->2|>]]"),
+            Value::List(vec![int(1), int(2)])
+        );
+    }
+
+    #[test]
+    fn test_keys_values_dataset_column() {
+        // Values over the rows produced by a query.
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1, \"b\"->2|>, <|\"a\"->3, \"b\"->4|>}];
+            Values[ds[All]]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![int(1), int(2)]),
+                Value::List(vec![int(3), int(4)]),
+            ])
+        );
+    }
+
+    // ── Aggregation over query results ──
+
+    #[test]
+    fn test_aggregate_total_mean() {
+        let d = "ds = Dataset[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}];";
+        assert_eq!(eval_str(&format!("{d} Total[ds[All, \"a\"]]")), int(6));
+        assert_eq!(eval_str(&format!("{d} Mean[ds[All, \"a\"]]")), int(2));
+        assert_eq!(eval_str(&format!("{d} Count[ds[All, \"a\"], 2]")), int(1));
+    }
+
+    #[test]
+    fn test_aggregate_sort_select() {
+        let d = "ds = Dataset[{<|\"a\"->3|>, <|\"a\"->1|>, <|\"a\"->2|>}];";
+        assert_eq!(
+            eval_str(&format!("{d} Select[ds[All], Lookup[#, \"a\"] > 1 &]")),
+            Value::List(vec![assoc(vec![("a", int(3))]), assoc(vec![("a", int(2))])])
+        );
+        assert_eq!(
+            eval_str(&format!("{d} SortBy[ds[All], Lookup[#, \"a\"] &]")),
+            Value::List(vec![
+                assoc(vec![("a", int(1))]),
+                assoc(vec![("a", int(2))]),
+                assoc(vec![("a", int(3))]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_aggregate_group_by() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"g\"->\"x\"|>, <|\"g\"->\"y\"|>, <|\"g\"->\"x\"|>}];
+            GroupBy[ds[All], Lookup[#, \"g\"] &]
+        )",
+        );
+        let Value::Assoc(map) = result else {
+            panic!("GroupBy should yield an association");
+        };
+        assert_eq!(map.len(), 2);
+        match (&map["x"], &map["y"]) {
+            (Value::List(xs), Value::List(ys)) => {
+                assert_eq!(xs.len(), 2);
+                assert_eq!(ys.len(), 1);
+            }
+            other => panic!("GroupBy groups should be lists, got {other:?}"),
+        }
+    }
+
+    // ── SortBy directly on a Dataset ──
+
+    #[test]
+    fn test_sort_by_dataset_rewraps() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->3|>, <|\"a\"->1|>}];
+            SortBy[ds, Lookup[#, \"a\"] &]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::Dataset(std::sync::Arc::new(Value::List(vec![
+                assoc(vec![("a", int(1))]),
+                assoc(vec![("a", int(3))]),
+            ])))
+        );
+    }
+
+    // ── Unevaluated when inapplicable ──
+
+    #[test]
+    fn test_query_unevaluated_assoc_span_inapplicable() {
+        // A Span on a query that has no list to range over is still a list op;
+        // Query with a non-data target stays unevaluated.
+        assert_eq!(
+            eval_str("Query[5, All, \"a\"]"),
+            Value::Call {
+                head: "Query".to_string(),
+                args: vec![
+                    int(5),
+                    Value::Symbol("All".to_string()),
+                    Value::Str("a".to_string()),
+                ],
+            }
+        );
     }
 }

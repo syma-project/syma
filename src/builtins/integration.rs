@@ -479,6 +479,31 @@ pub fn builtin_coefficient(args: &[Value]) -> Result<Value, EvalError> {
             _ => Integer::from(1),
         })
         .unwrap_or(Integer::from(1));
+    // Negative power of the variable: `Coefficient[expr, x, -k]` is the
+    // coefficient of `x^0` in `expr * x^k`.
+    if n.is_negative() {
+        let shifted = Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                args[0].clone(),
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![Value::Symbol(var.clone()), Value::Integer(-n.clone())],
+                },
+            ],
+        };
+        // `Together` first so nested denominators normalise (`1/x * x -> 1`).
+        let combined =
+            crate::builtins::symbolicmanip::builtin_together(&[shifted.clone()]).unwrap_or(shifted);
+        let expanded =
+            crate::builtins::symbolic::builtin_expand(&[combined.clone()]).unwrap_or(combined);
+        let shift = crate::builtins::symbolicmanip::simplify_value(&expanded);
+        let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&shift, &var);
+        return Ok(coeffs
+            .first()
+            .cloned()
+            .unwrap_or(Value::Integer(Integer::from(0))));
+    }
     let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(expr, &var);
     let n_us = n.to_usize().unwrap_or(coeffs.len());
     if n_us >= coeffs.len() {
@@ -699,18 +724,7 @@ pub fn builtin_numerator(args: &[Value]) -> Result<Value, EvalError> {
             "Numerator requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Rational(r) => Ok(Value::Integer(r.numer().clone())),
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[0].clone()),
-        Value::Call { head, args }
-            if head == "Power"
-                && args.len() == 2
-                && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
-        {
-            Ok(Value::Integer(Integer::from(1)))
-        }
-        _ => Ok(args[0].clone()),
-    }
+    Ok(together_split(&args[0]).0)
 }
 
 /// Denominator[expr] — denominator of expression
@@ -720,21 +734,14 @@ pub fn builtin_denominator(args: &[Value]) -> Result<Value, EvalError> {
             "Denominator requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Rational(r) => Ok(Value::Integer(r.denom().clone())),
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[1].clone()),
-        Value::Call { head, args }
-            if head == "Power"
-                && args.len() == 2
-                && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
-        {
-            Ok(Value::Call {
-                head: "Power".to_string(),
-                args: vec![args[0].clone(), Value::Integer(Integer::from(1))],
-            })
-        }
-        _ => Ok(Value::Integer(Integer::from(1))),
-    }
+    Ok(together_split(&args[0]).1)
+}
+
+/// Normalize `expr` with `Together`, then split it into numerator/denominator.
+fn together_split(expr: &Value) -> (Value, Value) {
+    let combined = crate::builtins::symbolicmanip::builtin_together(&[expr.clone()])
+        .unwrap_or_else(|_| expr.clone());
+    crate::builtins::symbolicmanip::split_fraction(&combined)
 }
 
 /// Numer[expr] — alias for Numerator
@@ -766,6 +773,12 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     }
+    // Negative powers via a simple quotient `c / x^k`.
+    if let Value::Symbol(var_name) = &args[1]
+        && let Some(k) = quotient_negative_degree(&args[0], var_name)
+    {
+        return Ok(Value::Integer(Integer::from(k)));
+    }
     // Fallback: direct Power[base, exp] match
     match &args[0] {
         Value::Call {
@@ -776,6 +789,31 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ if args[0].struct_eq(&args[1]) => Ok(Value::Integer(Integer::from(1))),
         _ => Ok(Value::Integer(Integer::from(0))),
+    }
+}
+
+/// For a quotient `c / x^k` (numerator free of `x`, denominator a monomial)
+/// return `-k`; otherwise `None`.
+fn quotient_negative_degree(expr: &Value, var: &str) -> Option<i64> {
+    let Value::Call { head, args } = expr else {
+        return None;
+    };
+    if head != "Divide" || args.len() != 2 {
+        return None;
+    }
+    let nc = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], var);
+    if nc.iter().skip(1).any(|c| !is_zero(c)) {
+        return None;
+    }
+    let dc = crate::builtins::symbolic::extract_polynomial_coeffs(&args[1], var);
+    let deg = dc.len().saturating_sub(1) as i64;
+    if deg <= 0 {
+        return None;
+    }
+    if dc.iter().take(deg as usize).all(is_zero) && !is_zero(&dc[deg as usize]) {
+        Some(-deg)
+    } else {
+        None
     }
 }
 
@@ -1384,14 +1422,14 @@ pub fn builtin_inverse_function_of_linear(args: &[Value]) -> Result<Value, EvalE
     }
 }
 
-/// SubstFor[result, pattern, replacement] — substitute pattern in result
+/// SubstFor[u, v, x] — `v` with every `x` replaced by `u` (Rubi semantics).
 pub fn builtin_subst_for(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(EvalError::Error(
             "SubstFor requires exactly 3 arguments".to_string(),
         ));
     }
-    Ok(substitute_value(&args[0], &args[1], &args[2]))
+    Ok(substitute_value(&args[1], &args[2], &args[0]))
 }
 
 /// SubstForInverseFunction[result, func, x] — stub

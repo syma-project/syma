@@ -130,6 +130,15 @@ fn simplify_call_inner(head: &str, args: &[Value]) -> Value {
         "Times" => simplify_times(args),
         "Power" => simplify_power(args),
         "Divide" if args.len() == 2 => {
+            if is_one_v(&args[1]) {
+                return args[0].clone();
+            }
+            if matches!(&args[1], Value::Integer(n) if *n == -1) {
+                return simplify_call(
+                    "Times",
+                    &[Value::Integer(Integer::from(-1)), args[0].clone()],
+                );
+            }
             let (num, den) = cancel_factors(&args[0], &args[1]);
             if is_one_v(&den) {
                 num
@@ -161,6 +170,7 @@ fn is_one_v(v: &Value) -> bool {
     match v {
         Value::Integer(n) => *n == 1,
         Value::Real(r) => *r == Float::with_val(DEFAULT_PRECISION, 1.0),
+        Value::Rational(r) => **r == 1,
         _ => false,
     }
 }
@@ -481,11 +491,12 @@ fn collect_factors(val: &Value, factors: &mut Vec<(Value, Integer)>) {
             }
         }
         Value::Call { head, args } if head == "Power" && args.len() == 2 => {
-            let exp = match &args[1] {
-                Value::Integer(n) => n.clone(),
-                _ => Integer::from(1),
-            };
-            factors.push((args[0].clone(), exp));
+            // A non-integer (symbolic) exponent can't be tracked as an integer
+            // factor, so keep the whole `Power[base, exp]` opaque.
+            match &args[1] {
+                Value::Integer(n) => factors.push((args[0].clone(), n.clone())),
+                _ => factors.push((val.clone(), Integer::from(1))),
+            }
         }
         _ => factors.push((val.clone(), Integer::from(1))),
     }
@@ -2064,194 +2075,328 @@ fn find_var(expr: &Value) -> Option<String> {
     }
 }
 
-fn apart_expr(expr: &Value, var: &str) -> Value {
-    let (num, den) = extract_num_den(expr);
-    let den_expanded = expand_value(&den);
-    let num_expanded = expand_value(&num);
-
-    // Extract linear factors from the denominator. Prefer the unexpanded form
-    // so factored inputs like (x-1)(x+1) keep their individual factors; if that
-    // yields nothing, try to factor the expanded polynomial (e.g. x^2 - 1).
-    let mut factors = extract_linear_factors(&den, var);
-    if factors.is_empty() {
-        factors = simple_factor_linear(&den_expanded, var).unwrap_or_default();
+/// Drop trailing (high-degree) zero coefficients, keeping at least one entry.
+fn trim_coeffs(mut c: Vec<Value>) -> Vec<Value> {
+    while c.len() > 1 && is_zero_v(c.last().unwrap()) {
+        c.pop();
     }
-    if factors.is_empty() {
-        // Can't decompose — return as-is
-        if is_one_v(&den) {
-            return expr.clone();
-        }
-        return call("Apart", vec![expr.clone(), Value::Symbol(var.to_string())]);
-    }
-
-    // Check if numerator degree >= denominator degree
-    let num_deg = degree_in(&num_expanded, var);
-    let den_deg = degree_in(&den_expanded, var);
-    let mut remainder_num = num_expanded.clone();
-    let mut polynomial_part = Value::Integer(Integer::from(0));
-
-    if num_deg >= den_deg {
-        // Polynomial long division
-        let (quot, rem) = polyn_div(&num_expanded, &den_expanded, var);
-        polynomial_part = quot;
-        remainder_num = rem;
-    }
-
-    // Set up partial fraction: sum of A_i / (factor_i) for simple linear factors
-    let coeffs = solve_partial_fractions(&remainder_num, &factors, var);
-    if coeffs.is_empty() {
-        if is_one_v(&den) {
-            return polynomial_part;
-        }
-        return call("Apart", vec![expr.clone(), Value::Symbol(var.to_string())]);
-    }
-
-    // Build sum of partial fractions
-    let mut pf_terms: Vec<Value> = Vec::new();
-    for (i, (_, factor)) in factors.iter().enumerate() {
-        if i >= coeffs.len() {
-            break;
-        }
-        let coeff = &coeffs[i];
-        // Check if coefficient is zero
-        if is_zero_v(&simplify_value(coeff)) {
-            continue;
-        }
-        pf_terms.push(simplify_call("Divide", &[coeff.clone(), factor.clone()]));
-    }
-
-    let pf_sum = if pf_terms.is_empty() {
-        Value::Integer(Integer::from(0))
-    } else if pf_terms.len() == 1 {
-        pf_terms.into_iter().next().unwrap()
-    } else {
-        simplify_call("Plus", &pf_terms)
-    };
-
-    if is_zero_v(&simplify_value(&polynomial_part)) {
-        pf_sum
-    } else if is_zero_v(&simplify_value(&pf_sum)) {
-        polynomial_part
-    } else {
-        simplify_call("Plus", &[polynomial_part, pf_sum])
-    }
+    c
 }
 
-/// Extract linear factors (x + c) from a product in the denominator.
-fn extract_linear_factors(expr: &Value, var: &str) -> Vec<(Value, Value)> {
-    let mut factors = Vec::new();
-    match expr {
-        Value::Call { head, args } if head == "Times" => {
-            for arg in args {
-                extract_linear_factors_inner(arg, var, &mut factors);
+/// Convert a coefficient list to exact rationals, or `None` if any coefficient
+/// is not a rational constant.
+fn rational_coeffs(coeffs: &[Value]) -> Option<Vec<Rational>> {
+    coeffs.iter().map(value_to_rat).collect()
+}
+
+/// Fully factor a univariate rational polynomial into monic irreducible factors
+/// with multiplicities (linear factors from rational roots, plus irreducible
+/// quadratic/higher remainders).
+fn factor_irreducible_over_q(coeffs: &[Rational]) -> Vec<(Vec<Rational>, usize)> {
+    let mut out = Vec::new();
+    for (part, mult) in polynomial::square_free_decomposition(coeffs) {
+        let mut p = part;
+        loop {
+            let deg = polynomial::poly_degree(&p);
+            if deg == 0 {
+                break;
             }
+            if deg == 1 {
+                out.push((p, mult));
+                break;
+            }
+            match polynomial::rational_roots(&p).into_iter().next() {
+                Some(r) => {
+                    let lin = vec![-r, Rational::from(1)];
+                    let (q, _) = polynomial::poly_divmod(&p, &lin);
+                    out.push((lin, mult));
+                    p = q;
+                }
+                None => {
+                    out.push((p, mult));
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Structural factor extraction from an (unexpanded) denominator: recurse
+/// through `Times`/`Power`, emitting every non-constant factor with its
+/// multiplicity. Constant content is recovered later by degree/leading-coeff
+/// bookkeeping so it never needs to be tracked here.
+fn structural_collect(
+    f: &Value,
+    var: &str,
+    mult: usize,
+    out: &mut Vec<(Value, usize)>,
+) -> Option<()> {
+    match f {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                structural_collect(a, var, mult, out)?;
+            }
+            Some(())
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let m = match &args[1] {
+                Value::Integer(n) => n.to_usize()?,
+                _ => 1,
+            };
+            structural_collect(&args[0], var, mult.checked_mul(m)?, out)
         }
         _ => {
-            extract_linear_factors_inner(expr, var, &mut factors);
-        }
-    }
-    factors
-}
-
-fn extract_linear_factors_inner(expr: &Value, var: &str, factors: &mut Vec<(Value, Value)>) {
-    // Recognize (x + c) or (x - c) pattern
-    if let Value::Call { head, args } = expr {
-        if head == "Plus" && args.len() == 2 {
-            // Check for c + x or x + c
-            if let Value::Symbol(s) = &args[0]
-                && s == var
-                && is_numeric_constant(&args[1])
-            {
-                factors.push((args[1].clone(), expr.clone()));
-                return;
+            let coeffs = poly_coeffs(&expand_value(f), var);
+            if coeffs.len() >= 2 {
+                out.push((f.clone(), mult));
             }
-            if let Value::Symbol(s) = &args[1]
-                && s == var
-                && is_numeric_constant(&args[0])
-            {
-                factors.push((args[0].clone(), expr.clone()));
-                return;
-            }
-        }
-        if head == "Times" {
-            for arg in args {
-                extract_linear_factors_inner(arg, var, factors);
-            }
-            return;
-        }
-    }
-    // Try to factor quadratic (skip Plus/Times to avoid infinite recursion
-    // through simple_factor_linear → poly_coeffs → expand_value → simplify_call)
-    if let Value::Call { head, args: _ } = expr
-        && head != "Plus"
-        && head != "Times"
-    {
-        let factored = simple_factor_linear(expr, var);
-        if let Some(fs) = factored {
-            factors.extend(fs);
+            Some(())
         }
     }
 }
 
-/// Try to factor a polynomial into linear factors: (x+a)*(x+b) etc.
-fn simple_factor_linear(poly: &Value, var: &str) -> Option<Vec<(Value, Value)>> {
-    let coeffs = poly_coeffs(poly, var);
-    if coeffs.len() < 3 {
+/// Factor `den` (polynomial in `var`) into coprime factors with multiplicities.
+/// Prefers the factored *shape* of the input; rational factors of degree ≥ 2
+/// are split further over `Q`. Returns `None` when the factors do not multiply
+/// back to the denominator's degree.
+fn denominator_factors(
+    den: &Value,
+    den_expanded: &Value,
+    var: &str,
+) -> Option<Vec<(Vec<Value>, usize)>> {
+    let mut raw = Vec::new();
+    structural_collect(den, var, 1, &mut raw)?;
+    if raw.is_empty() {
         return None;
     }
+    let mut out: Vec<(Vec<Value>, usize)> = Vec::new();
+    for (f, m) in raw {
+        let fc = trim_coeffs(poly_coeffs(&expand_value(&f), var));
+        if fc.len() <= 1 {
+            continue;
+        }
+        match rational_coeffs(&fc) {
+            Some(rc) => {
+                for (rf, rm) in factor_irreducible_over_q(&rc) {
+                    let fv: Vec<Value> = rf.iter().map(polynomial::rational_to_value).collect();
+                    out.push((fv, rm.checked_mul(m)?));
+                }
+            }
+            None => out.push((fc, m)),
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    let dsum: usize = out.iter().map(|(f, m)| (f.len() - 1) * m).sum();
+    let dden = trim_coeffs(poly_coeffs(den_expanded, var))
+        .len()
+        .saturating_sub(1);
+    if dsum != dden {
+        return None;
+    }
+    Some(out)
+}
 
-    // For quadratic: a*x^2 + b*x + c
-    if coeffs.len() == 3
-        && let (Value::Integer(a), Value::Integer(b), Value::Integer(c)) =
-            (&coeffs[2], &coeffs[1], &coeffs[0])
-    {
-        let disc = b * b - Integer::from(4) * a * c;
-        if !disc.is_negative() {
-            let sqrt_disc = disc.clone().sqrt();
-            if (sqrt_disc.clone() * sqrt_disc.clone()) == disc {
-                let two_a: Integer = Integer::from(2) * a;
-                let neg_b: Integer = (-b).into();
-                let r1_num: Integer = (&neg_b + &sqrt_disc).into();
-                let r1 = Rational::from((&r1_num, &two_a));
-                let r2_num: Integer = (&neg_b - &sqrt_disc).into();
-                let r2 = Rational::from((&r2_num, &two_a));
-                let x = Value::Symbol(var.to_string());
-                let f1 = call(
+/// Gauss–Jordan elimination over symbolic `Value` entries. Returns a solution
+/// over the pivoted columns (free columns default to zero).
+fn solve_linear_value_system(mut a: Vec<Vec<Value>>, mut b: Vec<Value>) -> Option<Vec<Value>> {
+    let n = a.len();
+    if n == 0 {
+        return Some(vec![]);
+    }
+    let mut pivot_row_of_col: Vec<Option<usize>> = vec![None; n];
+    let mut row = 0usize;
+    let neg_one = Value::Integer(Integer::from(-1));
+    for col in 0..n {
+        let mut pr = None;
+        for r in row..n {
+            if !is_zero_v(&a[r][col]) {
+                pr = Some(r);
+                break;
+            }
+        }
+        let Some(pr) = pr else { continue };
+        a.swap(row, pr);
+        b.swap(row, pr);
+        let pv = a[row][col].clone();
+        for c in col..n {
+            a[row][c] = simplify_value(&exact_div(&a[row][c].clone(), &pv));
+        }
+        b[row] = simplify_value(&exact_div(&b[row].clone(), &pv));
+        for r in 0..n {
+            if r == row {
+                continue;
+            }
+            let f = a[r][col].clone();
+            if is_zero_v(&f) {
+                continue;
+            }
+            let neg_f = simplify_call("Times", &[neg_one.clone(), f]);
+            for c in col..n {
+                a[r][c] = simplify_value(&simplify_call(
                     "Plus",
-                    vec![
-                        x.clone(),
-                        call(
-                            "Times",
-                            vec![
-                                Value::Integer(Integer::from(-1)),
-                                Value::Rational(Box::new(r1.clone())),
-                            ],
-                        ),
+                    &[
+                        a[r][c].clone(),
+                        simplify_call("Times", &[neg_f.clone(), a[row][c].clone()]),
                     ],
-                );
-                let f2 = call(
-                    "Plus",
-                    vec![
-                        x,
-                        call(
-                            "Times",
-                            vec![
-                                Value::Integer(Integer::from(-1)),
-                                Value::Rational(Box::new(r2.clone())),
-                            ],
-                        ),
-                    ],
-                );
-                let neg_r1: Rational = (-&r1).into();
-                let neg_r2: Rational = (-&r2).into();
-                return Some(vec![
-                    (Value::Rational(Box::new(neg_r1)), f1),
-                    (Value::Rational(Box::new(neg_r2)), f2),
-                ]);
+                ));
+            }
+            b[r] = simplify_value(&simplify_call(
+                "Plus",
+                &[
+                    b[r].clone(),
+                    simplify_call("Times", &[neg_f.clone(), b[row].clone()]),
+                ],
+            ));
+        }
+        pivot_row_of_col[col] = Some(row);
+        row += 1;
+        if row == n {
+            break;
+        }
+    }
+    let mut x = vec![Value::Integer(Integer::from(0)); n];
+    for (col, pr) in pivot_row_of_col.iter().enumerate() {
+        if let Some(r) = pr {
+            x[col] = b[*r].clone();
+        }
+    }
+    Some(x)
+}
+
+fn find_any_var(expr: &Value) -> String {
+    if let Some(v) = find_var(expr) {
+        return v;
+    }
+    "x".to_string()
+}
+
+fn apart_expr(expr: &Value, var: &str) -> Value {
+    let unevaluated = || call("Apart", vec![expr.clone(), Value::Symbol(var.to_string())]);
+
+    let (num, den) = extract_num_den(expr);
+    if is_one_v(&simplify_value(&den)) {
+        return simplify_value(&expand_value(&num));
+    }
+    if !free_appears_p(&den, var) {
+        return simplify_value(expr);
+    }
+
+    let num_e = simplify_value(&expand_value(&num));
+    let den_e = simplify_value(&expand_value(&den));
+
+    let dc = trim_coeffs(poly_coeffs(&den_e, var));
+    if dc.len() <= 1 {
+        return simplify_value(expr);
+    }
+    let nc = trim_coeffs(poly_coeffs(&num_e, var));
+
+    let Some(factors) = denominator_factors(&den, &den_e, var) else {
+        return unevaluated();
+    };
+
+    // Polynomial part: num = q * den + r.
+    let (q_coeffs, r_coeffs) = coeff_div(&nc, &dc);
+    let mut r = trim_coeffs(r_coeffs);
+
+    let d: usize = factors.iter().map(|(f, m)| (f.len() - 1) * m).sum();
+    if d == 0 {
+        return unevaluated();
+    }
+    if r.len() > d {
+        r.truncate(d);
+    } else {
+        r.resize(d, Value::Integer(Integer::from(0)));
+    }
+
+    // Constant content `c` with `den == c * prod f_i^{m_i}` (the factors are
+    // coprime but not necessarily monic for the symbolic path).
+    let mut prod_lead = Value::Integer(Integer::from(1));
+    for (f, m) in &factors {
+        if let Some(lead) = f.last() {
+            for _ in 0..*m {
+                prod_lead = simplify_value(&simplify_call("Times", &[prod_lead, lead.clone()]));
             }
         }
     }
-    None
+    let content = simplify_value(&exact_div(dc.last().unwrap(), &prod_lead));
+
+    // E_{i,k} = den / f_i^k, index-aligned with the unknown columns.
+    let mut e_list: Vec<Vec<Value>> = Vec::new();
+    for (i, (_fi, mi)) in factors.iter().enumerate() {
+        for k in 1..=*mi {
+            let mut e = vec![content.clone()];
+            for (j, (fj, mj)) in factors.iter().enumerate() {
+                let mult = if j == i { mi - k } else { *mj };
+                if mult > 0 {
+                    e = cvv_mul(&e, &cvv_pow(fj, mult));
+                }
+            }
+            e_list.push(trim_coeffs(e));
+        }
+    }
+
+    // Assemble the linear system: num (remainder) = sum g_{i,k} * E_{i,k}.
+    let mut matrix: Vec<Vec<Value>> = vec![vec![Value::Integer(Integer::from(0)); d]; d];
+    let mut e_index = 0usize;
+    let mut col = 0usize;
+    for (fi, mi) in factors.iter() {
+        for _k in 1..=*mi {
+            let e = &e_list[e_index];
+            e_index += 1;
+            for j in 0..(fi.len() - 1) {
+                for (t, row) in matrix.iter_mut().enumerate() {
+                    if t >= j && (t - j) < e.len() {
+                        row[col] = e[t - j].clone();
+                    }
+                }
+                col += 1;
+            }
+        }
+    }
+
+    let Some(sol) = solve_linear_value_system(matrix, r) else {
+        return unevaluated();
+    };
+
+    // Rebuild the partial fractions.
+    let mut terms: Vec<Value> = Vec::new();
+    let poly_part = simplify_value(&rebuild_poly(&trim_coeffs(q_coeffs), var));
+    if !is_zero_v(&poly_part) {
+        terms.push(poly_part);
+    }
+    let mut sol_idx = 0usize;
+    for (fi, mi) in factors.iter() {
+        for k in 1..=*mi {
+            let deg = fi.len() - 1;
+            let g_coeffs: Vec<Value> = sol[sol_idx..sol_idx + deg].to_vec();
+            sol_idx += deg;
+            let g = rebuild_poly(&g_coeffs, var);
+            if is_zero_v(&simplify_value(&g)) {
+                continue;
+            }
+            let f_val = rebuild_poly(fi, var);
+            let denom = if k == 1 {
+                f_val
+            } else {
+                call(
+                    "Power",
+                    vec![f_val, Value::Integer(Integer::from(k as i64))],
+                )
+            };
+            terms.push(exact_div(&g, &denom));
+        }
+    }
+
+    if terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        simplify_call("Plus", &terms)
+    }
 }
 
 fn poly_coeffs(expr: &Value, var: &str) -> Vec<Value> {
@@ -2367,6 +2512,7 @@ fn get_polynomial_degree(expr: &Value, var: &str) -> i64 {
 }
 
 /// Polynomial division: returns (quotient, remainder).
+#[allow(dead_code)]
 fn polyn_div(num: &Value, den: &Value, var: &str) -> (Value, Value) {
     let num_coeffs = poly_coeffs(num, var);
     let den_coeffs = poly_coeffs(den, var);
@@ -2460,43 +2606,6 @@ fn rebuild_poly(coeffs: &[Value], var: &str) -> Value {
     }
 }
 
-/// Solve for partial fraction coefficients using polynomial identity.
-/// For factors (x + a_i), set up: num = sum(coeff_i * product(other_factors)).
-fn solve_partial_fractions(num: &Value, factors: &[(Value, Value)], var: &str) -> Vec<Value> {
-    let n = factors.len();
-    if n == 0 {
-        return vec![];
-    }
-
-    // For simple linear factors, use residue method: substitute root of each factor.
-    // For A/(x+a): A = num(-a) / product(other_factors(-a))
-    let mut coeffs = Vec::new();
-    for (i, (root_neg, _factor)) in factors.iter().enumerate() {
-        // root_neg is the constant c in (x + c), so root is -c
-        let root = simplify_call(
-            "Times",
-            &[Value::Integer(Integer::from(-1)), root_neg.clone()],
-        );
-
-        // Evaluate numerator at root
-        let num_at_root = simplify_value(&substitute(num, var, &root));
-
-        // Evaluate product of all other factors at root
-        let mut product = Value::Integer(Integer::from(1));
-        for (j, (_root_neg, factor)) in factors.iter().enumerate() {
-            if j == i {
-                continue;
-            }
-            let fac_at_root = simplify_value(&substitute(factor, var, &root));
-            product = simplify_call("Times", &[product, fac_at_root]);
-        }
-
-        let coeff = simplify_call("Divide", &[num_at_root, product]);
-        coeffs.push(coeff);
-    }
-    coeffs
-}
-
 // ── Together ──
 
 pub fn builtin_together(args: &[Value]) -> Result<Value, EvalError> {
@@ -2508,79 +2617,226 @@ pub fn builtin_together(args: &[Value]) -> Result<Value, EvalError> {
     Ok(together_expr(&args[0]))
 }
 
-fn together_expr(expr: &Value) -> Value {
-    match expr {
-        // For a sum of fractions
-        Value::Call { head, args } if head == "Plus" => {
-            let terms = args;
-            if terms.is_empty() {
-                return expr.clone();
-            }
-            // Collect numerators and denominators
-            let mut numerators: Vec<Value> = Vec::new();
-            let mut denominators: Vec<Value> = Vec::new();
-            for term in terms {
-                let (n, d) = extract_num_den(term);
-                numerators.push(n);
-                denominators.push(d);
-            }
-
-            // Common denominator = LCM of all denominators (product / GCD approach)
-            // For simplicity: use product of all denominators
-            let mut common_den = Value::Integer(Integer::from(1));
-            for d in &denominators {
-                if !is_one_v(d) {
-                    common_den = simplify_call("Times", &[common_den, d.clone()]);
+/// Split an expression into a `(numerator, denominator)` pair, descending
+/// through products, quotients and negative powers.
+pub(crate) fn split_fraction(v: &Value) -> (Value, Value) {
+    match v {
+        Value::Rational(r) => (
+            Value::Integer(r.numer().clone()),
+            Value::Integer(r.denom().clone()),
+        ),
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            (args[0].clone(), args[1].clone())
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut num = Vec::new();
+            let mut den = Vec::new();
+            for a in args {
+                let (n, d) = split_fraction(a);
+                if !is_one_v(&n) {
+                    num.push(n);
+                }
+                if !is_one_v(&d) {
+                    den.push(d);
                 }
             }
-
-            // For each term, multiply numerator by (common_den / own_den)
-            let mut scaled_numerator: Vec<Value> = Vec::new();
-            for (i, n) in numerators.iter().enumerate() {
-                let own_den = &denominators[i];
-                let scale = if is_one_v(own_den) {
-                    Value::Integer(Integer::from(1))
-                } else {
-                    simplify_call("Divide", &[common_den.clone(), own_den.clone()])
-                };
-                let scaled = simplify_call("Times", &[n.clone(), scale]);
-                scaled_numerator.push(expand_value(&simplify_value(&scaled)));
-            }
-
-            // Sum all scaled numerators
-            let combined_num = if scaled_numerator.len() == 1 {
-                scaled_numerator.into_iter().next().unwrap()
-            } else {
-                expand_value(&simplify_call("Plus", &scaled_numerator))
-            };
-
-            let combined_num_s = simplify_value(&combined_num);
-            let combined_den_s = simplify_value(&common_den);
-
-            // Try to cancel common factors
-            let (final_num, final_den) = cancel_factors(&combined_num_s, &combined_den_s);
-
-            if is_one_v(&simplify_value(&final_den)) {
-                simplify_value(&final_num)
-            } else {
-                simplify_call(
-                    "Divide",
-                    &[simplify_value(&final_num), simplify_value(&final_den)],
-                )
-            }
+            (rebuild_times(num), rebuild_times(den))
         }
-        // Single fraction
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            let (n, d) = cancel_factors(&args[0], &args[1]);
-            if is_one_v(&simplify_value(&d)) {
-                simplify_value(&n)
-            } else {
-                call("Divide", vec![simplify_value(&n), simplify_value(&d)])
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(n) = &args[1] {
+                if *n == -1 {
+                    return (Value::Integer(Integer::from(1)), args[0].clone());
+                }
+                if n.is_negative() {
+                    return (
+                        Value::Integer(Integer::from(1)),
+                        call("Power", vec![args[0].clone(), Value::Integer(-n.clone())]),
+                    );
+                }
             }
+            (v.clone(), Value::Integer(Integer::from(1)))
         }
-        // Non-sum, non-division: unchanged
-        _ => expr.clone(),
+        _ => (v.clone(), Value::Integer(Integer::from(1))),
     }
+}
+
+fn rebuild_times(mut factors: Vec<Value>) -> Value {
+    match factors.len() {
+        0 => Value::Integer(Integer::from(1)),
+        1 => factors.pop().unwrap(),
+        _ => call("Times", factors),
+    }
+}
+
+/// Collect `(base, exponent)` pairs from a product/power expression.
+fn collect_power_parts(v: &Value, out: &mut Vec<(Value, Integer)>) {
+    match v {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                collect_power_parts(a, out);
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(n) = &args[1] {
+                out.push((args[0].clone(), n.clone()));
+            } else {
+                out.push((v.clone(), Integer::from(1)));
+            }
+        }
+        _ => out.push((v.clone(), Integer::from(1))),
+    }
+}
+
+/// Merge `src` factor pairs into `dst`, keeping the larger exponent per base.
+fn merge_power_parts(dst: &mut Vec<(Value, Integer)>, src: &[(Value, Integer)]) {
+    for (b, e) in src {
+        if let Some(g) = dst.iter_mut().find(|(d, _)| d.struct_eq(b)) {
+            if *e > g.1 {
+                g.1 = e.clone();
+            }
+        } else {
+            dst.push((b.clone(), e.clone()));
+        }
+    }
+}
+
+/// Exact polynomial division on coefficient vectors; `None` on a nonzero
+/// remainder or a non-polynomial operand.
+fn exact_poly_div(a: &Value, b: &Value, var: &str) -> Option<Value> {
+    let ac = poly_coeffs(a, var);
+    let bc = trim_coeffs(poly_coeffs(b, var));
+    if bc.is_empty() || (bc.len() == 1 && is_zero_v(&bc[0])) {
+        return None;
+    }
+    if bc.len() == 1 {
+        let inv = inverse_value(&bc[0]);
+        let q: Vec<Value> = ac
+            .iter()
+            .map(|c| simplify_value(&simplify_call("Times", &[c.clone(), inv.clone()])))
+            .collect();
+        return Some(rebuild_poly(&trim_coeffs(q), var));
+    }
+    let (q, r) = coeff_div(&ac, &bc);
+    if r.iter().all(is_zero_v) {
+        Some(rebuild_poly(&trim_coeffs(q), var))
+    } else {
+        None
+    }
+}
+
+/// Cancel a common polynomial factor from numerator/denominator via their gcd.
+fn cancel_poly_gcd(a: &Value, b: &Value) -> (Value, Value) {
+    let Some(var) = find_var(b).or_else(|| find_var(a)) else {
+        return (a.clone(), b.clone());
+    };
+    if !is_polynomial_in(a, &var) || !is_polynomial_in(b, &var) {
+        return (a.clone(), b.clone());
+    }
+    let Ok(g) = builtin_polynomial_gcd(&[a.clone(), b.clone(), Value::Symbol(var.clone())]) else {
+        return (a.clone(), b.clone());
+    };
+    let gs = simplify_value(&g);
+    if is_one_v(&gs) || is_zero_v(&gs) {
+        return (a.clone(), b.clone());
+    }
+    match (exact_poly_div(a, &gs, &var), exact_poly_div(b, &gs, &var)) {
+        (Some(na), Some(nb)) => (na, nb),
+        _ => (a.clone(), b.clone()),
+    }
+}
+
+/// Pull an integer content (or overall sign) out of a numerator polynomial.
+fn factor_common_content(n: &Value, d: &Value) -> (Value, Value) {
+    if is_one_v(&simplify_value(d)) {
+        return (n.clone(), d.clone());
+    }
+    let Some(var) = find_var(n) else {
+        return (n.clone(), d.clone());
+    };
+    if !is_polynomial_in(n, &var) {
+        return (n.clone(), d.clone());
+    }
+    let coeffs = poly_coeffs(n, &var);
+    match int_content(&coeffs) {
+        Some((c, reduced)) if c != 1 => (rebuild_poly(&reduced, &var), d.clone()),
+        _ => (n.clone(), d.clone()),
+    }
+}
+
+/// Normalize a numerator/denominator pair: cancel shared factors, then integer
+/// content.
+fn normalize_fraction(n: Value, d: Value) -> Value {
+    let (n, d) = cancel_factors(&n, &d);
+    let (n, d) = cancel_symbolic_factors(&n, &d);
+    let (n, d) = cancel_poly_gcd(&n, &d);
+    let (n, d) = factor_common_content(&n, &d);
+    if is_one_v(&simplify_value(&d)) {
+        simplify_value(&expand_value(&n))
+    } else {
+        simplify_value(&exact_div(&n, &d))
+    }
+}
+
+fn together_expr(expr: &Value) -> Value {
+    // Distribute products over sums so fractions hidden inside a factor (e.g.
+    // `(1/x + x) x`) surface before combining.
+    let expanded = expand_value(expr);
+    if let Value::Call { head, args } = &expanded
+        && head == "Plus"
+    {
+        return together_plus(args);
+    }
+    let (n, d) = split_fraction(&expanded);
+    normalize_fraction(n, d)
+}
+
+fn together_plus(terms: &[Value]) -> Value {
+    if terms.is_empty() {
+        return Value::Integer(Integer::from(0));
+    }
+    let mut nums: Vec<Value> = Vec::new();
+    let mut dens: Vec<Value> = Vec::new();
+    for t in terms {
+        let (n, d) = split_fraction(t);
+        nums.push(n);
+        dens.push(d);
+    }
+    // Least common denominator: per-base maximum exponent across denominators.
+    let mut lcm: Vec<(Value, Integer)> = Vec::new();
+    for d in &dens {
+        let mut parts = Vec::new();
+        collect_power_parts(d, &mut parts);
+        merge_power_parts(&mut lcm, &parts);
+    }
+    let common = simplify_value(&rebuild_times(
+        lcm.into_iter()
+            .map(|(b, e)| {
+                if e == 1 {
+                    b
+                } else {
+                    call("Power", vec![b, Value::Integer(e)])
+                }
+            })
+            .collect(),
+    ));
+    let mut acc: Vec<Value> = Vec::new();
+    for (n, d) in nums.iter().zip(dens.iter()) {
+        if is_one_v(&common) {
+            acc.push(n.clone());
+            continue;
+        }
+        let scale = if is_one_v(d) {
+            common.clone()
+        } else {
+            simplify_value(&exact_div(&common, d))
+        };
+        acc.push(simplify_value(&expand_value(&simplify_call(
+            "Times",
+            &[n.clone(), scale],
+        ))));
+    }
+    let num = simplify_value(&expand_value(&simplify_call("Plus", &acc)));
+    normalize_fraction(num, common)
 }
 
 // ── Cancel ──
@@ -2611,7 +2867,7 @@ fn cancel_expr(expr: &Value) -> Value {
         return expr.clone();
     }
 
-    let (num, den) = extract_num_den(expr);
+    let (num, den) = split_fraction(expr);
 
     // Try symbolic factor cancellation
     let num_factored = try_factor_cancel(&num);
@@ -2623,37 +2879,21 @@ fn cancel_expr(expr: &Value) -> Value {
         return simplify_value(&c_num);
     }
 
-    // Try polynomial division as extra step
-    if let Value::Call { head, args } = &c_den
-        && head == "Times"
-    {
-        for factor in args {
-            if let Some(divided) = try_poly_divide_by_factor(&c_num, factor) {
-                let new_num = simplify_value(&divided);
-                let remaining_factors: Vec<Value> = args
-                    .iter()
-                    .filter(|f| !f.struct_eq(factor))
-                    .cloned()
-                    .collect();
-                let new_den = if remaining_factors.is_empty() {
-                    Value::Integer(Integer::from(1))
-                } else if remaining_factors.len() == 1 {
-                    remaining_factors.into_iter().next().unwrap()
-                } else {
-                    call("Times", remaining_factors)
-                };
-                return cancel_expr(&call("Divide", vec![new_num, new_den]));
-            }
-        }
+    // Cancel a common polynomial factor (handles multivariate inputs via the
+    // coefficient-level Euclidean algorithm).
+    let (c_num, c_den) = cancel_poly_gcd(&c_num, &c_den);
+    if is_one_v(&c_den) {
+        return simplify_value(&c_num);
     }
 
-    // Try direct polynomial division
+    // Direct exact polynomial division (denominator divides the numerator).
+    let var = find_var(&c_den).unwrap_or_else(|| find_any_var(&c_num));
     let (num_s, den_s) = (simplify_value(&c_num), simplify_value(&c_den));
-    if let Some(quotient) = polyn_div_exact(&num_s, &den_s) {
+    if let Some(quotient) = exact_poly_div(&num_s, &den_s, &var) {
         return simplify_value(&quotient);
     }
 
-    call("Divide", vec![c_num, c_den])
+    simplify_value(&exact_div(&num_s, &den_s))
 }
 
 /// Try to recognize and factor patterns like x^2-1 -> (x-1)(x+1).
@@ -2761,38 +3001,12 @@ fn collect_times_factors(val: &Value, factors: &mut Vec<Value>) {
     }
 }
 
-fn try_poly_divide_by_factor(poly: &Value, factor: &Value) -> Option<Value> {
-    let (quot, rem) = polyn_div(poly, factor, &find_any_var(poly));
-    if is_zero_v(&simplify_value(&rem)) {
-        Some(quot)
-    } else {
-        None
-    }
-}
-
-fn find_any_var(expr: &Value) -> String {
-    if let Some(v) = find_var(expr) {
-        return v;
-    }
-    "x".to_string()
-}
-
-fn polyn_div_exact(num: &Value, den: &Value) -> Option<Value> {
-    let var = find_any_var(num);
-    let (quot, rem) = polyn_div(num, den, &var);
-    if is_zero_v(&simplify_value(&rem)) {
-        Some(quot)
-    } else {
-        None
-    }
-}
-
 // ── Collect ──
 
 pub fn builtin_collect(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "Collect requires exactly 2 arguments: Collect[expr, var]".to_string(),
+            "Collect requires 2 or 3 arguments: Collect[expr, var, f?]".to_string(),
         ));
     }
     let var = match &args[1] {
@@ -2804,10 +3018,17 @@ pub fn builtin_collect(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    Ok(collect_expr(&args[0], &var))
+    Ok(collect_expr(&args[0], &var, args.get(2)))
 }
 
-fn collect_expr(expr: &Value, var: &str) -> Value {
+/// Apply a user-supplied function value to a coefficient (`Collect[.., f]`).
+fn apply_coeff_fn(f: &Value, coeff: Value) -> Value {
+    let env = crate::env::Env::new();
+    crate::builtins::register_builtins(&env);
+    crate::eval::apply_function(f, &[coeff.clone()], &env).unwrap_or(coeff)
+}
+
+fn collect_expr(expr: &Value, var: &str, f: Option<&Value>) -> Value {
     // Expand the expression into a sum of terms
     let expanded = expand_value(expr);
     let terms = match &expanded {
@@ -2839,7 +3060,10 @@ fn collect_expr(expr: &Value, var: &str) -> Value {
     // Reconstruct
     let mut result_terms: Vec<Value> = Vec::new();
     for (power, coeff) in power_groups {
-        let coeff_s = simplify_value(&coeff);
+        let coeff_s = match f {
+            Some(fv) => apply_coeff_fn(fv, simplify_value(&coeff)),
+            None => simplify_value(&coeff),
+        };
         if is_zero_v(&coeff_s) {
             continue;
         }
@@ -3626,6 +3850,9 @@ pub fn builtin_resultant(args: &[Value]) -> Result<Value, EvalError> {
     };
     let p = &args[0];
     let q = &args[1];
+    if !is_polynomial_in(p, &var) || !is_polynomial_in(q, &var) {
+        return Ok(call_ref("Resultant", args));
+    }
     Ok(compute_resultant(p, q, &var))
 }
 
@@ -4795,7 +5022,101 @@ pub fn builtin_list_of_vars(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(set.into_iter().map(Value::Symbol).collect()))
 }
 
-// ── Factor helpers ──
+/// Exponent vector of `term` with respect to `vars` (missing → 0).
+fn monomial_exponents(term: &Value, vars: &[String]) -> Vec<i64> {
+    let mut exps = vec![0i64; vars.len()];
+    match term {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                monomial_add_exponents(a, &mut exps, vars);
+            }
+        }
+        _ => monomial_add_exponents(term, &mut exps, vars),
+    }
+    exps
+}
+
+fn monomial_add_exponents(v: &Value, exps: &mut [i64], vars: &[String]) {
+    match v {
+        Value::Symbol(s) => {
+            if let Some(i) = vars.iter().position(|x| x == s) {
+                exps[i] += 1;
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let (Value::Symbol(s), Value::Integer(n)) = (&args[0], &args[1])
+                && let Some(i) = vars.iter().position(|x| x == s)
+                && let Some(ni) = n.to_i64()
+            {
+                exps[i] += ni;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// MonomialList[expr, vars?, order?] — list of the monomial terms of `expr`,
+/// ordered lexicographically (descending) by default.
+pub fn builtin_monomial_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(EvalError::Error(
+            "MonomialList requires 1 to 3 arguments: MonomialList[expr, vars?, order?]".to_string(),
+        ));
+    }
+    let expr = &args[0];
+    let mut vars: Vec<String> = match args.get(1) {
+        Some(Value::List(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Value::Symbol(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        Some(Value::Symbol(s)) => vec![s.clone()],
+        None => {
+            let mut set = BTreeSet::new();
+            collect_vars(expr, &mut set);
+            set.into_iter().collect()
+        }
+        _ => vec![],
+    };
+    if !is_polynomial_expr(expr) {
+        return Ok(call_ref("MonomialList", args));
+    }
+    if vars.is_empty() {
+        let mut set = BTreeSet::new();
+        collect_vars(expr, &mut set);
+        vars = set.into_iter().collect();
+    }
+    let expanded = expand_value(expr);
+    let terms: Vec<Value> = match &expanded {
+        Value::Call { head, args } if head == "Plus" => args.clone(),
+        _ => vec![expanded],
+    };
+    let order = args.get(2).and_then(|v| match v {
+        Value::Symbol(s) | Value::Str(s) => Some(s.clone()),
+        _ => None,
+    });
+    let mut items: Vec<(Vec<i64>, Value)> = terms
+        .into_iter()
+        .map(|t| (monomial_exponents(&t, &vars), simplify_value(&t)))
+        .filter(|(_, t)| !is_zero_v(t))
+        .collect();
+    match order.as_deref() {
+        Some("NegativeLexicographic") | Some("NegativeLexicographicOrder") => {
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        Some("DegreeLexicographic") | Some("DegreeLexicographicOrder") => {
+            items.sort_by(|a, b| {
+                let da: i64 = a.0.iter().sum();
+                let db: i64 = b.0.iter().sum();
+                db.cmp(&da).then_with(|| b.0.cmp(&a.0))
+            });
+        }
+        _ => items.sort_by(|a, b| b.0.cmp(&a.0)),
+    }
+    Ok(Value::List(items.into_iter().map(|(_, t)| t).collect()))
+}
 
 fn collect_factor_pairs(v: &Value) -> (Value, Vec<(Value, i64)>) {
     match v {
@@ -4909,6 +5230,50 @@ pub fn builtin_factor_square_free(args: &[Value]) -> Result<Value, EvalError> {
         return Ok(simplify_value(poly));
     }
     Ok(simplify_value(&call("Times", factors)))
+}
+
+/// FactorSquareFreeList[expr] — square-free decomposition as a list of
+/// `{factor, exponent}` pairs (leading constant included with exponent 1).
+pub fn builtin_factor_square_free_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FactorSquareFreeList requires exactly 1 argument".to_string(),
+        ));
+    }
+    let poly = &args[0];
+    let Some(var) = find_var(poly) else {
+        return Ok(Value::List(vec![Value::List(vec![
+            simplify_value(poly),
+            cv_one(),
+        ])]));
+    };
+    if !is_polynomial_in(poly, &var) {
+        return Ok(call_ref("FactorSquareFreeList", args));
+    }
+    let coeffs_v = poly_coeffs(poly, &var);
+    let Some(rc): Option<Vec<Rational>> = coeffs_v.iter().map(value_to_rat).collect() else {
+        return Ok(call_ref("FactorSquareFreeList", args));
+    };
+    if rc.iter().all(|c| c.is_zero()) {
+        return Ok(Value::List(vec![Value::List(vec![cv_zero(), cv_one()])]));
+    }
+    let lead = rc.iter().rev().find(|c| !c.is_zero()).cloned().unwrap();
+    let mut list: Vec<Value> = Vec::new();
+    let lead_v = polynomial::rational_to_value(&lead);
+    if !is_one_v(&lead_v) {
+        list.push(Value::List(vec![lead_v, cv_one()]));
+    }
+    for (fac, mult) in polynomial::square_free_decomposition(&rc) {
+        let fp = rebuild_poly_from_rat(&fac, &var);
+        list.push(Value::List(vec![
+            fp,
+            Value::Integer(Integer::from(mult as i64)),
+        ]));
+    }
+    if list.is_empty() {
+        list.push(Value::List(vec![simplify_value(poly), cv_one()]));
+    }
+    Ok(Value::List(list))
 }
 
 fn flatten_mults(v: &Value, out: &mut Vec<(Value, Integer)>) {
@@ -5249,9 +5614,11 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "HornerForm", builtin_horner_form);
     super::register_builtin(env, "Variables", builtin_variables);
     super::register_builtin(env, "ListofVars", builtin_list_of_vars);
+    super::register_builtin(env, "MonomialList", builtin_monomial_list);
     super::register_builtin(env, "Subresultants", builtin_subresultants);
     super::register_builtin(env, "FactorList", builtin_factor_list);
     super::register_builtin(env, "FactorSquareFree", builtin_factor_square_free);
+    super::register_builtin(env, "FactorSquareFreeList", builtin_factor_square_free_list);
     super::register_builtin(env, "FactorTermsList", builtin_factor_terms_list);
     super::register_builtin(env, "Decompose", builtin_decompose);
     super::register_builtin(env, "PolynomialLCM", builtin_polynomial_lcm);
@@ -6634,5 +7001,311 @@ mod tests {
     fn test_list_of_vars_unevaluated() {
         let res = builtin_list_of_vars(&[val_call("Sin", vec![val_sym("x")])]).unwrap();
         assert!(matches!(&res, Value::Call { head, .. } if head == "ListofVars"));
+    }
+
+    // ══════════════ Rational / polynomial-structure ops ══════════════
+
+    fn unevaluated(v: &Value, head: &str) -> bool {
+        matches!(v, Value::Call { head: h, .. } if h == head)
+    }
+
+    /// Evaluate `expr` and `decomp` at the same sample points and require the
+    /// results to agree — a form-independent correctness check.
+    fn assert_reconstructs(expr: &str, decomp: &str, assigns: &[(&str, i64)]) {
+        let a = eval_str(decomp);
+        let b = eval_str(expr);
+        for &(name, pt) in assigns {
+            let va = eval_at(&a, &[(name, pt)]);
+            let vb = eval_at(&b, &[(name, pt)]);
+            assert_close(va, vb);
+        }
+        // Also try a couple of extra points for the sole free variable.
+        if let Some(&(name, _)) = assigns.first() {
+            for pt in [7i64, -3, 11] {
+                let mut asg: Vec<(&str, i64)> = vec![(name, pt)];
+                for &(n, v) in &assigns[1..] {
+                    asg.push((n, v));
+                }
+                assert_close(eval_at(&a, &asg), eval_at(&b, &asg));
+            }
+        }
+    }
+
+    #[test]
+    fn test_apart_linear_reconstructs() {
+        assert_reconstructs("1/(x^2 - 1)", "Apart[1/(x^2 - 1), x]", &[("x", 3)]);
+        assert_reconstructs("1/(x (x + 1))", "Apart[1/(x (x + 1)), x]", &[("x", 4)]);
+        let v = eval_str("Apart[1/(x^2 - 1), x]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "Plus"));
+    }
+
+    #[test]
+    fn test_apart_repeated_linear_factor() {
+        assert_reconstructs(
+            "1/((x - 1)^2 (x + 1))",
+            "Apart[1/((x - 1)^2 (x + 1)), x]",
+            &[("x", 3)],
+        );
+        assert_reconstructs(
+            "(2 x + 3)/(x^2 (x + 1))",
+            "Apart[(2 x + 3)/(x^2 (x + 1)), x]",
+            &[("x", 2)],
+        );
+    }
+
+    #[test]
+    fn test_apart_nonlinear_and_irreducible() {
+        assert_reconstructs(
+            "1/((x^2 + 1) (x + 1))",
+            "Apart[1/((x^2 + 1) (x + 1)), x]",
+            &[("x", 3)],
+        );
+        // An already-irreducible quadratic stays put.
+        let v = eval_str("Apart[1/(x^2 + 1), x]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "Divide" || head == "Power"));
+    }
+
+    #[test]
+    fn test_apart_symbolic_coefficients() {
+        assert_reconstructs(
+            "(a x + b)/(x^2 - 1)",
+            "Apart[(a x + b)/(x^2 - 1), x]",
+            &[("x", 3), ("a", 2), ("b", 5)],
+        );
+    }
+
+    #[test]
+    fn test_apart_improper_reconstructs() {
+        assert_reconstructs(
+            "(x^3 + 1)/(x - 1)",
+            "Apart[(x^3 + 1)/(x - 1), x]",
+            &[("x", 3)],
+        );
+        assert_reconstructs(
+            "(x^2 + 1)/(x - 1)",
+            "Apart[(x^2 + 1)/(x - 1), x]",
+            &[("x", 4)],
+        );
+    }
+
+    #[test]
+    fn test_together_and_cancel_round_trip() {
+        assert_reconstructs("1/x + 1/x^2", "Together[1/x + 1/x^2]", &[("x", 3)]);
+        assert_reconstructs(
+            "1/(x - 1) - 1/(x + 1)",
+            "Together[1/(x - 1) - 1/(x + 1)]",
+            &[("x", 4)],
+        );
+        assert_reconstructs(
+            "Cancel[(x^3 - y^3)/(x - y)]",
+            "x^2 + x y + y^2",
+            &[("x", 3)],
+        );
+        assert_reconstructs("Cancel[(2 x^2)/(4 x)]", "x/2", &[("x", 5)]);
+    }
+
+    #[test]
+    fn test_together_lcm_denominator() {
+        // 1/x + 1/x^2 must use x^2 (not x^3) as the common denominator.
+        let v = eval_str("Together[1/x + 1/x^2]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "Divide"));
+        assert_reconstructs(
+            "1/x + 1/x^2 + 1/x^3",
+            "Together[1/x + 1/x^2 + 1/x^3]",
+            &[("x", 2)],
+        );
+    }
+
+    #[test]
+    fn test_numerator_denominator_sum() {
+        let n = eval_str("Numerator[1/(x + 1) + 1/(x + 2)]");
+        assert_close(eval_at(&n, &[("x", 3)]), 9.0);
+        let d = eval_str("Denominator[1/(x + 1) + 1/(x + 2)]");
+        assert_close(eval_at(&d, &[("x", 3)]), 20.0);
+        assert!(unevaluated(&eval_str("1/(x + 1) + 1/(x + 2)"), "Plus"));
+    }
+
+    #[test]
+    fn test_numerator_denominator_power_and_rational() {
+        assert!(matches!(
+            eval_str("Numerator[x^-2]"),
+            Value::Integer(ref n) if *n == 1
+        ));
+        assert_reconstructs("x^2", "Denominator[x^-2]", &[("x", 5)]);
+        assert!(matches!(
+            eval_str("Numerator[3/4]"),
+            Value::Integer(ref n) if *n == 3
+        ));
+        assert!(matches!(
+            eval_str("Denominator[3/4]"),
+            Value::Integer(ref n) if *n == 4
+        ));
+    }
+
+    #[test]
+    fn test_collect_groups_and_function_arg() {
+        let v = eval_str("Collect[a x^2 + b x + c x + d, x]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "Plus"));
+        assert_reconstructs(
+            "a x^2 + b x + c x + d",
+            "Collect[a x^2 + b x + c x + d, x]",
+            &[("x", 2)],
+        );
+        // Three-argument form applies the function to every coefficient.
+        let f = eval_str("Collect[a x^2 + b x + c x, x, g]");
+        assert!(f.to_string().contains('g'));
+    }
+
+    #[test]
+    fn test_coefficient_various() {
+        assert!(
+            matches!(eval_str("Coefficient[x^3 + 2 x^2 + 3 x + 4, x, 2]"), Value::Integer(ref n) if *n == 2)
+        );
+        assert!(
+            matches!(eval_str("Coefficient[x^3 + 2 x^2 + 3 x + 4, x, 0]"), Value::Integer(ref n) if *n == 4)
+        );
+        assert!(is_zero_v(&eval_str("Coefficient[x^3 + 1, x, 5]")));
+        // Expand-then-extract path.
+        assert_reconstructs("3 y", "Coefficient[(x + y)^3, x, 2]", &[("y", 4)]);
+        assert_reconstructs("3 y", "Coefficient[x^2 + 3 x y + y^2, x]", &[("y", 5)]);
+        assert!(matches!(eval_str("Coefficient[1/x, x, -1]"), Value::Integer(ref n) if *n == 1));
+    }
+
+    #[test]
+    fn test_coefficient_list_and_multivariate_nested() {
+        let c = eval_str("CoefficientList[x^2 + 3 x + 4, x]");
+        assert!(matches!(&c, Value::List(items) if items.len() == 3));
+        assert_reconstructs(
+            "x^2 + 3 x + 4",
+            "FromCoefficientList[CoefficientList[x^2 + 3 x + 4, x], x]",
+            &[("x", 3)],
+        );
+        // Nested (multivariate) form.
+        let n = eval_str("CoefficientList[x^2 + 3 x y + y^2, {x, y}]");
+        let Value::List(rows) = &n else {
+            panic!("expected nested list")
+        };
+        assert_eq!(rows.len(), 3);
+        // Coefficient of x^2 is at [2][0] == 1; of x*y at [1][1] == 3.
+        if let (Value::List(r2), Value::List(r1)) = (&rows[2], &rows[1]) {
+            assert!(matches!(r2[0], Value::Integer(ref k) if *k == 1));
+            assert!(matches!(r1[1], Value::Integer(ref k) if *k == 3));
+        } else {
+            panic!("expected rectangular inner lists");
+        }
+        let rect = eval_str("CoefficientList[1 + x + y + x y, {x, y}]");
+        if let Value::List(rows) = &rect {
+            assert!(
+                rows.iter()
+                    .all(|r| matches!(r, Value::List(items) if items.len() == 2))
+            );
+        } else {
+            panic!("expected list");
+        }
+    }
+
+    #[test]
+    fn test_exponent_various() {
+        assert!(matches!(eval_str("Exponent[x^2 + x^5 + x, x]"), Value::Integer(ref n) if *n == 5));
+        assert!(matches!(eval_str("Exponent[(x + 1)^3, x]"), Value::Integer(ref n) if *n == 3));
+        assert!(matches!(eval_str("Exponent[1/x^2, x]"), Value::Integer(ref n) if *n == -2));
+        assert!(matches!(eval_str("Exponent[x^2 + x^-1, x]"), Value::Integer(ref n) if *n == 2));
+        assert!(matches!(eval_str("Exponent[a x^2 + b, a]"), Value::Integer(ref n) if *n == 1));
+    }
+
+    #[test]
+    fn test_monomial_list_orders_and_reconstructs() {
+        let m = eval_str("MonomialList[x^2 + 3 x y + y^2]");
+        let Value::List(items) = &m else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 3);
+        // Lexicographic descending: x^2 first, y^2 last.
+        assert!(
+            matches!(&items[0], Value::Call { head, args } if head == "Power" && args[0].struct_eq(&val_sym("x")))
+        );
+        assert!(
+            matches!(&items[2], Value::Call { head, args } if head == "Power" && args[0].struct_eq(&val_sym("y")))
+        );
+        // Sum of the monomials reconstructs the polynomial.
+        let sum = items
+            .iter()
+            .cloned()
+            .fold(val_int(0), |acc, t| simplify_call("Plus", &[acc, t]));
+        assert_close(eval_at(&sum, &[("x", 3), ("y", 2)]), 9.0 + 18.0 + 4.0);
+        // Explicit variable order changes the ordering.
+        let m2 = eval_str("MonomialList[x^2 + 3 x y + y^2, {y, x}]");
+        let Value::List(items2) = &m2 else {
+            panic!("expected list")
+        };
+        assert!(
+            matches!(&items2[0], Value::Call { head, args } if head == "Power" && args[0].struct_eq(&val_sym("y")))
+        );
+    }
+
+    #[test]
+    fn test_polynomial_quotient_remainder_identity() {
+        let q = eval_str("PolynomialQuotient[x^3 + 2 x^2 + 3 x + 4, x + 1, x]");
+        let r = eval_str("PolynomialRemainder[x^3 + 2 x^2 + 3 x + 4, x + 1, x]");
+        let recon = simplify_call(
+            "Plus",
+            &[
+                simplify_call(
+                    "Times",
+                    &[q, val_call("Plus", vec![val_sym("x"), val_int(1)])],
+                ),
+                r,
+            ],
+        );
+        assert_close(eval_at(&recon, &[("x", 4)]), 64.0 + 32.0 + 12.0 + 4.0);
+    }
+
+    #[test]
+    fn test_factor_terms_and_square_free_list() {
+        let ft = eval_str("FactorTerms[2 x^2 - 2]");
+        assert_reconstructs("2 x^2 - 2", "FactorTerms[2 x^2 - 2]", &[("x", 3)]);
+        let _ = ft;
+        let fl = eval_str("FactorTermsList[2 x^2 - 2]");
+        let Value::List(pair) = &fl else {
+            panic!("expected list")
+        };
+        assert!(matches!(&pair[0], Value::Integer(n) if *n == 2));
+        // Square-free list round-trips.
+        let sf = eval_str("FactorSquareFreeList[x^3 + 2 x^2 + x]");
+        let Value::List(items) = &sf else {
+            panic!("expected list")
+        };
+        assert!(!items.is_empty());
+        assert_reconstructs(
+            "x^3 + 2 x^2 + x",
+            "FactorSquareFree[x^3 + 2 x^2 + x]",
+            &[("x", 3)],
+        );
+    }
+
+    #[test]
+    fn test_resultant_values_and_unevaluated() {
+        assert!(is_zero_v(&eval_str("Resultant[x^2 - 1, x - 1, x]")));
+        let r = eval_str("Resultant[x - 1, x - 2, x]");
+        assert!(
+            matches!(&r, Value::Integer(n) if n == &Integer::from(-1) || n == &Integer::from(1))
+        );
+        assert!(unevaluated(
+            &eval_str("Resultant[Sin[x], x - 1, x]"),
+            "Resultant"
+        ));
+    }
+
+    #[test]
+    fn test_unevaluated_when_inapplicable() {
+        assert!(unevaluated(&eval_str("Variables[Sin[x]]"), "Variables"));
+        assert!(unevaluated(
+            &eval_str("MonomialList[Sin[x]]"),
+            "MonomialList"
+        ));
+        assert!(unevaluated(
+            &eval_str("FactorSquareFree[x + Sin[x]]"),
+            "FactorSquareFree"
+        ));
     }
 }

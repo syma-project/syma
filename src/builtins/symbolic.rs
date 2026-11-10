@@ -5,6 +5,18 @@ use rug::Float;
 use rug::Integer;
 use rug::Rational;
 use rug::ops::Pow;
+use std::cell::RefCell;
+
+thread_local! {
+    /// Stack of `(integrand-key, rule-index)` pairs currently being evaluated
+    /// by the Rubi dispatcher.  Some ported rules rewrite the integrand through
+    /// a helper (`ExpandIntegrand`, `ExpandToSum`, `NormalizePseudoBinomial`, …)
+    /// that can be a no-op; re-entering such a rule with the *same* integrand
+    /// would recurse forever.  Skipping a rule that is already on the stack for
+    /// the same integrand breaks those cycles and lets a later rule handle it.
+    static ACTIVE_INTEGRATE_RULES: RefCell<Vec<(String, usize)>> =
+        const { RefCell::new(Vec::new()) };
+}
 
 /// Build a symbolic Call node.
 fn call(head: &str, args: Vec<Value>) -> Value {
@@ -25,6 +37,14 @@ fn call_ref(head: &str, args: &[Value]) -> Value {
 /// Build an integer Value.
 fn int(n: i64) -> Value {
     Value::Integer(Integer::from(n))
+}
+
+/// If `v` is `Sqrt[u]`, return `u`.
+fn sqrt_arg(v: &Value) -> Option<Value> {
+    match v {
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => Some(args[0].clone()),
+        _ => None,
+    }
 }
 
 // ── Simplify ──
@@ -155,17 +175,47 @@ fn simplify_value(val: &Value) -> Value {
         Value::Call { head, args } => {
             let simplified_args: Vec<Value> = args.iter().map(simplify_value).collect();
             let result = simplify_call(head, &simplified_args);
+            // `Simplify[*]`-only fold: `b Log[a] -> Log[a^b]`. Kept out of
+            // `simplify_times` so `PowerExpand`/`ExpandLog` retain the expanded
+            // `Times` form.
+            let result = if head == "Times" {
+                combine_log_power(&result)
+            } else {
+                result
+            };
             // Re-canonicalise trig after simplification: the pass above expands
             // multiple angles to single angles to expose cancellations, and
             // `canonicalize_trig` folds the surviving terms back to the
             // lowest-complexity (normally multiple-angle) form.
-            if std::env::var_os("SYMA_NO_TRIGCANON").is_some() {
+            let result = if std::env::var_os("SYMA_NO_TRIGCANON").is_some() {
                 result
             } else {
                 canonicalize_trig(&result)
+            };
+            // `Plus` is `Orderless`: match the evaluator's canonical argument
+            // order so `Simplify[...]` results compare equal to literally-typed
+            // sums.
+            if head == "Plus" {
+                sort_orderless(result)
+            } else {
+                result
             }
         }
         _ => val.clone(),
+    }
+}
+
+/// Sort the arguments of an `Orderless` call into canonical order.
+fn sort_orderless(val: Value) -> Value {
+    if let Value::Call { head, mut args } = val {
+        // Only genuinely `Orderless` heads may have their args reordered;
+        // e.g. `Power[a, b]` must keep its base/exponent order.
+        if head == "Plus" || head == "Times" {
+            args.sort_by(crate::builtins::comparison::canonical_cmp);
+        }
+        Value::Call { head, args }
+    } else {
+        val
     }
 }
 
@@ -176,11 +226,15 @@ pub fn simplify_call(head: &str, args: &[Value]) -> Value {
         "Power" => simplify_power(args),
         "Sin" => simplify_sin(args),
         "Cos" => simplify_cos(args),
+        "Sqrt" => simplify_sqrt(args),
         "Sec" if args.len() == 1 => simplify_call("Power", &[call("Cos", args.to_vec()), int(-1)]),
         "Csc" if args.len() == 1 => simplify_call("Power", &[call("Sin", args.to_vec()), int(-1)]),
         "Log" => simplify_log(args),
         "Exp" => simplify_exp(args),
         "Divide" if args.len() == 2 => {
+            if let Some(rewritten) = simplify_divide(&args[0], &args[1]) {
+                return rewritten;
+            }
             if is_zero_value(&args[0]) && !is_zero_value(&args[1]) {
                 return Value::Integer(Integer::from(0));
             }
@@ -228,6 +282,7 @@ fn simplify_plus(args: &[Value]) -> Value {
     }
     let terms = combine_like_terms(expanded);
     let terms = fold_pythagorean(terms);
+    let terms = combine_log_sum(terms);
     if terms.is_empty() {
         return Value::Integer(Integer::from(0));
     }
@@ -237,9 +292,44 @@ fn simplify_plus(args: &[Value]) -> Value {
     call("Plus", terms)
 }
 
+/// Fold `Log[a] + Log[b] -> Log[a b]` (positive-argument heuristic used by
+/// `Simplify`/`FullSimplify`). Applied only when two or more `Log` terms exist.
+fn combine_log_sum(terms: Vec<Value>) -> Vec<Value> {
+    let log_count = terms
+        .iter()
+        .filter(|t| matches!(t, Value::Call { head, args } if head == "Log" && args.len() == 1))
+        .count();
+    if log_count < 2 {
+        return terms;
+    }
+    let mut product = Value::Integer(Integer::from(1));
+    let mut kept: Vec<Value> = Vec::new();
+    for t in terms {
+        match &t {
+            Value::Call { head, args } if head == "Log" && args.len() == 1 => {
+                product = simplify_call("Times", &[product, args[0].clone()]);
+            }
+            _ => kept.push(t),
+        }
+    }
+    kept.push(match &product {
+        Value::Integer(n) if *n == 1 => Value::Integer(Integer::from(0)),
+        _ => call("Log", vec![product]),
+    });
+    kept
+}
+
 /// Distribute a product over a sum: `Times[c, Plus[a, b]]` → `[c*a, c*b]`.
 /// Recurses so nested products distribute fully.
 fn distribute_term(term: Value) -> Vec<Value> {
+    // A bare sum (which can appear once a coefficient collapses to 1) is
+    // already distributed: recurse into its summands so no nested `Plus`
+    // survives into the flat term list.
+    if let Value::Call { head, args } = &term
+        && head == "Plus"
+    {
+        return args.iter().cloned().flat_map(distribute_term).collect();
+    }
     let expanded = expand_times_over_plus(term);
     if expanded.len() == 1 {
         expanded
@@ -373,6 +463,9 @@ fn canonicalize_trig(val: &Value) -> Value {
             // Combining like terms lets a collapsed `Cos[2 u]` cancel against a
             // pre-existing multiple of it (e.g. `-Cos[2 u] + Cos[2 u] → 0`).
             let terms = fold_integer_constants(combine_like_terms(terms));
+            if std::env::var("SYMA_TRIG_DBG").is_ok() {
+                eprintln!("[trig-dbg] terms={terms:?}");
+            }
             match terms.len() {
                 0 => Value::Integer(Integer::from(0)),
                 1 => terms.into_iter().next().unwrap(),
@@ -813,34 +906,69 @@ fn simplify_times(args: &[Value]) -> Value {
         _ => {}
     }
 
-    // Convert symbolic factors to (base, exponent) pairs for merging
-    // n * n^2 → (n, 1) + (n, 2) → Power[n, 3]
-    let mut base_exp: Vec<(Value, Integer)> = Vec::new();
+    // Convert symbolic factors to (base, exponent) pairs for merging.
+    // Merging works for integer *and* symbolic exponents, so `x^-a * x^b` and
+    // `x^x * x^(1-x)` both collapse.
+    let mut base_exp: Vec<(Value, Value)> = Vec::new();
     for factor in symbolic {
-        match &factor {
+        let (base, exp) = match &factor {
             Value::Call { head, args } if head == "Power" && args.len() == 2 => {
-                if let Value::Integer(exp) = &args[1] {
-                    if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == args[0]) {
-                        *acc += exp;
-                    } else {
-                        base_exp.push((args[0].clone(), exp.clone()));
-                    }
-                } else {
-                    // Non-integer exponent, can't merge — treat as base=itself
-                    if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == factor) {
-                        *acc += 1;
-                    } else {
-                        base_exp.push((factor, Integer::from(1)));
-                    }
-                }
+                (args[0].clone(), args[1].clone())
             }
-            _ => {
-                if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == factor) {
-                    *acc += 1;
+            _ => (factor.clone(), Value::Integer(Integer::from(1))),
+        };
+        if let Some((_, acc)) = base_exp.iter_mut().find(|(b, _)| *b == base) {
+            *acc = simplify_call("Plus", &[acc.clone(), exp]);
+        } else {
+            base_exp.push((base, exp));
+        }
+    }
+
+    // Normalise radical factors: `Sqrt[u]^(2k) -> u^k` and collect the odd
+    // remainder into a single `Sqrt[u1 u2 ...]`.
+    let mut normalized: Vec<(Value, Value)> = Vec::new();
+    let mut radicals: Vec<Value> = Vec::new();
+    for (base, exp) in base_exp {
+        if let Some(u) = sqrt_arg(&base) {
+            if let Value::Integer(n) = &exp {
+                if n.is_even() {
+                    normalized.push((u, Value::Integer(n.clone() / Integer::from(2))));
                 } else {
-                    base_exp.push((factor, Integer::from(1)));
+                    if *n != 1 {
+                        normalized.push((
+                            u.clone(),
+                            Value::Integer((n.clone() - Integer::from(1)) / Integer::from(2)),
+                        ));
+                    }
+                    radicals.push(u);
                 }
+            } else {
+                normalized.push((base, exp));
             }
+        } else {
+            normalized.push((base, exp));
+        }
+    }
+    if !radicals.is_empty() {
+        let inside = if radicals.len() == 1 {
+            radicals.pop().unwrap()
+        } else {
+            simplify_call("Times", &radicals)
+        };
+        normalized.push((call("Sqrt", vec![inside]), Value::Integer(Integer::from(1))));
+    }
+
+    // Merge exponentials: `Exp[a] Exp[b] -> Exp[a + b]`.
+    let mut exp_terms: Vec<Value> = Vec::new();
+    let mut factors: Vec<(Value, Value)> = Vec::new();
+    for (base, exp) in normalized {
+        if let Value::Call { head, args: ea } = &base
+            && head == "Exp"
+            && ea.len() == 1
+        {
+            exp_terms.push(simplify_call("Times", &[exp, ea[0].clone()]));
+        } else {
+            factors.push((base, exp));
         }
     }
 
@@ -856,14 +984,25 @@ fn simplify_times(args: &[Value]) -> Value {
     if !is_one {
         result.push(numeric_product);
     }
-    for (base, exp) in base_exp {
-        if exp.is_zero() {
+    for (base, exp) in factors {
+        if is_zero_value(&exp) {
             continue;
         }
-        if exp == 1 {
+        if matches!(&exp, Value::Integer(n) if *n == 1) {
             result.push(base);
         } else {
-            result.push(simplify_call("Power", &[base, Value::Integer(exp)]));
+            result.push(simplify_call("Power", &[base, exp]));
+        }
+    }
+    if !exp_terms.is_empty() {
+        let sum = if exp_terms.len() == 1 {
+            exp_terms.pop().unwrap()
+        } else {
+            simplify_call("Plus", &exp_terms)
+        };
+        let combined = simplify_call("Exp", &[sum]);
+        if !matches!(&combined, Value::Integer(n) if *n == 1) {
+            result.push(combined);
         }
     }
 
@@ -874,6 +1013,48 @@ fn simplify_times(args: &[Value]) -> Value {
     } else {
         call("Times", result)
     }
+}
+
+/// `b Log[a] -> Log[a^b]` when a product carries exactly one `Log` factor and a
+/// non-trivial coefficient/product. Applied from [`simplify_value`] (rather than
+/// [`simplify_times`]) so `PowerExpand`/`ExpandLog`, which call `simplify_call`
+/// directly, keep their expanded `Times` shape.
+fn combine_log_power(val: &Value) -> Value {
+    let Value::Call { head, args } = val else {
+        return val.clone();
+    };
+    if head != "Times" || args.len() < 2 {
+        return val.clone();
+    }
+    let logs: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| matches!(v, Value::Call { head, .. } if head == "Log"))
+        .map(|(i, _)| i)
+        .collect();
+    if logs.len() != 1 {
+        return val.clone();
+    }
+    let idx = logs[0];
+    let Value::Call { args: la, .. } = &args[idx] else {
+        return val.clone();
+    };
+    if la.len() != 1 {
+        return val.clone();
+    }
+    let u = la[0].clone();
+    let rest: Vec<Value> = args
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| *j != idx)
+        .map(|(_, v)| v.clone())
+        .collect();
+    let power = if rest.len() == 1 {
+        rest.into_iter().next().unwrap()
+    } else {
+        simplify_call("Times", &rest)
+    };
+    simplify_call("Log", &[simplify_call("Power", &[u, power])])
 }
 
 fn simplify_power(args: &[Value]) -> Value {
@@ -889,6 +1070,33 @@ fn simplify_power(args: &[Value]) -> Value {
             Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 1) => {
                 Value::Integer(Integer::from(1))
             }
+            // `Sqrt[u]^n`: pull even powers out of the radical and keep a
+            // single `Sqrt[u]` for odd powers (e.g. `Sqrt[x]^2 -> x`,
+            // `Sqrt[a]^-1 -> Sqrt[a]/a`).
+            Value::Call { head, args: inner } if head == "Sqrt" && inner.len() == 1 => {
+                if let Value::Integer(n) = &args[1] {
+                    if n.is_even() {
+                        simplify_call(
+                            "Power",
+                            &[
+                                inner[0].clone(),
+                                Value::Integer(n.clone() / Integer::from(2)),
+                            ],
+                        )
+                    } else {
+                        let k = (n.clone() - Integer::from(1)) / Integer::from(2);
+                        simplify_call(
+                            "Times",
+                            &[
+                                simplify_call("Power", &[inner[0].clone(), Value::Integer(k)]),
+                                call("Sqrt", vec![inner[0].clone()]),
+                            ],
+                        )
+                    }
+                } else {
+                    call_ref("Power", args)
+                }
+            }
             // Nested Power: Power[Power[x, a], b] → Power[x, a*b]
             Value::Call { head, args: inner } if head == "Power" && inner.len() == 2 => {
                 let new_exp = simplify_call("Times", &[inner[1].clone(), args[1].clone()]);
@@ -897,6 +1105,40 @@ fn simplify_power(args: &[Value]) -> Value {
             _ => call_ref("Power", args),
         },
     }
+}
+
+/// Canonicalise a quotient, exposing factors hidden in nested `Divide`s and
+/// rationalising a lone radical denominator:
+///
+/// - `(a/b)/(c/d) -> a d/(b c)`
+/// - `num/Sqrt[u] -> num Sqrt[u]/u`
+///
+/// Returns `None` when no rule applies (so the caller keeps its normal path).
+fn simplify_divide(num: &Value, den: &Value) -> Option<Value> {
+    if let (Value::Call { head: hn, args: an }, Value::Call { head: hd, args: ad }) = (num, den)
+        && hn == "Divide"
+        && an.len() == 2
+        && hd == "Divide"
+        && ad.len() == 2
+    {
+        let new_num = simplify_call("Times", &[an[0].clone(), ad[1].clone()]);
+        let new_den = simplify_call("Times", &[an[1].clone(), ad[0].clone()]);
+        return Some(simplify_call("Divide", &[new_num, new_den]));
+    }
+    if let Some(u) = sqrt_arg(den) {
+        let new_num = simplify_call("Times", &[num.clone(), call("Sqrt", vec![u.clone()])]);
+        return Some(simplify_call("Divide", &[new_num, u]));
+    }
+    None
+}
+
+/// Simplify the argument of a `Sqrt` (the radical itself is preserved so
+/// `Sqrt[x^2]` stays put without assumptions).
+fn simplify_sqrt(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return call_ref("Sqrt", args);
+    }
+    call_ref("Sqrt", args)
 }
 
 fn simplify_sin(args: &[Value]) -> Value {
@@ -948,6 +1190,18 @@ fn simplify_log(args: &[Value]) -> Value {
     }
     match &args[0] {
         Value::Integer(n) if *n == 1 => Value::Integer(Integer::from(0)),
+        Value::Call { head, args: inner } if head == "Exp" && inner.len() == 1 => inner[0].clone(),
+        // `Log[a b ...] -> Log[a] + Log[b] + ...` (valid for positive factors).
+        Value::Call {
+            head,
+            args: factors,
+        } if head == "Times" && !factors.is_empty() => {
+            let logs: Vec<Value> = factors
+                .iter()
+                .map(|f| simplify_call("Log", &[f.clone()]))
+                .collect();
+            simplify_call("Plus", &logs)
+        }
         Value::Real(r) => {
             let e_val = Float::with_val(DEFAULT_PRECISION, 1).exp();
             if (r.clone() - e_val).abs() < 1e-10 {
@@ -956,7 +1210,6 @@ fn simplify_log(args: &[Value]) -> Value {
                 call_ref("Log", args)
             }
         }
-        Value::Call { head, args: inner } if head == "Exp" && inner.len() == 1 => inner[0].clone(),
         _ => call_ref("Log", args),
     }
 }
@@ -1106,12 +1359,12 @@ fn collect_power_factors(val: &Value, factors: &mut Vec<(Value, Integer)>) {
             }
         }
         Value::Call { head, args } if head == "Power" && args.len() == 2 => {
-            let base = &args[0];
-            let exp = match &args[1] {
-                Value::Integer(n) => n.clone(),
-                _ => Integer::from(1),
-            };
-            factors.push((base.clone(), exp));
+            // A non-integer (symbolic) exponent can't be tracked as an integer
+            // factor, so keep the whole `Power[base, exp]` opaque.
+            match &args[1] {
+                Value::Integer(n) => factors.push((args[0].clone(), n.clone())),
+                _ => factors.push((val.clone(), Integer::from(1))),
+            }
         }
         _ => {
             factors.push((val.clone(), Integer::from(1)));
@@ -1871,10 +2124,25 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     if antideriv.is_none()
         && let Some(Value::Function(func_def)) = env.get("$IntegrateRules")
     {
+        if std::env::var_os("SYMA_INTEG_DEBUG").is_some() {
+            eprintln!("TOTAL_DEFS={}", func_def.definitions.len());
+            if std::env::var_os("SYMA_INTEG_DUMP").is_some() {
+                for (i, d) in func_def.definitions.iter().enumerate().take(6) {
+                    eprintln!("FIRST[{}] params={} body={}", i, d.params.len(), d.body);
+                }
+            }
+        }
         for (def_idx, def) in func_def.definitions.iter().enumerate() {
             if let Some(bindings) =
                 crate::eval::try_match_params(&def.params, &indefinite_args, env)?
             {
+                // Break no-op re-integration cycles: if this exact rule is
+                // already being evaluated for this exact integrand, applying it
+                // again would reproduce the same `Integrate[...]` call.
+                let rule_key = (expr.to_string(), def_idx);
+                if ACTIVE_INTEGRATE_RULES.with(|a| a.borrow().contains(&rule_key)) {
+                    continue;
+                }
                 if let Some(guard_expr) = &def.guard {
                     let guard_env = env.child();
                     for (name, value) in &bindings {
@@ -1891,7 +2159,12 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
                 for (name, value) in &bindings {
                     child_env.set(name.clone(), value.clone());
                 }
-                match crate::eval::eval(&def.body, &child_env) {
+                ACTIVE_INTEGRATE_RULES.with(|a| a.borrow_mut().push(rule_key));
+                let body_result = crate::eval::eval(&def.body, &child_env);
+                ACTIVE_INTEGRATE_RULES.with(|a| {
+                    a.borrow_mut().pop();
+                });
+                match body_result {
                     // A body whose result is a bare guard (`expr /; cond`) acts
                     // as a definition condition: fall through to the next rule
                     // when it does not hold (same semantics as `apply_function`).
@@ -1965,6 +2238,13 @@ fn lazy_load_integrate(env: &Env) -> Result<(), EvalError> {
     ];
     for fname in &files {
         load_integrate_file(env, fname);
+        if std::env::var_os("SYMA_INTEG_DUMP").is_some() {
+            let n = match env.root_env().get("Integrate") {
+                Some(Value::Function(f)) => f.definitions.len(),
+                _ => 0,
+            };
+            eprintln!("LOADED {fname} -> cumulative defs {n}");
+        }
     }
     // The .syma files define `Integrate[...] := ...`, which replaces the
     // builtin with a `Value::Function`. Restore the builtin as the dispatcher
@@ -3352,7 +3632,10 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
 }
 
 pub fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Vec<Value> {
-    let terms = flatten_to_plus_terms(expr);
+    // Expand first so powers of sums like `(x + y)^3` contribute their terms
+    // with the correct per-power coefficients.
+    let expanded = expand_value(expr);
+    let terms = flatten_to_plus_terms(&expanded);
     let mut max_degree = 0i64;
     let mut coeff_map: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
     for term in &terms {
@@ -3992,21 +4275,68 @@ pub fn builtin_coefficient_list(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let var = match &args[1] {
-        Value::Symbol(s) => s.clone(),
+    let coeffs = match &args[1] {
+        Value::Symbol(s) => extract_polynomial_coeffs(&args[0], s),
+        Value::List(vars) if !vars.is_empty() => {
+            return Ok(nested_coefficient_list(&args[0], vars));
+        }
         _ => {
             return Err(EvalError::TypeError {
-                expected: "Symbol".to_string(),
+                expected: "Symbol or List of Symbols".to_string(),
                 got: args[1].type_name().to_string(),
             });
         }
     };
-
-    let coeffs = extract_polynomial_coeffs(&args[0], &var);
     if coeffs.is_empty() {
         return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
     }
     Ok(Value::List(coeffs))
+}
+
+/// Build a (possibly nested) coefficient array over `vars` (outermost = first
+/// variable), padding inner levels to a rectangular shape.
+fn nested_coefficient_list(expr: &Value, vars: &[Value]) -> Value {
+    let var = match &vars[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return expr.clone(),
+    };
+    let coeffs = extract_polynomial_coeffs(expr, &var);
+    let coeffs = if coeffs.is_empty() {
+        vec![Value::Integer(Integer::from(0))]
+    } else {
+        coeffs
+    };
+    if vars.len() == 1 {
+        return Value::List(coeffs);
+    }
+    let rest = &vars[1..];
+    let inner: Vec<Value> = coeffs
+        .iter()
+        .map(|c| nested_coefficient_list(c, rest))
+        .collect();
+    // Pad every inner list to a common length so the result is rectangular.
+    let max_len = inner
+        .iter()
+        .map(|v| match v {
+            Value::List(items) => items.len(),
+            _ => 1,
+        })
+        .max()
+        .unwrap_or(1);
+    let zero = Value::Integer(Integer::from(0));
+    let padded: Vec<Value> = inner
+        .into_iter()
+        .map(|v| match v {
+            Value::List(mut items) => {
+                while items.len() < max_len {
+                    items.push(zero.clone());
+                }
+                Value::List(items)
+            }
+            other => Value::List(vec![other]),
+        })
+        .collect();
+    Value::List(padded)
 }
 
 // ── FromCoefficientList ──────────────────────────────────────────────────────

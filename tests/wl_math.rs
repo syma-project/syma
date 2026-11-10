@@ -207,6 +207,26 @@ fn linear_algebra() {
     eq("MatrixPower[{{1, 1}, {0, 1}}, 3]", "{{1, 3}, {0, 1}}");
     eq("Eigenvalues[{{2, 0}, {0, 3}}]", "{3, 2}");
     eq("Norm[{3, 4}]", "5");
+    // Exact Bareiss determinant (integer and rational) — no round-off.
+    eq("Det[{{1, 2, 3}, {4, 5, 6}, {7, 8, 10}}]", "-3");
+    eq("Det[{{1/2, 1/3}, {1/4, 1/5}}]", "1/60");
+    // Exact RREF / rank / null space.
+    eq(
+        "RowReduce[{{1, 2, 3}, {4, 5, 6}}]",
+        "{{1, 0, -1}, {0, 1, 2}}",
+    );
+    eq("MatrixRank[{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}]", "2");
+    eq("NullSpace[{{1, 2, 3}, {4, 5, 6}}]", "{{1, -2, 1}}");
+    eq("RowSpace[{{1, 2, 3}, {2, 4, 6}}]", "{{1, 2, 3}}");
+    eq("ColumnSpace[{{1, 2}, {2, 4}, {3, 6}}]", "{{1, 2, 3}}");
+    eq("CofactorMatrix[{{1, 2}, {3, 4}}]", "{{4, -3}, {-2, 1}}");
+    // Multi-RHS LinearSolve.
+    eq(
+        "LinearSolve[{{2, 0}, {0, 3}}, {{4, 2}, {9, 3}}]",
+        "{{2, 1}, {3, 1}}",
+    );
+    // Structured matrix generators.
+    eq("HankelMatrix[3]", "{{1, 2, 3}, {2, 3, 0}, {3, 0, 0}}");
 }
 
 // ── numeric ──
@@ -380,6 +400,21 @@ fn linalg_decompositions() {
     eq("LeviCivitaTensor[3][[2, 3, 1]]", "1");
     eq("LeviCivitaTensor[3][[2, 1, 3]]", "-1");
     eq("LeviCivitaTensor[3][[1, 1, 2]]", "0");
+    // Structured generators / triangularizers / predicates (exact).
+    eq("Diagonal[{{1, 2}, {3, 4}}]", "{1, 4}");
+    eq("UpperTriangularize[{{1, 2}, {3, 4}}]", "{{1, 2}, {0, 4}}");
+    eq("LowerTriangularize[{{1, 2}, {3, 4}}]", "{{1, 0}, {3, 4}}");
+    eq("HilbertMatrix[2]", "{{1, 1/2}, {1/2, 1/3}}");
+    eq(
+        "ToeplitzMatrix[{1, 2, 3}]",
+        "{{1, 2, 3}, {2, 1, 2}, {3, 2, 1}}",
+    );
+    eq(
+        "VandermondeMatrix[{1, 2, 3}]",
+        "{{1, 1, 1}, {1, 2, 4}, {1, 3, 9}}",
+    );
+    eq("SymmetricMatrixQ[{{1, 2}, {2, 1}}]", "True");
+    eq("HermitianMatrixQ[{{1, I}, {-I, 1}}]", "True");
 }
 
 // ── statistics extras ──

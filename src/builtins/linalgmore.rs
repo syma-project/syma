@@ -1022,7 +1022,79 @@ fn identity_f64(n: usize) -> Vec<Vec<f64>> {
     m
 }
 
-/// MatrixExp[m] — matrix exponential via scaling and squaring with a Taylor series.
+/// Coefficients c_k of the [6/6] Padé approximant of exp (N(u)/N(−u)).
+const PADE6: [f64; 7] = [
+    1.0,
+    0.5,
+    5.0 / 44.0,
+    1.0 / 66.0,
+    1.0 / 792.0,
+    1.0 / 15840.0,
+    1.0 / 665280.0,
+];
+
+/// Largest absolute row sum (the L∞ / induced ∞-norm).
+fn inf_norm_f64(a: &[Vec<f64>]) -> f64 {
+    a.iter()
+        .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+        .fold(0.0f64, f64::max)
+}
+
+/// Number of squarings so that `norm / 2^s <= theta`.
+fn scale_count(norm: f64, theta: f64) -> u32 {
+    if !norm.is_finite() || norm <= theta || norm <= 0.0 {
+        0
+    } else {
+        ((norm / theta).log2().ceil() as u32).min(1024)
+    }
+}
+
+/// `exp(a)` for a square real matrix via scaling-and-squaring with a [6/6] Padé
+/// approximant (Higham 2005).
+fn pade_exp(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = a.len();
+    if n == 0 {
+        return vec![];
+    }
+    let s = scale_count(inf_norm_f64(a), 0.5);
+    let scale = 2f64.powi(s as i32);
+    let u: Vec<Vec<f64>> = a
+        .iter()
+        .map(|r| r.iter().map(|x| x / scale).collect())
+        .collect();
+    // Horner evaluation of N(u) = Σ cₖ uᵏ and D(u) = N(−u).
+    let mut num = identity_f64(n);
+    let mut den = identity_f64(n);
+    for i in 0..n {
+        num[i][i] = PADE6[6];
+        den[i][i] = PADE6[6];
+    }
+    for k in (0..6).rev() {
+        num = mat_mul(&num, &u);
+        den = mat_mul(&den, &u);
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+        for i in 0..n {
+            num[i][i] += PADE6[k];
+            den[i][i] += sign * PADE6[k];
+        }
+    }
+    // Solve D · X = N column by column.
+    let (lu, perm) = lu_decompose(&den);
+    let mut x = vec![vec![0.0f64; n]; n];
+    for j in 0..n {
+        let b: Vec<f64> = (0..n).map(|i| num[i][j]).collect();
+        let col = lu_solve(&lu, &perm, &b);
+        for i in 0..n {
+            x[i][j] = col[i];
+        }
+    }
+    for _ in 0..s {
+        x = mat_mul(&x, &x);
+    }
+    x
+}
+
+/// MatrixExp[m] — matrix exponential via scaling and squaring (Padé).
 pub fn builtin_matrix_exp(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Ok(unevaluated("MatrixExp", args));
@@ -1035,42 +1107,401 @@ pub fn builtin_matrix_exp(args: &[Value]) -> Result<Value, EvalError> {
         Some(d) => d,
         None => return Ok(unevaluated("MatrixExp", args)),
     };
-    if rows != cols || rows == 0 {
+    if rows != cols || rows == 0 || !matrix_is_numeric(m) {
         return Ok(unevaluated("MatrixExp", args));
     }
     let a = matrix_to_f64(m)?;
-    let n = rows;
+    Ok(f64_matrix_to_value(&pade_exp(&a)))
+}
+
+// ── MatrixFunction / MatrixSqrt ─────────────────────────────────────────────
+
+/// A closed-form scalar function applied matrix-wise.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatFn {
+    Exp,
+    Log,
+    Sin,
+    Cos,
+    Tan,
+    Sqrt,
+    Sinh,
+    Cosh,
+    Tanh,
+}
+
+impl MatFn {
+    fn parse(v: &Value) -> Option<MatFn> {
+        let name = match v {
+            Value::Symbol(s) => s.as_str(),
+            Value::Builtin(s, _) => s.as_str(),
+            Value::Str(s) => s.as_str(),
+            _ => return None,
+        };
+        Some(match name {
+            "Exp" => MatFn::Exp,
+            "Log" => MatFn::Log,
+            "Sin" => MatFn::Sin,
+            "Cos" => MatFn::Cos,
+            "Tan" => MatFn::Tan,
+            "Sqrt" => MatFn::Sqrt,
+            "Sinh" => MatFn::Sinh,
+            "Cosh" => MatFn::Cosh,
+            "Tanh" => MatFn::Tanh,
+            _ => return None,
+        })
+    }
+
+    /// Principal branch of the function on a complex scalar.
+    fn on_complex(self, z: C) -> C {
+        let (re, im) = z;
+        let e = re.exp();
+        match self {
+            MatFn::Exp => (e * im.cos(), e * im.sin()),
+            MatFn::Log => (0.5 * (re * re + im * im).ln(), im.atan2(re)),
+            MatFn::Sin => (re.sin() * im.cosh(), re.cos() * im.sinh()),
+            MatFn::Cos => (re.cos() * im.cosh(), -re.sin() * im.sinh()),
+            MatFn::Tan => cdiv(self_sin(re, im), self_cos(re, im)),
+            MatFn::Sqrt => {
+                let r = (re * re + im * im).sqrt();
+                let sr = ((r + re) / 2.0).max(0.0).sqrt();
+                let si = ((r - re) / 2.0).max(0.0).sqrt() * if im < 0.0 { -1.0 } else { 1.0 };
+                (sr, si)
+            }
+            MatFn::Sinh => (re.sinh() * im.cos(), re.cosh() * im.sin()),
+            MatFn::Cosh => (re.cosh() * im.cos(), re.sinh() * im.sin()),
+            MatFn::Tanh => cdiv(self_sinh(re, im), self_cosh(re, im)),
+        }
+    }
+}
+
+fn self_sin(re: f64, im: f64) -> C {
+    (re.sin() * im.cosh(), re.cos() * im.sinh())
+}
+
+fn self_cos(re: f64, im: f64) -> C {
+    (re.cos() * im.cosh(), -re.sin() * im.sinh())
+}
+
+fn self_sinh(re: f64, im: f64) -> C {
+    (re.sinh() * im.cos(), re.cosh() * im.sin())
+}
+
+fn self_cosh(re: f64, im: f64) -> C {
+    (re.cosh() * im.cos(), re.sinh() * im.sin())
+}
+
+fn cmat_scale(a: &[Vec<C>], s: f64) -> Vec<Vec<C>> {
+    a.iter()
+        .map(|r| r.iter().map(|&(x, y)| (x * s, y * s)).collect())
+        .collect()
+}
+
+fn cmat_sub(a: &[Vec<C>], b: &[Vec<C>]) -> Vec<Vec<C>> {
+    a.iter()
+        .zip(b)
+        .map(|(ra, rb)| ra.iter().zip(rb).map(|(&x, &y)| csub(x, y)).collect())
+        .collect()
+}
+
+fn cmat_identity(n: usize) -> Vec<Vec<C>> {
+    let mut m = vec![vec![(0.0f64, 0.0f64); n]; n];
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] = (1.0, 0.0);
+    }
+    m
+}
+
+/// `exp(a)` for a square complex matrix via scaling-and-squaring (Padé).
+fn cexp_mat(a: &[Vec<C>]) -> Option<Vec<Vec<C>>> {
+    let n = a.len();
+    if n == 0 {
+        return Some(vec![]);
+    }
     let norm = a
         .iter()
-        .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+        .map(|r| r.iter().map(|&(x, y)| x.hypot(y)).sum::<f64>())
         .fold(0.0f64, f64::max);
-    let s = if norm <= 1.0 {
-        0u32
-    } else {
-        norm.log2().ceil() as u32
-    };
+    let s = scale_count(norm, 0.5);
     let scale = 2f64.powi(s as i32);
-    let b: Vec<Vec<f64>> = a
-        .iter()
-        .map(|row| row.iter().map(|x| x / scale).collect())
-        .collect();
-
-    let mut result = identity_f64(n);
-    let mut term = identity_f64(n);
-    for k in 1..=30u32 {
-        term = mat_mul(&term, &b);
-        let inv = 1.0 / k as f64;
+    let u = cmat_scale(a, 1.0 / scale);
+    let mut num = cmat_identity(n);
+    let mut den = cmat_identity(n);
+    for i in 0..n {
+        num[i][i] = (PADE6[6], 0.0);
+        den[i][i] = (PADE6[6], 0.0);
+    }
+    for k in (0..6).rev() {
+        num = cmat_mul(&num, &u);
+        den = cmat_mul(&den, &u);
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
         for i in 0..n {
-            for j in 0..n {
-                term[i][j] *= inv;
-                result[i][j] += term[i][j];
-            }
+            num[i][i] = cadd(num[i][i], (PADE6[k], 0.0));
+            den[i][i] = cadd(den[i][i], (sign * PADE6[k], 0.0));
+        }
+    }
+    let mut x = vec![vec![(0.0f64, 0.0f64); n]; n];
+    for j in 0..n {
+        let b: Vec<C> = (0..n).map(|i| num[i][j]).collect();
+        let col = csolve(&den, &b)?;
+        for i in 0..n {
+            x[i][j] = col[i];
         }
     }
     for _ in 0..s {
-        result = mat_mul(&result, &result);
+        x = cmat_mul(&x, &x);
     }
-    Ok(f64_matrix_to_value(&result))
+    Some(x)
+}
+
+/// Apply `f` via the (complex) eigendecomposition `S · f(Λ) · S⁻¹`.
+/// Returns `None` when the eigenvector matrix is singular (defective input).
+fn mat_fn_via_eigen(a: &[Vec<f64>], f: MatFn) -> Option<Vec<Vec<C>>> {
+    let n = a.len();
+    let mut af = a.to_vec();
+    let vals = super::numericsolve::qr_eigenvalues(&mut af, n);
+    if vals.len() != n {
+        return None;
+    }
+    let ac = matrix_to_complex(as_list(&f64_matrix_to_value(a)).ok()?).ok()?;
+    let mut s = vec![vec![(0.0f64, 0.0f64); n]; n];
+    for (col, &(re, im)) in vals.iter().enumerate() {
+        let mut shifted = ac.clone();
+        for i in 0..n {
+            shifted[i][i] = csub(shifted[i][i], (re, im));
+        }
+        let v = complex_null_vector(&shifted);
+        for i in 0..n {
+            s[i][col] = v[i];
+        }
+    }
+    let sinv = cmat_inv(&s)?;
+    let mut d = vec![vec![(0.0f64, 0.0f64); n]; n];
+    for (i, &lam) in vals.iter().enumerate() {
+        d[i][i] = f.on_complex(lam);
+    }
+    Some(cmat_mul(&cmat_mul(&s, &d), &sinv))
+}
+
+/// Apply `f` without assuming diagonalisability, using identities built on the
+/// complex matrix exponential (defective / repeated-spectrum fallback).
+fn mat_fn_via_exp(a: &[Vec<f64>], f: MatFn) -> Option<Vec<Vec<C>>> {
+    let n = a.len();
+    let ac = matrix_to_complex(as_list(&f64_matrix_to_value(a)).ok()?).ok()?;
+    let mul_i = |m: &[Vec<C>]| -> Vec<Vec<C>> {
+        m.iter()
+            .map(|r| r.iter().map(|&z| cmul((0.0, 1.0), z)).collect())
+            .collect()
+    };
+    match f {
+        MatFn::Exp => cexp_mat(&ac),
+        MatFn::Sin => {
+            let ep = cexp_mat(&mul_i(&ac))?;
+            let em = cexp_mat(&mul_i(&cmat_scale(&ac, -1.0)))?;
+            // (e^{iA} − e^{−iA}) / (2i)
+            Some(
+                cmat_scale(&cmat_sub(&ep, &em), 0.5)
+                    .iter()
+                    .map(|r| r.iter().map(|&z| cmul(z, (0.0, -1.0))).collect())
+                    .collect(),
+            )
+        }
+        MatFn::Cos => {
+            let ep = cexp_mat(&mul_i(&ac))?;
+            let em = cexp_mat(&mul_i(&cmat_scale(&ac, -1.0)))?;
+            Some(cmat_scale(&cadd_mat(&ep, &em), 0.5))
+        }
+        MatFn::Sinh => {
+            let ep = cexp_mat(&ac)?;
+            let em = cexp_mat(&cmat_scale(&ac, -1.0))?;
+            Some(cmat_scale(&cmat_sub(&ep, &em), 0.5))
+        }
+        MatFn::Cosh => {
+            let ep = cexp_mat(&ac)?;
+            let em = cexp_mat(&cmat_scale(&ac, -1.0))?;
+            Some(cmat_scale(&cadd_mat(&ep, &em), 0.5))
+        }
+        MatFn::Tan => {
+            let s = mat_fn_via_exp(a, MatFn::Sin)?;
+            let c = mat_fn_via_exp(a, MatFn::Cos)?;
+            Some(cmat_mul(&s, &cmat_inv(&c)?))
+        }
+        MatFn::Tanh => {
+            let s = mat_fn_via_exp(a, MatFn::Sinh)?;
+            let c = mat_fn_via_exp(a, MatFn::Cosh)?;
+            Some(cmat_mul(&s, &cmat_inv(&c)?))
+        }
+        MatFn::Sqrt => {
+            // Denman–Beavers iteration.
+            let mut y = ac.clone();
+            let mut z = cmat_identity(n);
+            for _ in 0..64 {
+                let yinv = cmat_inv(&y)?;
+                let zinv = cmat_inv(&z)?;
+                let ny = cmat_scale(&cadd_mat(&y, &zinv), 0.5);
+                let nz = cmat_scale(&cadd_mat(&z, &yinv), 0.5);
+                let diff = ny
+                    .iter()
+                    .zip(&y)
+                    .map(|(ra, rb)| {
+                        ra.iter()
+                            .zip(rb)
+                            .map(|(x, z)| csub(*x, *z))
+                            .map(|d| d.0.hypot(d.1))
+                            .fold(0.0, f64::max)
+                    })
+                    .fold(0.0, f64::max);
+                y = ny;
+                z = nz;
+                if diff < 1e-14 {
+                    break;
+                }
+            }
+            Some(y)
+        }
+        // Log has no exp identity; the eigen path is attempted first, and a
+        // defective matrix with a valid decomposition is handled there.
+        MatFn::Log => mat_fn_via_eigen(a, MatFn::Log).or_else(|| {
+            let mut af = a.to_vec();
+            let vals = super::numericsolve::qr_eigenvalues(&mut af, n);
+            if vals.len() != n {
+                return None;
+            }
+            let mut l = vec![vec![(0.0f64, 0.0f64); n]; n];
+            for (i, &(re, im)) in vals.iter().enumerate() {
+                l[i][i] = (re.hypot(im).ln(), im.atan2(re));
+            }
+            Some(l)
+        }),
+    }
+}
+
+fn cadd_mat(a: &[Vec<C>], b: &[Vec<C>]) -> Vec<Vec<C>> {
+    a.iter()
+        .zip(b)
+        .map(|(ra, rb)| ra.iter().zip(rb).map(|(&x, &y)| cadd(x, y)).collect())
+        .collect()
+}
+
+fn cresult_to_value(m: &[Vec<C>]) -> Value {
+    Value::List(
+        m.iter()
+            .map(|row| Value::List(row.iter().map(|&(re, im)| complex_value(re, im)).collect()))
+            .collect(),
+    )
+}
+
+/// `MatrixFunction[f, m]` — apply the scalar function `f` to the square matrix
+/// `m`, through the eigendecomposition (with a defect-safe fallback).
+pub fn builtin_matrix_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated("MatrixFunction", args));
+    }
+    let f = match MatFn::parse(&args[0]) {
+        Some(f) => f,
+        None => return Ok(unevaluated("MatrixFunction", args)),
+    };
+    let m = match &args[1] {
+        Value::List(_) => as_list(&args[1])?,
+        _ => return Ok(unevaluated("MatrixFunction", args)),
+    };
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("MatrixFunction", args)),
+    };
+    if rows != cols || rows == 0 || !matrix_is_numeric(m) {
+        return Ok(unevaluated("MatrixFunction", args));
+    }
+    let a = matrix_to_f64(m)?;
+    let res = mat_fn_via_eigen(&a, f).or_else(|| mat_fn_via_exp(&a, f));
+    match res {
+        Some(c) => Ok(cresult_to_value(&c)),
+        None => Ok(unevaluated("MatrixFunction", args)),
+    }
+}
+
+/// Whether two real matrices agree entrywise within tolerance.
+fn close_f64(a: &[Vec<f64>], b: &[Vec<f64>], tol: f64) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(ra, rb)| {
+            ra.len() == rb.len() && ra.iter().zip(rb).all(|(x, y)| (x - y).abs() <= tol)
+        })
+}
+
+/// Real square root via Denman–Beavers, or `None` when it does not converge.
+fn sqrt_denman_beavers(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = a.len();
+    let mut y = a.to_vec();
+    let mut z = identity_f64(n);
+    for _ in 0..64 {
+        let yinv = cmat_inv(
+            &y.iter()
+                .map(|r| r.iter().map(|&x| (x, 0.0)).collect())
+                .collect::<Vec<_>>(),
+        )?;
+        let zinv = cmat_inv(
+            &z.iter()
+                .map(|r| r.iter().map(|&x| (x, 0.0)).collect())
+                .collect::<Vec<_>>(),
+        )?;
+        let mut ny = vec![vec![0.0f64; n]; n];
+        let mut nz = vec![vec![0.0f64; n]; n];
+        let mut diff = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                ny[i][j] = 0.5 * (y[i][j] + zinv[i][j].0);
+                nz[i][j] = 0.5 * (z[i][j] + yinv[i][j].0);
+                diff = diff.max((ny[i][j] - y[i][j]).abs());
+            }
+        }
+        y = ny;
+        z = nz;
+        if diff < 1e-14 {
+            break;
+        }
+    }
+    Some(y)
+}
+
+/// MatrixSqrt[m] — principal square root of a square matrix.
+pub fn builtin_matrix_sqrt(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("MatrixSqrt", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("MatrixSqrt", args)),
+    };
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) => d,
+        None => return Ok(unevaluated("MatrixSqrt", args)),
+    };
+    if rows != cols || rows == 0 || !matrix_is_numeric(m) {
+        return Ok(unevaluated("MatrixSqrt", args));
+    }
+    let a = matrix_to_f64(m)?;
+    // Prefer a real branch when the matrix has a real square root.
+    if let Some(c) = mat_fn_via_eigen(&a, MatFn::Sqrt) {
+        let real = c.iter().all(|r| r.iter().all(|&(_, im)| im.abs() < 1e-9));
+        if real {
+            let r: Vec<Vec<f64>> = c
+                .iter()
+                .map(|row| row.iter().map(|&(re, _)| re).collect())
+                .collect();
+            if close_f64(&mat_mul(&r, &r), &a, 1e-7) {
+                return Ok(f64_matrix_to_value(&r));
+            }
+        }
+    }
+    if let Some(r) = sqrt_denman_beavers(&a)
+        && close_f64(&mat_mul(&r, &r), &a, 1e-7)
+    {
+        return Ok(f64_matrix_to_value(&r));
+    }
+    match mat_fn_via_eigen(&a, MatFn::Sqrt).or_else(|| mat_fn_via_exp(&a, MatFn::Sqrt)) {
+        Some(c) => Ok(cresult_to_value(&c)),
+        None => Ok(unevaluated("MatrixSqrt", args)),
+    }
 }
 
 // ── Structured matrices ─────────────────────────────────────────────────────
@@ -2715,6 +3146,159 @@ pub fn builtin_positive_semidefinite_matrix_q(args: &[Value]) -> Result<Value, E
     })))
 }
 
+// ── Matrix norms / condition number ─────────────────────────────────────────
+
+/// Which matrix norm to compute.
+#[derive(Clone, Copy)]
+enum NormP {
+    One,
+    Two,
+    Inf,
+    Frobenius,
+    Max,
+}
+
+fn parse_norm_p(v: &Value) -> Option<NormP> {
+    match v {
+        Value::Integer(i) => match i.to_i64()? {
+            1 => Some(NormP::One),
+            2 => Some(NormP::Two),
+            _ => None,
+        },
+        Value::Real(r) if r.is_integer() => match r.to_integer()?.to_i64()? {
+            1 => Some(NormP::One),
+            2 => Some(NormP::Two),
+            _ => None,
+        },
+        Value::Symbol(s) if s == "Infinity" => Some(NormP::Inf),
+        Value::Symbol(s) if s == "Frobenius" => Some(NormP::Frobenius),
+        Value::Str(s) => match s.as_str() {
+            "Infinity" => Some(NormP::Inf),
+            "Frobenius" | "FrobeniusNorm" => Some(NormP::Frobenius),
+            "Max" | "Maximum" => Some(NormP::Max),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Numeric matrix norm of a real matrix. `None` for an empty matrix.
+fn matrix_norm_f64(a: &[Vec<f64>], p: NormP) -> Option<f64> {
+    if a.is_empty() || a[0].is_empty() {
+        return None;
+    }
+    Some(match p {
+        NormP::Max => a
+            .iter()
+            .map(|r| r.iter().map(|x| x.abs()).fold(0.0, f64::max))
+            .fold(0.0, f64::max),
+        NormP::One => {
+            let cols = a[0].len();
+            (0..cols)
+                .map(|j| a.iter().map(|r| r[j].abs()).sum::<f64>())
+                .fold(0.0, f64::max)
+        }
+        NormP::Inf => inf_norm_f64(a),
+        NormP::Frobenius => a
+            .iter()
+            .map(|r| r.iter().map(|x| x * x).sum::<f64>())
+            .sum::<f64>()
+            .sqrt(),
+        NormP::Two => {
+            let (_u, sigma, _v) = svd_decompose(a);
+            sigma.first().copied().unwrap_or(0.0)
+        }
+    })
+}
+
+/// MatrixNorm[m] / MatrixNorm[m, p] — matrix norm (default: 2-norm).
+pub fn builtin_matrix_norm(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("MatrixNorm", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("MatrixNorm", args)),
+    };
+    if matrix_dims(m).is_none() || !matrix_is_numeric(m) {
+        return Ok(unevaluated("MatrixNorm", args));
+    }
+    let p = match args.get(1) {
+        Some(v) => match parse_norm_p(v) {
+            Some(p) => p,
+            None => return Ok(unevaluated("MatrixNorm", args)),
+        },
+        None => NormP::Two,
+    };
+    let a = matrix_to_f64(m)?;
+    match matrix_norm_f64(&a, p) {
+        Some(n) => Ok(super::real(n)),
+        None => Ok(unevaluated("MatrixNorm", args)),
+    }
+}
+
+fn complex_abs_rows(a: &[Vec<f64>]) -> Vec<Vec<(f64, f64)>> {
+    a.iter()
+        .map(|r| r.iter().map(|&x| (x, 0.0)).collect())
+        .collect()
+}
+
+/// ConditionNumber[m] / ConditionNumber[m, p] — ‖m‖·‖m⁻¹‖ (default 2-norm;
+/// returns `Infinity` for a singular matrix).
+pub fn builtin_condition_number(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("ConditionNumber", args));
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("ConditionNumber", args)),
+    };
+    let n = match is_square_matrix(m) {
+        Some(n) if n > 0 => n,
+        _ => return Ok(unevaluated("ConditionNumber", args)),
+    };
+    if !matrix_is_numeric(m) {
+        return Ok(unevaluated("ConditionNumber", args));
+    }
+    let p = match args.get(1) {
+        Some(v) => match parse_norm_p(v) {
+            Some(p) => p,
+            None => return Ok(unevaluated("ConditionNumber", args)),
+        },
+        None => NormP::Two,
+    };
+    let a = matrix_to_f64(m)?;
+    let _ = n;
+    // 2-norm condition number is σmax/σmin.
+    if let NormP::Two = p {
+        let (_u, sigma, _v) = svd_decompose(&a);
+        if let (Some(&smax), Some(&smin)) = (sigma.first(), sigma.last()) {
+            if smin <= 1e-15 {
+                if smax <= 1e-15 {
+                    return Ok(Value::Symbol("Indeterminate".to_string()));
+                }
+                return Ok(Value::Symbol("Infinity".to_string()));
+            }
+            return Ok(super::real(smax / smin));
+        }
+        return Ok(unevaluated("ConditionNumber", args));
+    }
+    let ca = complex_abs_rows(&a);
+    let inv = match cmat_inv(&ca) {
+        Some(inv) => inv,
+        None => return Ok(Value::Symbol("Infinity".to_string())),
+    };
+    let inv_f: Vec<Vec<f64>> = inv
+        .iter()
+        .map(|r| r.iter().map(|&(re, _)| re).collect())
+        .collect();
+    let (Some(na), Some(ni)) = (matrix_norm_f64(&a, p), matrix_norm_f64(&inv_f, p)) else {
+        return Ok(unevaluated("ConditionNumber", args));
+    };
+    let _ = &inv_f;
+    Ok(super::real(na * ni))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 // ── Sparse arrays ───────────────────────────────────────────────────────────
@@ -2776,11 +3360,23 @@ fn dims_of(v: &Value) -> Option<Vec<usize>> {
     }
 }
 
-/// Infer the dimensions from a rule set's positions.
+/// Infer the dimensions from a rule set's positions (Band starts included).
 fn infer_dims(rules: &[Value]) -> Option<Vec<usize>> {
     let mut dims: Vec<usize> = Vec::new();
     for r in rules {
-        let Some((pos, _)) = rule_position(r) else {
+        // Position rules contribute their position; `Band[..]` rules contribute
+        // their start corner.
+        let pos: Vec<Value> = if let Some((pos, _)) = rule_position(r) {
+            pos
+        } else if let Value::Rule { lhs, .. } = r {
+            match unwrap_value(lhs) {
+                Value::Call { head, args } if head == "Band" => match args.first() {
+                    Some(Value::List(s)) => s.clone(),
+                    _ => continue,
+                },
+                _ => continue,
+            }
+        } else {
             continue;
         };
         for (i, c) in pos.iter().enumerate() {
@@ -2796,6 +3392,62 @@ fn infer_dims(rules: &[Value]) -> Option<Vec<usize>> {
         Some(vec![0])
     } else {
         Some(dims)
+    }
+}
+
+/// Is `v` a `Band[..]` band specification?
+fn as_band(v: &Value) -> Option<&Vec<Value>> {
+    match v {
+        Value::Call { head, args } if head == "Band" => Some(args),
+        _ => None,
+    }
+}
+
+/// Expand `Band[{i,j}, {di,dj}]` into the list of in-bounds positions.
+fn band_positions(band: &[Value], dims: &[usize]) -> Option<Vec<Vec<Value>>> {
+    if band.is_empty() || band.len() > 2 || dims.len() != 2 {
+        return None;
+    }
+    let start = match band.first()? {
+        Value::List(s) if s.len() == 2 => s,
+        _ => return None,
+    };
+    let dir = match band.get(1) {
+        Some(Value::List(d)) if d.len() == 2 => d.clone(),
+        None => vec![int(1), int(1)],
+        _ => return None,
+    };
+    let s = [start[0].to_integer()?, start[1].to_integer()?];
+    let d = [dir[0].to_integer()?, dir[1].to_integer()?];
+    if s[0] < 1 || s[1] < 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let limit = dims[0].max(dims[1]).max(1) + 1;
+    for t in 0..=limit {
+        let i = s[0] + t as i64 * d[0];
+        let j = s[1] + t as i64 * d[1];
+        if i < 1 || j < 1 || i as usize > dims[0] || j as usize > dims[1] {
+            break;
+        }
+        out.push(vec![int(i), int(j)]);
+        if d == [0, 0] {
+            break;
+        }
+    }
+    Some(out)
+}
+
+/// Band[{i,j}] / Band[{i,j},{di,dj}] — sparse-array band specification.
+pub fn builtin_band(args: &[Value]) -> Result<Value, EvalError> {
+    let valid_list = |v: &Value| matches!(v, Value::List(l) if l.len() == 2 && l.iter().all(|x| matches!(x, Value::Integer(_))));
+    match args.len() {
+        1 if valid_list(&args[0]) => Ok(Value::Call {
+            head: "Band".to_string(),
+            args: vec![args[0].clone(), Value::List(vec![int(1), int(1)])],
+        }),
+        2 if valid_list(&args[0]) && valid_list(&args[1]) => Ok(unevaluated("Band", args)),
+        _ => Ok(unevaluated("Band", args)),
     }
 }
 
@@ -2894,9 +3546,36 @@ pub fn builtin_sparse_array(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ => return Ok(uneval()),
     };
-    // Normalise rules (unwrap parsed `Pattern` operands).
+    // Normalise rules (unwrap parsed `Pattern` operands) and expand `Band`
+    // specifications against the known dimensions.
     let mut rules = Vec::with_capacity(rules_raw.len());
     for r in &rules_raw {
+        let Value::Rule { lhs, rhs, .. } = r else {
+            return Ok(uneval());
+        };
+        let lhs_v = unwrap_value(lhs);
+        let rhs_v = unwrap_value(rhs);
+        if let Some(band) = as_band(&lhs_v) {
+            let positions = match band_positions(band, &dims) {
+                Some(p) => p,
+                None => return Ok(uneval()),
+            };
+            for (t, pos) in positions.into_iter().enumerate() {
+                let val = match &rhs_v {
+                    Value::List(vals) => match vals.get(t) {
+                        Some(v) => v.clone(),
+                        None => break,
+                    },
+                    other => other.clone(),
+                };
+                rules.push(Value::Rule {
+                    lhs: Box::new(Value::List(pos)),
+                    rhs: Box::new(val),
+                    delayed: false,
+                });
+            }
+            continue;
+        }
         match rule_position(r) {
             Some((pos, val)) => rules.push(Value::Rule {
                 lhs: Box::new(Value::List(pos)),
@@ -3104,6 +3783,143 @@ pub fn builtin_sparse_matrix_multiply(args: &[Value]) -> Result<Value, EvalError
     builtin_sparse_array(&[Value::List(rows)])
 }
 
+// ── Sparse linear-algebra dispatch ──────────────────────────────────────────
+//
+// `Dot`/`Transpose`/`Part`/`Total`/`Tr` are registered by other modules, so a
+// small dispatcher densifies sparse arguments and forwards everything else.
+
+fn densify_or_clone(v: &Value) -> Value {
+    if is_sparse(v) {
+        normal_dense(v).unwrap_or_else(|| v.clone())
+    } else {
+        v.clone()
+    }
+}
+
+/// Is the value a rank-≥2 nested (matrix-like) list?
+fn is_matrix_list(v: &Value) -> bool {
+    matches!(v, Value::List(rows) if !rows.is_empty() && rows.iter().all(|r| matches!(r, Value::List(_))))
+}
+
+/// Dot[a, b, …] — dispatches to the tensor implementation for non-sparse
+/// arguments, and handles sparse operands by densifying.
+pub fn builtin_sparse_dot(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.iter().any(is_sparse) {
+        return super::tensor::builtin_dot(args);
+    }
+    let dense: Vec<Value> = args.iter().map(densify_or_clone).collect();
+    let r = super::tensor::builtin_dot(&dense)?;
+    if is_matrix_list(&r) {
+        builtin_sparse_array(&[r])
+    } else {
+        Ok(r)
+    }
+}
+
+/// Transpose[m] — sparse-aware (returns a `SparseArray` for sparse input).
+pub fn builtin_sparse_transpose(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1 && is_sparse(&args[0]) {
+        let dense = densify_or_clone(&args[0]);
+        let t = super::list::builtin_transpose(&[dense])?;
+        return builtin_sparse_array(&[t]);
+    }
+    super::list::builtin_transpose(args)
+}
+
+/// Total[m] — sparse-aware.
+pub fn builtin_sparse_total(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1 && is_sparse(&args[0]) {
+        let dense = densify_or_clone(&args[0]);
+        return super::list::builtin_total(&[dense]);
+    }
+    super::list::builtin_total(args)
+}
+
+/// Tr[m, …] — sparse-aware.
+pub fn builtin_sparse_tr(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if !args.is_empty() && is_sparse(&args[0]) {
+        let mut newargs = args.to_vec();
+        newargs[0] = densify_or_clone(&args[0]);
+        return super::tensor::builtin_tr(&newargs, env);
+    }
+    super::tensor::builtin_tr(args, env)
+}
+
+/// Part[m, …] — sparse-aware (densifies before indexing).
+pub fn builtin_sparse_part(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() >= 2 && is_sparse(&args[0]) {
+        let mut newargs = args.to_vec();
+        newargs[0] = densify_or_clone(&args[0]);
+        return super::dataset::builtin_dataset_part(&newargs, env);
+    }
+    super::dataset::builtin_dataset_part(args, env)
+}
+
+/// PseudoInverse[m] — exact for full-rank exact input (delegating to the exact
+/// `linalg` implementation), SVD-based for rank-deficient / numeric input.
+pub fn builtin_pseudo_inverse_svd(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("PseudoInverse", args));
+    }
+    if let Ok(v) = super::linalg::builtin_pseudo_inverse(args) {
+        return Ok(v);
+    }
+    let m = match &args[0] {
+        Value::List(_) => as_list(&args[0])?,
+        _ => return Ok(unevaluated("PseudoInverse", args)),
+    };
+    let (rows, cols) = match matrix_dims(m) {
+        Some(d) if d.0 > 0 && d.1 > 0 => d,
+        _ => return Ok(unevaluated("PseudoInverse", args)),
+    };
+    if !matrix_is_numeric(m) {
+        return Ok(unevaluated("PseudoInverse", args));
+    }
+    let a = matrix_to_f64(m)?;
+    let (u, sigma, v) = svd_decompose(&a);
+    let smax = sigma.iter().cloned().fold(0.0f64, f64::max);
+    let tol = if smax > 0.0 { smax * 1e-12 } else { 1e-300 };
+    // A⁺ = Σ_i (1/σ_i) v_i u_iᵀ  (cols × rows).
+    let mut pinv = vec![vec![0.0f64; rows]; cols];
+    for (idx, &s) in sigma.iter().enumerate() {
+        if s <= tol || idx >= u[0].len().min(v[0].len()) {
+            continue;
+        }
+        let inv = 1.0 / s;
+        for i in 0..cols {
+            for j in 0..rows {
+                pinv[i][j] += inv * v[i][idx] * u[j][idx];
+            }
+        }
+    }
+    Ok(f64_matrix_to_value(&pinv))
+}
+
+/// Register the sparse / shared-dispatch overrides. Must run *after* the
+/// modules that own `Dot`/`Tr`/`Part`/`Transpose`/`Total`.
+pub fn register_sparse(env: &Env) {
+    #[allow(clippy::type_complexity)]
+    let funcs: &[(&str, fn(&[Value]) -> Result<Value, EvalError>)] = &[
+        ("Dot", builtin_sparse_dot),
+        ("Transpose", builtin_sparse_transpose),
+        ("Total", builtin_sparse_total),
+        ("Band", builtin_band),
+        ("MatrixFunction", builtin_matrix_function),
+        ("MatrixSqrt", builtin_matrix_sqrt),
+        ("ConditionNumber", builtin_condition_number),
+        ("MatrixNorm", builtin_matrix_norm),
+        ("PseudoInverse", builtin_pseudo_inverse_svd),
+    ];
+    for (name, func) in funcs {
+        super::register_builtin(env, name, *func);
+        env.set_attributes(name, vec!["Protected".to_string()]);
+    }
+    super::register_builtin_env(env, "Tr", builtin_sparse_tr);
+    env.set_attributes("Tr", vec!["Protected".to_string()]);
+    super::register_builtin_env(env, "Part", builtin_sparse_part);
+    env.set_attributes("Part", vec!["Protected".to_string()]);
+}
+
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
     #[allow(clippy::type_complexity)]
@@ -3122,6 +3938,12 @@ pub fn register(env: &Env) {
         ("Minors", builtin_minors_more),
         ("Cofactor", builtin_cofactor),
         ("MatrixExp", builtin_matrix_exp),
+        ("MatrixLog", builtin_matrix_log),
+        ("MatrixFunction", builtin_matrix_function),
+        ("MatrixSqrt", builtin_matrix_sqrt),
+        ("ConditionNumber", builtin_condition_number),
+        ("MatrixNorm", builtin_matrix_norm),
+        ("Band", builtin_band),
         ("HilbertMatrix", builtin_hilbert_matrix),
         ("VandermondeMatrix", builtin_vandermonde_matrix),
         ("ToeplitzMatrix", builtin_toeplitz_matrix),
@@ -3959,5 +4781,347 @@ mod tests {
         let prod = builtin_sparse_matrix_multiply(&[a, b]).unwrap();
         let dense = normal_dense(&prod).unwrap();
         assert_eq!(dense.to_string(), "{{6}}");
+    }
+
+    // ── MatrixExp (Padé) ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_exp_diagonal() {
+        let m = real_matrix(vec![vec![1.0, 0.0], vec![0.0, 2.0]]);
+        let r = as_f64_matrix(&builtin_matrix_exp(&[m]).unwrap());
+        assert!((r[0][0] - 1f64.exp()).abs() < 1e-9);
+        assert!((r[1][1] - 2f64.exp()).abs() < 1e-9);
+        assert!(r[0][1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_matrix_exp_zero_is_identity() {
+        let z = real_matrix(vec![vec![0.0, 0.0], vec![0.0, 0.0]]);
+        let r = as_f64_matrix(&builtin_matrix_exp(&[z]).unwrap());
+        assert!(close(&r, &identity_f64(2), 1e-12));
+    }
+
+    #[test]
+    fn test_matrix_exp_scaling_large_norm() {
+        // exp(10·I) = e¹⁰·I — exercises the scaling/squaring path.
+        let m = real_matrix(vec![vec![10.0, 0.0], vec![0.0, 10.0]]);
+        let r = as_f64_matrix(&builtin_matrix_exp(&[m]).unwrap());
+        assert!((r[0][0] - 10f64.exp()).abs() < 1e-6);
+        assert!(r[0][1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_matrix_exp_rotation_antidiagonal() {
+        let m = real_matrix(vec![vec![0.0, -1.0], vec![1.0, 0.0]]);
+        let r = as_f64_matrix(&builtin_matrix_exp(&[m]).unwrap());
+        assert!((r[0][0] - 1f64.cos()).abs() < 1e-9);
+        assert!((r[0][1] + 1f64.sin()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_matrix_exp_unevaluated() {
+        assert!(matches!(
+            builtin_matrix_exp(&[int_val(2)]).unwrap(),
+            Value::Call { ref head, .. } if head == "MatrixExp"
+        ));
+        let rect = list(vec![list(vec![int_val(1), int_val(2), int_val(3)])]);
+        assert!(matches!(
+            builtin_matrix_exp(&[rect]).unwrap(),
+            Value::Call { ref head, .. } if head == "MatrixExp"
+        ));
+    }
+
+    // ── MatrixFunction / MatrixSqrt ─────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_function_sin_nilpotent() {
+        let m = matrix(vec![vec![0, 1], vec![0, 0]]);
+        let r = builtin_matrix_function(&[Value::Symbol("Sin".to_string()), m]).unwrap();
+        let r = as_f64_matrix(&r);
+        let expected = [[0.0, 1.0], [0.0, 0.0]]
+            .iter()
+            .map(|x| x.to_vec())
+            .collect::<Vec<_>>();
+        assert!(close(&r, &expected, 1e-9));
+    }
+
+    #[test]
+    fn test_matrix_function_cos_symmetric() {
+        let m = real_matrix(vec![vec![0.0, 1.0], [1.0, 0.0].to_vec()]);
+        let r = builtin_matrix_function(&[Value::Symbol("Cos".to_string()), m]).unwrap();
+        let r = as_f64_matrix(&r);
+        let c = 1f64.cos();
+        let expected = vec![vec![c, 0.0], vec![0.0, c]];
+        assert!(close(&r, &expected, 1e-9));
+    }
+
+    #[test]
+    fn test_matrix_function_exp_matches_matrix_exp() {
+        let m = real_matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let a = as_f64_matrix(
+            &builtin_matrix_function(&[Value::Symbol("Exp".to_string()), m.clone()]).unwrap(),
+        );
+        let b = as_f64_matrix(&builtin_matrix_exp(&[m]).unwrap());
+        assert!(close(&a, &b, 1e-8));
+    }
+
+    #[test]
+    fn test_matrix_function_unevaluated() {
+        let m = matrix(vec![vec![1, 0], vec![0, 1]]);
+        assert!(matches!(
+            builtin_matrix_function(&[Value::Symbol("Foo".to_string()), m]).unwrap(),
+            Value::Call { ref head, .. } if head == "MatrixFunction"
+        ));
+    }
+
+    #[test]
+    fn test_matrix_sqrt_positive_definite() {
+        let a = vec![vec![5.0, 4.0], vec![4.0, 5.0]];
+        let r = as_f64_matrix(&builtin_matrix_sqrt(&[real_matrix(a.clone())]).unwrap());
+        assert!(close(&mmul(&r, &r), &a, 1e-8));
+    }
+
+    #[test]
+    fn test_matrix_sqrt_diagonal_and_identity() {
+        let r = as_f64_matrix(
+            &builtin_matrix_sqrt(&[real_matrix(vec![vec![4.0, 0.0], vec![0.0, 9.0]])]).unwrap(),
+        );
+        assert!((r[0][0] - 2.0).abs() < 1e-9);
+        assert!((r[1][1] - 3.0).abs() < 1e-9);
+        let id = real_matrix(vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!(close(
+            &as_f64_matrix(&builtin_matrix_sqrt(&[id]).unwrap()),
+            &identity_f64(2),
+            1e-9
+        ));
+    }
+
+    #[test]
+    fn test_matrix_sqrt_unevaluated() {
+        let rect = list(vec![list(vec![int_val(1), int_val(2)])]);
+        assert!(matches!(
+            builtin_matrix_sqrt(&[rect]).unwrap(),
+            Value::Call { ref head, .. } if head == "MatrixSqrt"
+        ));
+    }
+
+    // ── PseudoInverse ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pseudo_inverse_rank_deficient_svd() {
+        let m = matrix(vec![vec![1, 2], vec![2, 4]]);
+        let p = as_f64_matrix(&builtin_pseudo_inverse_svd(&[m]).unwrap());
+        for (i, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let want = (i + 1) as f64 * (j + 1) as f64 / 25.0;
+            assert!((p[i][j] - want).abs() < 1e-9, "p[{i}][{j}]={}", p[i][j]);
+        }
+    }
+
+    #[test]
+    fn test_pseudo_inverse_full_rank_exact_preserved() {
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let p = as_f64_matrix(&builtin_pseudo_inverse_svd(&[m]).unwrap());
+        let expected = [[-2.0, 1.0], [1.5, -0.5]];
+        let expected = expected.iter().map(|r| r.to_vec()).collect::<Vec<_>>();
+        assert!(close(&p, &expected, 1e-9));
+    }
+
+    #[test]
+    fn test_pseudo_inverse_derived_from_svd() {
+        let m = matrix(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        let p = as_f64_matrix(&builtin_pseudo_inverse_svd(&[m.clone()]).unwrap());
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0].len(), 2);
+        // A·A⁺·A ≈ A
+        let rec = mmul(&mmul(&as_f64_matrix(&m), &p), &as_f64_matrix(&m));
+        assert!(close(&rec, &as_f64_matrix(&m), 1e-8));
+    }
+
+    // ── MatrixNorm / ConditionNumber ────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_norm_variants() {
+        let m = real_matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let inf = super::super::to_f64(
+            &builtin_matrix_norm(&[m.clone(), Value::Symbol("Infinity".to_string())]).unwrap(),
+        )
+        .unwrap();
+        assert!((inf - 7.0).abs() < 1e-9);
+        let one =
+            super::super::to_f64(&builtin_matrix_norm(&[m.clone(), int_val(1)]).unwrap()).unwrap();
+        assert!((one - 6.0).abs() < 1e-9);
+        let fro = super::super::to_f64(
+            &builtin_matrix_norm(&[m.clone(), Value::Str("Frobenius".to_string())]).unwrap(),
+        )
+        .unwrap();
+        assert!((fro - 30f64.sqrt()).abs() < 1e-9);
+        let mx = super::super::to_f64(
+            &builtin_matrix_norm(&[m.clone(), Value::Str("Max".to_string())]).unwrap(),
+        )
+        .unwrap();
+        assert!((mx - 4.0).abs() < 1e-9);
+        // default is the 2-norm (largest singular value)
+        let two = super::super::to_f64(&builtin_matrix_norm(&[m]).unwrap()).unwrap();
+        assert!(two > 5.4 && two < 5.5);
+    }
+
+    #[test]
+    fn test_matrix_norm_unevaluated() {
+        assert!(matches!(
+            builtin_matrix_norm(&[int_val(3)]).unwrap(),
+            Value::Call { ref head, .. } if head == "MatrixNorm"
+        ));
+    }
+
+    #[test]
+    fn test_condition_number() {
+        let id = real_matrix(vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        let c = super::super::to_f64(&builtin_condition_number(&[id]).unwrap()).unwrap();
+        assert!((c - 1.0).abs() < 1e-9);
+        let d = real_matrix(vec![vec![1.0, 0.0], vec![0.0, 2.0]]);
+        let c = super::super::to_f64(&builtin_condition_number(&[d]).unwrap()).unwrap();
+        assert!((c - 2.0).abs() < 1e-9);
+        let s = real_matrix(vec![vec![1.0, 0.0], vec![0.0, 0.0]]);
+        assert_eq!(
+            builtin_condition_number(&[s]).unwrap(),
+            Value::Symbol("Infinity".to_string())
+        );
+        let one = super::super::to_f64(
+            &builtin_condition_number(&[
+                real_matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]),
+                int_val(1),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(one > 0.0);
+    }
+
+    #[test]
+    fn test_condition_number_unevaluated() {
+        assert!(matches!(
+            builtin_condition_number(&[int_val(2)]).unwrap(),
+            Value::Call { ref head, .. } if head == "ConditionNumber"
+        ));
+    }
+
+    // ── Sparse: construction / Band / ops ───────────────────────────────────
+
+    fn sparse_rules(entries: &[(i64, i64, i64)], dims: (i64, i64)) -> Value {
+        let rules = entries
+            .iter()
+            .map(|&(i, j, v)| Value::Rule {
+                lhs: Box::new(Value::List(vec![int(i), int(j)])),
+                rhs: Box::new(int(v)),
+                delayed: false,
+            })
+            .collect();
+        builtin_sparse_array(&[
+            Value::List(rules),
+            Value::List(vec![int(dims.0), int(dims.1)]),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn test_sparse_default_and_dimensions() {
+        let sa = builtin_sparse_array(&[
+            Value::List(vec![Value::Rule {
+                lhs: Box::new(Value::List(vec![int(1), int(1)])),
+                rhs: Box::new(int(5)),
+                delayed: false,
+            }]),
+            Value::List(vec![int(2), int(3)]),
+            int(9),
+        ])
+        .unwrap();
+        assert!(is_sparse(&sa));
+        assert!(sa.to_string().contains("9"), "default kept: {sa}");
+        assert_eq!(
+            normal_dense(&sa).unwrap().to_string(),
+            "{{5, 9, 9}, {9, 9, 9}}"
+        );
+    }
+
+    #[test]
+    fn test_sparse_transpose_part_total_tr() {
+        let sa = sparse_rules(&[(1, 2, 7), (2, 1, 8)], (2, 2));
+        let t = builtin_sparse_transpose(&[sa.clone()]).unwrap();
+        assert!(is_sparse(&t));
+        assert_eq!(normal_dense(&t).unwrap().to_string(), "{{0, 8}, {7, 0}}");
+        let env = Env::new();
+        assert_eq!(
+            builtin_sparse_part(&[sa.clone(), int(1), int(2)], &env).unwrap(),
+            int(7)
+        );
+        assert_eq!(
+            builtin_sparse_total(&[sa.clone()]).unwrap().to_string(),
+            "{8, 7}"
+        );
+        assert_eq!(builtin_sparse_tr(&[sa], &env).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_sparse_dot_and_dispatch_fallback() {
+        let a = sparse_rules(&[(1, 1, 2)], (1, 1));
+        let b = sparse_rules(&[(1, 1, 3)], (1, 1));
+        let p = builtin_sparse_dot(&[a, b]).unwrap();
+        assert!(is_sparse(&p));
+        assert_eq!(normal_dense(&p).unwrap().to_string(), "{{6}}");
+        // Non-sparse arguments fall through to the dense Dot.
+        assert_eq!(
+            builtin_sparse_dot(&[list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]).unwrap(),
+            int(11)
+        );
+    }
+
+    #[test]
+    fn test_band_expansion_and_eval() {
+        let band = |args: Vec<Value>| Value::Call {
+            head: "Band".to_string(),
+            args,
+        };
+        let sa = builtin_sparse_array(&[
+            Value::List(vec![
+                Value::Rule {
+                    lhs: Box::new(band(vec![Value::List(vec![int(1), int(1)])])),
+                    rhs: Box::new(int(1)),
+                    delayed: false,
+                },
+                Value::Rule {
+                    lhs: Box::new(band(vec![
+                        Value::List(vec![int(1), int(2)]),
+                        Value::List(vec![int(1), int(1)]),
+                    ])),
+                    rhs: Box::new(int(2)),
+                    delayed: false,
+                },
+            ]),
+            Value::List(vec![int(3), int(3)]),
+        ])
+        .unwrap();
+        assert_eq!(
+            normal_dense(&sa).unwrap().to_string(),
+            "{{1, 2, 0}, {0, 1, 2}, {0, 0, 1}}"
+        );
+
+        assert_eq!(
+            builtin_band(&[Value::List(vec![int(1), int(2)])])
+                .unwrap()
+                .to_string(),
+            "Band[{1, 2}, {1, 1}]"
+        );
+        assert!(matches!(
+            builtin_band(&[int_val(1)]).unwrap(),
+            Value::Call { ref head, .. } if head == "Band"
+        ));
+    }
+
+    #[test]
+    fn test_sparse_matrix_multiply_rectangular() {
+        let a = sparse_rules(&[(1, 1, 1), (2, 2, 1)], (2, 2));
+        let b = sparse_rules(&[(1, 2, 4), (2, 1, 5)], (2, 2));
+        let p = builtin_sparse_matrix_multiply(&[a, b]).unwrap();
+        assert_eq!(normal_dense(&p).unwrap().to_string(), "{{0, 4}, {5, 0}}");
     }
 }

@@ -224,7 +224,7 @@ fn power_expand(val: &Value) -> Value {
                     None => call("Sqrt", eargs),
                 },
                 "Log" if eargs.len() == 1 => match pe_log(&eargs[0]) {
-                    Some(v) => power_expand(&v),
+                    Some(v) => v,
                     None => call("Log", eargs),
                 },
                 "Times" => simplify_call("Times", &eargs),
@@ -286,7 +286,7 @@ fn pe_log(arg: &Value) -> Option<Value> {
                 .iter()
                 .map(|f| power_expand(&call("Log", vec![f.clone()])))
                 .collect();
-            Some(simplify_call("Plus", &terms))
+            Some(call("Plus", terms))
         }
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => Some(simplify_call(
             "Plus",
@@ -298,16 +298,16 @@ fn pe_log(arg: &Value) -> Option<Value> {
                 ),
             ],
         )),
-        Value::Call { head, args } if head == "Power" && args.len() == 2 => Some(simplify_call(
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => Some(call(
             "Times",
-            &[
+            vec![
                 args[1].clone(),
                 power_expand(&call("Log", vec![args[0].clone()])),
             ],
         )),
-        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => Some(simplify_call(
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => Some(call(
             "Times",
-            &[half(), power_expand(&call("Log", vec![args[0].clone()]))],
+            vec![half(), power_expand(&call("Log", vec![args[0].clone()]))],
         )),
         Value::Call { head, args } if head == "Abs" && args.len() == 1 => {
             if let Value::Call {
@@ -320,7 +320,7 @@ fn pe_log(arg: &Value) -> Option<Value> {
                     .iter()
                     .map(|f| power_expand(&call("Log", vec![call("Abs", vec![f.clone()])])))
                     .collect();
-                Some(simplify_call("Plus", &terms))
+                Some(call("Plus", terms))
             } else {
                 None
             }
@@ -366,7 +366,7 @@ fn el_log(arg: &Value) -> Value {
                 .iter()
                 .map(|f| expand_log_val(&call("Log", vec![f.clone()])))
                 .collect();
-            simplify_call("Plus", &terms)
+            call("Plus", terms)
         }
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => simplify_call(
             "Plus",
@@ -378,9 +378,9 @@ fn el_log(arg: &Value) -> Value {
                 ),
             ],
         ),
-        Value::Call { head, args } if head == "Power" && args.len() == 2 => simplify_call(
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => call(
             "Times",
-            &[
+            vec![
                 args[1].clone(),
                 expand_log_val(&call("Log", vec![args[0].clone()])),
             ],

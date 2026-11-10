@@ -47,9 +47,17 @@ pub enum Opcode {
     LoadSym = 0x62,
     StoreSym = 0x63,
     EvalTree = 0x64,
+    /// Like `EvalTree`, but `Break`/`Continue` raised by the delegated subtree
+    /// are captured into the VM's loop-control slot instead of propagating, so
+    /// an enclosing compiled loop can act on them.
+    EvalTreeLoop = 0x65,
     Jump = 0x70,
     JumpIfZero = 0x71,
     JumpIfNotZero = 0x72,
+    /// Jump if the pending loop control is `Break` (then clear it).
+    JumpIfBreak = 0x73,
+    /// Jump if the pending loop control is `Continue` (then clear it).
+    JumpIfContinue = 0x74,
     Return = 0x80,
 }
 
@@ -115,10 +123,19 @@ pub enum Instruction {
     /// `Catch`, whose control flow escapes the instruction stream).
     EvalTree(u16, u32),
 
+    /// Evaluate a held expression (constant pool index `idx`) and capture any
+    /// `Break`/`Continue` it raises for the enclosing compiled loop. See
+    /// [`Opcode::EvalTreeLoop`].
+    EvalTreeLoop(u16, u32),
+
     // register + i32
     Jump(i32),
     JumpIfZero(u16, i32),
     JumpIfNotZero(u16, i32),
+    /// Jump to the loop end if the captured control is `Break`.
+    JumpIfBreak(i32),
+    /// Jump to the loop continue point if the captured control is `Continue`.
+    JumpIfContinue(i32),
 
     // Return
     Return(u16),
@@ -151,7 +168,9 @@ impl CodeBuilder {
         match &mut self.code[label_id] {
             Instruction::Jump(offset)
             | Instruction::JumpIfZero(_, offset)
-            | Instruction::JumpIfNotZero(_, offset) => *offset = target,
+            | Instruction::JumpIfNotZero(_, offset)
+            | Instruction::JumpIfBreak(offset)
+            | Instruction::JumpIfContinue(offset) => *offset = target,
             _ => panic!("Cannot patch non-jump instruction at {label_id}"),
         }
     }

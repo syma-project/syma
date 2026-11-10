@@ -644,7 +644,10 @@ fn apply_first_order_ic(sol: Expr, name: &str, x: &str, ics: &[Expr], env: &Env)
     }
     let a0 = eval_expr(&subst(&a, &sym(x), &x0), env);
     let b0 = eval_expr(&subst(&b, &sym(x), &x0), env);
-    let c1 = together(&div(sub(y0, a0), b0), env);
+    let c1 = together(&div(sub(y0.clone(), a0), b0.clone()), env);
+    if std::env::var("SYMA_DSOLVE_DBG").is_ok() {
+        eprintln!("[dsolve-dbg] sol={sol:?} x0={x0:?} y0={y0:?} b={b:?} b0={b0:?} c1={c1:?}");
+    }
     Some(eval_expr(&subst(&sol, &c_const(1), &c1), env))
 }
 
@@ -1693,6 +1696,9 @@ fn undetermined(
     }
     let out = expand_neg_powers(&eval_expr(&out, env), env);
     let out = together(&out, env);
+    if std::env::var("SYMA_DSOLVE_DBG").is_ok() {
+        eprintln!("[dsolve-ic] out={out:?}");
+    }
     let simplified = eval_expr(&call("Simplify", vec![out.clone()]), env);
     if contains_symbol(&simplified, "Simplify") {
         Some(out)
@@ -1806,6 +1812,9 @@ fn apply_general_ics(
     }
     let out = expand_neg_powers(&eval_expr(&out, env), env);
     let out = together(&out, env);
+    if std::env::var("SYMA_DSOLVE_DBG").is_ok() {
+        eprintln!("[dsolve-ic] out={out:?}");
+    }
     let simplified = eval_expr(&call("Simplify", vec![out.clone()]), env);
     if contains_symbol(&simplified, "Simplify") {
         Some(out)

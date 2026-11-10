@@ -1,6 +1,6 @@
 /// Tier 1: Load raw C/C++/Rust dynamic libraries and call their functions.
 use crate::env::Env;
-use crate::ffi::marshal::{CArg, c_ret_to_value, value_to_c_arg};
+use crate::ffi::marshal::{CArg, c_ret_to_value2, value_to_c_arg};
 use crate::ffi::{lib_open, lib_sym};
 use crate::value::{EvalError, NativeSig, NativeType, Value};
 
@@ -78,9 +78,37 @@ pub fn call_native(fn_ptr: usize, sig: &NativeSig, args: &[Value]) -> Result<Val
     // SAFETY: the caller guarantees that `fn_ptr` points to a function whose
     // C ABI matches `sig`. Violating this contract causes undefined behaviour,
     // just as calling a C function with wrong types does in any language.
-    let ret_bits: u64 = unsafe { dispatch_call(fn_ptr, &c_args, &sig.params, &sig.ret)? };
+    let (lo, hi) = unsafe { dispatch_call(fn_ptr, &c_args, &sig.params, &sig.ret)? };
 
-    Ok(c_ret_to_value(ret_bits, &sig.ret))
+    Ok(c_ret_to_value2(lo, hi, &sig.ret))
+}
+
+/// Like [`call_native`], but catches Rust panics raised during argument
+/// marshalling or dispatch and converts them to an `EvalError`.
+///
+/// This keeps a misbehaving native function — or a marshalling bug — from
+/// tearing down the whole evaluator. It cannot catch a hard segfault from a
+/// genuinely invalid pointer, which is inherent to FFI.
+pub fn call_native_catching(
+    fn_ptr: usize,
+    sig: &NativeSig,
+    args: &[Value],
+) -> Result<Value, EvalError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call_native(fn_ptr, sig, args)
+    })) {
+        Ok(r) => r,
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            Err(EvalError::FfiError(format!("native call panicked: {msg}")))
+        }
+    }
 }
 
 // ── Low-level call dispatch ───────────────────────────────────────────────────
@@ -94,13 +122,18 @@ pub fn call_native(fn_ptr: usize, sig: &NativeSig, args: &[Value]) -> Result<Val
 /// Extract the raw bit pattern of an integer/pointer/boolean `CArg`.
 fn arg_bits(a: &CArg) -> u64 {
     match a {
+        CArg::I8(v) => *v as i64 as u64,
+        CArg::I16(v) => *v as i64 as u64,
         CArg::I32(v) => *v as i64 as u64,
         CArg::I64(v) => *v as u64,
+        CArg::U8(v) => *v as u64,
+        CArg::U16(v) => *v as u64,
         CArg::U32(v) => *v as u64,
         CArg::U64(v) => *v,
         CArg::F32(v) => v.to_bits() as u64,
         CArg::F64(v) => v.to_bits(),
         CArg::Bool(v) => *v as u64,
+        CArg::Ptr(v) => *v,
         CArg::CStr(cs) => cs.as_ptr() as usize as u64,
     }
 }
@@ -152,13 +185,33 @@ macro_rules! invoke {
     }};
 }
 
+/// Like [`invoke!`], but with a two-word aggregate return type. Used for
+/// `Struct` returns, which the SysV ABI returns in a register pair.
+macro_rules! invoke_wide {
+    ($fn_ptr:expr, $args:expr, [$($ty:ty),*]) => {{
+        let __f: unsafe extern "C" fn($($ty),*) -> [u64; 2] =
+            unsafe { std::mem::transmute($fn_ptr) };
+        let mut __it = $args.iter();
+        let __r = unsafe { __f($(<$ty as CArgValue>::from_carg(__it.next().unwrap())),*) };
+        let _ = &mut __it;
+        __r
+    }};
+}
+
 /// Dispatch on the return type and invoke with the given parameter classes.
+///
+/// Always yields a `(low_word, high_word)` pair; the high word is only
+/// meaningful for two-word `Struct` returns.
 macro_rules! call_typed {
     ($fn_ptr:expr, $ret:expr, $args:expr, [$($ty:ty),*]) => {
         match *$ret {
-            NativeType::F64 => invoke!($fn_ptr, f64, $args, [$($ty),*]).to_bits(),
-            NativeType::F32 => invoke!($fn_ptr, f32, $args, [$($ty),*]).to_bits() as u64,
-            _ => invoke!($fn_ptr, u64, $args, [$($ty),*]),
+            NativeType::F64 => (invoke!($fn_ptr, f64, $args, [$($ty),*]).to_bits(), 0),
+            NativeType::F32 => (invoke!($fn_ptr, f32, $args, [$($ty),*]).to_bits() as u64, 0),
+            NativeType::Struct(_) => {
+                let __w = invoke_wide!($fn_ptr, $args, [$($ty),*]);
+                (__w[0], __w[1])
+            }
+            _ => (invoke!($fn_ptr, u64, $args, [$($ty),*]), 0),
         }
     };
 }
@@ -194,7 +247,7 @@ unsafe fn dispatch_call(
     args: &[CArg],
     params: &[NativeType],
     ret: &NativeType,
-) -> Result<u64, EvalError> {
+) -> Result<(u64, u64), EvalError> {
     if params.len() > 6 {
         return Err(EvalError::FfiError(format!(
             "too many arguments for direct FFI call ({}); use an extension for wider signatures",
@@ -1654,5 +1707,167 @@ mod tests {
             }
             _ => panic!("expected native libs"),
         }
+    }
+
+    // ── Type breadth / safety ──
+
+    #[test]
+    fn test_native_type_name_roundtrip() {
+        for name in [
+            "Integer8",
+            "Integer16",
+            "Integer32",
+            "Integer64",
+            "UnsignedInteger8",
+            "UnsignedInteger16",
+            "UnsignedInteger32",
+            "UnsignedInteger64",
+            "Real32",
+            "Real64",
+            "CString",
+            "UTF8String",
+            "Void",
+            "Boolean",
+            "Pointer",
+        ] {
+            let t = NativeType::from_syma_name(name).expect(name);
+            assert_eq!(t.syma_name(), name, "roundtrip failed for {name}");
+        }
+        // Aliases resolve too.
+        assert_eq!(NativeType::from_syma_name("Int8"), Some(NativeType::I8));
+        assert_eq!(NativeType::from_syma_name("Double"), Some(NativeType::F64));
+        assert_eq!(
+            NativeType::from_syma_name("div_t"),
+            Some(NativeType::Struct(vec![NativeType::I32, NativeType::I32]))
+        );
+        assert!(NativeType::from_syma_name("Nope").is_none());
+    }
+
+    /// `size_t strlen(const char *)` with a `UTF8String` parameter, returning an
+    /// unsigned 64-bit value.
+    #[test]
+    fn test_call_native_strlen_utf8string_param() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::UTF8String],
+            ret: NativeType::U64,
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "strlen", sig.clone()) else {
+            return;
+        };
+        let out = call_native(fn_ptr, &sig, &[Value::Str("héllo".to_string())]).unwrap();
+        // "héllo" is 6 UTF-8 bytes (é is two bytes).
+        assert_eq!(out, Value::Integer(Integer::from(6)));
+    }
+
+    /// `div_t div(int, int)` returns a struct *by value*. Basic struct support
+    /// decodes it into a two-element list `{quotient, remainder}`.
+    #[test]
+    fn test_call_native_div_struct_by_value() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::I32, NativeType::I32],
+            ret: NativeType::from_syma_name("div_t").unwrap(),
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "div", sig.clone()) else {
+            return;
+        };
+        let out = call_native(
+            fn_ptr,
+            &sig,
+            &[
+                Value::Integer(Integer::from(17)),
+                Value::Integer(Integer::from(5)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(2))
+            ])
+        );
+    }
+
+    /// `ldiv_t ldiv(long, long)` — 16-byte struct returned in a register pair.
+    #[test]
+    fn test_call_native_ldiv_struct_two_words() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::I64, NativeType::I64],
+            ret: NativeType::from_syma_name("ldiv_t").unwrap(),
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "ldiv", sig.clone()) else {
+            return;
+        };
+        let out = call_native(
+            fn_ptr,
+            &sig,
+            &[
+                Value::Integer(Integer::from(100)),
+                Value::Integer(Integer::from(7)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![
+                Value::Integer(Integer::from(14)),
+                Value::Integer(Integer::from(2))
+            ])
+        );
+    }
+
+    /// A Rust function that panics is caught by `call_native_catching` instead
+    /// of aborting. `extern "C-unwind"` is used so the panic may unwind back to
+    /// the `catch_unwind` frame (plain `extern "C"` panics abort).
+    #[test]
+    fn test_call_native_catching_catches_panic() {
+        extern "C-unwind" fn boom(_a: u64) -> u64 {
+            panic!("ffi boom");
+        }
+        let sig = NativeSig {
+            params: vec![NativeType::I64],
+            ret: NativeType::I64,
+        };
+        let err = call_native_catching(
+            boom as *const () as usize,
+            &sig,
+            &[Value::Integer(1.into())],
+        )
+        .expect_err("panic should surface as an error");
+        assert!(err.to_string().contains("panicked"), "got: {err}");
+    }
+
+    #[test]
+    fn test_call_native_catching_passes_through_errors() {
+        let sig = NativeSig {
+            params: vec![NativeType::I32, NativeType::I32],
+            ret: NativeType::I32,
+        };
+        // Wrong arity: marshalling error, not a panic.
+        let err = call_native_catching(1, &sig, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("expected 2 arguments"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_lib_sym_with_null_handle_does_not_panic() {
+        let handle = crate::value::NativeLibHandle { raw: 0 };
+        // dlsym(NULL, ...) searches the global scope; either way it must not panic.
+        let _ = lib_sym(&handle, "syma_definitely_absent_symbol_xyz");
+    }
+
+    #[test]
+    fn test_library_function_on_non_library_errors() {
+        let sig = NativeSig {
+            params: vec![],
+            ret: NativeType::Void,
+        };
+        let err = library_function(&Value::Integer(1.into()), "x", sig).unwrap_err();
+        assert!(err.to_string().contains("NativeLib"), "got: {err}");
     }
 }

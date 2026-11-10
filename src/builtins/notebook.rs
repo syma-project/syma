@@ -307,6 +307,11 @@ pub fn builtin_box_data(args: &[Value]) -> Result<Value, EvalError> {
     inert("BoxData", args)
 }
 
+/// `TextCell[...]` — symbolic notebook text cell (kept inert).
+pub fn builtin_text_cell(args: &[Value]) -> Result<Value, EvalError> {
+    inert("TextCell", args)
+}
+
 /// `SetSelectedNotebook[nb]` — select `nb`, returning it.
 pub fn builtin_set_selected_notebook(args: &[Value]) -> Result<Value, EvalError> {
     match args {
@@ -328,6 +333,10 @@ pub fn builtin_current_notebooks(args: &[Value]) -> Result<Value, EvalError> {
 /// `BinaryRead["file"]` / `BinaryRead["file", n]` — read all (or the first `n`)
 /// bytes as a list of byte values. Returns `$Failed` when the file is missing.
 pub fn builtin_binary_read(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    // A leading stream handle takes precedence over a file-name path.
+    if args.first().and_then(as_handle).is_some() {
+        return super::streams::builtin_binary_read_stream(args, env);
+    }
     let (file, count) = match args {
         [p] => (as_str(p), None),
         [p, Value::Integer(n)] => (as_str(p), n.to_usize()),
@@ -352,6 +361,10 @@ pub fn builtin_binary_read(args: &[Value], env: &Env) -> Result<Value, EvalError
 
 /// `BinaryWrite["file", {b1, b2, ...}]` — write raw bytes to a file.
 pub fn builtin_binary_write(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    // A leading stream handle writes to the open stream instead of a path.
+    if args.first().and_then(as_handle).is_some() {
+        return super::streams::builtin_binary_write_stream(args, env);
+    }
     let (file, bytes) = match args {
         [p, Value::List(bytes)] => (as_str(p), bytes),
         _ => return inert("BinaryWrite", args),
@@ -505,8 +518,12 @@ pub fn builtin_default(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 // ── PutAppend / filesystem helpers ──────────────────────────────────────────
 
 /// `PutAppend[expr, "file"]` — append `expr` to `file` in `InputForm`. Multiple
-/// expressions may be supplied before the trailing file name.
+/// expressions may be supplied before the trailing file name. A trailing stream
+/// handle is written to directly.
 pub fn builtin_put_append(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() >= 2 && args.last().and_then(as_handle).is_some() {
+        return super::streams::builtin_put_append(args, env);
+    }
     if args.len() < 2 {
         return inert("PutAppend", args);
     }
@@ -613,6 +630,7 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "NotebookSave", builtin_notebook_save);
     super::register_builtin(env, "Cell", builtin_cell);
     super::register_builtin(env, "BoxData", builtin_box_data);
+    super::register_builtin(env, "TextCell", builtin_text_cell);
     super::register_builtin(env, "SetSelectedNotebook", builtin_set_selected_notebook);
     super::register_builtin(env, "CurrentNotebooks", builtin_current_notebooks);
     super::register_builtin(env, "StreamPosition", builtin_stream_position);
@@ -648,6 +666,7 @@ pub fn register(env: &Env) {
         "CreateDocument",
         "NotebookSave",
         "BoxData",
+        "TextCell",
         "SetSelectedNotebook",
         "CurrentNotebooks",
         "StreamPosition",
@@ -1025,5 +1044,63 @@ mod tests {
             builtin_stream_position(&[int(1), int(2)]).unwrap(),
             Value::Call { .. }
         ));
+    }
+
+    // ── Notebook / cell breadth ──────────────────────────────────────────
+
+    #[test]
+    fn test_text_cell_symbolic() {
+        assert_eq!(
+            builtin_text_cell(&[s("hello")]).unwrap().to_string(),
+            "TextCell[\"hello\"]"
+        );
+        assert!(matches!(
+            run("TextCell[\"a\"]", &env_with_builtins()),
+            Value::Call { .. }
+        ));
+    }
+
+    #[test]
+    fn test_notebook_symbolic_roundtrip() {
+        let env = env_with_builtins();
+        assert!(matches!(
+            run("Notebook[{Cell[1]}]", &env),
+            Value::Call { .. }
+        ));
+        assert!(matches!(run("NotebookObject[1]", &env), Value::Call { .. }));
+        assert!(matches!(run("BoxData[\"x\"]", &env), Value::Call { .. }));
+    }
+
+    #[test]
+    fn test_create_document_and_notebook_save() {
+        let env = env_with_builtins();
+        let doc = run("doc = CreateDocument[BoxData[1]]", &env);
+        assert!(matches!(&doc, Value::Call { head, .. } if head == "NotebookObject"));
+        let path = temp_path("created.nb");
+        run(
+            &format!("NotebookSave[doc, \"{}\"]", path.to_str().unwrap()),
+            &env,
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("Notebook["), "written: {written}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_binary_read_write_stream_via_notebook() {
+        let env = env_with_builtins();
+        let path = temp_path("nbstream.bin");
+        let handle =
+            crate::builtins::streams::builtin_open_write(&[s(path.to_str().unwrap())], &env)
+                .unwrap();
+        builtin_binary_write(
+            &[handle.clone(), Value::List(vec![int(1), int(2), int(3)])],
+            &env,
+        )
+        .unwrap();
+        crate::builtins::streams::builtin_close(&[handle], &env).unwrap();
+        let read = builtin_binary_read(&[s(path.to_str().unwrap())], &env).unwrap();
+        assert_eq!(read, Value::List(vec![int(1), int(2), int(3)]));
+        std::fs::remove_file(&path).ok();
     }
 }

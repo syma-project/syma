@@ -9,6 +9,10 @@ D[var_, x_] := 1 /; (var == x) && MatchQ[var, _Symbol]
 (* Linearity: D(f + g, x) = D(f, x) + D(g, x) *)
 D[Plus[f_, g_], x_] := Plus[D[f, x], D[g, x]] /; UnsameQ[f, 0]
 
+(* Power rule with a variable exponent: d(u^v)/dx = u^v (v' Log[u] + v u'/u).
+   Must precede the constant-exponent rule so it captures v depending on x. *)
+D[Power[u_, v_], x_] := Times[Power[u, v], Plus[Times[D[v, x], Log[u]], Times[v, Power[u, -1], D[u, x]]]] /; !FreeQ[v, x]
+
 (* Power rule with constant exponent: d(u^n)/dx = n*u^(n-1)*u' *)
 (* (before the product rule: a bare power such as x^3 can also match the
    OneIdentity-expanded `Times[f_, g_]` pattern with f = 1.) The guard skips
@@ -20,6 +24,12 @@ D[Times[f_, g_], x_] := Plus[Times[D[f, x], g], Times[f, D[g, x]]] /; UnsameQ[f,
 (* Product with an explicit unit factor (e.g. from a normalized Divide). *)
 D[Times[1, p_], x_] := D[p, x]
 D[Times[p_, 1], x_] := D[p, x]
+
+(* Gauss hypergeometric: d/dz 2F1(a,b;c;z) = (a b / c) 2F1(a+1,b+1;c+1;z).
+   Must precede the generic chain rule below. *)
+D[Hypergeometric2F1[a_, b_, c_, z_], x_] :=
+    Times[a, b, Power[c, -1],
+        Hypergeometric2F1[Plus[a, 1], Plus[b, 1], Plus[c, 1], z], D[z, x]]
 
 (* Chain rule for unknown heads: D(f(u), x) = D(f(u), u) * D(u, x)
    Guards: avoid infinite recursion when u == x or func_[u] is the same as the original expression *)

@@ -9,6 +9,17 @@
 
 use crate::env::Env;
 use crate::value::{EvalError, Value};
+use rug::Float;
+
+/// Extract a high-precision real from a numeric value.
+fn float_val(v: &Value, prec: u32) -> Option<Float> {
+    match v {
+        Value::Integer(n) => Some(Float::with_val(prec, n)),
+        Value::Real(r) => Some(r.clone()),
+        Value::Rational(r) => Some(Float::with_val(prec, &**r)),
+        _ => None,
+    }
+}
 
 /// Build an unevaluated call node, preserving argument order.
 fn unevaluated(head: &str, args: &[Value]) -> Value {
@@ -1467,27 +1478,20 @@ fn dirichlet_eta(s: f64) -> f64 {
 /// HurwitzZeta[s, a].
 pub fn builtin_hurwitz_zeta(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("HurwitzZeta", args, 2)?;
-    let (Some(s), Some(a)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+    let prec = crate::value::DEFAULT_PRECISION;
+    let (Some(s), Some(a)) = (float_val(&args[0], prec), float_val(&args[1], prec)) else {
         return Ok(unevaluated("HurwitzZeta", args));
     };
-    if (s - 1.0).abs() < 1e-14 {
+    if a <= 0 {
         return Ok(unevaluated("HurwitzZeta", args));
     }
-    if a == 1.0 {
-        // ζ(s, 1) = ζ(s); recompute through the same kernel for consistency.
-        let v = hurwitz_zeta(s, 1.0);
-        return if v.is_finite() {
-            Ok(super::real(v))
-        } else {
-            Ok(unevaluated("HurwitzZeta", args))
-        };
-    }
-    if s <= 0.0 || a <= 0.0 {
+    let one = Float::with_val(prec, 1u32);
+    if (Float::with_val(prec, &s - &one)).abs() < Float::with_val(prec, 1e-30) {
         return Ok(unevaluated("HurwitzZeta", args));
     }
-    let v = hurwitz_zeta(s, a);
+    let v = super::specialfunctions::hurwitz_zeta_em(&s, &a);
     if v.is_finite() {
-        Ok(super::real(v))
+        Ok(Value::Real(v))
     } else {
         Ok(unevaluated("HurwitzZeta", args))
     }
@@ -1785,28 +1789,109 @@ pub fn builtin_cosh_integral(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Fresnel integrals ───────────────────────────────────────────────────────
 
+/// `(S(z), C(z))`: convergent series for `|z| < 4.2` (in full precision, so the
+/// alternating cancellation is harmless) and the optimal-truncation asymptotic
+/// beyond, where the series blows up.
+fn fresnel_sc(z: f64) -> (f64, f64) {
+    if z == 0.0 {
+        return (0.0, 0.0);
+    }
+    let prec = crate::value::DEFAULT_PRECISION;
+    let az = z.abs();
+    let (s, c) = if az < 4.2 {
+        fresnel_series(az, prec)
+    } else {
+        fresnel_asymptotic(az, prec)
+    };
+    if z < 0.0 { (-s, -c) } else { (s, c) }
+}
+
+/// Series `S(z) = z Σ (-1)^m c_{2m+1}`, `C(z) = z Σ (-1)^m c_{2m}` with
+/// `c_n = b^n / (n! (2n+1))`, `b = π z² / 2`.
+fn fresnel_series(az: f64, prec: u32) -> (f64, f64) {
+    let pi = Float::with_val(prec, rug::float::Constant::Pi);
+    let b = Float::with_val(prec, &pi) / 2u32 * (az * az);
+    let a = Float::with_val(prec, az);
+    let mut c = Float::with_val(prec, 1u32);
+    let mut sum_s = Float::with_val(prec, 0u32);
+    let mut sum_c = c.clone();
+    let mut sign_s: i32 = 1; // n = 1 term of S is +
+    let mut sign_c: i32 = -1; // n = 2 term of C is -
+    let mut n: u32 = 1;
+    loop {
+        c *= &b;
+        c *= Float::with_val(prec, 2 * n - 1);
+        c /= Float::with_val(prec, n) * Float::with_val(prec, 2 * n + 1);
+        if n % 2 == 1 {
+            let term = if sign_s < 0 { -c.clone() } else { c.clone() };
+            sum_s += term;
+            sign_s = -sign_s;
+        } else {
+            let term = if sign_c < 0 { -c.clone() } else { c.clone() };
+            sum_c += term;
+            sign_c = -sign_c;
+        }
+        if c < Float::with_val(prec, 1e-45) || n > 5000 {
+            break;
+        }
+        n += 1;
+    }
+    ((a.clone() * sum_s).to_f64(), (a * sum_c).to_f64())
+}
+
+/// Large-argument asymptotic (DLMF 7.5.8) with optimal truncation.
+fn fresnel_asymptotic(az: f64, prec: u32) -> (f64, f64) {
+    let pi = Float::with_val(prec, rug::float::Constant::Pi);
+    let a = Float::with_val(prec, az);
+    let t = Float::with_val(prec, &pi) * (az * az);
+    let theta = Float::with_val(prec, &t) / 2u32;
+    let mut d = Float::with_val(prec, 1u32); // d_0
+    let mut sum_f = Float::with_val(prec, 1u32);
+    let mut sum_g = Float::with_val(prec, 0u32);
+    let mut sign_f: i32 = -1; // first even (k = 2) term is -
+    let mut sign_g: i32 = 1; // first odd (k = 1) term is +
+    let mut k: u32 = 1;
+    loop {
+        let prev = d.clone();
+        d *= Float::with_val(prec, 2 * k - 1);
+        d /= &t;
+        if k.is_multiple_of(2) {
+            let term = if sign_f < 0 { -d.clone() } else { d.clone() };
+            sum_f += term;
+            sign_f = -sign_f;
+        } else {
+            let term = if sign_g < 0 { -d.clone() } else { d.clone() };
+            sum_g += term;
+            sign_g = -sign_g;
+        }
+        if d.clone().abs() > prev.abs() && k > 2 {
+            break;
+        }
+        k += 1;
+        if k > 500 {
+            break;
+        }
+    }
+    let pis = Float::with_val(prec, &pi) * &a;
+    let f = sum_f / &pis;
+    let g = sum_g / &pis;
+    let (st, ct) = (theta.clone().sin(), theta.cos());
+    let s = Float::with_val(prec, 0.5)
+        - Float::with_val(prec, &f * &ct)
+        - Float::with_val(prec, &g * &st);
+    let c = Float::with_val(prec, 0.5) + Float::with_val(prec, &f * &st)
+        - Float::with_val(prec, &g * &ct);
+    (s.to_f64(), c.to_f64())
+}
+
 /// FresnelS[z] = `∫_0^z sin(π t²/2) dt`.
 pub fn builtin_fresnel_s(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("FresnelS", args, 1)?;
     let Some(z) = super::to_f64(&args[0]) else {
         return Ok(unevaluated("FresnelS", args));
     };
-    let half_pi = 0.5 * std::f64::consts::PI;
-    let mut sum = 0.0_f64;
-    let mut term = half_pi * z.powi(3) / 3.0; // k = 0 term
-    let mut k = 0u32;
-    loop {
-        sum += term;
-        // signed ratio t_{k+1}/t_k = -(π/2)² z⁴ (4k+3) / ((2k+2)(2k+3)(4k+7))
-        let ratio = -(half_pi * half_pi) * z.powi(4) * (4 * k + 3) as f64
-            / (((2 * k + 2) as f64) * ((2 * k + 3) as f64) * ((4 * k + 7) as f64));
-        term *= ratio;
-        k += 1;
-        if term.abs() < 1e-18 * sum.abs().max(1.0) || k > 500 {
-            break;
-        }
-    }
-    Ok(super::real(sum))
+    let (s, _) = fresnel_sc(z);
+    Ok(super::real(s))
 }
 
 /// FresnelC[z] = `∫_0^z cos(π t²/2) dt`.
@@ -1815,43 +1900,24 @@ pub fn builtin_fresnel_c(args: &[Value]) -> Result<Value, EvalError> {
     let Some(z) = super::to_f64(&args[0]) else {
         return Ok(unevaluated("FresnelC", args));
     };
-    let half_pi = 0.5 * std::f64::consts::PI;
-    let mut sum = 0.0_f64;
-    let mut term = z; // k = 0 term: z/(0!·1)
-    let mut k = 0u32;
-    loop {
-        sum += term;
-        // signed ratio t_{k+1}/t_k = -(π/2)² z⁴ · (4k+1) / ((2k+1)(2k+2)(4k+5))
-        let ratio = -(half_pi * half_pi) * z.powi(4) * (4 * k + 1) as f64
-            / (((2 * k + 1) as f64) * ((2 * k + 2) as f64) * ((4 * k + 5) as f64));
-        term *= ratio;
-        k += 1;
-        if term.abs() < 1e-18 * sum.abs().max(1.0) || k > 500 {
-            break;
-        }
-    }
-    Ok(super::real(sum))
+    let (_, c) = fresnel_sc(z);
+    Ok(super::real(c))
 }
 
-/// DawsonF[z] = `e^{-z²} ∫_0^z e^{t²} dt`.
+/// DawsonF[z] = `e^{-z²} ∫_0^z e^{t²} dt`. Computed as
+/// `Sqrt[Pi]/2 e^{-z²} Erfi[z]`, using the high-precision `erfi` kernel.
 pub fn builtin_dawson_f(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("DawsonF", args, 1)?;
     let Some(z) = super::to_f64(&args[0]) else {
         return Ok(unevaluated("DawsonF", args));
     };
-    let mut sum = 0.0_f64;
-    let mut term = z;
-    let mut k = 0u32;
-    loop {
-        sum += term;
-        // t_{k+1} / t_k = -2 z² / (2(k+1)+1).
-        term *= -2.0 * z * z / (2 * k + 3) as f64;
-        k += 1;
-        if term.abs() < 1e-18 * sum.abs().max(1.0) || k > 500 {
-            break;
-        }
-    }
-    Ok(super::real(sum))
+    let prec = crate::value::DEFAULT_PRECISION;
+    let x = Float::with_val(prec, z);
+    let erfi = super::specialfunctions::erfi_float(&x);
+    let half_sqrt_pi = Float::with_val(prec, rug::float::Constant::Pi).sqrt() / 2u32;
+    let x2 = Float::with_val(prec, &x * &x);
+    let result = half_sqrt_pi * (-x2).exp() * erfi;
+    Ok(super::real(result.to_f64()))
 }
 
 // ── Struve functions ────────────────────────────────────────────────────────
@@ -3140,6 +3206,688 @@ fn simplify_plus_times(v: Value) -> Value {
     }
 }
 
+// ── Bessel functions of general real order ──────────────────────────────────
+
+/// `true` when `v` is an unevaluated call to `head`.
+fn is_call(v: &Value, head: &str) -> bool {
+    matches!(v, Value::Call { head: h, .. } if h == head)
+}
+
+/// BesselJ[n, z] — Bessel function of the first kind. Exact/symbolic
+/// half-integer and integer cases defer to the sibling `specialfunctions`
+/// module; general real orders evaluate numerically.
+pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselJ", args, 2)?;
+    let exact = super::specialfunctions::builtin_bessel_j(args)?;
+    if !is_call(&exact, "BesselJ") {
+        return Ok(exact);
+    }
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselJ", args));
+    };
+    if z == 0.0 {
+        return Ok(int_value(if n == 0.0 { 1 } else { 0 }));
+    }
+    let v = bessel_j_real(n, z);
+    if v.is_nan() {
+        Ok(unevaluated("BesselJ", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+/// BesselI[n, z] — modified Bessel function of the first kind.
+pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselI", args, 2)?;
+    let exact = super::specialfunctions::builtin_bessel_i(args)?;
+    if !is_call(&exact, "BesselI") {
+        return Ok(exact);
+    }
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselI", args));
+    };
+    if z == 0.0 {
+        return Ok(int_value(if n == 0.0 { 1 } else { 0 }));
+    }
+    if z < 0.0 {
+        return Ok(unevaluated("BesselI", args));
+    }
+    let v = bessel_i_real(n, z);
+    if v.is_nan() {
+        Ok(unevaluated("BesselI", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+/// BesselY[n, z] — Bessel function of the second kind.
+pub fn builtin_bessel_y(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselY", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselY", args));
+    };
+    if z == 0.0 && n >= 0.0 {
+        return Ok(super::real(f64::NEG_INFINITY));
+    }
+    let v = bessel_y_real(n, z);
+    if v.is_nan() {
+        Ok(unevaluated("BesselY", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+/// BesselK[n, z] — modified Bessel function of the second kind.
+pub fn builtin_bessel_k(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselK", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselK", args));
+    };
+    if z == 0.0 && n >= 0.0 {
+        return Ok(super::real(f64::INFINITY));
+    }
+    if z <= 0.0 {
+        return Ok(unevaluated("BesselK", args));
+    }
+    let v = bessel_k_real(n, z);
+    if v.is_nan() {
+        Ok(unevaluated("BesselK", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+/// BesselJZero[n, k] — k-th positive zero of `J_n`.
+pub fn builtin_bessel_j_zero(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselJZero", args, 2)?;
+    let (Some(n), Some(k)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselJZero", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 || (k - k.round()).abs() > 1e-12 || k < 1.0 {
+        return Ok(unevaluated("BesselJZero", args));
+    }
+    match bessel_j_zero(n.round() as u32, k.round() as u32) {
+        Some(v) => Ok(super::real(v)),
+        None => Ok(unevaluated("BesselJZero", args)),
+    }
+}
+
+/// Locate the `k`-th positive zero of `J_n` by scanning for sign changes and
+/// then bisecting.
+fn bessel_j_zero(n: u32, k: u32) -> Option<f64> {
+    let nf = n as f64;
+    let step = 0.25_f64;
+    let mut prev = 1e-6_f64;
+    let mut fx = bessel_j_real(nf, prev);
+    let mut count = 0u32;
+    let mut it = 0u32;
+    while prev < 500.0 && it < 100_000 {
+        it += 1;
+        let next = prev + step;
+        let fnx = bessel_j_real(nf, next);
+        if fnx == 0.0 || (fx < 0.0) != (fnx < 0.0) {
+            count += 1;
+            if count == k {
+                return Some(bisect_zero(nf, prev, next));
+            }
+        }
+        fx = fnx;
+        prev = next;
+    }
+    None
+}
+
+fn bisect_zero(n: f64, mut a: f64, mut b: f64) -> f64 {
+    let mut fa = bessel_j_real(n, a);
+    for _ in 0..200 {
+        let mid = 0.5 * (a + b);
+        let fm = bessel_j_real(n, mid);
+        if fm == 0.0 {
+            return mid;
+        }
+        if (fa < 0.0) != (fm < 0.0) {
+            b = mid;
+        } else {
+            a = mid;
+            fa = fm;
+        }
+    }
+    0.5 * (a + b)
+}
+
+/// SphericalBesselJ[n, z] = Sqrt[Pi/(2 z)] BesselJ[n + 1/2, z].
+pub fn builtin_spherical_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("SphericalBesselJ", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("SphericalBesselJ", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 {
+        return Ok(unevaluated("SphericalBesselJ", args));
+    }
+    let ni = n.round();
+    if z == 0.0 {
+        return Ok(int_value(if ni == 0.0 { 1 } else { 0 }));
+    }
+    if z < 0.0 {
+        return Ok(unevaluated("SphericalBesselJ", args));
+    }
+    let v = (std::f64::consts::PI / (2.0 * z)).sqrt() * bessel_j_real(ni + 0.5, z);
+    if v.is_nan() {
+        Ok(unevaluated("SphericalBesselJ", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+/// SphericalBesselY[n, z] = Sqrt[Pi/(2 z)] BesselY[n + 1/2, z].
+pub fn builtin_spherical_bessel_y(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("SphericalBesselY", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("SphericalBesselY", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 {
+        return Ok(unevaluated("SphericalBesselY", args));
+    }
+    let ni = n.round();
+    if z == 0.0 {
+        return Ok(super::real(f64::NEG_INFINITY));
+    }
+    if z < 0.0 {
+        return Ok(unevaluated("SphericalBesselY", args));
+    }
+    let v = (std::f64::consts::PI / (2.0 * z)).sqrt() * bessel_y_real(ni + 0.5, z);
+    if v.is_nan() {
+        Ok(unevaluated("SphericalBesselY", args))
+    } else {
+        Ok(super::real(v))
+    }
+}
+
+// ── Hermite / Laguerre / Legendre polynomials ───────────────────────────────
+
+/// `H_n(x)` (physicists' Hermite polynomial) via
+/// `H_{n+1} = 2x H_n − 2n H_{n-1}`.
+fn hermite_h(n: i64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    match n {
+        0 => 1.0,
+        1 => 2.0 * x,
+        _ => {
+            let (mut h0, mut h1) = (1.0_f64, 2.0 * x);
+            for k in 1..n {
+                let h2 = 2.0 * x * h1 - 2.0 * k as f64 * h0;
+                h0 = h1;
+                h1 = h2;
+            }
+            h1
+        }
+    }
+}
+
+/// HermiteH[n, x].
+pub fn builtin_hermite_h(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("HermiteH", args, 2)?;
+    let (Some(n), Some(x)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("HermiteH", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 {
+        return Ok(unevaluated("HermiteH", args));
+    }
+    Ok(super::real(hermite_h(n.round() as i64, x)))
+}
+
+/// `L_n^{(k)}(x)` via `(n+1) L_{n+1} = (2n+k+1−x) L_n − (n+k) L_{n-1}`.
+fn laguerre_l(n: i64, k: f64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    match n {
+        0 => 1.0,
+        1 => 1.0 + k - x,
+        _ => {
+            let (mut l0, mut l1) = (1.0_f64, 1.0 + k - x);
+            for i in 1..n {
+                let f = i as f64;
+                let l2 = ((2.0 * f + k + 1.0 - x) * l1 - (f + k) * l0) / (f + 1.0);
+                l0 = l1;
+                l1 = l2;
+            }
+            l1
+        }
+    }
+}
+
+/// LaguerreL[n, x] and LaguerreL[n, k, x].
+pub fn builtin_laguerre_l(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(EvalError::Error(
+            "LaguerreL requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let Some(n) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("LaguerreL", args));
+    };
+    let k = if args.len() == 3 {
+        let Some(k) = super::to_f64(&args[1]) else {
+            return Ok(unevaluated("LaguerreL", args));
+        };
+        k
+    } else {
+        0.0
+    };
+    let Some(x) = super::to_f64(args.last().unwrap()) else {
+        return Ok(unevaluated("LaguerreL", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 {
+        return Ok(unevaluated("LaguerreL", args));
+    }
+    Ok(super::real(laguerre_l(n.round() as i64, k, x)))
+}
+
+/// `P_n(x)` via the Bonnet recurrence; accepts negative degree through
+/// `P_{−n−1} = P_n`.
+fn legendre_p_int(n: i64, x: f64) -> f64 {
+    let n = if n < 0 { -n - 1 } else { n };
+    match n {
+        0 => 1.0,
+        1 => x,
+        _ => {
+            let (mut p0, mut p1) = (1.0_f64, x);
+            for k in 1..n {
+                let f = k as f64;
+                let p2 = ((2.0 * f + 1.0) * x * p1 - f * p0) / (f + 1.0);
+                p0 = p1;
+                p1 = p2;
+            }
+            p1
+        }
+    }
+}
+
+/// `P_n^m(x)` with the Condon–Shortley phase, honouring negative order.
+fn assoc_legendre_signed(n: i64, m: i64, x: f64) -> f64 {
+    if m >= 0 {
+        if m > n { 0.0 } else { assoc_legendre(n, m, x) }
+    } else {
+        let mm = -m;
+        if mm > n {
+            0.0
+        } else {
+            let sign = if mm % 2 == 0 { 1.0 } else { -1.0 };
+            let ratio = factorial_small((n - mm) as u32) / factorial_small((n + mm) as u32);
+            sign * ratio * assoc_legendre(n, mm, x)
+        }
+    }
+}
+
+/// `Q_n(x)` (Legendre function of the second kind) via the convolution
+/// representation, valid for `|x| < 1` and `|x| > 1`.
+fn legendre_q(n: i64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    let q0 = if x.abs() < 1.0 {
+        x.atanh()
+    } else {
+        0.5 * ((x + 1.0) / (x - 1.0)).ln()
+    };
+    if n == 0 {
+        return q0;
+    }
+    let (mut qm1, mut qn) = (q0, x * q0 - 1.0);
+    for k in 1..n {
+        let f = k as f64;
+        let qp = ((2.0 * f + 1.0) * x * qn - f * qm1) / (f + 1.0);
+        qm1 = qn;
+        qn = qp;
+    }
+    qn
+}
+
+/// `Q_n^m(x)` (associated, type 2) with the Condon–Shortley phase, using the
+/// derivative recurrence derived from Legendre's differential equation.
+fn assoc_legendre_q(n: i64, m: i64, x: f64) -> f64 {
+    let nn = n.unsigned_abs();
+    if m < 0 {
+        let mm = -m;
+        let sign = if mm % 2 == 0 { 1.0 } else { -1.0 };
+        let ratio =
+            factorial_small((n - mm).unsigned_abs() as u32) / factorial_small((n + mm) as u32);
+        return sign * ratio * assoc_legendre_q(n, mm, x);
+    }
+    let q0 = legendre_q(n, x);
+    if m == 0 {
+        return q0;
+    }
+    let denom = 1.0 - x * x;
+    let qprev = if nn == 0 { 0.0 } else { legendre_q(n - 1, x) };
+    let nf = nn as f64;
+    let mut qk = q0;
+    let mut qk1 = nf * (qprev - x * q0) / denom;
+    for k in 0..(m as usize - 1) {
+        let f = k as f64;
+        let coeff = nf * (nf + 1.0) - f * (f + 1.0) - 2.0 * f;
+        let qk2 = (2.0 * x * (f + 1.0) * qk1 - coeff * qk) / denom;
+        qk = qk1;
+        qk1 = qk2;
+    }
+    let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+    sign * (denom).powf(m as f64 / 2.0) * qk1
+}
+
+/// LegendreP[n, x], LegendreP[n, m, x] and LegendreP[n, m, a, x].
+pub fn builtin_legendre_p(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 4 {
+        return Err(EvalError::Error(
+            "LegendreP requires 2, 3 or 4 arguments".to_string(),
+        ));
+    }
+    let nv = &args[0];
+    let Some(n) = super::to_f64(nv) else {
+        return Ok(unevaluated("LegendreP", args));
+    };
+    if args.len() == 2 {
+        let Some(x) = super::to_f64(&args[1]) else {
+            return Ok(unevaluated("LegendreP", args));
+        };
+        let v = if (n - n.round()).abs() < 1e-12 {
+            legendre_p_int(n.round() as i64, x)
+        } else {
+            hyper_2f1(-n, n + 1.0, 1.0, (1.0 - x) / 2.0)
+        };
+        return Ok(if v.is_nan() {
+            unevaluated("LegendreP", args)
+        } else {
+            super::real(v)
+        });
+    }
+    // 3- or 4-argument: associated functions need an integer degree/order.
+    let Some(m) = super::to_f64(&args[1]) else {
+        return Ok(unevaluated("LegendreP", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || (m - m.round()).abs() > 1e-12 {
+        return Ok(unevaluated("LegendreP", args));
+    }
+    let (ni, mi) = (n.round() as i64, m.round() as i64);
+    if args.len() == 4 {
+        let Some(a) = super::to_f64(&args[2]) else {
+            return Ok(unevaluated("LegendreP", args));
+        };
+        if !(is_int(&args[2], 1) || is_int(&args[2], 2) || is_int(&args[2], 3)) {
+            return Ok(unevaluated("LegendreP", args));
+        }
+        let _ = a;
+        if is_int(&args[2], 2) || is_int(&args[2], 3) {
+            let Some(x) = super::to_f64(&args[3]) else {
+                return Ok(unevaluated("LegendreP", args));
+            };
+            return Ok(super::real(assoc_legendre_q(ni, mi, x)));
+        }
+        let Some(x) = super::to_f64(&args[3]) else {
+            return Ok(unevaluated("LegendreP", args));
+        };
+        return Ok(super::real(assoc_legendre_signed(ni, mi, x)));
+    }
+    let Some(x) = super::to_f64(&args[2]) else {
+        return Ok(unevaluated("LegendreP", args));
+    };
+    Ok(super::real(assoc_legendre_signed(ni, mi, x)))
+}
+
+/// AssociatedLegendreP[n, m, x] — alias for the associated `LegendreP`.
+pub fn builtin_associated_legendre_p(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("AssociatedLegendreP", args, 3)?;
+    builtin_legendre_p(args)
+}
+
+/// LegendreQ[n, x] and LegendreQ[n, m, x].
+pub fn builtin_legendre_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(EvalError::Error(
+            "LegendreQ requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let Some(n) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("LegendreQ", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || n < 0.0 {
+        return Ok(unevaluated("LegendreQ", args));
+    }
+    let ni = n.round() as i64;
+    if args.len() == 2 {
+        let Some(x) = super::to_f64(&args[1]) else {
+            return Ok(unevaluated("LegendreQ", args));
+        };
+        let v = legendre_q(ni, x);
+        return Ok(if v.is_nan() {
+            unevaluated("LegendreQ", args)
+        } else {
+            super::real(v)
+        });
+    }
+    let Some(m) = super::to_f64(&args[1]) else {
+        return Ok(unevaluated("LegendreQ", args));
+    };
+    if (m - m.round()).abs() > 1e-12 {
+        return Ok(unevaluated("LegendreQ", args));
+    }
+    let Some(x) = super::to_f64(&args[2]) else {
+        return Ok(unevaluated("LegendreQ", args));
+    };
+    let v = assoc_legendre_q(ni, m.round() as i64, x);
+    Ok(if v.is_nan() {
+        unevaluated("LegendreQ", args)
+    } else {
+        super::real(v)
+    })
+}
+
+// ── Elliptic integrals and Jacobi elliptic functions ────────────────────────
+
+/// Composite Simpson quadrature on `[a, b]` with `n` (even) panels.
+fn simpson<F: Fn(f64) -> f64>(f: F, a: f64, b: f64, n: usize) -> f64 {
+    let h = (b - a) / n as f64;
+    let mut s = f(a) + f(b);
+    for i in 1..n {
+        s += if i % 2 == 1 { 4.0 } else { 2.0 } * f(a + i as f64 * h);
+    }
+    s * h / 3.0
+}
+
+/// Complete elliptic integrals `K(m)` and `E(m)` (parameter `m`) via the AGM.
+fn agm_k_e(m: f64) -> (f64, f64) {
+    let mut a = 1.0_f64;
+    let mut b = (1.0 - m).sqrt();
+    let mut c = m.sqrt();
+    let mut sum_e = c * c / 2.0;
+    let mut pow2 = 1.0_f64;
+    for _ in 0..60 {
+        if c.abs() <= 1e-17 * a {
+            break;
+        }
+        let an = 0.5 * (a + b);
+        let bn = (a * b).sqrt();
+        let cn = 0.5 * (a - b);
+        a = an;
+        b = bn;
+        c = cn;
+        sum_e += pow2 * c * c;
+        pow2 *= 2.0;
+    }
+    let k = std::f64::consts::PI / (2.0 * a);
+    (k, k * (1.0 - sum_e))
+}
+
+fn ellip_f_real(phi: f64, m: f64) -> f64 {
+    simpson(
+        |t| 1.0 / (1.0 - m * t.sin() * t.sin()).sqrt(),
+        0.0,
+        phi,
+        8192,
+    )
+}
+
+fn ellip_pi_real(n: f64, m: f64) -> f64 {
+    simpson(
+        |t| {
+            let s = t.sin();
+            1.0 / ((1.0 - n * s * s) * (1.0 - m * s * s).sqrt())
+        },
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+        16384,
+    )
+}
+
+/// Exact `Pi/2` value.
+fn half_pi_exact() -> Value {
+    sc("Divide", &[Value::Symbol("Pi".to_string()), int_value(2)])
+}
+
+/// `true` when `v` is an exact zero integer/rational.
+fn is_exact_zero(v: &Value) -> bool {
+    matches!(v, Value::Integer(_) | Value::Rational(_)) && super::to_f64(v) == Some(0.0)
+}
+
+/// EllipticK[m] — complete elliptic integral of the first kind.
+pub fn builtin_elliptic_k(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EllipticK", args, 1)?;
+    if is_exact_zero(&args[0]) {
+        return Ok(half_pi_exact());
+    }
+    let Some(m) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("EllipticK", args));
+    };
+    if m == 1.0 {
+        return Ok(super::real(f64::INFINITY));
+    }
+    if m > 1.0 {
+        return Ok(unevaluated("EllipticK", args));
+    }
+    Ok(super::real(agm_k_e(m).0))
+}
+
+/// EllipticE[m] — complete elliptic integral of the second kind.
+pub fn builtin_elliptic_e(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EllipticE", args, 1)?;
+    if is_exact_zero(&args[0]) {
+        return Ok(half_pi_exact());
+    }
+    if is_int(&args[0], 1) {
+        return Ok(int_value(1));
+    }
+    let Some(m) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("EllipticE", args));
+    };
+    if m > 1.0 {
+        return Ok(unevaluated("EllipticE", args));
+    }
+    Ok(super::real(agm_k_e(m).1))
+}
+
+/// EllipticPi[n, m] — complete elliptic integral of the third kind.
+pub fn builtin_elliptic_pi(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EllipticPi", args, 2)?;
+    let (Some(n), Some(m)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("EllipticPi", args));
+    };
+    if m > 1.0 {
+        return Ok(unevaluated("EllipticPi", args));
+    }
+    Ok(super::real(ellip_pi_real(n, m)))
+}
+
+/// EllipticF[phi, m] — incomplete elliptic integral of the first kind.
+pub fn builtin_elliptic_f(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EllipticF", args, 2)?;
+    if is_exact_zero(&args[1]) {
+        return Ok(args[0].clone());
+    }
+    let (Some(phi), Some(m)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("EllipticF", args));
+    };
+    if m > 1.0 {
+        return Ok(unevaluated("EllipticF", args));
+    }
+    Ok(super::real(ellip_f_real(phi, m)))
+}
+
+/// Jacobi elliptic functions `sn(u, m)`, `cn(u, m)`, `dn(u, m)` via the
+/// descending Landen transformation.
+fn jacobi_elliptic(u: f64, m: f64) -> Option<(f64, f64, f64)> {
+    if !(0.0..=1.0).contains(&m) {
+        return None;
+    }
+    let mut a = vec![1.0_f64];
+    let mut b = vec![(1.0 - m).sqrt()];
+    let mut c = vec![m.sqrt()];
+    for _ in 0..60 {
+        let last = a.len() - 1;
+        if c[last].abs() <= 1e-20 * a[last] {
+            break;
+        }
+        let an = 0.5 * (a[last] + b[last]);
+        let bn = (a[last] * b[last]).sqrt();
+        let cn = 0.5 * (a[last] - b[last]);
+        a.push(an);
+        b.push(bn);
+        c.push(cn);
+    }
+    let n = a.len() - 1;
+    let mut phi = (2.0_f64).powi(n as i32) * a[n] * u;
+    for k in (1..=n).rev() {
+        phi = 0.5 * (phi + ((c[k] / a[k]) * phi.sin()).asin());
+    }
+    let sn = phi.sin();
+    let cn = phi.cos();
+    let dn = (1.0 - m * sn * sn).sqrt();
+    Some((sn, cn, dn))
+}
+
+/// Shared driver for JacobiSN/CN/DN.
+fn jacobi_builtin(
+    name: &str,
+    args: &[Value],
+    pick: fn((f64, f64, f64)) -> f64,
+) -> Result<Value, EvalError> {
+    super::require_args(name, args, 2)?;
+    let (Some(u), Some(m)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated(name, args));
+    };
+    match jacobi_elliptic(u, m) {
+        Some(vals) => Ok(super::real(pick(vals))),
+        None => Ok(unevaluated(name, args)),
+    }
+}
+
+/// JacobiSN[u, m].
+pub fn builtin_jacobi_sn(args: &[Value]) -> Result<Value, EvalError> {
+    jacobi_builtin("JacobiSN", args, |(sn, _, _)| sn)
+}
+
+/// JacobiCN[u, m].
+pub fn builtin_jacobi_cn(args: &[Value]) -> Result<Value, EvalError> {
+    jacobi_builtin("JacobiCN", args, |(_, cn, _)| cn)
+}
+
+/// JacobiDN[u, m].
+pub fn builtin_jacobi_dn(args: &[Value]) -> Result<Value, EvalError> {
+    jacobi_builtin("JacobiDN", args, |(_, _, dn)| dn)
+}
+
+/// EllipticNomeQ[m] = Exp[-Pi EllipticK[1-m] / EllipticK[m]].
+pub fn builtin_elliptic_nome_q(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("EllipticNomeQ", args, 1)?;
+    let Some(m) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("EllipticNomeQ", args));
+    };
+    if m == 0.0 {
+        return Ok(int_value(0));
+    }
+    if !(0.0..1.0).contains(&m) {
+        return Ok(unevaluated("EllipticNomeQ", args));
+    }
+    let k = agm_k_e(m).0;
+    let k1 = agm_k_e(1.0 - m).0;
+    Ok(super::real((-std::f64::consts::PI * k1 / k).exp()))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -3203,6 +3951,32 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "SphericalHarmonicY", builtin_spherical_harmonic_y);
     super::register_builtin(env, "AiryAiPrime", builtin_airy_ai_prime);
     super::register_builtin(env, "AiryBiPrime", builtin_airy_bi_prime);
+    // General-order Bessel family and spherical variants.
+    super::register_builtin(env, "BesselJ", builtin_bessel_j);
+    super::register_builtin(env, "BesselY", builtin_bessel_y);
+    super::register_builtin(env, "BesselI", builtin_bessel_i);
+    super::register_builtin(env, "BesselK", builtin_bessel_k);
+    super::register_builtin(env, "BesselJZero", builtin_bessel_j_zero);
+    super::register_builtin(env, "SphericalBesselJ", builtin_spherical_bessel_j);
+    super::register_builtin(env, "SphericalBesselY", builtin_spherical_bessel_y);
+    // Airy functions (aliases onto the sibling `specialfunctions`).
+    super::register_builtin(env, "AiryAi", super::specialfunctions::builtin_airy_ai);
+    super::register_builtin(env, "AiryBi", super::specialfunctions::builtin_airy_bi);
+    // Classical orthogonal polynomials.
+    super::register_builtin(env, "HermiteH", builtin_hermite_h);
+    super::register_builtin(env, "LaguerreL", builtin_laguerre_l);
+    super::register_builtin(env, "LegendreP", builtin_legendre_p);
+    super::register_builtin(env, "LegendreQ", builtin_legendre_q);
+    super::register_builtin(env, "AssociatedLegendreP", builtin_associated_legendre_p);
+    // Elliptic integrals and Jacobi elliptic functions.
+    super::register_builtin(env, "EllipticK", builtin_elliptic_k);
+    super::register_builtin(env, "EllipticE", builtin_elliptic_e);
+    super::register_builtin(env, "EllipticPi", builtin_elliptic_pi);
+    super::register_builtin(env, "EllipticF", builtin_elliptic_f);
+    super::register_builtin(env, "JacobiSN", builtin_jacobi_sn);
+    super::register_builtin(env, "JacobiCN", builtin_jacobi_cn);
+    super::register_builtin(env, "JacobiDN", builtin_jacobi_dn);
+    super::register_builtin(env, "EllipticNomeQ", builtin_elliptic_nome_q);
     // Aliases onto sibling implementations in `specialfunctions`.
     super::register_builtin(
         env,
@@ -3305,6 +4079,28 @@ mod tests {
             "SphericalHarmonicY",
             "AiryAiPrime",
             "AiryBiPrime",
+            "AiryAi",
+            "AiryBi",
+            "BesselJ",
+            "BesselY",
+            "BesselI",
+            "BesselK",
+            "BesselJZero",
+            "SphericalBesselJ",
+            "SphericalBesselY",
+            "HermiteH",
+            "LaguerreL",
+            "LegendreP",
+            "LegendreQ",
+            "AssociatedLegendreP",
+            "EllipticK",
+            "EllipticE",
+            "EllipticPi",
+            "EllipticF",
+            "JacobiSN",
+            "JacobiCN",
+            "JacobiDN",
+            "EllipticNomeQ",
             "ProductLog",
             "ErfInv",
         ] {
@@ -4301,5 +5097,297 @@ mod tests {
         } else {
             panic!("{expr} => {v:?}");
         }
+    }
+
+    #[test]
+    fn test_bessel_general_order() {
+        // Reference values from mpmath (20 digits) at order 0.3 and integers.
+        close(
+            &builtin_bessel_j(&[r(0.3), r(2.0)]).unwrap(),
+            0.4256940619814137,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_j(&[r(-0.3), r(2.0)]).unwrap(),
+            -0.04384707707327879,
+            1e-12,
+        );
+        // Integer order delegates to the sibling module (closed series).
+        close(
+            &builtin_bessel_j(&[i(0), i(1)]).unwrap(),
+            0.7651976865579666,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_j(&[i(1), i(1)]).unwrap(),
+            0.44005058574493355,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_y(&[r(0.3), r(2.0)]).unwrap(),
+            0.3634828078260922,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_y(&[i(0), i(1)]).unwrap(),
+            0.08825696421567696,
+            1e-11,
+        );
+        close(
+            &builtin_bessel_y(&[i(1), i(1)]).unwrap(),
+            -0.7812128213002887,
+            1e-11,
+        );
+        close(
+            &builtin_bessel_i(&[r(0.3), r(2.0)]).unwrap(),
+            2.177637989553738,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_i(&[i(1), i(1)]).unwrap(),
+            0.565159103992485,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_k(&[r(0.3), r(2.0)]).unwrap(),
+            0.11603697434811926,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_k(&[i(0), i(1)]).unwrap(),
+            0.42102443824070834,
+            1e-12,
+        );
+        close(
+            &builtin_bessel_k(&[i(2), r(1.5)]).unwrap(),
+            0.5836559632566508,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_bessel_j_zeros() {
+        close(
+            &builtin_bessel_j_zero(&[i(0), i(1)]).unwrap(),
+            2.404825557695773,
+            1e-10,
+        );
+        close(
+            &builtin_bessel_j_zero(&[i(1), i(1)]).unwrap(),
+            3.8317059702075125,
+            1e-10,
+        );
+        close(
+            &builtin_bessel_j_zero(&[i(0), i(2)]).unwrap(),
+            5.520078110286311,
+            1e-10,
+        );
+        close(
+            &builtin_bessel_j_zero(&[i(2), i(1)]).unwrap(),
+            5.135622301840683,
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn test_spherical_bessel() {
+        close(
+            &builtin_spherical_bessel_j(&[i(0), i(1)]).unwrap(),
+            0.8414709848078965,
+            1e-12,
+        );
+        close(
+            &builtin_spherical_bessel_j(&[i(1), i(1)]).unwrap(),
+            0.3011686789397568,
+            1e-12,
+        );
+        close(
+            &builtin_spherical_bessel_j(&[i(2), i(1)]).unwrap(),
+            0.06203505201137386,
+            1e-12,
+        );
+        close(
+            &builtin_spherical_bessel_y(&[i(0), i(1)]).unwrap(),
+            -0.5403023058681397,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_hermite_laguerre() {
+        // H_3(x) = 8x³ − 12x, H_4(x) = 16x⁴ − 48x² + 12.
+        close(&builtin_hermite_h(&[i(3), r(0.5)]).unwrap(), -5.0, 1e-12);
+        close(&builtin_hermite_h(&[i(4), r(0.5)]).unwrap(), 1.0, 1e-12);
+        close(&builtin_hermite_h(&[i(2), r(0.3)]).unwrap(), -1.64, 1e-12);
+        // L_2(x) = 1 − 2x + x²/2; L_2^{(1)}(x) = 3 − 3x + x²/2.
+        close(&builtin_laguerre_l(&[i(2), r(0.5)]).unwrap(), 0.125, 1e-12);
+        close(
+            &builtin_laguerre_l(&[i(2), i(1), r(0.5)]).unwrap(),
+            1.625,
+            1e-12,
+        );
+        close(
+            &builtin_laguerre_l(&[i(3), i(2), r(0.7)]).unwrap(),
+            4.167833333333333,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_legendre_family() {
+        close(
+            &builtin_legendre_p(&[i(3), r(0.3)]).unwrap(),
+            -0.3825,
+            1e-12,
+        );
+        close(&builtin_legendre_p(&[i(-1), r(0.3)]).unwrap(), 1.0, 1e-12);
+        close(
+            &builtin_legendre_p(&[i(2), i(1), r(0.4)]).unwrap(),
+            -1.0998181667894016,
+            1e-12,
+        );
+        close(
+            &builtin_associated_legendre_p(&[i(2), i(1), r(0.4)]).unwrap(),
+            -1.0998181667894016,
+            1e-12,
+        );
+        close(
+            &builtin_legendre_q(&[i(0), r(0.5)]).unwrap(),
+            0.5493061443340548,
+            1e-12,
+        );
+        close(
+            &builtin_legendre_q(&[i(2), r(0.3)]).unwrap(),
+            -0.5629746555341358,
+            1e-12,
+        );
+        close(
+            &builtin_legendre_q(&[i(2), i(1), r(0.4)]).unwrap(),
+            1.1925191760257238,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_elliptic_integrals() {
+        close(
+            &builtin_elliptic_k(&[r(0.5)]).unwrap(),
+            1.8540746773013719,
+            1e-12,
+        );
+        close(
+            &builtin_elliptic_e(&[r(0.5)]).unwrap(),
+            1.3506438810476755,
+            1e-12,
+        );
+        close(
+            &builtin_elliptic_pi(&[r(0.3), r(0.5)]).unwrap(),
+            2.250376821943947,
+            1e-12,
+        );
+        close(
+            &builtin_elliptic_f(&[r(0.7), r(0.5)]).unwrap(),
+            0.7287703057181902,
+            1e-12,
+        );
+        // EllipticF[phi, 0] = phi.
+        close(&builtin_elliptic_f(&[r(0.7), i(0)]).unwrap(), 0.7, 1e-12);
+    }
+
+    #[test]
+    fn test_jacobi_elliptic() {
+        close(
+            &builtin_jacobi_sn(&[i(1), r(0.5)]).unwrap(),
+            0.8030018248956439,
+            1e-12,
+        );
+        close(
+            &builtin_jacobi_cn(&[i(1), r(0.5)]).unwrap(),
+            0.5959765676721407,
+            1e-12,
+        );
+        close(
+            &builtin_jacobi_dn(&[i(1), r(0.5)]).unwrap(),
+            0.8231610016315963,
+            1e-12,
+        );
+        // m = 0 reduces to the circular functions.
+        close(
+            &builtin_jacobi_sn(&[r(0.7), i(0)]).unwrap(),
+            0.7_f64.sin(),
+            1e-15,
+        );
+        close(
+            &builtin_jacobi_cn(&[r(0.7), i(0)]).unwrap(),
+            0.7_f64.cos(),
+            1e-15,
+        );
+        close(&builtin_jacobi_dn(&[r(0.7), i(0)]).unwrap(), 1.0, 1e-15);
+    }
+
+    #[test]
+    fn test_elliptic_nome_q() {
+        close(
+            &builtin_elliptic_nome_q(&[r(0.5)]).unwrap(),
+            0.04321391826377225,
+            1e-12,
+        );
+        assert!(matches!(
+            builtin_elliptic_nome_q(&[i(0)]).unwrap(),
+            Value::Integer(ref n) if *n == 0
+        ));
+    }
+
+    #[test]
+    fn test_elliptic_k_zero_exact() {
+        // EllipticK[0] = Pi/2 exactly (symbolic), numeric value π/2.
+        let exact = builtin_elliptic_k(&[i(0)]).unwrap();
+        assert!(
+            !matches!(exact, Value::Real(_)),
+            "expected symbolic, got {exact:?}"
+        );
+        assert!((n_at("EllipticK[0]", 0.0) - std::f64::consts::FRAC_PI_2).abs() < 1e-15);
+        assert!((n_at("EllipticE[0]", 0.0) - std::f64::consts::FRAC_PI_2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_env_dispatch_of_new_builtins() {
+        // Exercises registration precedence: the general-order Bessel surface
+        // must be the one installed in the environment.
+        assert!((n_at("BesselJ[0.3, 2.0]", 0.0) - 0.4256940619814137).abs() < 1e-12);
+        assert!(
+            (n_at("BesselJ[1/2, 1]", 0.0)
+                - (2.0f64.sqrt() * 1.0f64.sin()) / std::f64::consts::PI.sqrt())
+            .abs()
+                < 1e-12
+        );
+        assert!((n_at("BesselY[1, 1.0]", 0.0) + 0.7812128213002887).abs() < 1e-10);
+        assert!((n_at("BesselK[0, 1.0]", 0.0) - 0.42102443824070834).abs() < 1e-12);
+        assert!((n_at("HermiteH[3, 0.5]", 0.0) + 5.0).abs() < 1e-12);
+        assert!((n_at("LegendreP[3, 0.3]", 0.0) + 0.3825).abs() < 1e-12);
+        assert!((n_at("JacobiSN[1, 1/2]", 0.0) - 0.8030018248956439).abs() < 1e-12);
+        assert!((n_at("EllipticK[1/2]", 0.0) - 1.8540746773013719).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_new_family_symbolic_fallbacks() {
+        let s = Value::Symbol("z".to_string());
+        is_unevaluated(
+            &builtin_bessel_j(&[s.clone(), s.clone()]).unwrap(),
+            "BesselJ",
+        );
+        is_unevaluated(
+            &builtin_hermite_h(&[s.clone(), s.clone()]).unwrap(),
+            "HermiteH",
+        );
+        is_unevaluated(
+            &builtin_legendre_p(&[s.clone(), s.clone()]).unwrap(),
+            "LegendreP",
+        );
+        is_unevaluated(&builtin_elliptic_k(&[s.clone()]).unwrap(), "EllipticK");
+        is_unevaluated(
+            &builtin_jacobi_sn(&[s.clone(), s.clone()]).unwrap(),
+            "JacobiSN",
+        );
     }
 }

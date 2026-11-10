@@ -130,6 +130,17 @@ pub struct Env {
     /// Per-head subvalue definitions (`f[a][b] := ...`), keyed by head symbol.
     /// Shared across all child envs in a session.
     pub subvalues: Arc<Mutex<SubValueMap>>,
+    /// Cache of symbol names that resolve to a binding in the *root* scope.
+    ///
+    /// Deeply nested scopes (e.g. recursive function calls) make `get` walk a
+    /// long parent chain, hashing the name at every frame. Most names
+    /// (`Plus`, user function heads, `$RecursionLimit`, ...) live in the root
+    /// scope, so once resolved they can be served directly from here. Entries
+    /// are keyed by name and invalidated whenever that name is (re)bound or
+    /// removed in any scope, so a local shadowing binding correctly takes
+    /// precedence. Only root hits are cached; local hits fall through to the
+    /// normal chain walk.
+    global_cache: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 impl Scope {
@@ -228,6 +239,7 @@ impl Env {
             options: Arc::new(Mutex::new(HashMap::new())),
             upvalues: Arc::new(Mutex::new(HashMap::new())),
             subvalues: Arc::new(Mutex::new(HashMap::new())),
+            global_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -246,6 +258,7 @@ impl Env {
             options: self.options.clone(),
             upvalues: self.upvalues.clone(),
             subvalues: self.subvalues.clone(),
+            global_cache: self.global_cache.clone(),
         }
     }
 
@@ -302,33 +315,76 @@ impl Env {
             options: self.options.clone(),
             upvalues: self.upvalues.clone(),
             subvalues: self.subvalues.clone(),
+            global_cache: self.global_cache.clone(),
+        }
+    }
+
+    /// Drop any cached root resolution for `name`.
+    ///
+    /// Called on every binding mutation so that a newly created local shadow
+    /// (or a changed/removed root binding) is picked up by the next `get`.
+    fn invalidate_cached(&self, name: &str) {
+        // Fast bail-out: only touch the cache mutex when it is non-empty.
+        let mut cache = self.global_cache.lock().unwrap();
+        if !cache.is_empty() {
+            cache.remove(name);
         }
     }
 
     /// Look up a variable by name.
     pub fn get(&self, name: &str) -> Option<Value> {
-        self.scope.lock().unwrap().get(name)
+        // Fast path: a previous lookup resolved `name` to a root-scope value
+        // and no binding for `name` has been mutated since (mutations clear
+        // the entry), so no ancestor can be shadowing it.
+        if let Some(v) = self.global_cache.lock().unwrap().get(name) {
+            return Some(v.clone());
+        }
+        // Slow path: walk the scope chain innermost → outermost.
+        let mut current = Some(self.scope.clone());
+        while let Some(scope) = current {
+            let guard = scope.lock().unwrap();
+            if let Some(val) = guard.bindings.get(name) {
+                let val = val.clone();
+                let is_root = Arc::ptr_eq(&scope, &self.root_scope);
+                drop(guard);
+                // Cache only root hits; local hits are cheap to re-walk and
+                // may be shadowed differently from other call frames.
+                if is_root {
+                    self.global_cache
+                        .lock()
+                        .unwrap()
+                        .insert(name.to_string(), val.clone());
+                }
+                return Some(val);
+            }
+            current = guard.parent.clone();
+        }
+        None
     }
 
     /// Set a variable in the current scope.
     pub fn set(&self, name: String, value: Value) {
+        self.invalidate_cached(&name);
         self.scope.lock().unwrap().set(name, value);
     }
 
     /// Set a variable, propagating to the scope where it was originally defined.
     /// If not found in any ancestor scope, creates it in the current scope.
     pub fn set_propagate(&self, name: String, value: Value) {
+        self.invalidate_cached(&name);
         self.scope.lock().unwrap().set_propagate(name, value);
     }
 
     /// Set a variable in the current (local) scope only.
     pub fn set_local(&self, name: String, value: Value) {
+        self.invalidate_cached(&name);
         self.scope.lock().unwrap().set_local(name, value);
     }
 
     /// Remove a variable, propagating to the scope where it was originally defined.
     /// Returns true if the variable was found and removed.
     pub fn remove(&self, name: &str) -> bool {
+        self.invalidate_cached(name);
         self.scope.lock().unwrap().remove_propagate(name)
     }
 
@@ -337,6 +393,7 @@ impl Env {
     /// Unlike [`Env::get`] this transfers ownership of the value, so an
     /// `Arc` held only by the environment can be uniquely owned afterwards.
     pub fn take(&self, name: &str) -> Option<Value> {
+        self.invalidate_cached(name);
         self.scope.lock().unwrap().take_propagate(name)
     }
 
@@ -395,8 +452,15 @@ impl Env {
     }
 
     /// Check if a symbol has a specific attribute.
+    ///
+    /// Avoids cloning the attribute vector (unlike routing through
+    /// [`Env::get_attributes`]) so this stays cheap in the hot call path.
     pub fn has_attribute(&self, name: &str, attr: &str) -> bool {
-        self.get_attributes(name).iter().any(|a| a == attr)
+        self.attributes
+            .lock()
+            .unwrap()
+            .get(name)
+            .is_some_and(|attrs| attrs.iter().any(|a| a == attr))
     }
 
     /// Clear (remove) all attributes for a symbol.

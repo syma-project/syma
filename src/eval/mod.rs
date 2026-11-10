@@ -1754,6 +1754,31 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         }
     }
 
+    // ── Orderless attribute: canonicalize argument order ──
+    // Orderless heads hold their arguments in a canonical order so that
+    // structurally-equal calls always compare equal regardless of the order in
+    // which the arguments were supplied. This mirrors Wolfram semantics and
+    // makes Orderless matching order-insensitive without relying solely on the
+    // pattern engine's permutation search.
+    //
+    // `HoldAll` heads (e.g. `And`/`Or`) are exempt: their arguments are held
+    // and evaluated lazily left-to-right, so reordering them would change which
+    // operand is evaluated first and break short-circuiting
+    // (`And[False, Error[...]]` must not evaluate the error).
+    if let Some(name) = func_name
+        && args.len() > 1
+        && !matches!(func, Value::Builtin(_, _))
+        && env.has_attribute(name, "Orderless")
+        && !env.has_attribute(name, "HoldAll")
+        && !env.has_attribute(name, "HoldAllComplete")
+    {
+        let mut sorted = args.to_vec();
+        sorted.sort_by(crate::builtins::comparison::canonical_cmp);
+        if sorted.as_slice() != args {
+            return apply_function(func, &sorted, env);
+        }
+    }
+
     // ── Listable attribute: auto-thread over lists ──
     if let Some(name) = func_name
         && env.has_attribute(name, "Listable")
@@ -1833,7 +1858,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 
         Value::NativeFunction {
             fn_ptr, signature, ..
-        } => ffi::loader::call_native(*fn_ptr, signature, args),
+        } => ffi::loader::call_native_catching(*fn_ptr, signature, args),
 
         Value::BytecodeFunction(bc_def) => {
             // Enforce $RecursionLimit for the bytecode tier too. Without this,
@@ -1851,17 +1876,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                 if prev + 1 > JIT_THRESHOLD {
                     let jit_ptr = bc_def.jit_fn_ptr.load(Ordering::Relaxed);
                     if !jit_ptr.is_null() && jit_ptr as usize != JIT_FAILED {
-                        let mut regs = vec![Value::Null; bc_def.bytecode.nregs as usize];
-                        let mut jit_ctx = crate::jit::runtime::JitContext::new(
-                            &bc_def.bytecode,
-                            args,
-                            env,
-                            &mut regs,
-                        );
-                        let jit_fn: extern "C" fn(*mut crate::jit::runtime::JitContext) =
-                            unsafe { std::mem::transmute(jit_ptr) };
-                        jit_fn(&mut jit_ctx);
-                        return Ok(unsafe { (*jit_ctx.regs).clone() });
+                        return crate::jit::invoke(bc_def, args, env);
                     }
                     // First time past threshold — try to compile.
                     if prev + 1 == JIT_THRESHOLD + 1 {
@@ -3704,6 +3719,36 @@ mod tests {
     #[should_panic(expected = "ParallelCombine requires a non-empty list")]
     fn test_parallel_combine_empty() {
         eval_str("ParallelCombine[Plus, {}]");
+    }
+
+    // ── ParallelApply / DistributeDefinitions / SharedVariables / FindLibrary ──
+
+    #[test]
+    fn test_parallel_apply_sums_arguments() {
+        let result = eval_str("ParallelApply[Plus, {1, 2, 3, 4, 5}]");
+        assert_eq!(result, Value::Integer(Integer::from(15)));
+    }
+
+    #[test]
+    fn test_distribute_definitions_returns_symbols() {
+        match eval_str("DistributeDefinitions[a, b]") {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shared_variables_returns_null() {
+        assert_eq!(eval_str("SharedVariables[{a, b}]"), Value::Null);
+    }
+
+    #[test]
+    fn test_find_library_known_or_null() {
+        // libc is present on Linux; tolerate other platforms by allowing Null.
+        match eval_str("FindLibrary[\"libc.so.6\"]") {
+            Value::Str(_) | Value::Null => {}
+            other => panic!("unexpected FindLibrary result: {other:?}"),
+        }
     }
 
     // ── Hold / HoldComplete / ReleaseHold ──

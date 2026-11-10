@@ -639,6 +639,43 @@ fn random_variate_one(dist: &Value) -> Result<Value, EvalError> {
             let hi = dist_param(map, "Max", 1.0).floor();
             int_value((lo + (uniform01() * (hi - lo + 1.0)).floor()) as i64)
         }
+        // ── Broadened families ──────────────────────────────────────────────
+        "FRatio" => {
+            let num_df = dist_param(map, "N", 1.0);
+            let den_df = dist_param(map, "D", 1.0);
+            let g1 = sample_gamma_unit(num_df / 2.0);
+            let g2 = sample_gamma_unit(den_df / 2.0);
+            super::real(g1 * den_df / (g2 * num_df))
+        }
+        "Laplace" | "Logistic" | "Weibull" | "Pareto" => super::real(
+            crate::builtins::statistics::distribution_quantile_f64(map, uniform01()).unwrap_or(0.0),
+        ),
+        "Geometric" | "NegativeBinomial" | "Pascal" | "Hypergeometric" => int_value(
+            crate::builtins::statistics::distribution_quantile_f64(map, uniform01()).unwrap_or(0.0)
+                as i64,
+        ),
+        "Multinomial" => {
+            let trials = dist_param(map, "N", 0.0) as usize;
+            let ps: Vec<f64> = match map.get("P") {
+                Some(Value::List(l)) => l.iter().filter_map(as_f64).collect(),
+                _ => vec![],
+            };
+            let mut counts = vec![0i64; ps.len()];
+            for _ in 0..trials {
+                let u = uniform01();
+                let mut acc = 0.0;
+                let mut chosen = ps.len().saturating_sub(1);
+                for (i, p) in ps.iter().enumerate() {
+                    acc += p;
+                    if u < acc {
+                        chosen = i;
+                        break;
+                    }
+                }
+                counts[chosen] += 1;
+            }
+            Value::List(counts.into_iter().map(int_value).collect())
+        }
         other => {
             return Err(EvalError::Error(format!(
                 "RandomVariate: unknown distribution type '{}'",

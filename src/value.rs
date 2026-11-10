@@ -18,34 +18,66 @@ use image::GenericImageView;
 // ── FFI types ─────────────────────────────────────────────────────────────────
 
 /// The C type tags used in native function signatures.
+///
+/// Scalar integer/pointer types share the general-purpose register class;
+/// `F32`/`F64` use the SSE register class. `Struct` is a *basic* by-value
+/// aggregate of at most two machine words (return-only); its ABI class is
+/// inferred from the fields.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeType {
     Void,
+    I8,
+    I16,
     I32,
     I64,
+    U8,
+    U16,
     U32,
     U64,
     F32,
     F64,
-    /// Null-terminated UTF-8 string (`*const c_char`).
+    /// Null-terminated string (`*const c_char`), bytes interpreted as-is.
     CString,
+    /// Null-terminated UTF-8 string (`*const c_char`). Marshalled like
+    /// `CString`; a distinct tag for parity with Wolfram's `"UTF8String"`.
+    UTF8String,
     /// Marshalled as `i32` (C convention: 0 = false).
     Bool,
+    /// Opaque machine pointer (`*mut c_void`), carried as an unsigned integer.
+    Pointer,
+    /// A small C struct passed/returned by value. Basic support: up to two
+    /// machine words, return-only.
+    Struct(Vec<NativeType>),
 }
 
 impl NativeType {
     /// Parse a Syma string literal (e.g. `"Integer64"`) into a `NativeType`.
+    ///
+    /// Accepts Wolfram's canonical names as well as short aliases.
     pub fn from_syma_name(s: &str) -> Option<Self> {
         match s {
             "Void" => Some(NativeType::Void),
-            "Integer32" => Some(NativeType::I32),
-            "Integer64" => Some(NativeType::I64),
-            "UnsignedInteger32" => Some(NativeType::U32),
-            "UnsignedInteger64" => Some(NativeType::U64),
-            "Real32" => Some(NativeType::F32),
-            "Real64" => Some(NativeType::F64),
+            "Integer8" | "Int8" | "I8" | "Char" | "SignedChar" => Some(NativeType::I8),
+            "Integer16" | "Int16" | "I16" | "Short" | "SignedShort" => Some(NativeType::I16),
+            "Integer32" | "Int32" | "I32" | "Int" | "CInt" => Some(NativeType::I32),
+            "Integer64" | "Int64" | "I64" | "Long" | "CLong" | "LongLong" => Some(NativeType::I64),
+            "UnsignedInteger8" | "UInt8" | "U8" | "Byte" | "UnsignedChar" => Some(NativeType::U8),
+            "UnsignedInteger16" | "UInt16" | "U16" | "UnsignedShort" => Some(NativeType::U16),
+            "UnsignedInteger32" | "UInt32" | "U32" | "UnsignedInt" => Some(NativeType::U32),
+            "UnsignedInteger64" | "UInt64" | "U64" | "UnsignedLong" | "UnsignedLongLong" => {
+                Some(NativeType::U64)
+            }
+            "Real32" | "Float" | "F32" | "Single" => Some(NativeType::F32),
+            "Real64" | "Double" | "F64" => Some(NativeType::F64),
             "CString" => Some(NativeType::CString),
-            "Boolean" => Some(NativeType::Bool),
+            "UTF8String" | "UTF8" | "String" => Some(NativeType::UTF8String),
+            "Boolean" | "Bool" | "BOOL" => Some(NativeType::Bool),
+            "Pointer" | "VoidPtr" | "NativePointer" | "IntegerPointer" | "Handle" => {
+                Some(NativeType::Pointer)
+            }
+            // Common libc struct return types, for basic by-value support.
+            "div_t" => Some(NativeType::Struct(vec![NativeType::I32, NativeType::I32])),
+            "ldiv_t" => Some(NativeType::Struct(vec![NativeType::I64, NativeType::I64])),
             _ => None,
         }
     }
@@ -54,15 +86,40 @@ impl NativeType {
     pub fn syma_name(&self) -> &'static str {
         match self {
             NativeType::Void => "Void",
+            NativeType::I8 => "Integer8",
+            NativeType::I16 => "Integer16",
             NativeType::I32 => "Integer32",
             NativeType::I64 => "Integer64",
+            NativeType::U8 => "UnsignedInteger8",
+            NativeType::U16 => "UnsignedInteger16",
             NativeType::U32 => "UnsignedInteger32",
             NativeType::U64 => "UnsignedInteger64",
             NativeType::F32 => "Real32",
             NativeType::F64 => "Real64",
             NativeType::CString => "CString",
+            NativeType::UTF8String => "UTF8String",
             NativeType::Bool => "Boolean",
+            NativeType::Pointer => "Pointer",
+            NativeType::Struct(_) => "Struct",
         }
+    }
+
+    /// Size of this type in bytes when laid out in memory, if it is a scalar
+    /// with a fixed native width.
+    pub fn byte_size(&self) -> Option<usize> {
+        Some(match self {
+            NativeType::Void => 0,
+            NativeType::I8 | NativeType::U8 | NativeType::Bool => 1,
+            NativeType::I16 | NativeType::U16 => 2,
+            NativeType::I32 | NativeType::U32 | NativeType::F32 => 4,
+            NativeType::I64
+            | NativeType::U64
+            | NativeType::F64
+            | NativeType::CString
+            | NativeType::UTF8String
+            | NativeType::Pointer => 8,
+            NativeType::Struct(_) => return None,
+        })
     }
 }
 
@@ -766,6 +823,14 @@ impl Value {
                 | Format::OutputForm
                 | Format::Text => value.type_name(),
             },
+        }
+    }
+
+    /// Borrow this value as a list slice, or `None` for non-lists.
+    pub fn as_list(&self) -> Option<&Vec<Value>> {
+        match self {
+            Value::List(items) => Some(items),
+            _ => None,
         }
     }
 

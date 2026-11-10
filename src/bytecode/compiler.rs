@@ -149,6 +149,60 @@ struct LoopCtx {
 
 // ── BytecodeCompiler ───────────────────────────────────────────────────────────
 
+/// Special forms whose argument-evaluation or scoping semantics differ from a
+/// plain function call (held/unevaluated args, iterator specs, scoping
+/// constructs, …). The compiler has no dedicated lowering for these, so it
+/// delegates the whole call to the tree-walk evaluator via `EvalTree`, which
+/// owns their exact semantics. `Catch`, `While`, `For`, `Which`, `Switch` and
+/// `Return`/`Break`/`Continue` are lowered natively and are intentionally absent.
+const SPECIAL_FORMS: &[&str] = &[
+    "Clear",
+    "ClearAll",
+    "Remove",
+    "Table",
+    "ParallelTable",
+    "ParallelSum",
+    "ParallelEvaluate",
+    "ParallelTry",
+    "ParallelProduct",
+    "ParallelDo",
+    "Sum",
+    "Product",
+    "RecurrenceTable",
+    "Plot",
+    "LogPlot",
+    "LogLogPlot",
+    "LogLinearPlot",
+    "ParametricPlot",
+    "PolarPlot",
+    "DiscretePlot",
+    "DensityPlot",
+    "TryCatch",
+    "Goto",
+    "ReleaseHold",
+    "Assuming",
+    "N",
+    "Module",
+    "With",
+    "Block",
+    "TagSet",
+    "DownValues",
+    "OwnValues",
+    "UpValues",
+    "SubValues",
+    "Definition",
+    "Context",
+    "SymbolName",
+    "Options",
+    "OptionValue",
+    "SetOptions",
+    "HoldPattern",
+    "Verbatim",
+    "Inactive",
+    "Set",
+    "SetDelayed",
+];
+
 pub struct BytecodeCompiler {
     code: Vec<Instruction>,
     regs: RegAlloc,
@@ -512,34 +566,18 @@ impl BytecodeCompiler {
                     args: vec![*expr.clone(), rules_list],
                 })
             }
-            // ── Top-level definitions (explicit errors) ──
-            Expr::FuncDef { .. } => Err(CompileError::UnsupportedFeature(
-                "function definition".to_string(),
-            )),
-            Expr::DestructAssign { .. } => Err(CompileError::UnsupportedFeature(
-                "destructuring assignment".to_string(),
-            )),
-            Expr::PostIncrement { .. } => Err(CompileError::UnsupportedFeature(
-                "post-increment".to_string(),
-            )),
-            Expr::PostDecrement { .. } => Err(CompileError::UnsupportedFeature(
-                "post-decrement".to_string(),
-            )),
-            Expr::Unset { .. } => Err(CompileError::UnsupportedFeature("unset".to_string())),
-            Expr::RuleDef { .. } => Err(CompileError::UnsupportedFeature(
-                "rule definition".to_string(),
-            )),
-            Expr::ClassDef { .. } => Err(CompileError::UnsupportedFeature(
-                "class definition".to_string(),
-            )),
-            Expr::ModuleDef { .. } => Err(CompileError::UnsupportedFeature(
-                "module definition".to_string(),
-            )),
-            Expr::Import { .. } => Err(CompileError::UnsupportedFeature("import".to_string())),
-            Expr::Export(..) => Err(CompileError::UnsupportedFeature("export".to_string())),
-            Expr::Information(..) => {
-                Err(CompileError::UnsupportedFeature("information".to_string()))
-            }
+            // ── Top-level / definitional forms: delegate to tree-walk ──
+            Expr::FuncDef { .. }
+            | Expr::DestructAssign { .. }
+            | Expr::PostIncrement { .. }
+            | Expr::PostDecrement { .. }
+            | Expr::Unset { .. }
+            | Expr::RuleDef { .. }
+            | Expr::ClassDef { .. }
+            | Expr::ModuleDef { .. }
+            | Expr::Import { .. }
+            | Expr::Export(..)
+            | Expr::Information(..) => self.emit_eval_tree(expr),
         }
     }
 
@@ -607,14 +645,20 @@ impl BytecodeCompiler {
                 head: Box::new(head.clone()),
                 args: args.to_vec(),
             };
-            let dst = self.regs.alloc()?;
-            let idx = self.pool.insert(Value::Pattern(expr));
-            self.emit(Instruction::EvalTree(dst, idx));
-            // The tree-walk may have assigned to a parameter (via
-            // `set_propagate` in the local scope); reload parameter registers so
-            // later bytecode reads observe the new values.
-            self.resync_params();
-            return Ok(dst);
+            return self.emit_eval_tree(&expr);
+        }
+
+        // Other special forms (Table/Module/With/Block/Sum/Plot/...) are also
+        // delegated to the tree-walk evaluator so their held/iterator/scoping
+        // semantics match the interpreter exactly.
+        if let Expr::Symbol(name) = head
+            && SPECIAL_FORMS.contains(&name.as_str())
+        {
+            let expr = Expr::Call {
+                head: Box::new(head.clone()),
+                args: args.to_vec(),
+            };
+            return self.emit_eval_tree(&expr);
         }
 
         // `And`/`Or` with two operands: skip evaluating the second operand when
@@ -949,7 +993,9 @@ impl BytecodeCompiler {
         match instr {
             Instruction::Jump(o)
             | Instruction::JumpIfZero(_, o)
-            | Instruction::JumpIfNotZero(_, o) => *o = relative,
+            | Instruction::JumpIfNotZero(_, o)
+            | Instruction::JumpIfBreak(o)
+            | Instruction::JumpIfContinue(o) => *o = relative,
             _ => panic!("Cannot patch non-jump at {instr_idx}"),
         }
     }
@@ -1091,9 +1137,15 @@ impl BytecodeCompiler {
                 // Compile as For-equivalent loop
                 self.compile_for(&init, &condition, &step, body)
             }
-            IteratorSpec::List { .. } => Err(CompileError::UnsupportedFeature(
-                "Do loop with list iterator".to_string(),
-            )),
+            IteratorSpec::List { .. } => {
+                // List iterators (e.g. Do[body, {x, {1,2,3}}]) are handled by
+                // the tree-walk evaluator; delegate the whole form.
+                let expr = Expr::Do {
+                    body: Box::new(body.clone()),
+                    iterator: iterator.clone(),
+                };
+                self.emit_eval_tree(&expr)
+            }
         }
     }
 
@@ -1169,6 +1221,38 @@ impl BytecodeCompiler {
             head: Box::new(Expr::Symbol("Replace".to_string())),
             args: vec![expr.clone(), Expr::List(rules)],
         })
+    }
+
+    /// Emit an `EvalTree` that evaluates `expr` with the tree-walk evaluator
+    /// against the current (call-local) environment, then re-synchronise
+    /// parameter registers in case the evaluation mutated them.
+    ///
+    /// Inside a compiled loop, [`Instruction::EvalTreeLoop`] is used and the
+    /// enclosing loop is wired to catch any `Break`/`Continue` the delegated
+    /// subtree raises (the compiler cannot see them, since the subtree is
+    /// opaque), so nested `Module`/`Catch`/... don't let control escape.
+    fn emit_eval_tree(&mut self, expr: &Expr) -> Result<u16, CompileError> {
+        let dst = self.regs.alloc()?;
+        let idx = self.pool.insert(Value::Pattern(expr.clone()));
+        if self.loops.is_empty() {
+            self.emit(Instruction::EvalTree(dst, idx));
+        } else {
+            self.emit(Instruction::EvalTreeLoop(dst, idx));
+            let br = self.emit(Instruction::JumpIfBreak(0));
+            self.loops
+                .last_mut()
+                .expect("loop context")
+                .break_jumps
+                .push(br);
+            let cr = self.emit(Instruction::JumpIfContinue(0));
+            self.loops
+                .last_mut()
+                .expect("loop context")
+                .continue_jumps
+                .push(cr);
+        }
+        self.resync_params();
+        Ok(dst)
     }
 
     /// Reload named parameter registers from the local environment.

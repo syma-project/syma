@@ -100,6 +100,26 @@ FreeQ[{a,b},x] && LtQ[2*(n-1),j,n] (* Integrate[(a_*x_^j_.+b_*x_^n_.)^p_,x_] := 
 Integrate[(a_*x_^j_.+b_*x_^n_.)^p_,x_] := (a*x^j+b*x^n)^FracPart[p]/(x^(j*FracPart[p])*(a+b*x^(n-j))^FracPart[p])*Integrate[x^(j*p)*(a+b*x^(n-j))^p,x] /;
 FreeQ[{a,b,j,n,p},x] && Not[IntegerQ[p]] && NeQ[n,j] && PosQ[n-j]
 
+(* Terminating closed forms for two shapes whose generic "expand" rules
+   above/below reduce to themselves when the helper is a no-op.  The
+   optional dots keep these matching the bare-coefficient cases
+   (`1 + x^3`, `1 + x^2`) that the ported `b_` patterns miss. *)
+Integrate[x_^m_*(a_.+b_.*x_^n_)^p_,x_] := (a+b*x^n)^(p+1)/(b*n*(p+1)) /;
+    FreeQ[{a,b,m,n,p},x] && EqQ[m,n-1] && NeQ[p,-1];
+
+Integrate[x_^m_*Sqrt[a_.+b_.*x_^n_],x_] := 2*(a+b*x^n)^(3/2)/(3*b*n) /;
+    FreeQ[{a,b,m,n},x] && EqQ[m,n-1];
+
+Integrate[(a_+b_.*x_^2)^(-2),x_] := x/(2*a*(a+b*x^2)) + 1/(2*a)*Integrate[1/(a+b*x^2),x] /;
+    FreeQ[{a,b},x] && NeQ[a,0];
+
+(* Fully symbolic exponents: standard Gauss 2F1 closed form (correct for
+   arbitrary m,n,p).  Placed after the elementary special cases above so
+   those keep their nicer closed forms. *)
+Integrate[x_^m_*(a_.+b_.*x_^n_)^p_,x_] :=
+    x^(m+1)*(a+b*x^n)^p/((m+1)*(1+b*x^n/a)^p)*Hypergeometric2F1[(m+1)/n,-p,(m+1)/n+1,-b*x^n/a] /;
+    FreeQ[{a,b,m,n,p},x] && NeQ[m,-1] && NeQ[n,0] && NeQ[a,0];
+
 Integrate[(a_*u_^j_.+b_*u_^n_.)^p_,x_] := 1/Coefficient[u,x,1]*Subst[Integrate[(a*x^j+b*x^n)^p,x],x,u] /;
 FreeQ[{a,b,j,n,p},x] && LinearQ[u,x] && NeQ[u,x]
 
@@ -965,7 +985,7 @@ Integrate[(a_.+b_*u_^n_)^p_*(c_.+d_*u_^n_)^q_.,x_] := 1/Coefficient[u,x,1]*Subst
 FreeQ[{a,b,c,d,n,p,q},x] && LinearQ[u,x] && NeQ[u,x]
 
 Integrate[u_^p_*v_^q_.,x_] := Integrate[NormalizePseudoBinomial[u,x]^p*NormalizePseudoBinomial[v,x]^q,x] /;
-FreeQ[{p,q},x] && PseudoBinomialPairQ[u,v,x]
+FreeQ[{p,q},x] && PseudoBinomialPairQ[u,v,x] && Not[SameQ[NormalizePseudoBinomial[u,x]^p*NormalizePseudoBinomial[v,x]^q, u^p*v^q]]
 
 Integrate[x_^m_*u_^p_*v_^q_.,x_] := Integrate[NormalizePseudoBinomial[x^(m/p)*u,x]^p*NormalizePseudoBinomial[v,x]^q,x] /;
 FreeQ[{p,q},x] && IntegersQ[p,m/p] && PseudoBinomialPairQ[x^(m/p)*u,v,x]
@@ -1502,7 +1522,7 @@ Integrate[Pq_*(a_+b_*x_^n_.)^p_.,x_] := Integrate[ExpandIntegrand[Pq*(a+b*x^n)^p
 FreeQ[{a,b,n},x] && PolyQ[Pq,x] && (IGtQ[p,0] || EqQ[n,1])
 
 Integrate[Pq_*(a_+b_*x_^n_.)^p_,x_] := Integrate[x*PolynomialQuotient[Pq,x,x]*(a+b*x^n)^p,x] /;
-FreeQ[{a,b,n,p},x] && PolyQ[Pq,x] && EqQ[Coeff[Pq,x,0],0] && Not[MatchQ[Pq,x^m_*u_. /; IntegerQ[m]]]
+FreeQ[{a,b,n,p},x] && PolyQ[Pq,x] && EqQ[Coeff[Pq,x,0],0] && Not[MatchQ[Pq,x^m_*u_. /; IntegerQ[m]]] && Not[SameQ[x*PolynomialQuotient[Pq,x,x]*(a+b*x^n)^p, Pq*(a+b*x^n)^p]]
 
 Integrate[Pq_*(a_+b_*x_^n_.)^p_.,x_] := Integrate[PolynomialQuotient[Pq,a+b*x^n,x]*(a+b*x^n)^(p+1),x] /;
 FreeQ[{a,b,p},x] && PolyQ[Pq,x] && IGtQ[n,0] && GeQ[Expon[Pq,x],n] && EqQ[PolynomialRemainder[Pq,a+b*x^n,x],0]
@@ -1631,10 +1651,10 @@ Integrate[P3_*(a_+b_*x_^n_)^p_,x_] := With[{A=Coeff[P3,x^(n/2),0],B=Coeff[P3,x^(
 FreeQ[{a,b,n},x] && PolyQ[P3,x^(n/2),3] && ILtQ[p,-1]
 
 Integrate[Pq_*(a_+b_*x_^n_)^p_.,x_] := Integrate[ExpandIntegrand[Pq*(a+b*x^n)^p,x],x] /;
-FreeQ[{a,b,n,p},x] && (PolyQ[Pq,x] || PolyQ[Pq,x^n])
+FreeQ[{a,b,n,p},x] && (PolyQ[Pq,x] || PolyQ[Pq,x^n]) && Not[SameQ[ExpandIntegrand[Pq*(a+b*x^n)^p,x], Pq*(a+b*x^n)^p]]
 
 Integrate[Pq_*(a_+b_*v_^n_.)^p_,x_] := 1/Coeff[v,x,1]*Subst[Integrate[SubstFor[v,Pq,x]*(a+b*x^n)^p,x],x,v] /;
-FreeQ[{a,b,n,p},x] && LinearQ[v,x] && PolyQ[Pq,v^n]
+FreeQ[{a,b,n,p},x] && LinearQ[v,x] && PolyQ[Pq,v^n] && Not[And[SameQ[v,x], SameQ[SubstFor[v,Pq,x], Pq]]]
 
 Integrate[Pq_*(a1_+b1_*x_^n_.)^p_*(a2_+b2_*x_^n_.)^p_.,x_] := Integrate[Pq*(a1*a2+b1*b2*x^(2*n))^p,x] /;
 FreeQ[{a1,b1,a2,b2,n,p},x] && PolyQ[Pq,x] && EqQ[a2*b1+a1*b2,0] && (IntegerQ[p] || GtQ[a1,0] && GtQ[a2,0])
@@ -2380,10 +2400,10 @@ Integrate[Px_*(a_.+b_*x_)^m_*(c_.+d_*x_)^n_*(e_.+f_*x_)^p_*(g_.+h_*x_)^q_.,x_] :
 FreeQ[{a,b,c,d,e,f,g,h,m,n,p,q},x] && PolyQ[Px,x]
 
 Integrate[Pq_*(a_+b_*x_^2)^p_.,x_] := Integrate[ExpandIntegrand[Pq*(a+b*x^2)^p,x],x] /;
-FreeQ[{a,b},x] && PolyQ[Pq,x] && IGtQ[p,-2]
+FreeQ[{a,b},x] && PolyQ[Pq,x] && IGtQ[p,-2] && Not[SameQ[ExpandIntegrand[Pq*(a+b*x^2)^p,x], Pq*(a+b*x^2)^p]]
 
 Integrate[Pq_*(a_+b_*x_^2)^p_,x_] := Integrate[x*PolynomialQuotient[Pq,x,x]*(a+b*x^2)^p,x] /;
-FreeQ[{a,b,p},x] && PolyQ[Pq,x] && EqQ[Coeff[Pq,x,0],0] && Not[MatchQ[Pq,x^m_*u_. /; IntegerQ[m]]]
+FreeQ[{a,b,p},x] && PolyQ[Pq,x] && EqQ[Coeff[Pq,x,0],0] && Not[MatchQ[Pq,x^m_*u_. /; IntegerQ[m]]] && Not[SameQ[x*PolynomialQuotient[Pq,x,x]*(a+b*x^2)^p, Pq*(a+b*x^2)^p]]
 
 Integrate[Px_*(a_+b_*x_^2)^p_.,x_] := Integrate[PolynomialQuotient[Px,a+b*x^2,x]*(a+b*x^2)^(p+1),x] /;
 FreeQ[{a,b,p},x] && PolyQ[Px,x] && EqQ[PolynomialRemainder[Px,a+b*x^2,x],0]
@@ -6048,13 +6068,13 @@ ILtQ[q,0] && PolyQ[P,x] && PolyQ[Q,x]
 Integrate[u_*P_^p_.,x_] := With[{m=MinimumMonomialExponent[P,x]}, P^FracPart[p]/(x^(m*FracPart[p])*Distrib[1/x^m,P]^FracPart[p])*Integrate[u*x^(m*p)*Distrib[1/x^m,P]^p,x]] /;
 FreeQ[p,x] && Not[IntegerQ[p]] && SumQ[P] && EveryQ[Function[BinomialQ[#,x]],P] && Not[PolyQ[P,x,2]]
 
-Integrate[P_^p_,x_] := With[{u=Factor[ReplaceAll[P,xRuleSqrt[x]]]}, Integrate[ExpandIntegrand[ReplaceAll[u,xRulex^2]^p,x],x] /; Not[SumQ[NonfreeFactors[u,x]]]] /;
+Integrate[P_^p_,x_] := With[{u=Factor[ReplaceAll[P,xRuleSqrt[x]]]}, Integrate[ExpandIntegrand[ReplaceAll[u,xRulex^2]^p,x],x] /; Not[SumQ[NonfreeFactors[u,x]]] && Not[SameQ[ExpandIntegrand[ReplaceAll[u,xRulex^2]^p,x], P^p]]] /;
 PolyQ[P,x^2] && ILtQ[p,0]
 
-Integrate[P_^p_,x_] := With[{u=Factor[P]}, Integrate[ExpandIntegrand[u^p,x],x] /; Not[SumQ[NonfreeFactors[u,x]]]] /;
+Integrate[P_^p_,x_] := With[{u=Factor[P]}, Integrate[ExpandIntegrand[u^p,x],x] /; Not[SumQ[NonfreeFactors[u,x]]] && Not[SameQ[ExpandIntegrand[u^p,x], u^p]]] /;
 PolyQ[P,x] && ILtQ[p,0]
 
-Integrate[P_^p_,x_] := With[{u=Factor[P]}, Integrate[u^p,x] /; Not[SumQ[NonfreeFactors[u,x]]]] /;
+Integrate[P_^p_,x_] := With[{u=Factor[P]}, Integrate[u^p,x] /; Not[SumQ[NonfreeFactors[u,x]]] && Not[SameQ[u^p, P^p]]] /;
 PolyQ[P,x] && IntegerQ[p] (* Integrate[Pn_^p_,x_] := With[{u=Factor[Pn]}, Pn^p/DistributeDegree[u,p]*Integrate[DistributeDegree[u,p],x] /; Not[SumQ[u]]] /; PolyQ[Pn,x] && Not[IntegerQ[p]] *)
 
 Integrate[(a_.+b_*x_+c_*x_^2+d_*x_^3)^p_,x_] := 1/3^p*Subst[Integrate[Simp[(3*a*c-b^2)/c+c^2*x^3/b,x]^p,x],x,c/(3*d)+x] /;
@@ -6096,7 +6116,7 @@ FreeQ[{d,e},x] && PolyQ[v,x^2,2]
 Integrate[Sqrt[a_+b_*x_^2+c_*x_^4]/(d_+e_*x_^4),x_] := With[{q=Sqrt[b^2-4*a*c]}, -a*Sqrt[b+q]/(2*Sqrt[2]*Rt[-a*c,2]*d)*ArcTan[Sqrt[b+q]*x*(b-q+2*c*x^2)/(2*Sqrt[2]*Rt[-a*c,2]*Sqrt[a+b*x^2+c*x^4])] +    a*Sqrt[-b+q]/(2*Sqrt[2]*Rt[-a*c,2]*d)*ArcTanh[Sqrt[-b+q]*x*(b+q+2*c*x^2)/(2*Sqrt[2]*Rt[-a*c,2]*Sqrt[a+b*x^2+c*x^4])]] /;
 FreeQ[{a,b,c,d,e},x] && EqQ[c*d+a*e,0] && NegQ[a*c]
 
-Integrate[P_^p_*Q_^q_.,x_] := With[{PP=Factor[ReplaceAll[P,xRuleSqrt[x]]]}, Integrate[ExpandIntegrand[ReplaceAll[PP,xRulex^2]^p*Q^q,x],x] /; Not[SumQ[NonfreeFactors[PP,x]]]] /;
+Integrate[P_^p_*Q_^q_.,x_] := With[{PP=Factor[ReplaceAll[P,xRuleSqrt[x]]]}, Integrate[ExpandIntegrand[ReplaceAll[PP,xRulex^2]^p*Q^q,x],x] /; Not[SumQ[NonfreeFactors[PP,x]]] && Not[SameQ[ExpandIntegrand[ReplaceAll[PP,xRulex^2]^p*Q^q,x], P^p*Q^q]]] /;
 FreeQ[q,x] && PolyQ[P,x^2] && PolyQ[Q,x] && ILtQ[p,0]
 
 Integrate[P_^p_*Q_^q_.,x_] := With[{PP=Factor[P]}, Integrate[ExpandIntegrand[PP^p*Q^q,x],x] /; Not[SumQ[NonfreeFactors[PP,x]]]] /;
@@ -6542,4 +6562,5 @@ FreeQ[p,x] && BinomialQ[z,x] && GeneralizedTrinomialQ[u,x] && EqQ[BinomialDegree
 
 Integrate[(f_*x_)^m_*z_*u_^p_.,x_] := Integrate[(f*x)^m*ExpandToSum[z,x]*ExpandToSum[u,x]^p,x] /;
 FreeQ[{f,m,p},x] && BinomialQ[z,x] && GeneralizedTrinomialQ[u,x] && EqQ[BinomialDegree[z,x]-GeneralizedTrinomialDegree[u,x],0] && Not[BinomialMatchQ[z,x] && GeneralizedTrinomialMatchQ[u,x]]
+
 

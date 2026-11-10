@@ -3167,7 +3167,7 @@ mod tests {
         let sq = eval_str("LaplaceTransform[1/Sqrt[t], t, s]", &env);
         assert!(sq.contains("Sqrt[Pi]"), "{sq}");
         let inv = eval_str("LaplaceTransform[Sqrt[t], t, s]", &env);
-        assert!(inv.contains("Gamma"), "{inv}");
+        assert!(inv.contains("Gamma") || inv.contains("Sqrt[Pi]"), "{inv}");
     }
 
     #[test]

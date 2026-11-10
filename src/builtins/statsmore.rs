@@ -1130,7 +1130,30 @@ fn fit_normal(nums: &[f64]) -> Value {
     make_normal(mean, var.sqrt())
 }
 
-/// FindDistribution[data] — a best-fit distribution (Normal).
+/// An exponential distribution object with rate `lambda`.
+fn make_exponential(lambda: f64) -> Value {
+    let mut m = HashMap::new();
+    m.insert(
+        "Distribution".to_string(),
+        Value::Str("Exponential".to_string()),
+    );
+    m.insert("Lambda".to_string(), super::real(lambda.max(1e-12)));
+    Value::Assoc(m)
+}
+
+/// Fit an exponential distribution by maximum likelihood (`λ = 1/mean`).
+fn fit_exponential(nums: &[f64]) -> Option<Value> {
+    if nums.iter().any(|&x| x <= 0.0) {
+        return None;
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    (mean > 0.0).then(|| make_exponential(1.0 / mean))
+}
+
+/// `FindDistribution[data]` — a best-fit distribution.
+///
+/// Picks an exponential fit for strictly positive, markedly right-skewed data
+/// and a normal fit otherwise.
 pub fn builtin_find_distribution(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return unevaluated("FindDistribution", args);
@@ -1142,10 +1165,22 @@ pub fn builtin_find_distribution(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let nums = extract_nums(items)?;
+    if nums.len() >= 3 {
+        let n = nums.len() as f64;
+        let mean = nums.iter().sum::<f64>() / n;
+        let m2 = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let m3 = nums.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n;
+        let skew = if m2 > 0.0 { m3 / m2.powf(1.5) } else { 0.0 };
+        if skew > 0.8
+            && let Some(exp) = fit_exponential(&nums)
+        {
+            return Ok(exp);
+        }
+    }
     Ok(fit_normal(&nums))
 }
 
-/// EstimatedDistribution[data, dist] — fit the parameters of a distribution.
+/// `EstimatedDistribution[data, dist]` — fit the parameters of a distribution.
 pub fn builtin_estimated_distribution(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return unevaluated("EstimatedDistribution", args);
@@ -1163,6 +1198,10 @@ pub fn builtin_estimated_distribution(args: &[Value]) -> Result<Value, EvalError
     let nums = extract_nums(items)?;
     match dist_type(template) {
         Some("Normal") => Ok(fit_normal(&nums)),
+        Some("Exponential") => match fit_exponential(&nums) {
+            Some(v) => Ok(v),
+            None => unevaluated("EstimatedDistribution", args),
+        },
         _ => Ok(fit_normal(&nums)),
     }
 }
@@ -1993,6 +2032,567 @@ fn variance_two_sample(a: &[f64], b: &[f64], which: &str) -> Result<Value, EvalE
     Ok(super::real(two_sided(lo, hi)))
 }
 
+// ── Quantile interpolation methods ──────────────────────────────────────────
+
+/// Round half to even (banker's rounding), used by the Hyndman–Fan type-3
+/// estimator.
+fn round_half_even(x: f64) -> i64 {
+    let f = x.floor();
+    let frac = x - f;
+    if (frac - 0.5).abs() < 1e-12 {
+        let fi = f as i64;
+        if fi % 2 == 0 { fi } else { fi + 1 }
+    } else {
+        (f + if frac > 0.5 { 1.0 } else { 0.0 }) as i64
+    }
+}
+
+/// Hyndman–Fan quantile estimator of type `method` (1..=9) on sorted `data`.
+///
+/// The eight continuous estimators (types 4–9) share the form
+/// `x_{⌊h⌋} + γ·(x_{⌈h⌉} − x_{⌊h⌋})` with `γ = h − ⌊h⌋`; types 1–3 are the
+/// discontinuous inverse-ECDF variants. `h` is clamped to `[1, n]`.
+fn quantile_hf(data: &[f64], q: f64, method: u32) -> Option<f64> {
+    let n = data.len();
+    if n == 0 {
+        return None;
+    }
+    let nf = n as f64;
+    let clamp = |h: f64| h.clamp(1.0, nf);
+    match method {
+        1 => {
+            let h = clamp(nf * q + 0.5);
+            Some(data[(h.ceil() as usize).clamp(1, n) - 1])
+        }
+        2 => {
+            let h = clamp(nf * q + 0.5);
+            let lo = (h.floor() as usize).clamp(1, n);
+            let hi = (h.ceil() as usize).clamp(1, n);
+            Some(0.5 * (data[lo - 1] + data[hi - 1]))
+        }
+        3 => {
+            let h = clamp(nf * q - 0.5);
+            let r = round_half_even(h).clamp(1, n as i64);
+            Some(data[r as usize - 1])
+        }
+        4..=9 => {
+            let h_raw = match method {
+                4 => nf * q,
+                5 => nf * q + 0.5,
+                6 => (nf + 1.0) * q,
+                7 => (nf - 1.0) * q + 1.0,
+                8 => (nf + 1.0 / 3.0) * q + 1.0 / 3.0,
+                _ => (nf + 0.25) * q + 0.375,
+            };
+            let h = clamp(h_raw);
+            let fl = h.floor();
+            let gamma = h - fl;
+            let i = (fl as usize).clamp(1, n);
+            let j = ((fl as usize) + 1).clamp(1, n);
+            Some(data[i - 1] + gamma * (data[j - 1] - data[i - 1]))
+        }
+        _ => None,
+    }
+}
+
+/// Parse a `Quantile` method argument (an integer/`Type7`-style string).
+fn parse_quantile_method(v: &Value) -> Option<u32> {
+    match v {
+        Value::Integer(n) => {
+            let m = n.to_i64()?;
+            (1..=9).contains(&m).then_some(m as u32)
+        }
+        Value::Real(r) => {
+            let f = r.to_f64();
+            (f.fract() == 0.0 && (1.0..=9.0).contains(&f)).then_some(f as u32)
+        }
+        Value::Str(s) => match s.as_str() {
+            "InverseCDF" | "Type1" => Some(1),
+            "AveragedInverseCDF" | "Type2" => Some(2),
+            "NearestOrder" | "Round" | "Type3" => Some(3),
+            "Type4" => Some(4),
+            "Type5" => Some(5),
+            "Type6" => Some(6),
+            "LinearInterpolation" | "InterpolatedInverseCDF" | "Spline" | "Type7" => Some(7),
+            "Type8" => Some(8),
+            "Type9" => Some(9),
+            _ => None,
+        },
+        Value::List(items) if items.len() == 1 => parse_quantile_method(&items[0]),
+        _ => None,
+    }
+}
+
+/// `Quantile[data, q]` (default linear interpolation) with an optional third
+/// argument selecting Hyndman–Fan type 1–9 (`Quantile[data, q, "Type7"]`).
+pub fn builtin_quantile_method(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return st::builtin_quantile(args);
+    }
+    if args.len() != 3 {
+        return unevaluated("Quantile", args);
+    }
+    let items = data_list("Quantile", args, 0)?;
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "Quantile: list must not be empty".to_string(),
+        ));
+    }
+    let q = match as_f64(&args[1]) {
+        Some(q) if (0.0..=1.0).contains(&q) => q,
+        _ => return unevaluated("Quantile", args),
+    };
+    let method = match parse_quantile_method(&args[2]) {
+        Some(m) => m,
+        None => return unevaluated("Quantile", args),
+    };
+    let mut nums = extract_nums(items)?;
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    match quantile_hf(&nums, q, method) {
+        Some(v) => Ok(num(v)),
+        None => unevaluated("Quantile", args),
+    }
+}
+
+// ── QuartileDeviation / TrimmedMean / WinsorizedMean ────────────────────────
+
+/// `QuartileDeviation[list]` — half the interquartile range, `(Q3 − Q1)/2`.
+pub fn builtin_quartile_deviation(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return unevaluated("QuartileDeviation", args);
+    }
+    let items = data_list("QuartileDeviation", args, 0)?;
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "QuartileDeviation: list must not be empty".to_string(),
+        ));
+    }
+    let q1 = st::builtin_quantile(&[args[0].clone(), super::real(0.25)])?;
+    let q3 = st::builtin_quantile(&[args[0].clone(), super::real(0.75)])?;
+    let (a, b) = match (as_f64(&q1), as_f64(&q3)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return unevaluated("QuartileDeviation", args),
+    };
+    Ok(num((b - a) / 2.0))
+}
+
+/// Parse the trimming fractions of a `TrimmedMean`/`WinsorizedMean` call.
+///
+/// Accepts `f` or `{f_low, f_high}`, each in `[0, 0.5)`; returns the number of
+/// elements to drop from the low and high ends of an `n`-element sample.
+fn parse_trim_fractions(spec: &Value, n: usize) -> Option<(usize, usize)> {
+    let (flow, fhigh) = match spec {
+        Value::List(items) if items.len() == 2 => (as_f64(&items[0])?, as_f64(&items[1])?),
+        other => {
+            let f = as_f64(other)?;
+            (f, f)
+        }
+    };
+    if !(0.0..=0.5).contains(&flow) || !(0.0..=0.5).contains(&fhigh) {
+        return None;
+    }
+    let l = (flow * n as f64).floor() as usize;
+    let h = (fhigh * n as f64).floor() as usize;
+    (l + h < n).then_some((l, h))
+}
+
+/// `TrimmedMean[list, f]` / `TrimmedMean[list, {f_low, f_high}]` — mean of the
+/// sample after removing the lowest and highest fraction(s) of the data.
+pub fn builtin_trimmed_mean(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("TrimmedMean", args);
+    }
+    let items = data_list("TrimmedMean", args, 0)?;
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "TrimmedMean: list must not be empty".to_string(),
+        ));
+    }
+    let mut nums = extract_nums(items)?;
+    let (lo, hi) = match parse_trim_fractions(&args[1], nums.len()) {
+        Some(t) => t,
+        None => return unevaluated("TrimmedMean", args),
+    };
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let kept = &nums[lo..nums.len() - hi];
+    let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+    Ok(num(mean))
+}
+
+/// `WinsorizedMean[list, f]` / `WinsorizedMean[list, {f_low, f_high}]` — mean
+/// after clamping the extremes to the first retained order statistics.
+pub fn builtin_winsorized_mean(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("WinsorizedMean", args);
+    }
+    let items = data_list("WinsorizedMean", args, 0)?;
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "WinsorizedMean: list must not be empty".to_string(),
+        ));
+    }
+    let mut nums = extract_nums(items)?;
+    let (lo, hi) = match parse_trim_fractions(&args[1], nums.len()) {
+        Some(t) => t,
+        None => return unevaluated("WinsorizedMean", args),
+    };
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let low = nums[lo];
+    let high = nums[nums.len() - 1 - hi];
+    let len = nums.len();
+    for x in nums.iter_mut().take(lo) {
+        *x = low;
+    }
+    for x in nums.iter_mut().skip(len - hi) {
+        *x = high;
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    Ok(num(mean))
+}
+
+// ── PearsonChiSquareTest ────────────────────────────────────────────────────
+
+/// Pearson chi-square goodness-of-fit p-value, sharing the equiprobable binning
+/// of [`builtin_chi_square_test`].
+fn pearson_chi_square_p(nums: &[f64], dist: &HashMap<String, Value>) -> Option<f64> {
+    let n = nums.len();
+    if n < 2 {
+        return None;
+    }
+    let mut sorted = nums.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let k = ((n as f64).sqrt().ceil() as usize).clamp(2, n);
+    let mut edges = Vec::with_capacity(k + 1);
+    for i in 0..=k {
+        edges.push(inverse_cdf_f(dist, i as f64 / k as f64)?);
+    }
+    let mut obs = vec![0.0_f64; k];
+    for &x in &sorted {
+        let idx = edges
+            .partition_point(|&e| e < x)
+            .saturating_sub(1)
+            .min(k - 1);
+        obs[idx] += 1.0;
+    }
+    let exp = n as f64 / k as f64;
+    let chi2: f64 = obs.iter().map(|o| (o - exp) * (o - exp) / exp).sum();
+    Some(chi_square_sf((k - 1) as f64, chi2))
+}
+
+/// `PearsonChiSquareTest[data, dist]` — Pearson chi-square goodness-of-fit
+/// p-value. The one-argument form tests normality against the fitted
+/// mean/standard deviation.
+pub fn builtin_pearson_chi_square_test(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        2 => {
+            let Some(dist) = dist_arg(args) else {
+                return unevaluated("PearsonChiSquareTest", args);
+            };
+            let nums = extract_nums(data_list("PearsonChiSquareTest", args, 0)?)?;
+            match pearson_chi_square_p(&nums, dist) {
+                Some(p) => Ok(num(p)),
+                None => unevaluated("PearsonChiSquareTest", args),
+            }
+        }
+        1 => {
+            let nums = extract_nums(data_list("PearsonChiSquareTest", args, 0)?)?;
+            if nums.len() < 3 {
+                return unevaluated("PearsonChiSquareTest", args);
+            }
+            let n = nums.len() as f64;
+            let mean = nums.iter().sum::<f64>() / n;
+            let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            let dist = make_normal(mean, var.sqrt());
+            let m = match &dist {
+                Value::Assoc(m) => m,
+                _ => return unevaluated("PearsonChiSquareTest", args),
+            };
+            match pearson_chi_square_p(&nums, m) {
+                Some(p) => Ok(num(p)),
+                None => unevaluated("PearsonChiSquareTest", args),
+            }
+        }
+        _ => unevaluated("PearsonChiSquareTest", args),
+    }
+}
+
+// ── Non-parametric density distributions ────────────────────────────────────
+
+/// Cumulative standard-normal CDF via the Abramowitz–Stegun `erf` bound.
+fn normal_cdf(x: f64) -> f64 {
+    fn erf(x: f64) -> f64 {
+        let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+        let poly = ((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592;
+        let y = 1.0 - poly * t * (-x * x).exp();
+        if x >= 0.0 { y } else { -y }
+    }
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+fn normal_pdf(x: f64) -> f64 {
+    (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
+}
+
+/// Data payload of a non-parametric distribution object.
+fn dist_data(dist: &HashMap<String, Value>) -> Option<Vec<f64>> {
+    match dist.get("Data")? {
+        Value::List(items) => extract_nums(items).ok(),
+        _ => None,
+    }
+}
+
+fn assoc(kind: &str) -> HashMap<String, Value> {
+    let mut m = HashMap::new();
+    m.insert("Distribution".to_string(), Value::Str(kind.to_string()));
+    m
+}
+
+fn reals(nums: &[f64]) -> Value {
+    Value::List(nums.iter().map(|&x| super::real(x)).collect())
+}
+
+/// Silverman's rule-of-thumb bandwidth (with a robust IQR scale).
+fn silverman_bw(nums: &[f64]) -> f64 {
+    let n = nums.len() as f64;
+    if n < 2.0 {
+        return 1.0;
+    }
+    let mean = nums.iter().sum::<f64>() / n;
+    let sd = (nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+    let mut sorted = nums.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let iqr =
+        quantile_hf(&sorted, 0.75, 7).unwrap_or(sd) - quantile_hf(&sorted, 0.25, 7).unwrap_or(sd);
+    let a = sd;
+    let b = iqr / 1.34;
+    let scale = match (a > 0.0, b > 0.0) {
+        (true, true) => a.min(b),
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => 1.0,
+    };
+    (1.06 * scale * n.powf(-0.2)).max(1e-12)
+}
+
+/// `SmoothKernelDistribution[data]` / `[data, bw]` — Gaussian KDE object.
+pub fn builtin_smooth_kernel_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated("SmoothKernelDistribution", args);
+    }
+    let nums = extract_nums(data_list("SmoothKernelDistribution", args, 0)?)?;
+    if nums.len() < 2 {
+        return unevaluated("SmoothKernelDistribution", args);
+    }
+    let bw = if args.len() == 2 {
+        match as_f64(&args[1]) {
+            Some(h) if h > 0.0 => h,
+            _ => return unevaluated("SmoothKernelDistribution", args),
+        }
+    } else {
+        silverman_bw(&nums)
+    };
+    let mut m = assoc("SmoothKernel");
+    m.insert("Data".to_string(), reals(&nums));
+    m.insert("Bandwidth".to_string(), super::real(bw));
+    Ok(Value::Assoc(m))
+}
+
+/// `KernelMixtureDistribution[data]` / `[data, bw]` — Gaussian kernel mixture.
+pub fn builtin_kernel_mixture_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated("KernelMixtureDistribution", args);
+    }
+    let nums = extract_nums(data_list("KernelMixtureDistribution", args, 0)?)?;
+    if nums.len() < 2 {
+        return unevaluated("KernelMixtureDistribution", args);
+    }
+    let bw = if args.len() == 2 {
+        match as_f64(&args[1]) {
+            Some(h) if h > 0.0 => h,
+            _ => return unevaluated("KernelMixtureDistribution", args),
+        }
+    } else {
+        silverman_bw(&nums)
+    };
+    let mut m = assoc("KernelMixture");
+    m.insert("Data".to_string(), reals(&nums));
+    m.insert("Bandwidth".to_string(), super::real(bw));
+    Ok(Value::Assoc(m))
+}
+
+/// `EmpiricalDistribution[data]` — discrete distribution with mass `1/n` at
+/// each data point.
+pub fn builtin_empirical_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return unevaluated("EmpiricalDistribution", args);
+    }
+    let nums = extract_nums(data_list("EmpiricalDistribution", args, 0)?)?;
+    if nums.is_empty() {
+        return Err(EvalError::Error(
+            "EmpiricalDistribution: list must not be empty".to_string(),
+        ));
+    }
+    let mut m = assoc("Empirical");
+    m.insert("Data".to_string(), reals(&nums));
+    Ok(Value::Assoc(m))
+}
+
+/// Bin edges and per-bin densities of a histogram distribution payload.
+fn histogram_payload(dist: &HashMap<String, Value>) -> Option<(Vec<f64>, Vec<f64>)> {
+    let edges = match dist.get("Edges")? {
+        Value::List(items) => extract_nums(items).ok()?,
+        _ => return None,
+    };
+    let heights = match dist.get("Heights")? {
+        Value::List(items) => extract_nums(items).ok()?,
+        _ => return None,
+    };
+    (edges.len() == heights.len() + 1).then_some((edges, heights))
+}
+
+/// `HistogramDistribution[data]` / `[data, n]` — equal-width binned density.
+pub fn builtin_histogram_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated("HistogramDistribution", args);
+    }
+    let nums = extract_nums(data_list("HistogramDistribution", args, 0)?)?;
+    if nums.len() < 2 {
+        return unevaluated("HistogramDistribution", args);
+    }
+    let k = if args.len() == 2 {
+        let spec = match &args[1] {
+            Value::Integer(n) => n.to_i64().filter(|k| *k >= 1).map(|k| k as usize),
+            Value::Real(r) => {
+                let f = r.to_f64();
+                (f.fract() == 0.0 && f >= 1.0).then_some(f as usize)
+            }
+            _ => None,
+        };
+        match spec {
+            Some(k) => k,
+            None => return unevaluated("HistogramDistribution", args),
+        }
+    } else {
+        (nums.len() as f64).sqrt().ceil() as usize
+    };
+    let k = k.clamp(1, nums.len());
+    let lo = nums.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let width = if hi > lo { (hi - lo) / k as f64 } else { 1.0 };
+    let edges: Vec<f64> = (0..=k).map(|i| lo + width * i as f64).collect();
+    let n = nums.len() as f64;
+    let mut heights = vec![0.0_f64; k];
+    for &x in &nums {
+        let idx = ((x - lo) / width).floor() as usize;
+        heights[idx.min(k - 1)] += 1.0;
+    }
+    for h in heights.iter_mut() {
+        *h /= n * width;
+    }
+    let mut m = assoc("Histogram");
+    m.insert("Edges".to_string(), reals(&edges));
+    m.insert("Heights".to_string(), reals(&heights));
+    Ok(Value::Assoc(m))
+}
+
+/// Density of a non-parametric distribution payload at `x`.
+fn npar_pdf(dist: &HashMap<String, Value>, x: f64) -> Option<f64> {
+    match dist_type(dist)? {
+        "Empirical" => {
+            let d = dist_data(dist)?;
+            let n = d.len() as f64;
+            let c = d.iter().filter(|&&v| v == x).count() as f64;
+            Some(c / n)
+        }
+        "SmoothKernel" | "KernelMixture" => {
+            let d = dist_data(dist)?;
+            let h = dist.get("Bandwidth").and_then(as_f64)?;
+            if h <= 0.0 {
+                return None;
+            }
+            let s: f64 = d.iter().map(|&xi| normal_pdf((x - xi) / h)).sum();
+            Some(s / (d.len() as f64 * h))
+        }
+        "Histogram" => {
+            let (edges, heights) = histogram_payload(dist)?;
+            if x < edges[0] || x > *edges.last()? {
+                return Some(0.0);
+            }
+            let idx = edges
+                .partition_point(|&e| e <= x)
+                .saturating_sub(1)
+                .min(heights.len() - 1);
+            Some(heights[idx])
+        }
+        _ => None,
+    }
+}
+
+/// CDF of a non-parametric distribution payload at `x`.
+fn npar_cdf(dist: &HashMap<String, Value>, x: f64) -> Option<f64> {
+    match dist_type(dist)? {
+        "Empirical" => {
+            let d = dist_data(dist)?;
+            let n = d.len() as f64;
+            let c = d.iter().filter(|&&v| v <= x).count() as f64;
+            Some((c / n).clamp(0.0, 1.0))
+        }
+        "SmoothKernel" | "KernelMixture" => {
+            let d = dist_data(dist)?;
+            let h = dist.get("Bandwidth").and_then(as_f64)?;
+            if h <= 0.0 {
+                return None;
+            }
+            let s: f64 = d.iter().map(|&xi| normal_cdf((x - xi) / h)).sum();
+            Some((s / d.len() as f64).clamp(0.0, 1.0))
+        }
+        "Histogram" => {
+            let (edges, heights) = histogram_payload(dist)?;
+            if x <= edges[0] {
+                return Some(0.0);
+            }
+            if x >= *edges.last()? {
+                return Some(1.0);
+            }
+            let mut acc = 0.0;
+            for b in 0..heights.len() {
+                let (a, c) = (edges[b], edges[b + 1]);
+                if x >= c {
+                    acc += heights[b] * (c - a);
+                } else if x > a {
+                    acc += heights[b] * (x - a);
+                    break;
+                }
+            }
+            Some(acc.clamp(0.0, 1.0))
+        }
+        _ => None,
+    }
+}
+
+/// `PDF[dist, x]` — dispatch non-parametric distributions, else delegate.
+pub fn builtin_pdf_dispatch(args: &[Value]) -> Result<Value, EvalError> {
+    if let (2, Value::Assoc(m)) = (args.len(), &args[0])
+        && let Some(x) = as_f64(&args[1])
+        && let Some(p) = npar_pdf(m, x)
+    {
+        return Ok(super::real(p));
+    }
+    st::builtin_pdf(args)
+}
+
+/// `CDF[dist, x]` — dispatch non-parametric distributions, else delegate.
+pub fn builtin_cdf_dispatch(args: &[Value]) -> Result<Value, EvalError> {
+    if let (2, Value::Assoc(m)) = (args.len(), &args[0])
+        && let Some(x) = as_f64(&args[1])
+        && let Some(p) = npar_cdf(m, x)
+    {
+        return Ok(super::real(p));
+    }
+    st::builtin_cdf(args)
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -2065,6 +2665,31 @@ pub fn register(env: &Env) {
     register_builtin(env, "MeanTest", builtin_mean_test);
     register_builtin(env, "LocationTest", builtin_location_test);
     register_builtin(env, "VarianceTest", builtin_variance_test);
+    // Extended summaries: interpolation methods, trimmed/Winsorized means.
+    // `Quantile`/`PDF`/`CDF` are re-registered here to add the method argument
+    // and the non-parametric distribution kinds; all other cases delegate to
+    // the Statistics implementations.
+    register_builtin(env, "Quantile", builtin_quantile_method);
+    register_builtin(env, "QuartileDeviation", builtin_quartile_deviation);
+    register_builtin(env, "TrimmedMean", builtin_trimmed_mean);
+    register_builtin(env, "WinsorizedMean", builtin_winsorized_mean);
+    // Pearson chi-square goodness-of-fit (named form of the chi-square test)
+    register_builtin(env, "PearsonChiSquareTest", builtin_pearson_chi_square_test);
+    // Non-parametric density distributions
+    register_builtin(env, "EmpiricalDistribution", builtin_empirical_distribution);
+    register_builtin(env, "HistogramDistribution", builtin_histogram_distribution);
+    register_builtin(
+        env,
+        "SmoothKernelDistribution",
+        builtin_smooth_kernel_distribution,
+    );
+    register_builtin(
+        env,
+        "KernelMixtureDistribution",
+        builtin_kernel_mixture_distribution,
+    );
+    register_builtin(env, "PDF", builtin_pdf_dispatch);
+    register_builtin(env, "CDF", builtin_cdf_dispatch);
     // Hold the event/integrand so free variables survive argument evaluation
     // (e.g. `x == 2` must not collapse to `False`).
     env.set_attributes("Expectation", vec!["HoldFirst".to_string()]);
@@ -2725,6 +3350,346 @@ mod tests {
                 iv(0),
                 Value::Str("Bogus".to_string())
             ]),
+            Err(EvalError::NoMatch { .. })
+        ));
+    }
+
+    // ── Quantile interpolation methods 1–9 ───────────────────────────────────
+
+    fn ten() -> Value {
+        lst((1..=10).map(iv).collect())
+    }
+
+    #[test]
+    fn test_quantile_methods_hf() {
+        // Reference values from Hyndman & Fan (1996) for data 1..10 at q = 0.25.
+        let expected = [
+            (1i64, 3.0),
+            (2, 3.0),
+            (3, 2.0),
+            (4, 2.5),
+            (5, 3.0),
+            (6, 2.75),
+            (7, 3.25),
+            (8, 2.916_666_666_666_666_5),
+            (9, 2.9375),
+        ];
+        for (m, e) in expected {
+            let v = builtin_quantile_method(&[ten(), super::super::real(0.25), iv(m)]).unwrap();
+            approx(as_f(&v), e);
+        }
+    }
+
+    #[test]
+    fn test_quantile_method_named_and_default() {
+        let d = lst(vec![iv(1), iv(2), iv(3), iv(4)]);
+        let default = builtin_quantile_method(&[d.clone(), super::super::real(0.5)]).unwrap();
+        approx(as_f(&default), 2.5);
+        let named = builtin_quantile_method(&[
+            d,
+            super::super::real(0.5),
+            Value::Str("LinearInterpolation".to_string()),
+        ])
+        .unwrap();
+        approx(as_f(&named), 2.5);
+    }
+
+    #[test]
+    fn test_quantile_method_endpoints_and_unevaluated() {
+        let lo = builtin_quantile_method(&[ten(), iv(0), iv(7)]).unwrap();
+        approx(as_f(&lo), 1.0);
+        let hi = builtin_quantile_method(&[ten(), iv(1), iv(7)]).unwrap();
+        approx(as_f(&hi), 10.0);
+        assert!(matches!(
+            builtin_quantile_method(&[ten(), super::super::real(0.5), iv(11)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_quantile_method(&[
+                ten(),
+                super::super::real(0.5),
+                Value::Str("Bogus".to_string())
+            ]),
+            Err(EvalError::NoMatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_quartile_deviation() {
+        // Q1 = 2, Q3 = 4 for 1..5 -> (Q3 - Q1)/2 = 1.
+        let v =
+            builtin_quartile_deviation(&[lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)])]).unwrap();
+        approx(as_f(&v), 1.0);
+    }
+
+    #[test]
+    fn test_trimmed_mean_uniform_and_asymmetric() {
+        // Drop the single lowest and highest of 1..10 -> mean(2..9) = 5.5.
+        let v = builtin_trimmed_mean(&[ten(), super::super::real(0.1)]).unwrap();
+        approx(as_f(&v), 5.5);
+        // Drop 1 low, 2 high -> mean(2..8) = 5.
+        let v = builtin_trimmed_mean(&[
+            ten(),
+            lst(vec![super::super::real(0.1), super::super::real(0.2)]),
+        ])
+        .unwrap();
+        approx(as_f(&v), 5.0);
+    }
+
+    #[test]
+    fn test_winsorized_mean() {
+        // Clamp 1->2 and 10->9, then mean: (2+2+3+...+9+9)/10 = 5.5.
+        let v = builtin_winsorized_mean(&[ten(), super::super::real(0.1)]).unwrap();
+        approx(as_f(&v), 5.5);
+    }
+
+    #[test]
+    fn test_trim_winsor_unevaluated() {
+        assert!(matches!(
+            builtin_trimmed_mean(&[ten(), super::super::real(0.6)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_winsorized_mean(&[lst(vec![]), super::super::real(0.1)]),
+            Err(EvalError::Error(_))
+        ));
+    }
+
+    // ── Extended summaries (Statistics-owned builtins) ───────────────────────
+
+    #[test]
+    fn test_statistics_summaries() {
+        use crate::builtins::statistics as stt;
+        let data = lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]);
+        approx(
+            as_f(&stt::builtin_interquartile_range(&[data.clone()]).unwrap()),
+            2.0,
+        );
+        approx(as_f(&stt::builtin_skewness(&[data.clone()]).unwrap()), 0.0);
+        // m4 / m2^2 for 1..5 = 6.8 / 4 = 1.7.
+        approx(as_f(&stt::builtin_kurtosis(&[data]).unwrap()), 1.7);
+
+        let a = lst(vec![iv(1), iv(2), iv(3)]);
+        let b = lst(vec![iv(2), iv(4), iv(6)]);
+        approx(
+            as_f(&stt::builtin_covariance(&[a.clone(), b.clone()]).unwrap()),
+            2.0,
+        );
+        approx(as_f(&stt::builtin_correlation(&[a, b]).unwrap()), 1.0);
+    }
+
+    #[test]
+    fn test_histogram_list_bin_forms() {
+        use crate::builtins::statistics as stt;
+        let data = lst(vec![iv(1), iv(2), iv(2), iv(3), iv(4), iv(5)]);
+        for spec in [iv(3), iv(5)] {
+            let v = stt::builtin_histogram_list(&[data.clone(), spec]).unwrap();
+            let top = match v {
+                Value::List(x) => x,
+                _ => panic!("expected list"),
+            };
+            assert_eq!(top.len(), 2, "HistogramList returns {{edges, counts}}");
+            let counts = match &top[1] {
+                Value::List(c) => c,
+                _ => panic!("expected counts list"),
+            };
+            let total: i64 = counts.iter().map(|v| as_f64(v).unwrap_or(0.0) as i64).sum();
+            assert_eq!(total, 6);
+        }
+        // One-argument form uses Sturges' rule and still counts every point.
+        let v = stt::builtin_histogram_list(&[data]).unwrap();
+        let top = match v {
+            Value::List(x) => x,
+            _ => panic!("expected list"),
+        };
+        if let Value::List(c) = &top[1] {
+            let total: i64 = c.iter().map(|v| as_f64(v).unwrap_or(0.0) as i64).sum();
+            assert_eq!(total, 6);
+        } else {
+            panic!("expected counts list");
+        }
+    }
+
+    // ── Pearson chi-square goodness-of-fit ───────────────────────────────────
+
+    #[test]
+    fn test_pearson_chi_square_match_and_mismatch() {
+        let mut items = Vec::new();
+        for x in [0.5, 1.5, 2.5] {
+            for _ in 0..3 {
+                items.push(super::super::real(x));
+            }
+        }
+        let v = builtin_pearson_chi_square_test(&[lst(items), uniform(0.0, 3.0)]).unwrap();
+        assert!(as_f(&v) > 0.9, "p = {}", as_f(&v));
+
+        let flat: Vec<Value> = (0..20).map(|_| super::super::real(0.1)).collect();
+        let v = builtin_pearson_chi_square_test(&[lst(flat), uniform(0.0, 10.0)]).unwrap();
+        assert!(as_f(&v) < 0.01, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_pearson_chi_square_normality_form() {
+        // Uniform midpoints; normality is a plausible-but-imperfect fit.
+        let v = builtin_pearson_chi_square_test(&[grid(30)]).unwrap();
+        assert!((0.0..=1.0).contains(&as_f(&v)));
+    }
+
+    #[test]
+    fn test_pearson_chi_square_unevaluated() {
+        assert!(matches!(
+            builtin_pearson_chi_square_test(&[lst(vec![iv(1)])]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_pearson_chi_square_test(&[lst(vec![iv(1), iv(2)]), iv(3)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_distribution_fit_test_chi_square_named() {
+        let mut items = Vec::new();
+        for x in [0.5, 1.5, 2.5] {
+            for _ in 0..3 {
+                items.push(super::super::real(x));
+            }
+        }
+        let data = lst(items);
+        let direct = builtin_chi_square_test(&[data.clone(), uniform(0.0, 3.0)]).unwrap();
+        let named = builtin_distribution_fit_test(&[
+            data,
+            uniform(0.0, 3.0),
+            Value::Str("PearsonChiSquare".to_string()),
+        ])
+        .unwrap();
+        approx(as_f(&named), as_f(&direct));
+    }
+
+    // ── Non-parametric density distributions ─────────────────────────────────
+
+    #[test]
+    fn test_empirical_distribution_pdf_cdf() {
+        let d = builtin_empirical_distribution(&[lst(vec![iv(1), iv(2), iv(3), iv(4)])]).unwrap();
+        approx(
+            as_f(&builtin_cdf_dispatch(&[d.clone(), super::super::real(2.5)]).unwrap()),
+            0.5,
+        );
+        approx(
+            as_f(&builtin_pdf_dispatch(&[d.clone(), iv(3)]).unwrap()),
+            0.25,
+        );
+        approx(
+            as_f(&builtin_pdf_dispatch(&[d, super::super::real(2.5)]).unwrap()),
+            0.0,
+        );
+    }
+
+    #[test]
+    fn test_histogram_distribution_pdf_cdf() {
+        let d = builtin_histogram_distribution(&[lst(vec![iv(0), iv(0), iv(1), iv(1)]), iv(2)])
+            .unwrap();
+        // Two equal bins over [0,1], each density 1.
+        approx(
+            as_f(&builtin_pdf_dispatch(&[d.clone(), super::super::real(0.25)]).unwrap()),
+            1.0,
+        );
+        approx(
+            as_f(&builtin_cdf_dispatch(&[d.clone(), super::super::real(0.25)]).unwrap()),
+            0.25,
+        );
+        approx(
+            as_f(&builtin_cdf_dispatch(&[d, super::super::real(1.0)]).unwrap()),
+            1.0,
+        );
+    }
+
+    #[test]
+    fn test_smooth_kernel_distribution_symmetry() {
+        let d = builtin_smooth_kernel_distribution(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            super::super::real(0.5),
+        ])
+        .unwrap();
+        let p2 = as_f(&builtin_pdf_dispatch(&[d.clone(), iv(2)]).unwrap());
+        let p4 = as_f(&builtin_pdf_dispatch(&[d.clone(), iv(4)]).unwrap());
+        approx(p2, p4);
+        approx(
+            as_f(&builtin_cdf_dispatch(&[d.clone(), iv(3)]).unwrap()),
+            0.5,
+        );
+        assert!(as_f(&builtin_pdf_dispatch(&[d, iv(3)]).unwrap()) > 0.0);
+    }
+
+    #[test]
+    fn test_kernel_mixture_distribution_positive() {
+        let d = builtin_kernel_mixture_distribution(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            super::super::real(0.4),
+        ])
+        .unwrap();
+        assert!(as_f(&builtin_pdf_dispatch(&[d.clone(), iv(3)]).unwrap()) > 0.0);
+        let p1 = as_f(&builtin_pdf_dispatch(&[d.clone(), iv(1)]).unwrap());
+        let p5 = as_f(&builtin_pdf_dispatch(&[d, iv(5)]).unwrap());
+        approx(p1, p5);
+    }
+
+    #[test]
+    fn test_pdf_dispatch_delegates_for_normal() {
+        // Non-parametric dispatch must fall through to the Statistics PDF.
+        let v = builtin_pdf_dispatch(&[normal(0.0, 1.0), super::super::real(0.0)]).unwrap();
+        approx(as_f(&v), 1.0 / (2.0 * std::f64::consts::PI).sqrt());
+    }
+
+    #[test]
+    fn test_find_and_estimated_distribution_families() {
+        let n = builtin_find_distribution(&[lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)])]).unwrap();
+        if let Value::Assoc(m) = &n {
+            approx(as_f64(m.get("Mean").unwrap()).unwrap(), 3.0);
+        } else {
+            panic!("expected distribution assoc");
+        }
+        let skew_data = lst(vec![iv(1), iv(2), iv(4), iv(8), iv(16)]);
+        let e = builtin_find_distribution(&[skew_data]).unwrap();
+        if let Value::Assoc(m) = &e {
+            assert_eq!(dist_type(m), Some("Exponential"));
+        } else {
+            panic!("expected distribution assoc");
+        }
+        // MLE for Exponential over {2,4,6}: lambda = 1/mean = 0.25.
+        let ed =
+            builtin_estimated_distribution(&[lst(vec![iv(2), iv(4), iv(6)]), exponential(1.0)])
+                .unwrap();
+        if let Value::Assoc(m) = &ed {
+            approx(as_f64(m.get("Lambda").unwrap()).unwrap(), 0.25);
+        } else {
+            panic!("expected distribution assoc");
+        }
+    }
+
+    #[test]
+    fn test_density_builtins_unevaluated() {
+        assert!(matches!(
+            builtin_smooth_kernel_distribution(&[lst(vec![iv(1)])]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_kernel_mixture_distribution(&[
+                lst(vec![iv(1), iv(2)]),
+                super::super::real(-1.0)
+            ]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_histogram_distribution(&[lst(vec![iv(1), iv(2)]), iv(0)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_empirical_distribution(&[lst(vec![])]),
+            Err(EvalError::Error(_))
+        ));
+        assert!(matches!(
+            builtin_estimated_distribution(&[lst(vec![iv(-1), iv(2), iv(3)]), exponential(1.0)]),
             Err(EvalError::NoMatch { .. })
         ));
     }

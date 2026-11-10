@@ -9,7 +9,7 @@ use crate::bytecode::CompiledBytecode;
 use crate::bytecode::vm::Truthy;
 use crate::env::Env;
 use crate::eval;
-use crate::value::Value;
+use crate::value::{EvalError, Value};
 
 /// Context pointer passed to every JIT-compiled function.
 ///
@@ -32,6 +32,16 @@ pub struct JitContext {
     pub nargs: u32,
     /// Evaluation environment.
     pub env: *const Env,
+    /// Boxed first error raised by a runtime helper, or null.
+    ///
+    /// Runtime helpers that delegate back to the tree-walk evaluator can fail.
+    /// Rather than silently substituting `Null`, they record the error here;
+    /// the compiled code checks [`jit_has_error`] after each fallible helper
+    /// call and bails out, mirroring the interpreter's `?` propagation.
+    pub err: *mut EvalError,
+    /// Pending loop control captured by `jit_eval_tree_loop` (0 none,
+    /// 1 break, 2 continue). Consumed by the `jit_take_*` helpers.
+    pub ctrl: u8,
 }
 
 // SAFETY: JitContext is only accessed from the thread that created it.
@@ -52,6 +62,28 @@ impl JitContext {
             args: args.as_ptr(),
             nargs: args.len() as u32,
             env: env as *const Env,
+            err: std::ptr::null_mut(),
+            ctrl: 0,
+        }
+    }
+
+    /// Record `e` as the pending error, preserving the *first* one so that
+    /// evaluation aborts with the same error the interpreter would report.
+    #[inline]
+    pub fn set_error(&mut self, e: EvalError) {
+        if self.err.is_null() {
+            self.err = Box::into_raw(Box::new(e));
+        }
+    }
+
+    /// Take the pending error, if any (transfers ownership).
+    pub fn take_error(&mut self) -> Option<EvalError> {
+        if self.err.is_null() {
+            None
+        } else {
+            let e = unsafe { *Box::from_raw(self.err) };
+            self.err = std::ptr::null_mut();
+            Some(e)
         }
     }
 }
@@ -127,22 +159,124 @@ pub extern "C" fn jit_mov(ctx: &mut JitContext, dst: u32, src: u32) {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn jit_has_error(ctx: &mut JitContext) -> u8 {
+    (!ctx.err.is_null()) as u8
+}
+
+/// Evaluate a held expression (constant pool index `idx`) with the tree-walk
+/// evaluator. Mirrors `Instruction::EvalTree` in the VM.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_eval_tree(ctx: &mut JitContext, dst: u32, idx: u32) {
+    if (dst as usize) >= ctx.nregs as usize || (idx as usize) >= ctx.nconstants as usize {
+        return;
+    }
+    let expr = match unsafe { &*ctx.constants.add(idx as usize) } {
+        Value::Pattern(e) => e.clone(),
+        other => crate::eval::table::value_to_expr(other),
+    };
+    let result = {
+        let env = unsafe { &*ctx.env };
+        eval::eval(&expr, env)
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(e) => ctx.set_error(e),
+    }
+}
+
+/// Like [`jit_eval_tree`], but capture `Break`/`Continue` into `ctx.ctrl`
+/// instead of failing, so an enclosing native loop can act on them.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_eval_tree_loop(ctx: &mut JitContext, dst: u32, idx: u32) {
+    if (dst as usize) >= ctx.nregs as usize || (idx as usize) >= ctx.nconstants as usize {
+        return;
+    }
+    let expr = match unsafe { &*ctx.constants.add(idx as usize) } {
+        Value::Pattern(e) => e.clone(),
+        other => crate::eval::table::value_to_expr(other),
+    };
+    let result = {
+        let env = unsafe { &*ctx.env };
+        eval::eval(&expr, env)
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(EvalError::Break) => {
+            ctx.ctrl = 1;
+            unsafe {
+                *ctx.regs.add(dst as usize) = Value::Null;
+            }
+        }
+        Err(EvalError::Continue) => {
+            ctx.ctrl = 2;
+            unsafe {
+                *ctx.regs.add(dst as usize) = Value::Null;
+            }
+        }
+        Err(e) => ctx.set_error(e),
+    }
+}
+
+/// Return the captured `Break` control and clear it.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_take_break(ctx: &mut JitContext) -> u8 {
+    let hit = ctx.ctrl == 1;
+    if hit {
+        ctx.ctrl = 0;
+    }
+    hit as u8
+}
+
+/// Return the captured `Continue` control and clear it.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_take_continue(ctx: &mut JitContext) -> u8 {
+    let hit = ctx.ctrl == 2;
+    if hit {
+        ctx.ctrl = 0;
+    }
+    hit as u8
+}
+
+/// Negate a value exactly like `VmState::negate`: numeric literals directly,
+/// otherwise `Times[-1, val]`.
+fn negate_value(val: &Value, env: &Env) -> Result<Value, EvalError> {
+    match val {
+        Value::Integer(n) => Ok(Value::Integer(n.clone() * -1)),
+        Value::Real(r) => {
+            let mut neg = r.clone();
+            neg *= -1.0;
+            Ok(Value::Real(neg))
+        }
+        Value::Complex { re, im } => Ok(Value::Complex { re: -re, im: -im }),
+        _ => {
+            let minus_one = Value::Integer((-1).into());
+            let func = env
+                .get("Times")
+                .unwrap_or_else(|| Value::Symbol("Times".to_string()));
+            eval::apply_function(&func, &[minus_one, val.clone()], env)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn jit_neg(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) >= ctx.nregs as usize || (src as usize) >= ctx.nregs as usize {
         return;
     }
     let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
-    let env = unsafe { &*ctx.env };
-    if let Some(func) = env.get("Minus")
-        && let Ok(result) = eval::apply_function(&func, &[val], env)
-    {
-        unsafe {
-            *ctx.regs.add(dst as usize) = result;
-        }
-        return;
-    }
-    unsafe {
-        *ctx.regs.add(dst as usize) = Value::Null;
+    let result = {
+        let env = unsafe { &*ctx.env };
+        negate_value(&val, env)
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(e) => ctx.set_error(e),
     }
 }
 
@@ -208,20 +342,21 @@ pub extern "C" fn jit_sub(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     }
     let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
     let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
-    let env = unsafe { &*ctx.env };
-    // Sub(a, b) = Plus[a, Minus[b]]
-    if let Some(minus_fn) = env.get("Minus")
-        && let Ok(neg_b) = eval::apply_function(&minus_fn, &[vb], env)
-        && let Some(plus_fn) = env.get("Plus")
-        && let Ok(result) = eval::apply_function(&plus_fn, &[va, neg_b], env)
-    {
-        unsafe {
-            *ctx.regs.add(dst as usize) = result;
-        }
-    } else {
-        unsafe {
-            *ctx.regs.add(dst as usize) = Value::Null;
-        }
+    // Sub(a, b) = Plus[a, negate(b)], matching `Instruction::Sub` in the VM.
+    let result = {
+        let env = unsafe { &*ctx.env };
+        negate_value(&vb, env).and_then(|neg_b| {
+            let plus = env
+                .get("Plus")
+                .unwrap_or_else(|| Value::Symbol("Plus".to_string()));
+            eval::apply_function(&plus, &[va, neg_b], env)
+        })
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(e) => ctx.set_error(e),
     }
 }
 
@@ -235,21 +370,20 @@ pub extern "C" fn jit_div(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
     }
     let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
     let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
-    let env = unsafe { &*ctx.env };
-    // Div(a, b) = Times[a, Power[b, -1]]
-    let minus_one = Value::Integer((-1).into());
-    if let Some(power_fn) = env.get("Power")
-        && let Ok(inv_b) = eval::apply_function(&power_fn, &[vb, minus_one], env)
-        && let Some(times_fn) = env.get("Times")
-        && let Ok(result) = eval::apply_function(&times_fn, &[va, inv_b], env)
-    {
-        unsafe {
-            *ctx.regs.add(dst as usize) = result;
-        }
-    } else {
-        unsafe {
-            *ctx.regs.add(dst as usize) = Value::Null;
-        }
+    // Match the VM: delegate to the `Divide` builtin so degenerate cases
+    // (e.g. `1/0` → `ComplexInfinity`) agree with the tree-walker.
+    let result = {
+        let env = unsafe { &*ctx.env };
+        let divide = env
+            .get("Divide")
+            .unwrap_or_else(|| Value::Symbol("Divide".to_string()));
+        eval::apply_function(&divide, &[va, vb], env)
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(e) => ctx.set_error(e),
     }
 }
 
@@ -263,7 +397,6 @@ pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: 
     }
     let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
     let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
-    let env = unsafe { &*ctx.env };
     let name = match op {
         JIT_OP_PLUS => "Plus",
         JIT_OP_TIMES => "Times",
@@ -276,16 +409,18 @@ pub extern "C" fn jit_binop(ctx: &mut JitContext, dst: u32, a: u32, b: u32, op: 
         JIT_OP_GREATEREQUAL => "GreaterEqual",
         _ => return,
     };
-    if let Some(func) = env.get(name)
-        && let Ok(result) = eval::apply_function(&func, &[va, vb], env)
-    {
-        unsafe {
-            *ctx.regs.add(dst as usize) = result;
-        }
-    } else {
-        unsafe {
-            *ctx.regs.add(dst as usize) = Value::Null;
-        }
+    let result = {
+        let env = unsafe { &*ctx.env };
+        let func = env
+            .get(name)
+            .unwrap_or_else(|| Value::Symbol(name.to_string()));
+        eval::apply_function(&func, &[va, vb], env)
+    };
+    match result {
+        Ok(v) => unsafe {
+            *ctx.regs.add(dst as usize) = v;
+        },
+        Err(e) => ctx.set_error(e),
     }
 }
 
@@ -322,12 +457,23 @@ pub extern "C" fn jit_make_assoc(ctx: &mut JitContext, dst: u32, n: u32) {
     }
     let mut map = HashMap::new();
     for (key, val) in pairs {
-        if let Value::Str(k) = key {
-            map.insert(k, val);
-        }
+        map.insert(key_str(&key), val);
     }
     unsafe {
         *ctx.regs.add(dst as usize) = Value::Assoc(map);
+    }
+}
+
+/// Format an association key exactly like `VmState::val_str`.
+fn key_str(val: &Value) -> String {
+    match val {
+        Value::Str(s) => s.clone(),
+        Value::Symbol(s) => s.clone(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(r) => r.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "Null".to_string(),
+        other => format!("{other}"),
     }
 }
 
@@ -383,7 +529,9 @@ pub extern "C" fn jit_store_sym(ctx: &mut JitContext, idx: u32, src: u32) {
     };
     let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
     let env = unsafe { &*ctx.env };
-    env.set(name, val);
+    // Mirror `StoreSym` in the VM, which propagates to the binding's
+    // defining scope (`set_propagate`) rather than shadowing in the frame.
+    env.set_propagate(name, val);
 }
 
 #[unsafe(no_mangle)]
@@ -399,10 +547,13 @@ pub extern "C" fn jit_apply(ctx: &mut JitContext, dst: u32, nargs: u32) {
             args.push(unsafe { (*ctx.regs.add(arg_idx)).clone() });
         }
     }
-    let env = unsafe { &*ctx.env };
-    match eval::apply_function(&func, &args, env) {
+    let result = {
+        let env = unsafe { &*ctx.env };
+        eval::apply_function(&func, &args, env)
+    };
+    match result {
         Ok(result) => unsafe { *ctx.regs.add(dst as usize) = result },
-        Err(_) => unsafe { *ctx.regs.add(dst as usize) = Value::Null },
+        Err(e) => ctx.set_error(e),
     }
 }
 

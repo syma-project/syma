@@ -11,7 +11,7 @@ use crate::env::Env;
 use crate::eval::eval;
 use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::{EvalError, Value};
-use rug::Integer;
+use rug::{Integer, Rational};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression Inspection
@@ -724,11 +724,28 @@ fn full_simplify_value(val: &Value) -> Value {
     best_simplification(&lowered)
 }
 
-/// Repeatedly apply candidate rewrites, keeping only strictly shorter
-/// (lower-complexity) forms, until a fixpoint or a small iteration bound.
+/// Maximum number of refinement sweeps in `best_simplification`: bounded and
+/// small, but deep enough for the rewrite chains these strategies trigger.
+const FULL_SIMPLIFY_SWEEPS: usize = 6;
+
+thread_local! {
+    static FS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Repeatedly apply candidate rewrites, keeping only strictly simpler forms,
+/// until a fixpoint or a small iteration bound.
+///
+/// The incumbent starts at `Simplify[val]` and a candidate must have strictly
+/// lower [`value_complexity`] to replace it, so the result is *never* more
+/// complex than plain `Simplify`.
 fn best_simplification(val: &Value) -> Value {
+    let depth = FS_DEPTH.get();
+    if depth > 512 {
+        return base_simplify(val);
+    }
+    FS_DEPTH.set(depth + 1);
     let mut best = base_simplify(val);
-    for _ in 0..4 {
+    for _ in 0..FULL_SIMPLIFY_SWEEPS {
         let mut improved = false;
         for cand in simplification_candidates(&best) {
             if value_complexity(&cand) < value_complexity(&best) {
@@ -740,6 +757,7 @@ fn best_simplification(val: &Value) -> Value {
             break;
         }
     }
+    FS_DEPTH.set(depth);
     best
 }
 
@@ -748,9 +766,35 @@ fn base_simplify(val: &Value) -> Value {
     crate::builtins::symbolic::builtin_simplify(&[val.clone()]).unwrap_or_else(|_| val.clone())
 }
 
-/// Total-order complexity: leaf count first, then textual length.
-fn value_complexity(val: &Value) -> (usize, usize) {
-    (count_leaves(val), val.to_string().len())
+/// Total-order complexity used to rank candidate rewrites: weighted operation
+/// count first, then leaf count, then textual length.
+///
+/// Weighting the expensive heads makes the search prefer a canonical compact
+/// form (e.g. `Cos[2 x]`) over an identity-expanded one
+/// (`Cos[x]^2 - Sin[x]^2`), rather than merely the shortest string.
+fn value_complexity(val: &Value) -> (usize, usize, usize) {
+    (weighted_cost(val), count_leaves(val), val.to_string().len())
+}
+
+/// Weighted node count. `Plus`/`Times` are cheap; `Power`/`Sqrt`/`Log`/`Exp`
+/// cost more; trigonometry costs most so identities that remove trig win.
+fn weighted_cost(val: &Value) -> usize {
+    match val {
+        Value::Call { head, args } => {
+            let head_cost = match head.as_str() {
+                "Plus" | "Times" => 1,
+                "Power" | "Sqrt" | "Log" | "Exp" => 2,
+                "Sin" | "Cos" | "Tan" | "Cot" | "Sec" | "Csc" | "Sinh" | "Cosh" | "Tanh" => 3,
+                _ => 2,
+            };
+            head_cost + args.iter().map(weighted_cost).sum::<usize>()
+        }
+        Value::List(items) | Value::Sequence(items) => {
+            1 + items.iter().map(weighted_cost).sum::<usize>()
+        }
+        Value::Rule { lhs, rhs, .. } => 1 + weighted_cost(lhs) + weighted_cost(rhs),
+        _ => 1,
+    }
 }
 
 /// Build every candidate rewrite of `val`, each normalised through `Simplify`.
@@ -759,7 +803,12 @@ fn simplification_candidates(val: &Value) -> Vec<Value> {
     use crate::builtins::symbolicmanip;
 
     let mut out: Vec<Value> = Vec::new();
-    let mut push = |candidate: Value| out.push(base_simplify(&candidate));
+    let mut push = |candidate: Value| {
+        let normalised = base_simplify(&candidate);
+        if !normalised.struct_eq(val) {
+            out.push(normalised);
+        }
+    };
 
     // Combine sums of fractions over a common denominator.
     let mut together: Option<Value> = None;
@@ -799,6 +848,14 @@ fn simplification_candidates(val: &Value) -> Vec<Value> {
     push(pythagorean_reduce(val));
     // Expand double angles so they can cancel against each other.
     push(expand_double_angles(val));
+    // Log/exp normalisation: `Exp[a] Exp[b] -> Exp[a + b]`,
+    // `Log[a] + Log[b] -> Log[a b]`, and their quotients.
+    push(logexp_reduce(val));
+    // Radical reduction: `Sqrt[u]^2 -> u` (and even roots of even powers).
+    push(radical_reduce(val));
+    // Route Tan/Cot/Sec/Csc through Sin/Cos so identities such as
+    // `Tan[x] - Sin[x]/Cos[x]` can cancel.
+    push(trig_to_sincos(val));
 
     out
 }
@@ -1463,6 +1520,471 @@ fn match_double_angle(u: &Value) -> Option<Value> {
     None
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Additional FullSimplify strategies: log/exp, radical, trig normalisation
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn vint(n: i64) -> Value {
+    Value::Integer(Integer::from(n))
+}
+
+fn vcall(head: &str, args: Vec<Value>) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args,
+    }
+}
+
+/// Bottom-up normalisation of exponentials and logarithms:
+/// `Exp[a] Exp[b] -> Exp[a + b]`, `Exp[a]^n -> Exp[n a]`,
+/// `Log[a] + Log[b] -> Log[a b]` (and quotients).
+fn logexp_reduce(val: &Value) -> Value {
+    match val {
+        Value::List(items) => Value::List(items.iter().map(logexp_reduce).collect()),
+        Value::Call { head, args } if head == "Times" => {
+            let mapped: Vec<Value> = args.iter().map(logexp_reduce).collect();
+            combine_exp_factors(&mapped)
+        }
+        Value::Call { head, args } if head == "Plus" => {
+            let mapped: Vec<Value> = args.iter().map(logexp_reduce).collect();
+            combine_log_terms(&mapped)
+        }
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            let mapped: Vec<Value> = args.iter().map(logexp_reduce).collect();
+            let as_factors = vec![
+                mapped[0].clone(),
+                vcall("Power", vec![mapped[1].clone(), vint(-1)]),
+            ];
+            combine_exp_factors(&as_factors)
+        }
+        Value::Call { head, args } => vcall(head, args.iter().map(logexp_reduce).collect()),
+        _ => val.clone(),
+    }
+}
+
+/// `Exp[u]`, `E^u`, or a power of either — return the exponent `u`.
+fn as_exp_arg(v: &Value) -> Option<Value> {
+    match v {
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => Some(args[0].clone()),
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && args[0].struct_eq(&Value::Symbol("E".into())) =>
+        {
+            Some(args[1].clone())
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let u = as_exp_arg(&args[0])?;
+            match &args[1] {
+                Value::Integer(n) => Some(vcall("Times", vec![Value::Integer(n.clone()), u])),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn combine_exp_factors(factors: &[Value]) -> Value {
+    let mut exp_args: Vec<Value> = Vec::new();
+    let mut others: Vec<Value> = Vec::new();
+    for f in factors {
+        match as_exp_arg(f) {
+            Some(u) => exp_args.push(u),
+            None => others.push(f.clone()),
+        }
+    }
+    if exp_args.len() < 2 {
+        return vcall("Times", factors.to_vec());
+    }
+    let sum = if exp_args.len() == 1 {
+        exp_args.pop().unwrap()
+    } else {
+        vcall("Plus", exp_args)
+    };
+    others.push(vcall("Exp", vec![sum]));
+    if others.len() == 1 {
+        others.pop().unwrap()
+    } else {
+        vcall("Times", others)
+    }
+}
+
+/// True for `Log[u]` or `c * Log[u]`; returns `(u, c)`.
+fn as_scaled_log(term: &Value) -> Option<(Value, Value)> {
+    match term {
+        Value::Call { head, args } if head == "Log" && args.len() == 1 => {
+            Some((args[0].clone(), vint(1)))
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut coeff = vint(1);
+            let mut arg: Option<Value> = None;
+            for f in args {
+                if let Value::Call { head: lh, args: la } = f
+                    && lh == "Log"
+                    && la.len() == 1
+                {
+                    arg = Some(la[0].clone());
+                    continue;
+                }
+                coeff = vcall("Times", vec![coeff, f.clone()]);
+            }
+            arg.map(|a| (a, base_simplify(&coeff)))
+        }
+        _ => None,
+    }
+}
+
+fn combine_log_terms(terms: &[Value]) -> Value {
+    let mut combined: Vec<(Value, Value)> = Vec::new();
+    let mut others: Vec<Value> = Vec::new();
+    for t in terms {
+        match as_scaled_log(t) {
+            Some(pair) => combined.push(pair),
+            None => others.push(t.clone()),
+        }
+    }
+    if combined.len() < 2 {
+        return vcall("Plus", terms.to_vec());
+    }
+    let factors: Vec<Value> = combined
+        .into_iter()
+        .map(|(arg, coeff)| {
+            if is_one(&coeff) {
+                arg
+            } else {
+                vcall("Power", vec![arg, coeff])
+            }
+        })
+        .collect();
+    others.push(vcall("Log", vec![vcall("Times", factors)]));
+    if others.len() == 1 {
+        others.pop().unwrap()
+    } else {
+        vcall("Plus", others)
+    }
+}
+
+/// Bottom-up radical reduction. `Sqrt[u]^2 -> u` is valid for every complex
+/// `u`; `Sqrt[b^(2k)] -> b^k` is applied only for `k >= 2` so that the
+/// ambiguous `Sqrt[x^2]` is left intact (matching `Simplify`).
+fn radical_reduce(val: &Value) -> Value {
+    match val {
+        Value::List(items) => Value::List(items.iter().map(radical_reduce).collect()),
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let base = radical_reduce(&args[0]);
+            if matches!(&args[1], Value::Integer(n) if *n == 2)
+                && let Some(inner) = as_sqrt_arg(&base)
+            {
+                return inner;
+            }
+            vcall("Power", vec![base, args[1].clone()])
+        }
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => {
+            let inner = radical_reduce(&args[0]);
+            if let Value::Call { head: ph, args: pa } = &inner
+                && ph == "Power"
+                && pa.len() == 2
+                && let Value::Integer(e) = &pa[1]
+                && let Some(ei) = e.to_i64()
+                && ei >= 4
+                && ei % 2 == 0
+            {
+                return vcall("Power", vec![pa[0].clone(), vint(ei / 2)]);
+            }
+            vcall("Sqrt", vec![inner])
+        }
+        Value::Call { head, args } => vcall(head, args.iter().map(radical_reduce).collect()),
+        _ => val.clone(),
+    }
+}
+
+/// If `v` is `Sqrt[b]` or `b^(1/2)`, return `b`.
+fn as_sqrt_arg(v: &Value) -> Option<Value> {
+    match v {
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => Some(args[0].clone()),
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && matches!(&args[1], Value::Rational(r) if **r == Rational::from((1, 2))) =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite Tan/Cot/Sec/Csc in terms of Sin/Cos (bottom-up).
+fn trig_to_sincos(val: &Value) -> Value {
+    match val {
+        Value::List(items) => Value::List(items.iter().map(trig_to_sincos).collect()),
+        Value::Call { head, args } if args.len() == 1 => {
+            let inner = trig_to_sincos(&args[0]);
+            let pair = |h: &str| vcall(h, vec![inner.clone()]);
+            match head.as_str() {
+                "Tan" => vcall("Divide", vec![pair("Sin"), pair("Cos")]),
+                "Cot" => vcall("Divide", vec![pair("Cos"), pair("Sin")]),
+                "Sec" => vcall("Divide", vec![vint(1), pair("Cos")]),
+                "Csc" => vcall("Divide", vec![vint(1), pair("Sin")]),
+                _ => vcall(head, vec![inner]),
+            }
+        }
+        Value::Call { head, args } => vcall(head, args.iter().map(trig_to_sincos).collect()),
+        _ => val.clone(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FunctionExpand
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FunctionExpand[expr]` — expand special functions into elementary ones:
+/// `Gamma[1 + n] -> n Gamma[n]`, `Beta[a, b] -> Gamma[a] Gamma[b]/Gamma[a + b]`,
+/// `Factorial[n] -> Gamma[1 + n]`, logarithms of products/powers, multiple
+/// angles, and half-integer Bessel functions.
+pub fn builtin_function_expand(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FunctionExpand expects exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(function_expand_value(&args[0]))
+}
+
+fn function_expand_value(val: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    match val {
+        Value::List(items) => Value::List(items.iter().map(function_expand_value).collect()),
+        Value::Call { head, args } => {
+            let mapped: Vec<Value> = args.iter().map(function_expand_value).collect();
+            match head.as_str() {
+                "Plus" => simplify_call("Plus", &mapped),
+                "Times" => simplify_call("Times", &mapped),
+                "Power" if mapped.len() == 2 => {
+                    if mapped[0].struct_eq(&Value::Symbol("E".into())) {
+                        vcall("Exp", vec![mapped[1].clone()])
+                    } else {
+                        vcall("Power", mapped)
+                    }
+                }
+                "Log" if mapped.len() == 1 => fe_log(&mapped[0]),
+                "Sin" if mapped.len() == 1 => fe_sin(&mapped[0]),
+                "Cos" if mapped.len() == 1 => fe_cos(&mapped[0]),
+                "Gamma" if mapped.len() == 1 => fe_gamma(&mapped[0]),
+                "Beta" if mapped.len() == 2 => fe_beta(&mapped[0], &mapped[1]),
+                "Factorial" if mapped.len() == 1 => fe_factorial(&mapped[0]),
+                "BesselJ" if mapped.len() == 2 => fe_bessel_j(&mapped[0], &mapped[1]),
+                _ => vcall(head, mapped),
+            }
+        }
+        _ => val.clone(),
+    }
+}
+
+fn fe_log(arg: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    match arg {
+        Value::Call { head, args } if head == "Times" => {
+            let terms: Vec<Value> = args.iter().map(|a| vcall("Log", vec![a.clone()])).collect();
+            simplify_call("Plus", &terms)
+        }
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => simplify_call(
+            "Plus",
+            &[
+                vcall("Log", vec![args[0].clone()]),
+                simplify_call("Times", &[vint(-1), vcall("Log", vec![args[1].clone()])]),
+            ],
+        ),
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => simplify_call(
+            "Times",
+            &[args[1].clone(), vcall("Log", vec![args[0].clone()])],
+        ),
+        _ => vcall("Log", vec![arg.clone()]),
+    }
+}
+
+fn fe_sin(arg: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    if let Value::Call { head, args } = arg
+        && head == "Times"
+        && args.len() == 2
+        && matches!(&args[0], Value::Integer(n) if *n == 2)
+    {
+        let x = args[1].clone();
+        return simplify_call(
+            "Times",
+            &[
+                vint(2),
+                vcall("Sin", vec![x.clone()]),
+                vcall("Cos", vec![x]),
+            ],
+        );
+    }
+    if let Value::Call { head, args } = arg
+        && head == "Plus"
+        && args.len() == 2
+    {
+        let (a, b) = (args[0].clone(), args[1].clone());
+        return simplify_call(
+            "Plus",
+            &[
+                simplify_call(
+                    "Times",
+                    &[vcall("Sin", vec![a.clone()]), vcall("Cos", vec![b.clone()])],
+                ),
+                simplify_call("Times", &[vcall("Cos", vec![a]), vcall("Sin", vec![b])]),
+            ],
+        );
+    }
+    vcall("Sin", vec![arg.clone()])
+}
+
+fn fe_cos(arg: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    if let Value::Call { head, args } = arg
+        && head == "Times"
+        && args.len() == 2
+        && matches!(&args[0], Value::Integer(n) if *n == 2)
+    {
+        let x = args[1].clone();
+        return simplify_call(
+            "Plus",
+            &[
+                vcall("Power", vec![vcall("Cos", vec![x.clone()]), vint(2)]),
+                simplify_call(
+                    "Times",
+                    &[
+                        vint(-1),
+                        vcall("Power", vec![vcall("Sin", vec![x]), vint(2)]),
+                    ],
+                ),
+            ],
+        );
+    }
+    if let Value::Call { head, args } = arg
+        && head == "Plus"
+        && args.len() == 2
+    {
+        let (a, b) = (args[0].clone(), args[1].clone());
+        return simplify_call(
+            "Plus",
+            &[
+                simplify_call(
+                    "Times",
+                    &[vcall("Cos", vec![a.clone()]), vcall("Cos", vec![b.clone()])],
+                ),
+                simplify_call(
+                    "Times",
+                    &[vint(-1), vcall("Sin", vec![a]), vcall("Sin", vec![b])],
+                ),
+            ],
+        );
+    }
+    vcall("Cos", vec![arg.clone()])
+}
+
+/// `Gamma[1 + n] -> n Gamma[n]` (either addend order).
+fn fe_gamma(arg: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    if let Value::Call { head, args } = arg
+        && head == "Plus"
+        && args.len() == 2
+    {
+        for (one, n) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+            if matches!(one, Value::Integer(v) if *v == 1) {
+                return simplify_call("Times", &[n.clone(), vcall("Gamma", vec![n.clone()])]);
+            }
+        }
+    }
+    vcall("Gamma", vec![arg.clone()])
+}
+
+/// `Beta[a, b] -> Gamma[a] Gamma[b] / Gamma[a + b]`.
+fn fe_beta(a: &Value, b: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    simplify_call(
+        "Divide",
+        &[
+            simplify_call(
+                "Times",
+                &[
+                    vcall("Gamma", vec![a.clone()]),
+                    vcall("Gamma", vec![b.clone()]),
+                ],
+            ),
+            vcall(
+                "Gamma",
+                vec![simplify_call("Plus", &[a.clone(), b.clone()])],
+            ),
+        ],
+    )
+}
+
+/// `Factorial[n] -> Gamma[1 + n]`.
+fn fe_factorial(n: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    vcall("Gamma", vec![simplify_call("Plus", &[vint(1), n.clone()])])
+}
+
+/// `BesselJ[±1/2, x] -> Sqrt[2/(Pi x)] {Sin,Cos}[x]`.
+fn fe_bessel_j(param: &Value, arg: &Value) -> Value {
+    use crate::builtins::symbolic::simplify_call;
+    let root = vcall(
+        "Sqrt",
+        vec![simplify_call(
+            "Times",
+            &[
+                vint(2),
+                simplify_call(
+                    "Divide",
+                    &[
+                        vint(1),
+                        simplify_call("Times", &[Value::Symbol("Pi".into()), arg.clone()]),
+                    ],
+                ),
+            ],
+        )],
+    );
+    if let Value::Rational(r) = param
+        && *r.numer() == 1
+        && *r.denom() == 2
+    {
+        return simplify_call("Times", &[root, vcall("Sin", vec![arg.clone()])]);
+    }
+    if let Value::Rational(r) = param
+        && *r.numer() == -1
+        && *r.denom() == 2
+    {
+        return simplify_call("Times", &[root, vcall("Cos", vec![arg.clone()])]);
+    }
+    vcall("BesselJ", vec![param.clone(), arg.clone()])
+}
+
+/// `PowerExpand[expr]` / `PowerExpand[expr, Assumptions -> …]` — formal
+/// expansion of powers and logs, optionally refined under assumptions
+/// (e.g. `PowerExpand[Sqrt[x^2], Assumptions -> x > 0] == x`).
+pub fn builtin_power_expand(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "PowerExpand expects 1 or 2 arguments".to_string(),
+        ));
+    }
+    let expanded = crate::builtins::symbolicmore::builtin_power_expand(&[args[0].clone()])?;
+    if args.len() == 2 {
+        let assum = crate::builtins::symbolic::effective_assumptions(Some(&args[1]), &Env::new());
+        if crate::builtins::symbolic::assumptions_present(&assum) {
+            return crate::builtins::domains::refine_expr(&expanded, &assum);
+        }
+    }
+    Ok(expanded)
+}
+
+/// Late overrides owned by this module: registered after the gap-fill modules
+/// so they are authoritative over the overlapping builtins.
+pub fn register_overrides(env: &Env) {
+    super::register_builtin(env, "FunctionExpand", builtin_function_expand);
+    super::register_builtin(env, "PowerExpand", builtin_power_expand);
+}
+
 /// Together[expr] — combine sum of rational expressions into a single fraction.
 pub fn builtin_together(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
@@ -1987,6 +2509,17 @@ mod tests {
         );
     }
 
+    /// Assert two expressions are numerically equivalent at sample points.
+    fn assert_num_equiv(a: &str, b: &str) {
+        let cond = eval_str(&format!(
+            "With[{{x = 0.7, y = 1.3, z = 2.1}}, Abs[(({a}) - ({b}))] < 10^-6]"
+        ));
+        assert!(
+            matches!(cond, Value::Bool(true)) || matches!(&cond, Value::Symbol(s) if s == "True"),
+            "`{a}` not numerically equivalent to `{b}`"
+        );
+    }
+
     /// Assert `FullSimplify[input]` is symbolically equivalent to `expected`.
     fn assert_full_simplify_equiv(input: &str, expected: &str) {
         let diff = eval_str(&format!("FullSimplify[({input}) - ({expected})]"));
@@ -2103,5 +2636,193 @@ mod tests {
         // Level 1 (the elements); the default leaves spec is normalized above.
         let out = builtin_replace(&[expr, rule, int(1)], &env_with_builtins()).unwrap();
         assert_eq!(out, list(vec![sym("x"), sym("b")]));
+    }
+
+    // ── FullSimplify: hardened multi-strategy search ──
+
+    #[test]
+    fn test_full_simplify_logexp() {
+        assert_num_equiv("FullSimplify[Log[x] + Log[y]]", "Log[x y]");
+        assert_num_equiv("FullSimplify[Log[x] - Log[y]]", "Log[x/y]");
+        assert_eq!(eval_str("FullSimplify[Log[x y] - Log[x] - Log[y]]"), int(0));
+        assert_num_equiv("FullSimplify[Exp[x] Exp[y]]", "Exp[x + y]");
+        assert_num_equiv("FullSimplify[Exp[x]/Exp[y]]", "Exp[x - y]");
+        assert_eq!(eval_str("FullSimplify[Exp[x] Exp[y] - Exp[x + y]]"), int(0));
+    }
+
+    #[test]
+    fn test_full_simplify_radical() {
+        // `Sqrt[x]^2 -> x` is unconditional; `Sqrt[x^2]` stays ambiguous.
+        assert_eq!(eval_str("FullSimplify[Sqrt[x]^2]"), eval_str("x"));
+        assert_full_simplify_equiv("Sqrt[x^4]", "x^2");
+        assert_eq!(eval_str("FullSimplify[Sqrt[x^2]]"), eval_str("Sqrt[x^2]"));
+    }
+
+    #[test]
+    fn test_full_simplify_trig_normalisation() {
+        assert_eq!(eval_str("FullSimplify[Tan[x] - Sin[x]/Cos[x]]"), int(0));
+        assert_eq!(eval_str("FullSimplify[Cot[x] - Cos[x]/Sin[x]]"), int(0));
+        assert_eq!(eval_str("FullSimplify[Sec[x] - 1/Cos[x]]"), int(0));
+        // A bare `Tan` must not be needlessly rewritten to `Sin/Cos`.
+        assert_eq!(eval_str("FullSimplify[Tan[x]]"), eval_str("Tan[x]"));
+    }
+
+    #[test]
+    fn test_full_simplify_required_assumption_identities() {
+        assert_eq!(
+            eval_str("Assuming[x < 0, FullSimplify[Abs[x]]]"),
+            eval_str("-x")
+        );
+        assert_eq!(eval_str("FullSimplify[Sqrt[x^2], x > 0]"), eval_str("x"));
+    }
+
+    #[test]
+    fn test_full_simplify_is_bounded_on_deep_input() {
+        // (x + 1)^10 expanded and subtracted must collapse to 0 without hanging.
+        assert_eq!(
+            eval_str("FullSimplify[(x + 1)^10 - Expand[(x + 1)^10]]"),
+            int(0)
+        );
+    }
+
+    #[test]
+    fn test_full_simplify_complexity_never_exceeds_simplify() {
+        // Strict-improvement search seeded from `Simplify` guarantees the result
+        // is never more complex, by both the internal metric and string length.
+        for input in [
+            "(x^2 - 1)/(x - 1)",
+            "Sin[x]^2 + Cos[x]^2",
+            "1/x + 1/y + 1/z",
+            "(x^3 - 1)/(x - 1)",
+            "Sqrt[x^2]",
+            "Log[x] + Log[y]",
+            "Exp[x] Exp[y]",
+            "Tan[x]",
+            "Cos[x]^2 - Sin[x]^2",
+            "x^2 + 2 x + 1",
+            "x + Sin[x]",
+            "Sqrt[8]",
+        ] {
+            let simplified = eval_str(&format!("Simplify[{input}]"));
+            let full = eval_str(&format!("FullSimplify[{input}]"));
+            assert!(
+                value_complexity(&full) <= value_complexity(&simplified),
+                "FullSimplify[{input}] = `{full}` more complex than Simplify = `{simplified}`"
+            );
+            assert!(
+                full.to_string().len() <= simplified.to_string().len(),
+                "FullSimplify[{input}] = `{full}` longer than Simplify = `{simplified}`"
+            );
+        }
+    }
+
+    // ── Expanding / transforming family ──
+
+    #[test]
+    fn test_trig_expand_end_to_end() {
+        assert_eq!(
+            eval_str("TrigExpand[Sin[x + y]]"),
+            eval_str("Sin[x] Cos[y] + Cos[x] Sin[y]")
+        );
+        assert_eq!(
+            eval_str("TrigExpand[Sin[2 x]]"),
+            eval_str("2 Sin[x] Cos[x]")
+        );
+        // Inapplicable input is returned unevaluated.
+        assert_eq!(eval_str("TrigExpand[x]"), eval_str("x"));
+        assert_eq!(eval_str("TrigExpand[f[x]]"), eval_str("f[x]"));
+    }
+
+    #[test]
+    fn test_trig_reduce_end_to_end() {
+        assert_eq!(
+            eval_str("TrigReduce[Sin[x]^2]"),
+            eval_str("1/2 - 1/2 Cos[2 x]")
+        );
+        assert_eq!(
+            eval_str("TrigReduce[Sin[x] Cos[y]]"),
+            eval_str("1/2 Sin[x + y] + 1/2 Sin[x - y]")
+        );
+        assert_eq!(eval_str("TrigReduce[x]"), eval_str("x"));
+    }
+
+    #[test]
+    fn test_trig_factor_end_to_end() {
+        assert_eq!(eval_str("TrigFactor[Sin[x]^2 + Cos[x]^2]"), int(1));
+        assert_num_equiv(
+            "TrigFactor[Sin[x] + Sin[y]]",
+            "2 Sin[(x + y)/2] Cos[(x - y)/2]",
+        );
+        assert_eq!(eval_str("TrigFactor[x]"), eval_str("x"));
+    }
+
+    #[test]
+    fn test_trig_to_exp_and_back() {
+        assert_num_equiv("TrigToExp[Sin[x]]", "(Exp[I x] - Exp[-I x])/(2 I)");
+        assert_eq!(
+            eval_str("ExpToTrig[Exp[I x]]"),
+            eval_str("Cos[x] + I Sin[x]")
+        );
+        assert_eq!(eval_str("ExpToTrig[Exp[x]]"), eval_str("Cosh[x] + Sinh[x]"));
+        // Round-trip is an identity.
+        assert_num_equiv("Simplify[ExpToTrig[TrigToExp[Sin[x + y]]]]", "Sin[x + y]");
+    }
+
+    #[test]
+    fn test_complex_expand_real_symbols() {
+        assert_eq!(
+            eval_str("ComplexExpand[Exp[I x]]"),
+            eval_str("Cos[x] + I Sin[x]")
+        );
+        assert_eq!(
+            eval_str("ComplexExpand[Abs[x + I y]]"),
+            eval_str("Sqrt[x^2 + y^2]")
+        );
+        assert_eq!(eval_str("ComplexExpand[Re[x + I y]]"), eval_str("x"));
+        // A real expression is left untouched.
+        assert_eq!(eval_str("ComplexExpand[x + y]"), eval_str("x + y"));
+    }
+
+    #[test]
+    fn test_power_expand_formal_and_assumptions() {
+        assert_eq!(eval_str("PowerExpand[(a b)^c]"), eval_str("a^c b^c"));
+        assert_eq!(
+            eval_str("PowerExpand[Log[a b]]"),
+            eval_str("Log[a] + Log[b]")
+        );
+        // Formal expansion collapses the ambiguous root…
+        assert_eq!(eval_str("PowerExpand[Sqrt[x^2]]"), eval_str("x"));
+        // …and assumptions make it correct for the stated branch.
+        assert_eq!(
+            eval_str("PowerExpand[Sqrt[x^2], Assumptions -> x > 0]"),
+            eval_str("x")
+        );
+        assert_eq!(eval_str("PowerExpand[y]"), eval_str("y"));
+    }
+
+    #[test]
+    fn test_function_expand_gamma_beta_factorial() {
+        assert_full_simplify_equiv("FunctionExpand[Gamma[1 + n]]", "n Gamma[n]");
+        assert_eq!(
+            eval_str("FunctionExpand[Factorial[n]]"),
+            eval_str("Gamma[1 + n]")
+        );
+        assert_full_simplify_equiv(
+            "FunctionExpand[Beta[a, b]]",
+            "Gamma[a] Gamma[b]/Gamma[a + b]",
+        );
+        // Already-numeric arguments still evaluate.
+        assert_eq!(eval_str("FunctionExpand[Beta[2, 3]]"), eval_str("1/12"));
+        assert_eq!(eval_str("FunctionExpand[f[x]]"), eval_str("f[x]"));
+    }
+
+    #[test]
+    fn test_expand_all_end_to_end() {
+        assert_eq!(eval_str("ExpandAll[(x + 1)^2]"), eval_str("x^2 + 2 x + 1"));
+        assert_eq!(
+            eval_str("Simplify[ExpandAll[(x + 1)/y] - (x/y + 1/y)]"),
+            int(0)
+        );
+        assert_eq!(eval_str("ExpandAll[x]"), eval_str("x"));
     }
 }

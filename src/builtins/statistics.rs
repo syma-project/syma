@@ -252,6 +252,32 @@ fn num_param(v: &Value) -> Value {
     }
 }
 
+/// Return a call unevaluated (keeps `head[args]` in the output). Used whenever a
+/// function is inapplicable to the supplied distribution.
+fn unevaluated(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    Err(EvalError::NoMatch {
+        head: name.to_string(),
+        args: Box::new(args.to_vec()),
+    })
+}
+
+/// Turn a non-negative `f64` into an exact `Integer` when it is integral.
+fn num_value(f: f64) -> Value {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 {
+        int(f as i64)
+    } else {
+        super::real(f)
+    }
+}
+
+/// Extract a distribution association from an argument, if present.
+fn as_dist(v: &Value) -> Option<&HashMap<String, Value>> {
+    match v {
+        Value::Assoc(m) if m.contains_key("Distribution") => Some(m),
+        _ => None,
+    }
+}
+
 /// Extract all numeric values from a list as f64, with error on non-numeric.
 fn extract_numbers(items: &[Value]) -> Result<Vec<f64>, EvalError> {
     items
@@ -539,6 +565,7 @@ fn num_recip(a: &Num) -> Num {
 
 /// Analytical mean of a distribution, kept exact when parameters are exact.
 fn distribution_mean_num(dist: &HashMap<String, Value>) -> Option<Num> {
+    let one = Num::Exact(Rational::from(1));
     let two = Num::Exact(Rational::from(2));
     match dist_type_of(dist)? {
         "Normal" => dist_param(dist, "Mean"),
@@ -584,6 +611,52 @@ fn distribution_mean_num(dist: &HashMap<String, Value>) -> Option<Num> {
             let hi = dist_param(dist, "Max")?;
             Some(num_div(&num_add(&lo, &hi), &two))
         }
+        // ── Broadened families ──────────────────────────────────────────────
+        "Laplace" => dist_param(dist, "Mu"),
+        "Logistic" => dist_param(dist, "Mu"),
+        // E[Weibull(α, β)] = β·Γ(1 + 1/α)
+        "Weibull" => {
+            let alpha = dist_param(dist, "Alpha")?.to_f64();
+            let beta = dist_param(dist, "Beta")?.to_f64();
+            Some(Num::Real(beta * exp_ln_gamma(1.0 + 1.0 / alpha)))
+        }
+        // E[Pareto(k, α)] = k·α/(α − 1), finite only for α > 1.
+        "Pareto" => {
+            let k = dist_param(dist, "K")?;
+            let alpha = dist_param(dist, "Alpha")?;
+            if alpha.to_f64() <= 1.0 {
+                None
+            } else {
+                Some(num_div(&num_mul(&k, &alpha), &num_sub(&alpha, &one)))
+            }
+        }
+        // E[Geometric(p)] = (1 − p)/p
+        "Geometric" => {
+            let p = dist_param(dist, "P")?;
+            Some(num_div(&num_sub(&one, &p), &p))
+        }
+        // E[NegativeBinomial(r, p)] = E[Pascal(r, p)] = r(1 − p)/p
+        "NegativeBinomial" | "Pascal" => {
+            let r = dist_param(dist, "R")?;
+            let p = dist_param(dist, "P")?;
+            Some(num_div(&num_mul(&r, &num_sub(&one, &p)), &p))
+        }
+        // E[Hypergeometric(n, K, N)] = n·K/N
+        "Hypergeometric" => {
+            let n = dist_param(dist, "N")?;
+            let succ = dist_param(dist, "K")?;
+            let pop = dist_param(dist, "Pop")?;
+            Some(num_div(&num_mul(&n, &succ), &pop))
+        }
+        // E[FRatio(n, d)] = d/(d − 2), finite only for d > 2.
+        "FRatio" => {
+            let d = dist_param(dist, "D")?;
+            if d.to_f64() <= 2.0 {
+                None
+            } else {
+                Some(num_div(&d, &num_sub(&d, &two)))
+            }
+        }
         _ => None,
     }
 }
@@ -592,6 +665,7 @@ fn distribution_mean_num(dist: &HashMap<String, Value>) -> Option<Num> {
 fn distribution_variance_num(dist: &HashMap<String, Value>) -> Option<Num> {
     let one = Num::Exact(Rational::from(1));
     let two = Num::Exact(Rational::from(2));
+    let four = Num::Exact(Rational::from(4));
     let twelve = Num::Exact(Rational::from(12));
     match dist_type_of(dist)? {
         "Normal" => {
@@ -660,7 +734,195 @@ fn distribution_variance_num(dist: &HashMap<String, Value>) -> Option<Num> {
             let n_plus_2 = num_add(&n, &two);
             Some(num_div(&num_mul(&n, &n_plus_2), &twelve))
         }
+        // ── Broadened families ──────────────────────────────────────────────
+        // Var[Laplace(μ, β)] = 2β²
+        "Laplace" => {
+            let beta = dist_param(dist, "Beta")?;
+            Some(num_mul(&two, &num_mul(&beta, &beta)))
+        }
+        // Var[Logistic(μ, s)] = π²s²/3 (numeric)
+        "Logistic" => {
+            let s = dist_param(dist, "Sigma")?.to_f64();
+            let pi2 = std::f64::consts::PI * std::f64::consts::PI;
+            Some(Num::Real(pi2 * s * s / 3.0))
+        }
+        // Var[Weibull(α, β)] = β²(Γ(1 + 2/α) − Γ(1 + 1/α)²)
+        "Weibull" => {
+            let alpha = dist_param(dist, "Alpha")?.to_f64();
+            let beta = dist_param(dist, "Beta")?.to_f64();
+            let g1 = exp_ln_gamma(1.0 + 1.0 / alpha);
+            let g2 = exp_ln_gamma(1.0 + 2.0 / alpha);
+            Some(Num::Real(beta * beta * (g2 - g1 * g1)))
+        }
+        // Var[Pareto(k, α)] = k²α / ((α − 1)²(α − 2)), finite for α > 2.
+        "Pareto" => {
+            let k = dist_param(dist, "K")?;
+            let alpha = dist_param(dist, "Alpha")?;
+            if alpha.to_f64() <= 2.0 {
+                None
+            } else {
+                let a1 = num_sub(&alpha, &one);
+                let a2 = num_sub(&alpha, &two);
+                let denom = num_mul(&num_mul(&a1, &a1), &a2);
+                Some(num_div(&num_mul(&num_mul(&k, &k), &alpha), &denom))
+            }
+        }
+        // Var[Geometric(p)] = (1 − p)/p²
+        "Geometric" => {
+            let p = dist_param(dist, "P")?;
+            let q = num_sub(&one, &p);
+            Some(num_div(&q, &num_mul(&p, &p)))
+        }
+        // Var[NegativeBinomial(r, p)] = r(1 − p)/p²
+        "NegativeBinomial" | "Pascal" => {
+            let r = dist_param(dist, "R")?;
+            let p = dist_param(dist, "P")?;
+            let q = num_sub(&one, &p);
+            Some(num_div(&num_mul(&r, &q), &num_mul(&p, &p)))
+        }
+        // Var[Hypergeometric(n, K, N)] = n·(K/N)·((N−K)/N)·((N−n)/(N−1))
+        "Hypergeometric" => {
+            let n = dist_param(dist, "N")?;
+            let succ = dist_param(dist, "K")?;
+            let pop = dist_param(dist, "Pop")?;
+            let q = num_sub(&pop, &succ);
+            let draws = num_sub(&pop, &n);
+            let popm1 = num_sub(&pop, &one);
+            let numr = num_mul(&num_mul(&num_mul(&n, &succ), &q), &draws);
+            let denom = num_mul(&num_mul(&pop, &pop), &popm1);
+            Some(num_div(&numr, &denom))
+        }
+        // Var[FRatio(n, d)] = 2d²(n + d − 2) / (n (d − 2)² (d − 4)), finite d > 4.
+        "FRatio" => {
+            let n = dist_param(dist, "N")?;
+            let d = dist_param(dist, "D")?;
+            if d.to_f64() <= 4.0 {
+                None
+            } else {
+                let d2 = num_sub(&d, &two);
+                let d4 = num_sub(&d, &four);
+                let numr = num_mul(
+                    &num_mul(&two, &num_mul(&d, &d)),
+                    &num_sub(&num_add(&n, &d), &two),
+                );
+                let denom = num_mul(&num_mul(&n, &num_mul(&d2, &d2)), &d4);
+                Some(num_div(&numr, &denom))
+            }
+        }
         _ => None,
+    }
+}
+
+/// exp(ln_gamma(x)) — the Gamma function via the Lanczos approximation.
+fn exp_ln_gamma(x: f64) -> f64 {
+    ln_gamma(x).exp()
+}
+
+/// Analytical skewness (standardized third central moment) of a distribution.
+fn distribution_skewness_num(dist: &HashMap<String, Value>) -> Option<Num> {
+    match dist_type_of(dist)? {
+        "Normal" | "Uniform" | "Logistic" | "Laplace" => Some(Num::Exact(Rational::from(0))),
+        "Exponential" => Some(Num::Exact(Rational::from(2))),
+        "ChiSquare" => {
+            let k = dist_param(dist, "K")?.to_f64();
+            Some(Num::Real((8.0 / k).sqrt()))
+        }
+        "Gamma" => {
+            let alpha = dist_param(dist, "Alpha")?.to_f64();
+            Some(Num::Real(2.0 / alpha.sqrt()))
+        }
+        "Poisson" => {
+            let lambda = dist_param(dist, "Lambda")?.to_f64();
+            Some(Num::Real(1.0 / lambda.sqrt()))
+        }
+        "Beta" => {
+            let a = dist_param(dist, "Alpha")?.to_f64();
+            let b = dist_param(dist, "Beta")?.to_f64();
+            let s = a + b;
+            Some(Num::Real(
+                2.0 * (b - a) * (s + 1.0).sqrt() / ((s + 2.0) * (a * b).sqrt()),
+            ))
+        }
+        "StudentT" => {
+            let nu = dist_param(dist, "Nu")?.to_f64();
+            if nu > 3.0 { Some(Num::Real(0.0)) } else { None }
+        }
+        "Binomial" => {
+            let n = dist_param(dist, "N")?.to_f64();
+            let p = dist_param(dist, "P")?.to_f64();
+            Some(Num::Real((1.0 - 2.0 * p) / (n * p * (1.0 - p)).sqrt()))
+        }
+        "Geometric" => {
+            let p = dist_param(dist, "P")?.to_f64();
+            Some(Num::Real((2.0 - p) / (1.0 - p).sqrt()))
+        }
+        "Pareto" => {
+            let alpha = dist_param(dist, "Alpha")?.to_f64();
+            if alpha > 3.0 {
+                Some(Num::Real(
+                    2.0 * (alpha + 1.0) / (alpha - 3.0) * ((alpha - 2.0) / alpha).sqrt(),
+                ))
+            } else {
+                None
+            }
+        }
+        "Cauchy" => None,
+        _ => None,
+    }
+}
+
+/// Analytical kurtosis (m₄/m₂²) of a distribution.
+fn distribution_kurtosis_num(dist: &HashMap<String, Value>) -> Option<Num> {
+    let exact = |p: i64, q: i64| Num::Exact(Rational::from((Integer::from(p), Integer::from(q))));
+    match dist_type_of(dist)? {
+        "Normal" => Some(Num::Exact(Rational::from(3))),
+        "Uniform" => Some(exact(9, 5)),
+        "Exponential" => Some(Num::Exact(Rational::from(9))),
+        "Laplace" => Some(Num::Exact(Rational::from(6))),
+        "Logistic" => Some(exact(21, 5)),
+        "ChiSquare" => {
+            let k = dist_param(dist, "K")?.to_f64();
+            Some(Num::Real(3.0 + 12.0 / k))
+        }
+        "Gamma" => {
+            let alpha = dist_param(dist, "Alpha")?.to_f64();
+            Some(Num::Real(3.0 + 6.0 / alpha))
+        }
+        "Poisson" => {
+            let lambda = dist_param(dist, "Lambda")?.to_f64();
+            Some(Num::Real(3.0 + 1.0 / lambda))
+        }
+        "Beta" => {
+            let a = dist_param(dist, "Alpha")?.to_f64();
+            let b = dist_param(dist, "Beta")?.to_f64();
+            let s = a + b;
+            let m = (a - b) * (a - b) * (s + 1.0) - a * b * (s + 2.0);
+            Some(Num::Real(3.0 + 6.0 * m / (a * b * (s + 2.0) * (s + 3.0))))
+        }
+        "StudentT" => {
+            let nu = dist_param(dist, "Nu")?.to_f64();
+            if nu > 4.0 {
+                Some(Num::Real(3.0 + 6.0 / (nu - 4.0)))
+            } else {
+                None
+            }
+        }
+        "Binomial" => {
+            let n = dist_param(dist, "N")?.to_f64();
+            let p = dist_param(dist, "P")?.to_f64();
+            Some(Num::Real(
+                3.0 + (1.0 - 6.0 * p * (1.0 - p)) / (n * p * (1.0 - p)),
+            ))
+        }
+        "Geometric" => {
+            let p = dist_param(dist, "P")?.to_f64();
+            Some(Num::Real(3.0 + (p * p - 6.0 * p + 6.0) / (1.0 - p)))
+        }
+        "Cauchy" => None,
+        _ => {
+            let _ = exact;
+            None
+        }
     }
 }
 
@@ -687,11 +949,9 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_mean_num(map) {
-            Some(v) => Ok(v.into_value()),
-            None => Err(EvalError::Error(
-                "Mean: distribution mean is undefined".to_string(),
-            )),
+        return match distribution_mean_value(map) {
+            Some(v) => Ok(v),
+            None => unevaluated("Mean", args),
         };
     }
     let items = as_list(&args[0])?;
@@ -700,6 +960,43 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     }
     let nums = extract_nums(items)?;
     Ok(compute_mean_num(&nums).into_value())
+}
+
+/// Distribution mean as a `Value`; vector-valued for `Multinomial`.
+fn distribution_mean_value(dist: &HashMap<String, Value>) -> Option<Value> {
+    if dist_type_of(dist) == Some("Multinomial") {
+        let n = dist_param(dist, "N")?;
+        let ps = match dist.get("P")? {
+            Value::List(l) => l,
+            _ => return None,
+        };
+        let mut out = Vec::with_capacity(ps.len());
+        for p in ps {
+            out.push(num_mul(&n, &to_num(p)?).into_value());
+        }
+        return Some(Value::List(out));
+    }
+    distribution_mean_num(dist).map(Num::into_value)
+}
+
+/// Distribution variance as a `Value`; vector-valued for `Multinomial`.
+fn distribution_variance_value(dist: &HashMap<String, Value>) -> Option<Value> {
+    if dist_type_of(dist) == Some("Multinomial") {
+        let n = dist_param(dist, "N")?;
+        let ps = match dist.get("P")? {
+            Value::List(l) => l,
+            _ => return None,
+        };
+        let one = Num::Exact(Rational::from(1));
+        let mut out = Vec::with_capacity(ps.len());
+        for p in ps {
+            let p = to_num(p)?;
+            let q = num_sub(&one, &p);
+            out.push(num_mul(&num_mul(&n, &p), &q).into_value());
+        }
+        return Some(Value::List(out));
+    }
+    distribution_variance_num(dist).map(Num::into_value)
 }
 
 /// Median[list] — median value.
@@ -730,11 +1027,9 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_variance_num(map) {
-            Some(v) => Ok(v.into_value()),
-            None => Err(EvalError::Error(
-                "Variance: distribution variance is undefined".to_string(),
-            )),
+        return match distribution_variance_value(map) {
+            Some(v) => Ok(v),
+            None => unevaluated("Variance", args),
         };
     }
     let items = as_list(&args[0])?;
@@ -763,11 +1058,22 @@ pub fn builtin_standard_deviation(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_variance_num(map) {
-            Some(v) => Ok(sqrt_num(v).into_value()),
-            None => Err(EvalError::Error(
-                "StandardDeviation: distribution variance is undefined".to_string(),
-            )),
+        return match distribution_variance_value(map) {
+            Some(Value::List(items)) => {
+                let out: Option<Vec<Value>> = items
+                    .iter()
+                    .map(|v| to_num(v).map(|n| sqrt_num(n).into_value()))
+                    .collect();
+                match out {
+                    Some(v) => Ok(Value::List(v)),
+                    None => unevaluated("StandardDeviation", args),
+                }
+            }
+            Some(v) => match to_num(&v) {
+                Some(n) => Ok(sqrt_num(n).into_value()),
+                None => unevaluated("StandardDeviation", args),
+            },
+            None => unevaluated("StandardDeviation", args),
         };
     }
     let items = as_list(&args[0])?;
@@ -791,6 +1097,23 @@ pub fn builtin_quantile(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error(
             "Quantile requires exactly 2 arguments".to_string(),
         ));
+    }
+    // Distribution dispatch: Quantile[dist, q].
+    if let Some(map) = as_dist(&args[0]) {
+        let q = to_num(&args[1]).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: args[1].type_name().to_string(),
+        })?;
+        let qf = q.to_f64();
+        if !(0.0..=1.0).contains(&qf) {
+            return Err(EvalError::Error(
+                "Quantile: q must be between 0 and 1".to_string(),
+            ));
+        }
+        return match distribution_quantile_f64(map, qf) {
+            Some(v) => Ok(num_value(v)),
+            None => unevaluated("Quantile", args),
+        };
     }
     let items = as_list(&args[0])?;
     if items.is_empty() {
@@ -925,6 +1248,12 @@ pub fn builtin_skewness(args: &[Value]) -> Result<Value, EvalError> {
             "Skewness requires exactly 1 argument".to_string(),
         ));
     }
+    if let Some(map) = as_dist(&args[0]) {
+        return match distribution_skewness_num(map) {
+            Some(v) => Ok(v.into_value()),
+            None => unevaluated("Skewness", args),
+        };
+    }
     let items = as_list(&args[0])?;
     let n = items.len();
     if n < 2 {
@@ -949,6 +1278,12 @@ pub fn builtin_kurtosis(args: &[Value]) -> Result<Value, EvalError> {
         return Err(EvalError::Error(
             "Kurtosis requires exactly 1 argument".to_string(),
         ));
+    }
+    if let Some(map) = as_dist(&args[0]) {
+        return match distribution_kurtosis_num(map) {
+            Some(v) => Ok(v.into_value()),
+            None => unevaluated("Kurtosis", args),
+        };
     }
     let items = as_list(&args[0])?;
     let n = items.len();
@@ -1666,6 +2001,519 @@ pub fn builtin_poisson_distribution(args: &[Value]) -> Result<Value, EvalError> 
     Ok(Value::Assoc(map))
 }
 
+// ── Broadened distribution constructors ──────────────────────────────────────
+
+fn require_positive(name: &str, label: &str, v: f64) -> Result<(), EvalError> {
+    if v <= 0.0 {
+        return Err(EvalError::Error(format!(
+            "{}: {} must be positive",
+            name, label
+        )));
+    }
+    Ok(())
+}
+
+/// FRatioDistribution[n, d] — F-ratio distribution with n, d degrees of freedom.
+pub fn builtin_f_ratio_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FRatioDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let n = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let d = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    require_positive("FRatioDistribution", "degrees of freedom", n)?;
+    require_positive("FRatioDistribution", "degrees of freedom", d)?;
+    let mut map = HashMap::new();
+    map.insert("Distribution".to_string(), Value::Str("FRatio".to_string()));
+    map.insert("N".to_string(), num_param(&args[0]));
+    map.insert("D".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// LaplaceDistribution[mu, beta] — Laplace (double-exponential) distribution.
+pub fn builtin_laplace_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LaplaceDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let _mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let beta = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    require_positive("LaplaceDistribution", "beta", beta)?;
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Laplace".to_string()),
+    );
+    map.insert("Mu".to_string(), num_param(&args[0]));
+    map.insert("Beta".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// LogisticDistribution[mu, sigma] — logistic distribution.
+pub fn builtin_logistic_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LogisticDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let _mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let sigma = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    require_positive("LogisticDistribution", "sigma", sigma)?;
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Logistic".to_string()),
+    );
+    map.insert("Mu".to_string(), num_param(&args[0]));
+    map.insert("Sigma".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// WeibullDistribution[alpha, beta] — Weibull distribution with shape α, scale β.
+pub fn builtin_weibull_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "WeibullDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let alpha = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let beta = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    require_positive("WeibullDistribution", "alpha", alpha)?;
+    require_positive("WeibullDistribution", "beta", beta)?;
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Weibull".to_string()),
+    );
+    map.insert("Alpha".to_string(), num_param(&args[0]));
+    map.insert("Beta".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// ParetoDistribution[k, alpha] — Pareto distribution with scale k, shape α.
+pub fn builtin_pareto_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParetoDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let k = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let alpha = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    require_positive("ParetoDistribution", "k", k)?;
+    require_positive("ParetoDistribution", "alpha", alpha)?;
+    let mut map = HashMap::new();
+    map.insert("Distribution".to_string(), Value::Str("Pareto".to_string()));
+    map.insert("K".to_string(), num_param(&args[0]));
+    map.insert("Alpha".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// GeometricDistribution[p] — number of trials until the first success.
+pub fn builtin_geometric_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "GeometricDistribution requires exactly 1 argument".to_string(),
+        ));
+    }
+    let p = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    if !(0.0..=1.0).contains(&p) || p == 0.0 {
+        return Err(EvalError::Error(
+            "GeometricDistribution: p must be in (0, 1]".to_string(),
+        ));
+    }
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Geometric".to_string()),
+    );
+    map.insert("P".to_string(), num_param(&args[0]));
+    Ok(Value::Assoc(map))
+}
+
+fn negative_binomial_like(name: &str, dist: &str, args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(format!(
+            "{} requires exactly 2 arguments",
+            name
+        )));
+    }
+    let r = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    let p = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[1].type_name().to_string(),
+    })?;
+    if r <= 0.0 {
+        return Err(EvalError::Error(format!("{}: r must be positive", name)));
+    }
+    if !(0.0..=1.0).contains(&p) || p == 0.0 {
+        return Err(EvalError::Error(format!("{}: p must be in (0, 1]", name)));
+    }
+    let mut map = HashMap::new();
+    map.insert("Distribution".to_string(), Value::Str(dist.to_string()));
+    map.insert("R".to_string(), num_param(&args[0]));
+    map.insert("P".to_string(), num_param(&args[1]));
+    Ok(Value::Assoc(map))
+}
+
+/// NegativeBinomialDistribution[r, p] — failures before the r-th success.
+pub fn builtin_negative_binomial_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    negative_binomial_like("NegativeBinomialDistribution", "NegativeBinomial", args)
+}
+
+/// PascalDistribution[r, p] — alias of the negative binomial with integer r.
+pub fn builtin_pascal_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    negative_binomial_like("PascalDistribution", "Pascal", args)
+}
+
+/// HypergeometricDistribution[n, K, N] — successes in n draws without replacement.
+pub fn builtin_hypergeometric_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "HypergeometricDistribution requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let mut vals = [0.0f64; 3];
+    for (i, a) in args.iter().enumerate() {
+        let v = super::to_f64(a).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: a.type_name().to_string(),
+        })?;
+        if v.fract() != 0.0 || v < 0.0 {
+            return Err(EvalError::Error(
+                "HypergeometricDistribution: arguments must be non-negative integers".to_string(),
+            ));
+        }
+        vals[i] = v;
+    }
+    let (draws, succ, pop) = (vals[0], vals[1], vals[2]);
+    if pop <= 0.0 || succ > pop || draws > pop {
+        return Err(EvalError::Error(
+            "HypergeometricDistribution: need n ≤ N and K ≤ N".to_string(),
+        ));
+    }
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Hypergeometric".to_string()),
+    );
+    map.insert("N".to_string(), num_param(&args[0]));
+    map.insert("K".to_string(), num_param(&args[1]));
+    map.insert("Pop".to_string(), num_param(&args[2]));
+    Ok(Value::Assoc(map))
+}
+
+/// MultinomialDistribution[n, {p1, ..., pk}] — multinomial counts (basic support).
+pub fn builtin_multinomial_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "MultinomialDistribution requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let n = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+        expected: "Number".to_string(),
+        got: args[0].type_name().to_string(),
+    })?;
+    if n.fract() != 0.0 || n < 0.0 {
+        return Err(EvalError::Error(
+            "MultinomialDistribution: n must be a non-negative integer".to_string(),
+        ));
+    }
+    let ps = as_list(&args[1])?;
+    if ps.is_empty() {
+        return Err(EvalError::Error(
+            "MultinomialDistribution: probability vector must not be empty".to_string(),
+        ));
+    }
+    let mut sum = 0.0;
+    for p in ps {
+        let v = super::to_f64(p).ok_or_else(|| EvalError::TypeError {
+            expected: "Number".to_string(),
+            got: p.type_name().to_string(),
+        })?;
+        if !(0.0..=1.0).contains(&v) {
+            return Err(EvalError::Error(
+                "MultinomialDistribution: probabilities must be in [0, 1]".to_string(),
+            ));
+        }
+        sum += v;
+    }
+    if (sum - 1.0).abs() > 1e-9 {
+        return Err(EvalError::Error(
+            "MultinomialDistribution: probabilities must sum to 1".to_string(),
+        ));
+    }
+    let mut map = HashMap::new();
+    map.insert(
+        "Distribution".to_string(),
+        Value::Str("Multinomial".to_string()),
+    );
+    map.insert("N".to_string(), num_param(&args[0]));
+    map.insert(
+        "P".to_string(),
+        Value::List(ps.iter().map(num_param).collect()),
+    );
+    Ok(Value::Assoc(map))
+}
+
+/// Multinomial PMF at a count vector. Returns `None` for a malformed vector.
+fn multinomial_pmf(dist: &HashMap<String, Value>, arg: &Value) -> Option<f64> {
+    let n = dist.get("N").and_then(super::to_f64)?;
+    let ps = match dist.get("P")? {
+        Value::List(l) => l,
+        _ => return None,
+    };
+    let counts = match arg {
+        Value::List(l) => l,
+        _ => return None,
+    };
+    if counts.len() != ps.len() {
+        return None;
+    }
+    let ks: Option<Vec<f64>> = counts.iter().map(super::to_f64).collect();
+    let ks = ks?;
+    if ks.iter().any(|k| k.fract() != 0.0 || *k < 0.0) || (ks.iter().sum::<f64>() - n).abs() > 1e-9
+    {
+        return None;
+    }
+    let mut ln_pmf = ln_gamma(n + 1.0);
+    for (k, p) in ks.iter().zip(ps.iter()) {
+        let pv = super::to_f64(p)?;
+        ln_pmf -= ln_gamma(k + 1.0);
+        if *k > 0.0 {
+            if pv <= 0.0 {
+                return Some(0.0);
+            }
+            ln_pmf += k * pv.ln();
+        }
+    }
+    Some(ln_pmf.exp())
+}
+
+/// Multinomial CDF at a vector of componentwise bounds.
+fn multinomial_cdf(dist: &HashMap<String, Value>, arg: &Value) -> Option<f64> {
+    let n = dist.get("N").and_then(super::to_f64)? as i64;
+    let ps = match dist.get("P")? {
+        Value::List(l) => l,
+        _ => return None,
+    };
+    let bounds = match arg {
+        Value::List(l) => l,
+        _ => return None,
+    };
+    if bounds.len() != ps.len() {
+        return None;
+    }
+    let caps: Option<Vec<i64>> = bounds
+        .iter()
+        .map(|b| super::to_f64(b).map(|f| f.floor() as i64))
+        .collect();
+    let caps = caps?;
+    let pvals: Option<Vec<f64>> = ps.iter().map(super::to_f64).collect();
+    let pvals = pvals?;
+    let k = ps.len();
+    let mut acc = 0.0f64;
+    let mut cur = vec![0i64; k];
+    let ln_fact_n = ln_gamma(n as f64 + 1.0);
+    fn rec(
+        i: usize,
+        remaining: i64,
+        cur: &mut [i64],
+        caps: &[i64],
+        pvals: &[f64],
+        ln_fact_n: f64,
+        acc: &mut f64,
+    ) {
+        if i == caps.len() {
+            if remaining != 0 {
+                return;
+            }
+            let mut ln_pmf = ln_fact_n;
+            for (c, pv) in cur.iter().zip(pvals.iter()) {
+                ln_pmf -= ln_gamma(*c as f64 + 1.0);
+                if *c > 0 {
+                    if *pv <= 0.0 {
+                        return;
+                    }
+                    ln_pmf += *c as f64 * pv.ln();
+                }
+            }
+            *acc += ln_pmf.exp();
+            return;
+        }
+        let cap = caps[i];
+        for c in 0..=remaining.min(cap) {
+            cur[i] = c;
+            rec(i + 1, remaining - c, cur, caps, pvals, ln_fact_n, acc);
+        }
+    }
+    rec(0, n, &mut cur, &caps, &pvals, ln_fact_n, &mut acc);
+    Some(acc.min(1.0))
+}
+
+// ── Support / quantile helpers ───────────────────────────────────────────────
+
+/// True for distributions with integer support (CDF is a step function).
+fn is_discrete_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "Poisson"
+            | "Binomial"
+            | "Bernoulli"
+            | "DiscreteUniform"
+            | "Geometric"
+            | "NegativeBinomial"
+            | "Pascal"
+            | "Hypergeometric"
+    )
+}
+
+/// A finite interval containing essentially all of the distribution's mass.
+fn dist_support(dist: &HashMap<String, Value>) -> Option<(f64, f64)> {
+    let p = |k: &str| dist.get(k).and_then(super::to_f64);
+    match dist_type_of(dist)? {
+        "Normal" => {
+            let mu = p("Mean")?;
+            let sd = p("SD")?;
+            Some((mu - 50.0 * sd, mu + 50.0 * sd))
+        }
+        "Uniform" => Some((p("Min")?, p("Max")?)),
+        "Exponential" => Some((0.0, 60.0 / p("Lambda")?)),
+        "Gamma" | "ChiSquare" => {
+            let m = distribution_mean_f64(dist)?;
+            let v = distribution_variance_f64(dist)?;
+            Some((0.0, m + 50.0 * v.max(0.0).sqrt().max(1e-12)))
+        }
+        "Beta" => Some((0.0, 1.0)),
+        "LogNormal" => {
+            let mu = p("Mu")?;
+            let sigma = p("Sigma")?;
+            Some((0.0, (mu + 40.0 * sigma).exp()))
+        }
+        "Cauchy" => {
+            let x0 = p("Location")?;
+            let g = p("Scale")?;
+            Some((x0 - 1.0e6 * g, x0 + 1.0e6 * g))
+        }
+        "StudentT" => Some((-1.0e7, 1.0e7)),
+        "Laplace" => {
+            let mu = p("Mu")?;
+            let b = p("Beta")?;
+            Some((mu - 60.0 * b, mu + 60.0 * b))
+        }
+        "Logistic" => {
+            let mu = p("Mu")?;
+            let s = p("Sigma")?;
+            Some((mu - 60.0 * s, mu + 60.0 * s))
+        }
+        "Weibull" => {
+            let alpha = p("Alpha")?;
+            let beta = p("Beta")?;
+            Some((0.0, beta * (1e12f64.ln()).powf(1.0 / alpha)))
+        }
+        "Pareto" => {
+            let k = p("K")?;
+            let alpha = p("Alpha")?;
+            Some((k, k * (1e12f64).powf(1.0 / alpha)))
+        }
+        "FRatio" => Some((0.0, 1.0e8)),
+        "Poisson" => {
+            let lambda = p("Lambda")?;
+            Some((0.0, lambda + 30.0 * lambda.sqrt() + 30.0))
+        }
+        "Binomial" => Some((0.0, p("N")?)),
+        "Bernoulli" => Some((0.0, 1.0)),
+        "DiscreteUniform" => Some((p("Min")?, p("Max")?)),
+        "Geometric" => Some((1.0, 1.0 + 300.0 / p("P")?)),
+        "NegativeBinomial" | "Pascal" => {
+            let r = p("R")?;
+            let pr = p("P")?;
+            let mean = r * (1.0 - pr) / pr;
+            Some((0.0, mean + 60.0 * mean.sqrt().max(1.0) + 60.0))
+        }
+        "Hypergeometric" => Some((0.0, p("N")?)),
+        _ => None,
+    }
+}
+
+/// CDF of a distribution at `x` (numeric), routing through [`builtin_cdf`].
+fn distribution_cdf_f64(dist: &HashMap<String, Value>, x: f64) -> Option<f64> {
+    builtin_cdf(&[Value::Assoc(dist.clone()), super::real(x)])
+        .ok()
+        .and_then(|v| super::to_f64(&v))
+}
+
+/// Numeric q-th quantile of a distribution (q ∈ [0, 1]).
+pub(crate) fn distribution_quantile_f64(dist: &HashMap<String, Value>, q: f64) -> Option<f64> {
+    let ty = dist_type_of(dist)?;
+    let (lo, hi) = dist_support(dist)?;
+    if q <= 0.0 {
+        return Some(lo);
+    }
+    if q >= 1.0 {
+        return Some(hi);
+    }
+    if is_discrete_type(ty) {
+        let start = lo.floor() as i64;
+        let end = hi.ceil() as i64;
+        for k in start..=end {
+            if distribution_cdf_f64(dist, k as f64)? >= q {
+                return Some(k as f64);
+            }
+        }
+        return Some(hi);
+    }
+    // Bisection on the continuous CDF.
+    let mut a = lo;
+    let mut z = hi;
+    for _ in 0..200 {
+        let m = 0.5 * (a + z);
+        if distribution_cdf_f64(dist, m)? < q {
+            a = m;
+        } else {
+            z = m;
+        }
+    }
+    Some(0.5 * (a + z))
+}
+
 // ── PDF and CDF ──────────────────────────────────────────────────────────────
 
 /// PDF[dist, x] — probability density (continuous) or mass (discrete) at x.
@@ -1684,6 +2532,12 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
+    if dist_type_of(dist) == Some("Multinomial") {
+        return match multinomial_pmf(dist, &args[1]) {
+            Some(d) => Ok(super::real(d)),
+            None => unevaluated("PDF", args),
+        };
+    }
     let x = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
@@ -1822,11 +2676,96 @@ pub fn builtin_pdf(args: &[Value]) -> Result<Value, EvalError> {
                 0.0
             }
         }
+        "FRatio" => {
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0);
+            let d = dist.get("D").and_then(super::to_f64).unwrap_or(1.0);
+            if x <= 0.0 {
+                0.0
+            } else {
+                let ln_beta = ln_gamma(n / 2.0) + ln_gamma(d / 2.0) - ln_gamma((n + d) / 2.0);
+                let ln_pdf = 0.5 * (n * (n * x).ln() + d * d.ln() - (n + d) * (n * x + d).ln())
+                    - x.ln()
+                    - ln_beta;
+                ln_pdf.exp()
+            }
+        }
+        "Laplace" => {
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let beta = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
+            (-((x - mu).abs()) / beta).exp() / (2.0 * beta)
+        }
+        "Logistic" => {
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let s = dist.get("Sigma").and_then(super::to_f64).unwrap_or(1.0);
+            let z = (x - mu) / s;
+            let e = (-z).exp();
+            e / (s * (1.0 + e) * (1.0 + e))
+        }
+        "Weibull" => {
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let beta = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
+            if x < 0.0 {
+                0.0
+            } else {
+                let z = x / beta;
+                (alpha / beta) * z.powf(alpha - 1.0) * (-z.powf(alpha)).exp()
+            }
+        }
+        "Pareto" => {
+            let k = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            if x < k {
+                0.0
+            } else {
+                alpha * k.powf(alpha) / x.powf(alpha + 1.0)
+            }
+        }
+        "Geometric" => {
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
+            if x.fract() == 0.0 && x >= 1.0 {
+                (1.0 - p).powf(x - 1.0) * p
+            } else {
+                0.0
+            }
+        }
+        "NegativeBinomial" | "Pascal" => {
+            let r = dist.get("R").and_then(super::to_f64).unwrap_or(1.0);
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
+            if x.fract() == 0.0 && x >= 0.0 {
+                let ln_pmf = ln_gamma(x + r) - ln_gamma(x + 1.0) - ln_gamma(r)
+                    + r * p.ln()
+                    + x * (1.0 - p).ln();
+                ln_pmf.exp()
+            } else {
+                0.0
+            }
+        }
+        "Hypergeometric" => {
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0);
+            let succ = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
+            let pop = dist.get("Pop").and_then(super::to_f64).unwrap_or(1.0);
+            let lo = (n - (pop - succ)).max(0.0);
+            let hi = n.min(succ);
+            if x.fract() == 0.0 && x >= lo && x <= hi {
+                let ln_pmf = ln_gamma(succ + 1.0) - ln_gamma(x + 1.0) - ln_gamma(succ - x + 1.0)
+                    + ln_gamma(pop - succ + 1.0)
+                    - ln_gamma(n - x + 1.0)
+                    - ln_gamma(pop - succ - n + x + 1.0)
+                    - ln_gamma(pop + 1.0)
+                    + ln_gamma(n + 1.0)
+                    + ln_gamma(pop - n + 1.0);
+                ln_pmf.exp()
+            } else {
+                0.0
+            }
+        }
+        "Multinomial" => {
+            // Handled separately: the *list* argument carries the counts.
+            0.0
+        }
         other => {
-            return Err(EvalError::Error(format!(
-                "PDF: unknown distribution '{}'",
-                other
-            )));
+            let _ = other;
+            return unevaluated("PDF", args);
         }
     };
     Ok(super::real(density))
@@ -1859,6 +2798,13 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
             _ => None,
         })
         .ok_or_else(|| EvalError::Error("CDF: invalid distribution".to_string()))?;
+
+    if dist_type == "Multinomial" {
+        return match multinomial_cdf(dist, &args[1]) {
+            Some(c) => Ok(super::real(c)),
+            None => unevaluated("CDF", args),
+        };
+    }
 
     let cdf_val = match dist_type {
         "Normal" => {
@@ -1987,11 +2933,95 @@ pub fn builtin_cdf(args: &[Value]) -> Result<Value, EvalError> {
                 (x.floor() - lo + 1.0) / (hi - lo + 1.0)
             }
         }
+        "FRatio" => {
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0);
+            let d = dist.get("D").and_then(super::to_f64).unwrap_or(1.0);
+            if x <= 0.0 {
+                0.0
+            } else {
+                regularized_beta(n * x / (n * x + d), n / 2.0, d / 2.0)
+            }
+        }
+        "Laplace" => {
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let beta = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
+            if x < mu {
+                0.5 * ((x - mu) / beta).exp()
+            } else {
+                1.0 - 0.5 * (-(x - mu) / beta).exp()
+            }
+        }
+        "Logistic" => {
+            let mu = dist.get("Mu").and_then(super::to_f64).unwrap_or(0.0);
+            let s = dist.get("Sigma").and_then(super::to_f64).unwrap_or(1.0);
+            1.0 / (1.0 + (-(x - mu) / s).exp())
+        }
+        "Weibull" => {
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            let beta = dist.get("Beta").and_then(super::to_f64).unwrap_or(1.0);
+            if x < 0.0 {
+                0.0
+            } else {
+                1.0 - (-(x / beta).powf(alpha)).exp()
+            }
+        }
+        "Pareto" => {
+            let k = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
+            let alpha = dist.get("Alpha").and_then(super::to_f64).unwrap_or(1.0);
+            if x < k {
+                0.0
+            } else {
+                1.0 - (k / x).powf(alpha)
+            }
+        }
+        "Geometric" => {
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
+            if x < 1.0 {
+                0.0
+            } else {
+                1.0 - (1.0 - p).powf(x.floor())
+            }
+        }
+        "NegativeBinomial" | "Pascal" => {
+            let r = dist.get("R").and_then(super::to_f64).unwrap_or(1.0);
+            let p = dist.get("P").and_then(super::to_f64).unwrap_or(0.5);
+            if x < 0.0 {
+                0.0
+            } else {
+                regularized_beta(p, r, x.floor() + 1.0)
+            }
+        }
+        "Hypergeometric" => {
+            let n = dist.get("N").and_then(super::to_f64).unwrap_or(1.0);
+            let succ = dist.get("K").and_then(super::to_f64).unwrap_or(1.0);
+            let pop = dist.get("Pop").and_then(super::to_f64).unwrap_or(1.0);
+            let lo = (n - (pop - succ)).max(0.0);
+            let hi = n.min(succ);
+            if x < lo {
+                0.0
+            } else if x >= hi {
+                1.0
+            } else {
+                let mut acc = 0.0;
+                let mut i = lo;
+                while i <= x.floor() {
+                    let ln_pmf =
+                        ln_gamma(succ + 1.0) - ln_gamma(i + 1.0) - ln_gamma(succ - i + 1.0)
+                            + ln_gamma(pop - succ + 1.0)
+                            - ln_gamma(n - i + 1.0)
+                            - ln_gamma(pop - succ - n + i + 1.0)
+                            - ln_gamma(pop + 1.0)
+                            + ln_gamma(n + 1.0)
+                            + ln_gamma(pop - n + 1.0);
+                    acc += ln_pmf.exp();
+                    i += 1.0;
+                }
+                acc.min(1.0)
+            }
+        }
         other => {
-            return Err(EvalError::Error(format!(
-                "CDF: unknown distribution '{}'",
-                other
-            )));
+            let _ = other;
+            return unevaluated("CDF", args);
         }
     };
     Ok(super::real(cdf_val))
@@ -2164,6 +3194,49 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
                 .map(|_| int(lo + (rng.f64() * (hi - lo + 1) as f64).floor() as i64))
                 .collect()
         }
+        "FRatio" => {
+            let num_df = dist.get("N").and_then(super::to_f64).unwrap_or(1.0);
+            let den_df = dist.get("D").and_then(super::to_f64).unwrap_or(1.0);
+            (0..n)
+                .map(|_| {
+                    let g1 = sample_gamma_unit(num_df / 2.0, &mut rng);
+                    let g2 = sample_gamma_unit(den_df / 2.0, &mut rng);
+                    super::real(g1 * den_df / (g2 * num_df))
+                })
+                .collect()
+        }
+        "Laplace" | "Logistic" | "Weibull" | "Pareto" => (0..n)
+            .map(|_| super::real(distribution_quantile_f64(dist, rng.f64()).unwrap_or(0.0)))
+            .collect(),
+        "Geometric" | "NegativeBinomial" | "Pascal" | "Hypergeometric" => (0..n)
+            .map(|_| int(distribution_quantile_f64(dist, rng.f64()).unwrap_or(0.0) as i64))
+            .collect(),
+        "Multinomial" => {
+            let trials = dist.get("N").and_then(super::to_f64).unwrap_or(0.0) as usize;
+            let ps: Vec<f64> = match dist.get("P") {
+                Some(Value::List(l)) => l.iter().filter_map(super::to_f64).collect(),
+                _ => vec![],
+            };
+            (0..n)
+                .map(|_| {
+                    let mut counts = vec![0i64; ps.len()];
+                    for _ in 0..trials {
+                        let u = rng.f64();
+                        let mut acc = 0.0;
+                        let mut chosen = ps.len().saturating_sub(1);
+                        for (i, p) in ps.iter().enumerate() {
+                            acc += p;
+                            if u < acc {
+                                chosen = i;
+                                break;
+                            }
+                        }
+                        counts[chosen] += 1;
+                    }
+                    Value::List(counts.into_iter().map(int).collect())
+                })
+                .collect()
+        }
         other => {
             return Err(EvalError::Error(format!(
                 "RandomVariate: unknown distribution type '{}'",
@@ -2176,6 +3249,310 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
         Ok(samples.into_iter().next().unwrap())
     } else {
         Ok(Value::List(samples))
+    }
+}
+
+// ── InverseCDF / MomentGeneratingFunction / CharacteristicFunction ──────────
+
+/// InverseCDF[dist, q] — q-th quantile of a distribution.
+pub fn builtin_inverse_cdf(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 || as_dist(&args[0]).is_none() {
+        return unevaluated("InverseCDF", args);
+    }
+    builtin_quantile(args)
+}
+
+/// Return a numeric `Value` folding integral results to exact integers.
+fn num_val(f: f64) -> Value {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 {
+        int(f as i64)
+    } else {
+        super::real(f)
+    }
+}
+
+fn b_add(a: Value, b: Value) -> Value {
+    match (super::to_f64(&a), super::to_f64(&b)) {
+        (Some(x), Some(y)) => num_val(x + y),
+        _ => {
+            if super::to_f64(&a) == Some(0.0) {
+                b
+            } else if super::to_f64(&b) == Some(0.0) {
+                a
+            } else {
+                Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![a, b],
+                }
+            }
+        }
+    }
+}
+
+fn b_mul(a: Value, b: Value) -> Value {
+    match (super::to_f64(&a), super::to_f64(&b)) {
+        (Some(x), Some(y)) => num_val(x * y),
+        _ => {
+            if super::to_f64(&a) == Some(0.0) || super::to_f64(&b) == Some(0.0) {
+                num_val(0.0)
+            } else if super::to_f64(&a) == Some(1.0) {
+                b
+            } else if super::to_f64(&b) == Some(1.0) {
+                a
+            } else {
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![a, b],
+                }
+            }
+        }
+    }
+}
+
+fn b_neg(a: Value) -> Value {
+    match super::to_f64(&a) {
+        Some(x) => num_val(-x),
+        None => b_mul(num_val(-1.0), a),
+    }
+}
+
+fn b_pow(a: Value, b: Value) -> Value {
+    if let (Some(x), Some(y)) = (super::to_f64(&a), super::to_f64(&b))
+        && (x >= 0.0 || y.fract() == 0.0)
+    {
+        return super::real(x.powf(y));
+    }
+    Value::Call {
+        head: "Power".to_string(),
+        args: vec![a, b],
+    }
+}
+
+/// MomentGeneratingFunction[dist, t] — M(t) = E[e^{t X}].
+pub fn builtin_moment_generating_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("MomentGeneratingFunction", args);
+    }
+    let dist = match as_dist(&args[0]) {
+        Some(m) => m,
+        None => return unevaluated("MomentGeneratingFunction", args),
+    };
+    let p = |k: &str| dist.get(k).and_then(super::to_f64);
+    let t_val = super::to_f64(&args[1]);
+    let ty = match dist_type_of(dist) {
+        Some(ty) => ty,
+        None => return unevaluated("MomentGeneratingFunction", args),
+    };
+    let t = args[1].clone();
+    let result: Value = match ty {
+        "Normal" => {
+            let mu = p("Mean").unwrap_or(0.0);
+            let sd = p("SD").unwrap_or(1.0);
+            match t_val {
+                Some(tv) => super::real((mu * tv + 0.5 * sd * sd * tv * tv).exp()),
+                None => {
+                    let z = b_add(
+                        b_mul(num_val(mu), t.clone()),
+                        b_mul(num_val(0.5 * sd * sd), b_pow(t.clone(), num_val(2.0))),
+                    );
+                    b_pow(Value::Symbol("E".to_string()), z)
+                }
+            }
+        }
+        "Uniform" => {
+            let lo = p("Min").unwrap_or(0.0);
+            let hi = p("Max").unwrap_or(1.0);
+            match t_val {
+                Some(0.0) => super::real(1.0),
+                Some(tv) => super::real(((tv * hi).exp() - (tv * lo).exp()) / (tv * (hi - lo))),
+                None => {
+                    let numr = b_add(
+                        b_pow(
+                            Value::Symbol("E".to_string()),
+                            b_mul(t.clone(), num_val(hi)),
+                        ),
+                        b_neg(b_pow(
+                            Value::Symbol("E".to_string()),
+                            b_mul(t.clone(), num_val(lo)),
+                        )),
+                    );
+                    let den = b_mul(t.clone(), num_val(hi - lo));
+                    b_mul(numr, b_pow(den, num_val(-1.0)))
+                }
+            }
+        }
+        "Exponential" => {
+            let lambda = p("Lambda").unwrap_or(1.0);
+            match t_val {
+                Some(tv) => super::real(lambda / (lambda - tv)),
+                None => b_mul(
+                    num_val(lambda),
+                    b_pow(b_add(num_val(lambda), b_neg(t.clone())), num_val(-1.0)),
+                ),
+            }
+        }
+        "Poisson" => {
+            let lambda = p("Lambda").unwrap_or(1.0);
+            match t_val {
+                Some(tv) => super::real((lambda * (tv.exp() - 1.0)).exp()),
+                None => {
+                    let inner = b_mul(
+                        num_val(lambda),
+                        b_add(
+                            b_pow(Value::Symbol("E".to_string()), t.clone()),
+                            num_val(-1.0),
+                        ),
+                    );
+                    b_pow(Value::Symbol("E".to_string()), inner)
+                }
+            }
+        }
+        "Binomial" => {
+            let n = p("N").unwrap_or(1.0);
+            let prob = p("P").unwrap_or(0.5);
+            match t_val {
+                Some(tv) => super::real((1.0 - prob + prob * tv.exp()).powf(n)),
+                None => {
+                    let base = b_add(
+                        num_val(1.0 - prob),
+                        b_mul(
+                            num_val(prob),
+                            b_pow(Value::Symbol("E".to_string()), t.clone()),
+                        ),
+                    );
+                    b_pow(base, num_val(n))
+                }
+            }
+        }
+        "Bernoulli" => {
+            let prob = p("P").unwrap_or(0.5);
+            match t_val {
+                Some(tv) => super::real(1.0 - prob + prob * tv.exp()),
+                None => b_add(
+                    num_val(1.0 - prob),
+                    b_mul(
+                        num_val(prob),
+                        b_pow(Value::Symbol("E".to_string()), t.clone()),
+                    ),
+                ),
+            }
+        }
+        _ => return unevaluated("MomentGeneratingFunction", args),
+    };
+    Ok(result)
+}
+
+fn cdiv(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let d = b.0 * b.0 + b.1 * b.1;
+    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+}
+
+fn cpow(a: (f64, f64), n: f64) -> (f64, f64) {
+    let r = (a.0 * a.0 + a.1 * a.1).sqrt();
+    let th = a.1.atan2(a.0);
+    let rn = r.powf(n);
+    (rn * (n * th).cos(), rn * (n * th).sin())
+}
+
+/// CharacteristicFunction[dist, t] — φ(t) = E[e^{i t X}] (numeric `t`).
+pub fn builtin_characteristic_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("CharacteristicFunction", args);
+    }
+    let dist = match as_dist(&args[0]) {
+        Some(m) => m,
+        None => return unevaluated("CharacteristicFunction", args),
+    };
+    let t = match super::to_f64(&args[1]) {
+        Some(t) => t,
+        None => return unevaluated("CharacteristicFunction", args),
+    };
+    let p = |k: &str| dist.get(k).and_then(super::to_f64);
+    let cexp = |re: f64| (re.cos(), re.sin());
+    let (re, im): (f64, f64) = match dist_type_of(dist) {
+        Some("Normal") => {
+            let mu = p("Mean").unwrap_or(0.0);
+            let sd = p("SD").unwrap_or(1.0);
+            let (c, s) = cexp(mu * t);
+            let g = (-0.5 * sd * sd * t * t).exp();
+            (g * c, g * s)
+        }
+        Some("Uniform") => {
+            let lo = p("Min").unwrap_or(0.0);
+            let hi = p("Max").unwrap_or(1.0);
+            if t == 0.0 {
+                (1.0, 0.0)
+            } else {
+                let (c1, s1) = cexp(t * hi);
+                let (c2, s2) = cexp(t * lo);
+                cdiv((c1 - c2, s1 - s2), (-t * (hi - lo), t * (hi - lo)))
+            }
+        }
+        Some("Exponential") => {
+            let lambda = p("Lambda").unwrap_or(1.0);
+            cdiv((lambda, 0.0), (lambda, -t))
+        }
+        Some("Poisson") => {
+            let lambda = p("Lambda").unwrap_or(1.0);
+            let er = (lambda * (t.cos() - 1.0)).exp();
+            let (wr, wi) = cexp(lambda * t.sin());
+            (er * wr, er * wi)
+        }
+        Some("Binomial") => {
+            let n = p("N").unwrap_or(1.0);
+            let prob = p("P").unwrap_or(0.5);
+            let (c, s) = cexp(t);
+            cpow((1.0 - prob + prob * c, prob * s), n)
+        }
+        Some("Bernoulli") => {
+            let prob = p("P").unwrap_or(0.5);
+            let (c, s) = cexp(t);
+            (1.0 - prob + prob * c, prob * s)
+        }
+        _ => return unevaluated("CharacteristicFunction", args),
+    };
+    if im.abs() < 1e-15 {
+        Ok(super::real(re))
+    } else {
+        Ok(Value::Complex { re, im })
+    }
+}
+
+/// DistributionParameterQ[dist] — True iff `dist` is a well-formed distribution.
+pub fn builtin_distribution_parameter_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return unevaluated("DistributionParameterQ", args);
+    }
+    Ok(Value::Bool(distribution_parameter_q(&args[0])))
+}
+
+fn distribution_parameter_q(v: &Value) -> bool {
+    let dist = match v {
+        Value::Assoc(m) if m.contains_key("Distribution") => m,
+        _ => return false,
+    };
+    let pos = |k: &str| dist.get(k).and_then(super::to_f64).is_some_and(|x| x > 0.0);
+    let present = |k: &str| dist.contains_key(k);
+    match dist_type_of(dist) {
+        Some("Normal") => present("Mean") && pos("SD"),
+        Some("Uniform") => present("Min") && present("Max"),
+        Some("Exponential" | "Poisson" | "Geometric") => pos("Lambda") || pos("P"),
+        Some("Bernoulli") => present("P"),
+        Some("Binomial") => pos("N") && present("P"),
+        Some("Gamma" | "Weibull") => pos("Alpha") && pos("Lambda") || (pos("Alpha") && pos("Beta")),
+        Some("ChiSquare") => pos("K"),
+        Some("StudentT") => pos("Nu"),
+        Some("Beta") => pos("Alpha") && pos("Beta"),
+        Some("LogNormal") => pos("Sigma"),
+        Some("Cauchy" | "Laplace") => pos("Scale") || pos("Beta"),
+        Some("Logistic") => pos("Sigma"),
+        Some("Pareto") => pos("K") && pos("Alpha"),
+        Some("FRatio") => pos("N") && pos("D"),
+        Some("NegativeBinomial" | "Pascal") => pos("R") && present("P"),
+        Some("Hypergeometric") => pos("N") && present("K") && pos("Pop"),
+        Some("Multinomial") => pos("N") && present("P"),
+        Some("DiscreteUniform") => present("Min") && present("Max"),
+        _ => false,
     }
 }
 
@@ -2236,9 +3613,47 @@ pub fn register(env: &crate::env::Env) {
         "DiscreteUniformDistribution",
         builtin_discrete_uniform_distribution,
     );
+    register_builtin(env, "FRatioDistribution", builtin_f_ratio_distribution);
+    register_builtin(env, "LaplaceDistribution", builtin_laplace_distribution);
+    register_builtin(env, "LogisticDistribution", builtin_logistic_distribution);
+    register_builtin(env, "WeibullDistribution", builtin_weibull_distribution);
+    register_builtin(env, "ParetoDistribution", builtin_pareto_distribution);
+    register_builtin(env, "GeometricDistribution", builtin_geometric_distribution);
+    register_builtin(
+        env,
+        "NegativeBinomialDistribution",
+        builtin_negative_binomial_distribution,
+    );
+    register_builtin(env, "PascalDistribution", builtin_pascal_distribution);
+    register_builtin(
+        env,
+        "HypergeometricDistribution",
+        builtin_hypergeometric_distribution,
+    );
+    register_builtin(
+        env,
+        "MultinomialDistribution",
+        builtin_multinomial_distribution,
+    );
     // Distribution functions
     register_builtin(env, "PDF", builtin_pdf);
     register_builtin(env, "CDF", builtin_cdf);
+    register_builtin(env, "InverseCDF", builtin_inverse_cdf);
+    register_builtin(
+        env,
+        "MomentGeneratingFunction",
+        builtin_moment_generating_function,
+    );
+    register_builtin(
+        env,
+        "CharacteristicFunction",
+        builtin_characteristic_function,
+    );
+    register_builtin(
+        env,
+        "DistributionParameterQ",
+        builtin_distribution_parameter_q,
+    );
     // Random sampling (`RandomVariate` is owned by `random`, registered later).
 }
 
@@ -2281,6 +3696,16 @@ pub const SYMBOLS: &[&str] = &[
     "LogNormalDistribution",
     "CauchyDistribution",
     "DiscreteUniformDistribution",
+    "FRatioDistribution",
+    "LaplaceDistribution",
+    "LogisticDistribution",
+    "WeibullDistribution",
+    "ParetoDistribution",
+    "GeometricDistribution",
+    "NegativeBinomialDistribution",
+    "PascalDistribution",
+    "HypergeometricDistribution",
+    "MultinomialDistribution",
     // Distribution functions
     "PDF",
     "CDF",
@@ -2296,6 +3721,7 @@ pub const SYMBOLS: &[&str] = &[
     "InverseCDF",
     "MomentGeneratingFunction",
     "CharacteristicFunction",
+    "DistributionParameterQ",
     "BinLists",
     "ExponentialMovingAverage",
     "SmoothHistogram",
@@ -2854,6 +4280,331 @@ mod tests {
             assert_eq!(items.len(), 50);
         } else {
             panic!("Expected List");
+        }
+    }
+
+    // ── Broadened distributions ──────────────────────────────────────────────
+
+    fn rat_val(n: i64, d: i64) -> Value {
+        rational_value(Integer::from(n), Integer::from(d))
+    }
+
+    fn is_unevaluated(r: &Result<Value, EvalError>) -> bool {
+        matches!(r, Err(EvalError::NoMatch { .. }))
+    }
+
+    #[test]
+    fn test_fratio_mean_variance_exact() {
+        let dist = builtin_f_ratio_distribution(&[int_val(5), int_val(10)]).unwrap();
+        // Mean = d/(d-2) = 10/8 = 5/4
+        assert!(approx(&builtin_mean(&[dist.clone()]).unwrap(), 1.25, 1e-10));
+        // Var = 2 d^2 (n+d-2)/(n (d-2)^2 (d-4)) = 65/48
+        assert!(approx(
+            &builtin_variance(&[dist]).unwrap(),
+            65.0 / 48.0,
+            1e-10
+        ));
+    }
+
+    #[test]
+    fn test_fratio_undefined_small_dof() {
+        // d <= 2 => mean undefined; d <= 4 => variance undefined.
+        let dist = builtin_f_ratio_distribution(&[int_val(5), int_val(2)]).unwrap();
+        assert!(is_unevaluated(&builtin_mean(&[dist.clone()])));
+        assert!(is_unevaluated(&builtin_variance(&[dist])));
+    }
+
+    #[test]
+    fn test_fratio_pdf_cdf() {
+        let dist = builtin_f_ratio_distribution(&[int_val(5), int_val(10)]).unwrap();
+        let c = builtin_cdf(&[dist.clone(), real_val(1.0)]).unwrap();
+        assert!(approx(&c, regularized_beta(5.0 / 15.0, 2.5, 5.0), 1e-12));
+        assert!(approx(
+            &builtin_pdf(&[dist, real_val(1.0)]).unwrap(),
+            0.495,
+            5e-3
+        ));
+    }
+
+    #[test]
+    fn test_laplace_pdf_cdf_variance() {
+        let dist = builtin_laplace_distribution(&[int_val(0), int_val(1)]).unwrap();
+        assert!(approx(
+            &builtin_pdf(&[dist.clone(), real_val(0.0)]).unwrap(),
+            0.5,
+            1e-12
+        ));
+        assert!(approx(
+            &builtin_cdf(&[dist.clone(), real_val(0.0)]).unwrap(),
+            0.5,
+            1e-12
+        ));
+        assert!(approx(&builtin_variance(&[dist]).unwrap(), 2.0, 1e-12));
+    }
+
+    #[test]
+    fn test_logistic_pdf_cdf() {
+        let dist = builtin_logistic_distribution(&[int_val(0), int_val(1)]).unwrap();
+        assert!(approx(
+            &builtin_pdf(&[dist.clone(), real_val(0.0)]).unwrap(),
+            0.25,
+            1e-12
+        ));
+        assert!(approx(
+            &builtin_cdf(&[dist.clone(), real_val(0.0)]).unwrap(),
+            0.5,
+            1e-12
+        ));
+        let v = builtin_variance(&[dist]).unwrap();
+        assert!(approx(
+            &v,
+            std::f64::consts::PI * std::f64::consts::PI / 3.0,
+            1e-10
+        ));
+    }
+
+    #[test]
+    fn test_weibull_pdf_cdf() {
+        let dist = builtin_weibull_distribution(&[int_val(2), int_val(1)]).unwrap();
+        // PDF(1) = 2 e^{-1}; CDF(1) = 1 - e^{-1}
+        assert!(approx(
+            &builtin_pdf(&[dist.clone(), real_val(1.0)]).unwrap(),
+            2.0 * (-1.0f64).exp(),
+            1e-10
+        ));
+        assert!(approx(
+            &builtin_cdf(&[dist, real_val(1.0)]).unwrap(),
+            1.0 - (-1.0f64).exp(),
+            1e-10
+        ));
+    }
+
+    #[test]
+    fn test_pareto_mean_cdf_exact() {
+        let dist = builtin_pareto_distribution(&[int_val(1), int_val(3)]).unwrap();
+        // Mean = k α/(α-1) = 3/2
+        assert!(approx(&builtin_mean(&[dist.clone()]).unwrap(), 1.5, 1e-10));
+        // CDF(2) = 1 - (1/2)^3 = 7/8
+        assert!(approx(
+            &builtin_cdf(&[dist, real_val(2.0)]).unwrap(),
+            0.875,
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn test_geometric_mean_variance_exact() {
+        let dist = builtin_geometric_distribution(&[rat_val(1, 2)]).unwrap();
+        assert_eq!(builtin_mean(&[dist.clone()]).unwrap(), int_val(1));
+        assert_eq!(builtin_variance(&[dist.clone()]).unwrap(), int_val(2));
+        // PMF(1) = p = 1/2
+        assert!(approx(
+            &builtin_pdf(&[dist, real_val(1.0)]).unwrap(),
+            0.5,
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn test_negative_binomial_and_pascal() {
+        let dist = builtin_negative_binomial_distribution(&[int_val(2), rat_val(1, 2)]).unwrap();
+        assert_eq!(builtin_mean(&[dist.clone()]).unwrap(), int_val(2));
+        assert_eq!(builtin_variance(&[dist.clone()]).unwrap(), int_val(4));
+        // PMF(0) = p^r = 1/4
+        assert!(approx(
+            &builtin_pdf(&[dist.clone(), real_val(0.0)]).unwrap(),
+            0.25,
+            1e-12
+        ));
+        let pascal = builtin_pascal_distribution(&[int_val(2), rat_val(1, 2)]).unwrap();
+        assert_eq!(builtin_mean(&[pascal]).unwrap(), int_val(2));
+    }
+
+    #[test]
+    fn test_hypergeometric_mean_pmf() {
+        let dist =
+            builtin_hypergeometric_distribution(&[int_val(4), int_val(3), int_val(10)]).unwrap();
+        // Mean = n K/N = 1.2
+        assert!(approx(&builtin_mean(&[dist.clone()]).unwrap(), 1.2, 1e-12));
+        // PMF(2) = C(3,2) C(7,2)/C(10,4) = 0.3
+        assert!(approx(
+            &builtin_pdf(&[dist, real_val(2.0)]).unwrap(),
+            0.3,
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn test_multinomial_pdf_mean_variance() {
+        let dist = builtin_multinomial_distribution(&[
+            int_val(2),
+            list(vec![rat_val(1, 2), rat_val(1, 2)]),
+        ])
+        .unwrap();
+        let arg = list(vec![int_val(1), int_val(1)]);
+        // PMF({1,1}) = 2!/(1!1!) (1/2)(1/2) = 1/2
+        assert!(approx(
+            &builtin_pdf(&[dist.clone(), arg]).unwrap(),
+            0.5,
+            1e-12
+        ));
+        match builtin_mean(&[dist.clone()]).unwrap() {
+            Value::List(v) => {
+                assert_eq!(v.len(), 2);
+                assert!(approx(&v[0], 1.0, 1e-12));
+                assert!(approx(&v[1], 1.0, 1e-12));
+            }
+            _ => panic!("expected list mean"),
+        }
+        match builtin_variance(&[dist]).unwrap() {
+            Value::List(v) => assert!(approx(&v[0], 0.5, 1e-12)),
+            _ => panic!("expected list variance"),
+        }
+    }
+
+    #[test]
+    fn test_quantile_distribution_normal() {
+        let dist = builtin_normal_distribution(&[real_val(0.0), real_val(1.0)]).unwrap();
+        assert!(approx(
+            &builtin_quantile(&[dist.clone(), real_val(0.5)]).unwrap(),
+            0.0,
+            1e-9
+        ));
+        assert!(approx(
+            &builtin_quantile(&[dist, real_val(0.975)]).unwrap(),
+            1.959_963_984_540_054,
+            1e-8
+        ));
+    }
+
+    #[test]
+    fn test_quantile_distribution_uniform() {
+        let dist = builtin_uniform_distribution(&[int_val(0), int_val(2)]).unwrap();
+        assert!(approx(
+            &builtin_quantile(&[dist, real_val(0.25)]).unwrap(),
+            0.5,
+            1e-9
+        ));
+    }
+
+    #[test]
+    fn test_inverse_cdf_exponential() {
+        let dist = builtin_exponential_distribution(&[int_val(1)]).unwrap();
+        assert!(approx(
+            &builtin_inverse_cdf(&[dist, real_val(0.5)]).unwrap(),
+            2.0f64.ln(),
+            1e-9
+        ));
+    }
+
+    #[test]
+    fn test_inverse_cdf_round_trip() {
+        let dist = builtin_gamma_distribution(&[int_val(3), int_val(2)]).unwrap();
+        let x = builtin_inverse_cdf(&[dist.clone(), real_val(0.3)]).unwrap();
+        let back = builtin_cdf(&[dist, x]).unwrap();
+        assert!(approx(&back, 0.3, 1e-9));
+    }
+
+    #[test]
+    fn test_distribution_skewness_kurtosis() {
+        let normal = builtin_normal_distribution(&[real_val(0.0), real_val(1.0)]).unwrap();
+        assert!(approx(
+            &builtin_skewness(&[normal.clone()]).unwrap(),
+            0.0,
+            1e-12
+        ));
+        assert!(approx(&builtin_kurtosis(&[normal]).unwrap(), 3.0, 1e-12));
+
+        let exp = builtin_exponential_distribution(&[int_val(2)]).unwrap();
+        assert!(approx(
+            &builtin_skewness(&[exp.clone()]).unwrap(),
+            2.0,
+            1e-12
+        ));
+        assert!(approx(&builtin_kurtosis(&[exp]).unwrap(), 9.0, 1e-12));
+
+        let uni = builtin_uniform_distribution(&[int_val(0), int_val(1)]).unwrap();
+        assert!(approx(
+            &builtin_skewness(&[uni.clone()]).unwrap(),
+            0.0,
+            1e-12
+        ));
+        assert!(approx(&builtin_kurtosis(&[uni]).unwrap(), 9.0 / 5.0, 1e-12));
+    }
+
+    #[test]
+    fn test_cauchy_mean_unevaluated() {
+        let dist = builtin_cauchy_distribution(&[int_val(0), int_val(1)]).unwrap();
+        assert!(is_unevaluated(&builtin_mean(&[dist.clone()])));
+        assert!(is_unevaluated(&builtin_variance(&[dist.clone()])));
+        assert!(is_unevaluated(&builtin_skewness(&[dist])));
+    }
+
+    #[test]
+    fn test_moment_generating_function() {
+        let exp = builtin_exponential_distribution(&[int_val(1)]).unwrap();
+        // M(0.5) = λ/(λ - t) = 2
+        assert!(approx(
+            &builtin_moment_generating_function(&[exp, real_val(0.5)]).unwrap(),
+            2.0,
+            1e-12
+        ));
+        let normal = builtin_normal_distribution(&[int_val(0), int_val(1)]).unwrap();
+        // M(1) = e^{1/2}
+        assert!(approx(
+            &builtin_moment_generating_function(&[normal, real_val(1.0)]).unwrap(),
+            0.5f64.exp(),
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn test_characteristic_function() {
+        let normal = builtin_normal_distribution(&[int_val(0), int_val(1)]).unwrap();
+        // φ(1) = e^{-1/2}
+        assert!(approx(
+            &builtin_characteristic_function(&[normal, real_val(1.0)]).unwrap(),
+            (-0.5f64).exp(),
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn test_distribution_parameter_q() {
+        let good = builtin_normal_distribution(&[real_val(0.0), real_val(1.0)]).unwrap();
+        assert_eq!(
+            builtin_distribution_parameter_q(&[good]).unwrap(),
+            Value::Bool(true)
+        );
+        let mut bad_map = HashMap::new();
+        bad_map.insert("Distribution".to_string(), Value::Str("Normal".to_string()));
+        bad_map.insert("Mean".to_string(), int_val(0));
+        bad_map.insert("SD".to_string(), int_val(-1));
+        assert_eq!(
+            builtin_distribution_parameter_q(&[Value::Assoc(bad_map)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_distribution_parameter_q(&[int_val(2)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_random_variate_broadened() {
+        let cases = [
+            builtin_f_ratio_distribution(&[int_val(5), int_val(10)]).unwrap(),
+            builtin_laplace_distribution(&[int_val(0), int_val(1)]).unwrap(),
+            builtin_weibull_distribution(&[int_val(2), int_val(1)]).unwrap(),
+            builtin_pareto_distribution(&[int_val(1), int_val(3)]).unwrap(),
+            builtin_geometric_distribution(&[rat_val(1, 2)]).unwrap(),
+        ];
+        for dist in cases {
+            let r = builtin_random_variate(&[dist, int_val(40)]).unwrap();
+            match r {
+                Value::List(items) => assert_eq!(items.len(), 40),
+                _ => panic!("expected list"),
+            }
         }
     }
 }

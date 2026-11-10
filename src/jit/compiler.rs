@@ -58,6 +58,11 @@ struct JitHelpers {
     load_sym: FuncRef,
     store_sym: FuncRef,
     is_truthy: FuncRef,
+    has_error: FuncRef,
+    eval_tree: FuncRef,
+    eval_tree_loop: FuncRef,
+    take_break: FuncRef,
+    take_continue: FuncRef,
 }
 
 impl JitHelpers {
@@ -199,6 +204,23 @@ impl JitHelpers {
                 "jit_is_truthy",
                 ret_sig(&[types::I64, types::I32], types::I8),
             ),
+            has_error: import(builder, "jit_has_error", ret_sig(&[types::I64], types::I8)),
+            eval_tree: import(
+                builder,
+                "jit_eval_tree",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            eval_tree_loop: import(
+                builder,
+                "jit_eval_tree_loop",
+                void_sig(&[types::I64, types::I32, types::I32]),
+            ),
+            take_break: import(builder, "jit_take_break", ret_sig(&[types::I64], types::I8)),
+            take_continue: import(
+                builder,
+                "jit_take_continue",
+                ret_sig(&[types::I64], types::I8),
+            ),
         }
     }
 }
@@ -211,13 +233,11 @@ impl JitHelpers {
 /// Returns `(function_pointer, allocation_size)` on success.
 /// The allocation_size is needed for proper deallocation via `JitModule`.
 pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), JitCompileError> {
-    // These instructions have no dedicated native lowering yet; failing
-    // compilation makes the caller fall back to the bytecode interpreter.
+    // `Break`/`Continue` escape to an enclosing (possibly tree-walk) loop and
+    // have no native lowering yet; failing compilation makes the caller fall
+    // back to the bytecode interpreter.
     for instr in &bc.instructions {
-        if matches!(
-            instr,
-            Instruction::Break | Instruction::Continue | Instruction::EvalTree(..)
-        ) {
+        if matches!(instr, Instruction::Break | Instruction::Continue) {
             return Err(JitCompileError::UnsupportedInstruction(format!(
                 "{instr:?}"
             )));
@@ -267,12 +287,23 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), J
     let mut ctx_arg = builder.block_params(current_block)[0];
     let mut terminated = false; // true → current block has a terminator
 
+    // Shared landing pad taken when a fallible runtime helper records an error.
+    let error_block = builder.create_block();
+    builder.append_block_param(error_block, types::I64);
+
     let mut i = 0;
     while i < bc.instructions.len() {
         // Handle block switching. Blocks are sealed once, in the final pass
         // below (sealing here too would seal them twice and panic).
         if i > 0 && block_starts_set.contains(&i) {
-            current_block = block_map[&i];
+            let target_block = block_map[&i];
+            // If the previous block is not terminated (e.g. it ends in a
+            // value-producing instruction and this label is a fallthrough
+            // target), close it with an explicit jump.
+            if !terminated {
+                builder.ins().jump(target_block, &[ctx_arg]);
+            }
+            current_block = target_block;
             builder.switch_to_block(current_block);
             ctx_arg = builder.block_params(current_block)[0];
             terminated = false;
@@ -356,12 +387,53 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), J
                 continue;
             }
 
+            Instruction::JumpIfBreak(offset) | Instruction::JumpIfContinue(offset) => {
+                let target = jump_target(i, *offset);
+                let target_block = block_map[&target];
+                let fallthrough = block_map[&(i + 1)];
+                let take = if matches!(instr, Instruction::JumpIfBreak(_)) {
+                    helpers.take_break
+                } else {
+                    helpers.take_continue
+                };
+                let call_inst = builder.ins().call(take, &[ctx_arg]);
+                let hit = builder.inst_results(call_inst)[0];
+                let zero = builder.ins().iconst(types::I8, 0);
+                let cond = builder.ins().icmp(IntCC::NotEqual, hit, zero);
+                builder
+                    .ins()
+                    .brif(cond, target_block, &[ctx_arg], fallthrough, &[ctx_arg]);
+                terminated = true;
+                i += 1;
+                continue;
+            }
+
             _ => {}
         }
 
         // ── Non-terminator instructions (accumulate values) ───
         // Each instruction calls the appropriate runtime helper.
         emit_op(&mut builder, instr, ctx_arg, &helpers);
+
+        // Fallible helpers delegate back to the tree-walk evaluator and can
+        // fail; after such a call, bail out to the shared error block if an
+        // error was recorded, so evaluation stops at the first error exactly
+        // like the interpreter's `?` propagation.
+        if is_fallible(instr) {
+            let call_inst = builder.ins().call(helpers.has_error, &[ctx_arg]);
+            let has = builder.inst_results(call_inst)[0];
+            let zero = builder.ins().iconst(types::I8, 0);
+            let cond = builder.ins().icmp(IntCC::NotEqual, has, zero);
+            let cont = builder.create_block();
+            builder.append_block_param(cont, types::I64);
+            builder
+                .ins()
+                .brif(cond, error_block, &[ctx_arg], cont, &[ctx_arg]);
+            builder.switch_to_block(cont);
+            builder.seal_block(cont);
+            ctx_arg = builder.block_params(cont)[0];
+            terminated = false;
+        }
         i += 1;
     }
 
@@ -369,6 +441,11 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), J
     if !terminated {
         builder.ins().return_(&[]);
     }
+
+    // ── Error landing pad: return immediately with the recorded error ──
+    builder.switch_to_block(error_block);
+    builder.ins().return_(&[]);
+    builder.seal_block(error_block);
 
     // ── Seal all blocks and finalize ───────────────────────────────
     for block in block_map.values() {
@@ -469,6 +546,26 @@ fn helper_addresses() -> Vec<(&'static str, usize)> {
             "jit_is_truthy",
             fn_addr!(crate::jit::runtime::jit_is_truthy),
         ),
+        (
+            "jit_has_error",
+            fn_addr!(crate::jit::runtime::jit_has_error),
+        ),
+        (
+            "jit_eval_tree",
+            fn_addr!(crate::jit::runtime::jit_eval_tree),
+        ),
+        (
+            "jit_eval_tree_loop",
+            fn_addr!(crate::jit::runtime::jit_eval_tree_loop),
+        ),
+        (
+            "jit_take_break",
+            fn_addr!(crate::jit::runtime::jit_take_break),
+        ),
+        (
+            "jit_take_continue",
+            fn_addr!(crate::jit::runtime::jit_take_continue),
+        ),
     ]
 }
 
@@ -485,7 +582,10 @@ fn find_block_starts(instructions: &[Instruction]) -> Vec<usize> {
                 let target = jump_target(i, *offset);
                 starts.insert(target);
             }
-            Instruction::JumpIfZero(_, offset) | Instruction::JumpIfNotZero(_, offset) => {
+            Instruction::JumpIfZero(_, offset)
+            | Instruction::JumpIfNotZero(_, offset)
+            | Instruction::JumpIfBreak(offset)
+            | Instruction::JumpIfContinue(offset) => {
                 let target = jump_target(i, *offset);
                 starts.insert(target);
                 if i + 1 < instructions.len() {
@@ -657,13 +757,60 @@ fn emit_op(builder: &mut FunctionBuilder, instr: &Instruction, ctx: ir::Value, h
         | Instruction::Return(_)
         | Instruction::Jump(_)
         | Instruction::JumpIfZero(..)
-        | Instruction::JumpIfNotZero(..) => {
+        | Instruction::JumpIfNotZero(..)
+        | Instruction::JumpIfBreak(..)
+        | Instruction::JumpIfContinue(..) => {
             // Should not be reached — these are handled as terminators.
         }
 
+        // Held expression evaluated by the tree-walk evaluator.
+        Instruction::EvalTree(d, idx) => {
+            let d_v = i32_val(builder, *d as u32);
+            let idx_v = i32_val(builder, *idx);
+            builder.ins().call(h.eval_tree, &[ctx, d_v, idx_v]);
+        }
+        Instruction::EvalTreeLoop(d, idx) => {
+            let d_v = i32_val(builder, *d as u32);
+            let idx_v = i32_val(builder, *idx);
+            builder.ins().call(h.eval_tree_loop, &[ctx, d_v, idx_v]);
+        }
+
         // Not lowered to native helpers; `compile` rejects these up front.
-        Instruction::Break | Instruction::Continue | Instruction::EvalTree(..) => {}
+        Instruction::Break | Instruction::Continue => {}
     }
+}
+
+/// When `true`, the runtime helper for `instr` may record an error on the
+/// context, and the code generator must check [`runtime::jit_has_error`] after
+/// the call.
+fn is_fallible(instr: &Instruction) -> bool {
+    matches!(
+        instr,
+        Instruction::Neg(..)
+            | Instruction::Add(..)
+            | Instruction::Sub(..)
+            | Instruction::Mul(..)
+            | Instruction::Div(..)
+            | Instruction::Pow(..)
+            | Instruction::IntAdd(..)
+            | Instruction::IntSub(..)
+            | Instruction::IntMul(..)
+            | Instruction::RealAdd(..)
+            | Instruction::RealSub(..)
+            | Instruction::RealMul(..)
+            | Instruction::RealDiv(..)
+            | Instruction::Eq(..)
+            | Instruction::Neq(..)
+            | Instruction::Lt(..)
+            | Instruction::Gt(..)
+            | Instruction::Le(..)
+            | Instruction::Ge(..)
+            | Instruction::Apply(..)
+            | Instruction::Call(..)
+            | Instruction::TailCall(..)
+            | Instruction::EvalTree(..)
+            | Instruction::EvalTreeLoop(..)
+    )
 }
 
 /// Emit a call to `jit_binop` with the given opcode.

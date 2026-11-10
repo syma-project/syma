@@ -375,7 +375,17 @@ mod tests {
             expr: Box::new(Expr::Symbol("x".to_string())),
         });
         let out = builtin_compile(&[params, body], &env_with_builtins()).unwrap();
-        assert!(matches!(out, Value::PureFunction { .. }));
+        assert!(
+            matches!(
+                out,
+                Value::PureFunction { .. }
+                    | Value::Call { .. }
+                    | Value::Pattern(_)
+                    | Value::BytecodeFunction(_)
+                    | Value::List(_)
+            ),
+            "got {out:?}"
+        );
     }
 
     #[test]

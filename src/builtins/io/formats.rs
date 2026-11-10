@@ -33,19 +33,45 @@ pub enum Format {
     Text,
     WL,
     JSON,
+    RawJson,
     NB,
     CSV,
     TSV,
     Table,
+    List,
+    Lines,
+    Words,
     HTML,
+    XML,
     PNG,
     SVG,
+    Binary,
 }
 
 impl Format {
     /// Returns `true` for formats that are stored as binary (not UTF-8 text).
     pub fn is_binary(&self) -> bool {
-        matches!(self, Format::PNG)
+        matches!(self, Format::PNG | Format::Binary)
+    }
+}
+
+/// Options controlling text import (applied on a line basis, before parsing).
+#[derive(Debug, Clone, Default)]
+pub struct ImportOptions {
+    /// Number of leading lines to discard before parsing.
+    pub skip_lines: usize,
+    /// Number of leading lines treated as a header and discarded.
+    pub header_lines: usize,
+}
+
+impl ImportOptions {
+    /// Drop `SkipLines` then `HeaderLines` from the front of `text`.
+    fn apply(&self, text: &str) -> String {
+        let drop = self.skip_lines + self.header_lines;
+        if drop == 0 {
+            return text.to_string();
+        }
+        text.split_inclusive('\n').skip(drop).collect()
     }
 }
 
@@ -67,16 +93,22 @@ fn normalise(name: &str) -> String {
 /// Parse a format name string into a `Format` (case-insensitive).
 fn format_from_name(name: &str) -> Option<Format> {
     match normalise(name).as_str() {
-        "TEXT" => Some(Format::Text),
+        "TEXT" | "STRING" => Some(Format::Text),
         "WL" | "M" | "WOLFRAM" => Some(Format::WL),
         "JSON" => Some(Format::JSON),
+        "RAWJSON" => Some(Format::RawJson),
         "NB" | "NOTEBOOK" => Some(Format::NB),
         "CSV" => Some(Format::CSV),
         "TSV" => Some(Format::TSV),
         "TABLE" | "DAT" => Some(Format::Table),
+        "LIST" => Some(Format::List),
+        "LINES" => Some(Format::Lines),
+        "WORDS" => Some(Format::Words),
         "HTML" | "HTM" => Some(Format::HTML),
+        "XML" => Some(Format::XML),
         "PNG" => Some(Format::PNG),
         "SVG" => Some(Format::SVG),
+        "BINARY" | "BYTE" | "BYTES" => Some(Format::Binary),
         _ => None,
     }
 }
@@ -94,9 +126,14 @@ fn format_from_extension(path: &str) -> Option<Format> {
         "csv" => Some(Format::CSV),
         "tsv" => Some(Format::TSV),
         "dat" | "data" | "table" => Some(Format::Table),
+        "list" => Some(Format::List),
+        "lines" => Some(Format::Lines),
+        "words" => Some(Format::Words),
         "html" | "htm" => Some(Format::HTML),
+        "xml" => Some(Format::XML),
         "png" => Some(Format::PNG),
         "svg" => Some(Format::SVG),
+        "bin" | "binary" => Some(Format::Binary),
         "txt" | "text" => Some(Format::Text),
         _ => None,
     }
@@ -284,6 +321,397 @@ fn export_table(value: &Value) -> Result<String, EvalError> {
     Ok(out)
 }
 
+/// Parse a whitespace token into a number when possible, else keep it a string.
+fn parse_scalar(s: &str) -> Value {
+    if let Ok(i) = s.parse::<rug::Integer>() {
+        return Value::Integer(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Value::Real(rug::Float::with_val(crate::value::DEFAULT_PRECISION, f));
+    }
+    Value::Str(s.to_string())
+}
+
+/// `"List"` import: like `Table` but numeric tokens become numbers.
+fn import_list(text: &str) -> Result<Value, EvalError> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        rows.push(Value::List(
+            trimmed.split_whitespace().map(parse_scalar).collect(),
+        ));
+    }
+    Ok(Value::List(rows))
+}
+
+// ── Lines / Words ────────────────────────────────────────────────────────────
+
+fn import_lines(text: &str) -> Result<Value, EvalError> {
+    Ok(Value::List(
+        text.lines()
+            .map(|s| Value::Str(s.trim_end_matches('\r').to_string()))
+            .collect(),
+    ))
+}
+
+fn export_lines(value: &Value) -> Result<String, EvalError> {
+    let mut out = match value {
+        Value::Str(s) => s.clone(),
+        Value::List(items) => items
+            .iter()
+            .map(value_to_csv_field)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    };
+    out.push('\n');
+    Ok(out)
+}
+
+fn import_words(text: &str) -> Result<Value, EvalError> {
+    Ok(Value::List(
+        text.split_whitespace()
+            .map(|s| Value::Str(s.to_string()))
+            .collect(),
+    ))
+}
+
+fn export_words(value: &Value) -> Result<String, EvalError> {
+    let mut out = match value {
+        Value::Str(s) => s.clone(),
+        Value::List(items) => items
+            .iter()
+            .map(value_to_csv_field)
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    };
+    out.push('\n');
+    Ok(out)
+}
+
+// ── Binary ───────────────────────────────────────────────────────────────────
+
+fn import_binary(data: &[u8]) -> Value {
+    Value::List(
+        data.iter()
+            .map(|b| Value::Integer(rug::Integer::from(*b)))
+            .collect(),
+    )
+}
+
+pub fn export_binary(value: &Value) -> Result<Vec<u8>, EvalError> {
+    match value {
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for b in items {
+                match b {
+                    Value::Integer(n) => out.push(n.to_u8().unwrap_or(0)),
+                    Value::Str(s) => out.extend_from_slice(s.as_bytes()),
+                    other => {
+                        return Err(EvalError::Error(format!(
+                            "Cannot export {} as Binary: expected integer byte values",
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Value::Str(s) => Ok(s.as_bytes().to_vec()),
+        Value::Integer(n) => Ok(vec![n.to_u8().unwrap_or(0)]),
+        other => Err(EvalError::Error(format!(
+            "Cannot export {} as Binary",
+            other.type_name()
+        ))),
+    }
+}
+
+// ── XML (basic) ──────────────────────────────────────────────────────────────
+
+/// Minimal XML parser producing `XMLElement["tag", {attrs}, {children}]` trees.
+struct XmlParser<'a> {
+    src: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> XmlParser<'a> {
+    fn new(s: &'a str) -> Self {
+        Self {
+            src: s.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.src.get(self.pos).copied()
+    }
+
+    fn starts_with(&self, pat: &str) -> bool {
+        self.src[self.pos..].starts_with(pat.as_bytes())
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.pos += 1;
+        }
+    }
+
+    /// Skip whitespace, comments, processing instructions and DOCTYPE.
+    fn skip_misc(&mut self) {
+        loop {
+            self.skip_ws();
+            if self.starts_with("<!--") {
+                self.pos += 4;
+                while self.pos < self.src.len() && !self.starts_with("-->") {
+                    self.pos += 1;
+                }
+                self.pos = (self.pos + 3).min(self.src.len());
+            } else if self.starts_with("<?") {
+                self.pos += 2;
+                while self.pos < self.src.len() && !self.starts_with("?>") {
+                    self.pos += 1;
+                }
+                self.pos = (self.pos + 2).min(self.src.len());
+            } else if self.starts_with("<!") {
+                while self.pos < self.src.len() && self.peek() != Some(b'>') {
+                    self.pos += 1;
+                }
+                self.pos = (self.pos + 1).min(self.src.len());
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn read_name(&mut self) -> String {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b':' | b'.') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&self.src[start..self.pos]).into_owned()
+    }
+
+    fn parse_attrs(&mut self) -> Vec<Value> {
+        let mut attrs = Vec::new();
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'/') | Some(b'>') | None => break,
+                _ => {
+                    let name = self.read_name();
+                    if name.is_empty() {
+                        self.pos += 1;
+                        continue;
+                    }
+                    self.skip_ws();
+                    let value = if self.peek() == Some(b'=') {
+                        self.pos += 1;
+                        self.skip_ws();
+                        self.read_quoted()
+                    } else {
+                        String::new()
+                    };
+                    attrs.push(Value::Rule {
+                        lhs: Box::new(Value::Str(name)),
+                        rhs: Box::new(Value::Str(value)),
+                        delayed: false,
+                    });
+                }
+            }
+        }
+        attrs
+    }
+
+    fn read_quoted(&mut self) -> String {
+        let quote = match self.peek() {
+            Some(q @ (b'"' | b'\'')) => {
+                self.pos += 1;
+                q
+            }
+            _ => return String::new(),
+        };
+        let mut out = String::new();
+        while let Some(c) = self.peek() {
+            if c == quote {
+                self.pos += 1;
+                break;
+            }
+            if c == b'&' {
+                out.push_str(&self.read_entity());
+            } else {
+                let start = self.pos;
+                self.pos += 1;
+                out.push_str(&String::from_utf8_lossy(&self.src[start..self.pos]));
+            }
+        }
+        out
+    }
+
+    fn read_entity(&mut self) -> String {
+        let start = self.pos;
+        self.pos += 1; // '&'
+        while self.pos < self.src.len() && self.peek() != Some(b';') && self.pos - start < 12 {
+            self.pos += 1;
+        }
+        if self.peek() == Some(b';') {
+            self.pos += 1;
+        }
+        let entity =
+            String::from_utf8_lossy(&self.src[start + 1..self.pos.saturating_sub(1)]).into_owned();
+        decode_entity(&entity)
+    }
+
+    fn parse_element(&mut self) -> Result<Value, EvalError> {
+        // Expect '<'
+        if self.peek() != Some(b'<') {
+            return Err(EvalError::Error("XML: expected element".to_string()));
+        }
+        self.pos += 1;
+        let tag = self.read_name();
+        let attrs = self.parse_attrs();
+        self.skip_ws();
+        let mut children: Vec<Value> = Vec::new();
+        if self.peek() == Some(b'/') {
+            // self-closing
+            self.pos += 1;
+            if self.peek() == Some(b'>') {
+                self.pos += 1;
+            }
+        } else {
+            if self.peek() == Some(b'>') {
+                self.pos += 1;
+            }
+            // Parse content until the matching close tag.
+            loop {
+                if self.pos >= self.src.len() {
+                    break;
+                }
+                if self.starts_with("</") {
+                    self.pos += 2;
+                    let _close = self.read_name();
+                    self.skip_ws();
+                    if self.peek() == Some(b'>') {
+                        self.pos += 1;
+                    }
+                    break;
+                }
+                if self.starts_with("<!--") || self.starts_with("<?") || self.starts_with("<!") {
+                    self.skip_misc();
+                    continue;
+                }
+                if self.peek() == Some(b'<') {
+                    children.push(self.parse_element()?);
+                } else {
+                    children.push(self.read_text());
+                }
+            }
+        }
+        Ok(Value::Call {
+            head: "XMLElement".to_string(),
+            args: vec![Value::Str(tag), Value::List(attrs), Value::List(children)],
+        })
+    }
+
+    fn read_text(&mut self) -> Value {
+        let mut out = String::new();
+        while let Some(c) = self.peek() {
+            if c == b'<' {
+                break;
+            }
+            if c == b'&' {
+                out.push_str(&self.read_entity());
+            } else {
+                let start = self.pos;
+                self.pos += 1;
+                out.push_str(&String::from_utf8_lossy(&self.src[start..self.pos]));
+            }
+        }
+        Value::Str(out.trim().to_string())
+    }
+}
+
+fn import_xml(text: &str) -> Result<Value, EvalError> {
+    let mut parser = XmlParser::new(text);
+    parser.skip_misc();
+    if parser.peek() != Some(b'<') {
+        return Ok(Value::Str(text.to_string()));
+    }
+    parser.parse_element()
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn serialize_xml(value: &Value, out: &mut String) {
+    match value {
+        Value::Call { head, args } if head == "XMLElement" && !args.is_empty() => {
+            let tag = match &args[0] {
+                Value::Str(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.push('<');
+            out.push_str(&tag);
+            if let Some(Value::List(attrs)) = args.get(1) {
+                for attr in attrs {
+                    if let Value::Rule { lhs, rhs, .. } = attr {
+                        out.push(' ');
+                        out.push_str(&xml_escape(lhs.to_string().trim_matches('"')));
+                        out.push_str("=\"");
+                        out.push_str(&xml_escape(rhs.to_string().trim_matches('"')));
+                        out.push('"');
+                    }
+                }
+            }
+            let children = args.get(2);
+            let empty = matches!(children, Some(Value::List(c)) if c.is_empty());
+            if empty {
+                out.push_str("/>");
+            } else {
+                out.push('>');
+                if let Some(Value::List(children)) = children {
+                    for child in children {
+                        serialize_xml(child, out);
+                    }
+                }
+                out.push_str("</");
+                out.push_str(&tag);
+                out.push('>');
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                serialize_xml(item, out);
+            }
+        }
+        Value::Str(s) => out.push_str(&xml_escape(s)),
+        other => out.push_str(&xml_escape(&other.to_string())),
+    }
+}
+
+fn export_xml(value: &Value) -> Result<String, EvalError> {
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        Value::Call { head, .. } if head == "XMLElement" => {
+            let mut out = String::new();
+            serialize_xml(value, &mut out);
+            Ok(out)
+        }
+        other => Ok(other.to_string()),
+    }
+}
+
 // ── HTML ─────────────────────────────────────────────────────────────────────
 
 fn decode_entity(entity: &str) -> String {
@@ -432,9 +860,27 @@ fn export_svg(value: &Value) -> Result<String, EvalError> {
 /// Import from a string of data using the given format.
 /// Returns an error for binary formats (PNG).
 pub fn format_import_text(format: &Format, text: &str) -> Result<Value, EvalError> {
+    format_import_text_opts(format, text, &ImportOptions::default())
+}
+
+/// Import from a string of data using the given format and line options.
+pub fn format_import_text_opts(
+    format: &Format,
+    text: &str,
+    opts: &ImportOptions,
+) -> Result<Value, EvalError> {
+    // `Binary` and `XML` are handled on the raw bytes/text, everything else
+    // gets the line-based `SkipLines`/`HeaderLines` treatment first.
+    match format {
+        Format::Binary => return Ok(import_binary(text.as_bytes())),
+        Format::XML => return import_xml(text),
+        _ => {}
+    }
+    let text = opts.apply(text);
+    let text = text.as_str();
     match format {
         Format::Text | Format::WL => Ok(Value::Str(text.to_string())),
-        Format::JSON => crate::ffi::marshal::json_to_value(text)
+        Format::JSON | Format::RawJson => crate::ffi::marshal::json_to_value(text)
             .map_err(|e| EvalError::Error(format!("Import JSON error: {}", e))),
         Format::NB => super::nb::notebook_to_code(text)
             .map(Value::Str)
@@ -442,8 +888,12 @@ pub fn format_import_text(format: &Format, text: &str) -> Result<Value, EvalErro
         Format::CSV => import_csv(text),
         Format::TSV => import_tsv(text),
         Format::Table => import_table(text),
+        Format::List => import_list(text),
+        Format::Lines => import_lines(text),
+        Format::Words => import_words(text),
         Format::HTML => import_html(text),
         Format::SVG => Ok(Value::Str(text.to_string())),
+        Format::Binary | Format::XML => unreachable!(),
         Format::PNG => Err(EvalError::Error(
             "Cannot import PNG from a string source; use Import[path] instead".to_string(),
         )),
@@ -453,12 +903,22 @@ pub fn format_import_text(format: &Format, text: &str) -> Result<Value, EvalErro
 /// Import from binary data using the given format.
 /// For non-binary formats, decodes as UTF-8 and delegates to `format_import_text`.
 pub fn format_import_binary(format: &Format, data: &[u8]) -> Result<Value, EvalError> {
+    format_import_binary_opts(format, data, &ImportOptions::default())
+}
+
+/// Import from binary data with line options applied to text formats.
+pub fn format_import_binary_opts(
+    format: &Format,
+    data: &[u8],
+    opts: &ImportOptions,
+) -> Result<Value, EvalError> {
     match format {
         Format::PNG => import_png(data),
+        Format::Binary => Ok(import_binary(data)),
         _ => {
             let text = std::str::from_utf8(data)
                 .map_err(|e| EvalError::Error(format!("File is not valid UTF-8: {}", e)))?;
-            format_import_text(format, text)
+            format_import_text_opts(format, text, opts)
         }
     }
 }
@@ -468,18 +928,26 @@ pub fn format_import_binary(format: &Format, data: &[u8]) -> Result<Value, EvalE
 /// Export a value to the given format.
 pub fn format_export(format: &Format, value: &Value) -> Result<ExportOutput, EvalError> {
     match format {
-        Format::JSON => {
+        Format::JSON | Format::RawJson => {
             let jv = crate::ffi::marshal::value_to_json(value)
                 .map_err(|e| EvalError::Error(format!("Export JSON error: {}", e)))?;
-            serde_json::to_string_pretty(&jv)
-                .map(ExportOutput::Text)
-                .map_err(|e| EvalError::Error(format!("Export JSON serialization: {}", e)))
+            let s = if *format == Format::RawJson {
+                serde_json::to_string(&jv)
+            } else {
+                serde_json::to_string_pretty(&jv)
+            }
+            .map_err(|e| EvalError::Error(format!("Export JSON serialization: {}", e)))?;
+            Ok(ExportOutput::Text(s))
         }
         Format::CSV => export_csv(value).map(ExportOutput::Text),
         Format::TSV => export_tsv(value).map(ExportOutput::Text),
-        Format::Table => export_table(value).map(ExportOutput::Text),
+        Format::Table | Format::List => export_table(value).map(ExportOutput::Text),
+        Format::Lines => export_lines(value).map(ExportOutput::Text),
+        Format::Words => export_words(value).map(ExportOutput::Text),
+        Format::XML => export_xml(value).map(ExportOutput::Text),
         Format::SVG => export_svg(value).map(ExportOutput::Text),
         Format::PNG => export_png(value).map(ExportOutput::Binary),
+        Format::Binary => export_binary(value).map(ExportOutput::Binary),
         Format::Text | Format::WL => {
             let s = match value {
                 Value::Str(s) => s.clone(),

@@ -241,7 +241,7 @@ fn cmp_seq(x: &[Value], y: &[Value]) -> Ordering {
 ///
 /// Returns `Ordering::Less` when `a` comes before `b`. This is antisymmetric:
 /// `canonical_cmp(a, b) == canonical_cmp(b, a).reverse()`.
-fn canonical_cmp(a: &Value, b: &Value) -> Ordering {
+pub(crate) fn canonical_cmp(a: &Value, b: &Value) -> Ordering {
     if let Value::Formatted { value, .. } = a {
         return canonical_cmp(value, b);
     }

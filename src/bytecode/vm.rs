@@ -46,6 +46,7 @@ pub fn execute_bytecode(
         args,
         env: &local,
         instr_count: 0,
+        ctrl: 0,
     };
     // `Return[expr]` raises `EvalError::Return`; at a function boundary it must
     // yield `expr` rather than escape to the caller (matching the tree-walk
@@ -66,7 +67,13 @@ struct VmState<'a> {
     args: &'a [Value],
     env: &'a Env,
     instr_count: u64,
+    /// Pending loop control captured by `EvalTreeLoop` (0 none, 1 break,
+    /// 2 continue). Consumed by `JumpIfBreak`/`JumpIfContinue`.
+    ctrl: u8,
 }
+
+const CTRL_BREAK: u8 = 1;
+const CTRL_CONTINUE: u8 = 2;
 
 impl VmState<'_> {
     fn execute_loop(&mut self) -> Result<Value, EvalError> {
@@ -122,13 +129,11 @@ impl VmState<'_> {
                         self.builtin2("Times", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Div(d, a, b) => {
-                    let inv = self.builtin2(
-                        "Power",
-                        &self.regs[*b as usize],
-                        &Value::Integer((-1).into()),
-                    )?;
+                    // Use the `Divide` builtin so symbolic/degenerate cases
+                    // (e.g. `1/0` → `ComplexInfinity`) match the tree-walker
+                    // rather than being recomputed as `Times[a, Power[b, -1]]`.
                     self.regs[*d as usize] =
-                        self.builtin2("Times", &self.regs[*a as usize], &inv)?;
+                        self.builtin2("Divide", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Pow(d, a, b) => {
                     self.regs[*d as usize] =
@@ -198,19 +203,10 @@ impl VmState<'_> {
                     )?;
                 }
                 Instruction::RealDiv(d, a, b) => {
-                    let av = &self.regs[*a as usize];
-                    let bv = &self.regs[*b as usize];
-                    match (av, bv) {
-                        (Value::Real(af), Value::Real(bf)) => {
-                            let mut r = af.clone();
-                            r /= bf.to_f64();
-                            self.regs[*d as usize] = Value::Real(r);
-                        }
-                        _ => {
-                            let inv = self.builtin2("Power", bv, &Value::Integer((-1).into()))?;
-                            self.regs[*d as usize] = self.builtin2("Times", av, &inv)?;
-                        }
-                    }
+                    // Delegate to `Divide` for the same reason as `Div`:
+                    // `1.0/0.0` must yield `ComplexInfinity`.
+                    self.regs[*d as usize] =
+                        self.builtin2("Divide", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
 
                 // Comparison
@@ -329,6 +325,25 @@ impl VmState<'_> {
                     };
                     self.regs[*d as usize] = eval::eval(&expr, self.env)?;
                 }
+                Instruction::EvalTreeLoop(d, idx) => {
+                    let expr = match self.constants.get(*idx as usize) {
+                        Some(Value::Pattern(e)) => e.clone(),
+                        Some(other) => crate::eval::table::value_to_expr(other),
+                        None => crate::ast::Expr::Null,
+                    };
+                    match eval::eval(&expr, self.env) {
+                        Ok(v) => self.regs[*d as usize] = v,
+                        Err(EvalError::Break) => {
+                            self.ctrl = CTRL_BREAK;
+                            self.regs[*d as usize] = Value::Null;
+                        }
+                        Err(EvalError::Continue) => {
+                            self.ctrl = CTRL_CONTINUE;
+                            self.regs[*d as usize] = Value::Null;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
 
                 // Control flow
                 Instruction::Jump(offset) => {
@@ -341,6 +356,18 @@ impl VmState<'_> {
                 }
                 Instruction::JumpIfNotZero(r, offset) => {
                     if self.regs[*r as usize].is_truthy() {
+                        self.pc = signed_offset(self.pc, *offset);
+                    }
+                }
+                Instruction::JumpIfBreak(offset) => {
+                    if self.ctrl & CTRL_BREAK != 0 {
+                        self.ctrl = 0;
+                        self.pc = signed_offset(self.pc, *offset);
+                    }
+                }
+                Instruction::JumpIfContinue(offset) => {
+                    if self.ctrl & CTRL_CONTINUE != 0 {
+                        self.ctrl = 0;
                         self.pc = signed_offset(self.pc, *offset);
                     }
                 }
@@ -491,7 +518,12 @@ fn validate_bytecode_regs(bc: &CompiledBytecode) -> Result<(), EvalError> {
 /// Return the maximum register index referenced by an instruction.
 fn max_reg_index(instr: &Instruction) -> usize {
     match instr {
-        Instruction::Halt | Instruction::Break | Instruction::Continue | Instruction::Jump(_) => 0,
+        Instruction::Halt
+        | Instruction::Break
+        | Instruction::Continue
+        | Instruction::Jump(_)
+        | Instruction::JumpIfBreak(_)
+        | Instruction::JumpIfContinue(_) => 0,
 
         // 1 register
         Instruction::LoadNull(d) | Instruction::LoadTrue(d) | Instruction::LoadFalse(d) => {
@@ -543,7 +575,8 @@ fn max_reg_index(instr: &Instruction) -> usize {
         Instruction::LoadConst(d, _)
         | Instruction::LoadArg(d, _)
         | Instruction::LoadSym(d, _)
-        | Instruction::EvalTree(d, _) => *d as usize,
+        | Instruction::EvalTree(d, _)
+        | Instruction::EvalTreeLoop(d, _) => *d as usize,
 
         // MakeSeq: dest register only
         Instruction::MakeSeq(d, _) => *d as usize,
@@ -1139,5 +1172,108 @@ mod diff_tests {
         diff("Or[x > 0, y > 0]", &[("x", i(-1)), ("y", i(1))]);
         diff("And[x > 0, First[{}]]", &[("x", i(-1))]);
         diff("Or[x > 0, First[{}]]", &[("x", i(1))]);
+    }
+
+    // ── Broader coverage: loops with control flow ──────────────────────────
+
+    fn list(xs: &[i64]) -> Value {
+        Value::List(xs.iter().map(|&n| Value::Integer(n.into())).collect())
+    }
+
+    #[test]
+    fn diff_break_continue_in_loops() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff(
+            "s = 0; Do[(If[k > 3, Break[]]; s = s + k), {k, 1, x}]; s",
+            &[("x", i(10))],
+        );
+        diff(
+            "s = 0; Do[(If[Mod[k, 2] == 0, Continue[]]; s = s + k), {k, 1, x}]; s",
+            &[("x", i(6))],
+        );
+        diff(
+            "s = 0; For[i = 1, i <= x, i++, s = s + i]; s",
+            &[("x", i(4))],
+        );
+        diff("s = 0; While[s < x, s = s + 1]; s", &[("x", i(6))]);
+    }
+
+    #[test]
+    fn diff_nested_loops_control() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff(
+            "s = 0; Do[Do[(If[j > i, Break[]]; s = s + 1), {j, 1, x}], {i, 1, x}]; s",
+            &[("x", i(4))],
+        );
+    }
+
+    #[test]
+    fn diff_break_escapes_delegated_subtree() {
+        // A `Break`/`Continue` inside a delegated special form must still be
+        // caught by the enclosing compiled loop.
+        let i = |n: i64| Value::Integer(n.into());
+        diff(
+            "s = 0; While[s < x, Module[{}, If[s == 2, Break[]]; s = s + 1]]; s",
+            &[("x", i(6))],
+        );
+        diff(
+            "s = 0; Do[Module[{}, If[Mod[k, 2] == 0, Continue[]]; s = s + k], {k, 1, x}]; s",
+            &[("x", i(6))],
+        );
+        diff(
+            "s = 0; Do[Catch[If[k == 3, Break[]]; s = s + k], {k, 1, x}]; s",
+            &[("x", i(6))],
+        );
+    }
+
+    #[test]
+    fn diff_delegated_special_forms() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("Module[{y = x + 1}, y * 2]", &[("x", i(5))]);
+        diff("Block[{y}, y = x + 1; y * 2]", &[("x", i(5))]);
+        diff("With[{y = x + 1}, y * 2]", &[("x", i(5))]);
+        diff("Table[i + x, {i, 3}]", &[("x", i(2))]);
+        diff("Sum[k + x, {k, 1, 4}]", &[("x", i(1))]);
+        diff("Product[k, {k, 1, x}]", &[("x", i(5))]);
+        diff("Module[{}, If[x > 0, Return[x]]; 0]", &[("x", i(7))]);
+    }
+
+    #[test]
+    fn diff_functional_and_string_ops() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("Map[Function[{y}, y + x], {1, 2, 3}]", &[("x", i(10))]);
+        diff("Apply[Plus, {x, 1, 2}]", &[("x", i(10))]);
+        diff("Select[{1, 2, 3, 4}, # > x &]", &[("x", i(2))]);
+        diff("Fold[Plus, x, {1, 2, 3}]", &[("x", i(0))]);
+        diff("Nest[Function[{y}, y + x], 0, 3]", &[("x", i(2))]);
+        diff("(Function[{y}, x + y])[10]", &[("x", i(5))]);
+        diff(
+            "StringJoin[\"a\", x, \"b\"]",
+            &[("x", Value::Str("X".into()))],
+        );
+        diff("ToUpperCase[x]", &[("x", Value::Str("ab".into()))]);
+        diff("Part[x, 2]", &[("x", list(&[1, 2, 3]))]);
+        diff("Take[x, 2]", &[("x", list(&[1, 2, 3]))]);
+    }
+
+    #[test]
+    fn diff_error_paths() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("First[{}]", &[]);
+        diff("Part[{}, 1]", &[]);
+        diff("1/0", &[]);
+        diff("1.0/0.0", &[]);
+        diff("Catch[Throw[\"boom\"]]", &[]);
+        diff("Catch[Throw[x, \"t\"], \"t\"]", &[("x", i(5))]);
+    }
+
+    #[test]
+    fn diff_recursion() {
+        let i = |n: i64| Value::Integer(n.into());
+        // Recursion via a global definition set up inside the body.
+        diff(
+            "f = Function[{n}, If[n <= 1, 1, n * f[n - 1]]]; f[x]",
+            &[("x", i(6))],
+        );
     }
 }

@@ -45,6 +45,19 @@ impl Parser {
         self.tokens.get(self.pos).map(|t| t.span.clone())
     }
 
+    /// The token `offset` positions ahead of the cursor (Eof past the end).
+    fn peek_at(&self, offset: usize) -> &Token {
+        self.tokens
+            .get(self.pos + offset)
+            .map(|t| &t.token)
+            .unwrap_or(&Token::Eof)
+    }
+
+    /// True when the cursor sits on the `;;` span operator.
+    fn at_span_op(&self) -> bool {
+        self.at(&Token::Semicolon) && self.peek_at(1) == &Token::Semicolon
+    }
+
     fn advance(&mut self) -> Token {
         let tok = self
             .tokens
@@ -688,7 +701,7 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         self.skip_newlines();
-        let lhs = self.parse_put_expr()?;
+        let lhs = self.parse_span_expr()?;
         // Check for assignment-like operators at the lowest precedence level.
         let token = self.peek().clone();
         match token {
@@ -798,6 +811,39 @@ impl Parser {
             }
             _ => Ok(lhs),
         }
+    }
+
+    /// Parse the `Span` operator (`a;;b`, `a;;b;;c`), which desugars to
+    /// `Span[…]`. It binds looser than `>>`/`//`/`@` but tighter than
+    /// assignment, and either bound may be omitted (`a;;`, `;;b`) to mean
+    /// `All`.
+    fn parse_span_expr(&mut self) -> Result<Expr, ParseError> {
+        let first = self.parse_put_expr()?;
+        if !self.at_span_op() {
+            return Ok(first);
+        }
+        self.advance(); // first `;`
+        self.advance(); // second `;`
+        let end = if self.at(&Token::RBracket)
+            || self.at(&Token::RBrace)
+            || self.at(&Token::Comma)
+            || self.at(&Token::Semicolon)
+            || self.at(&Token::Eof)
+        {
+            Expr::Symbol("All".to_string())
+        } else {
+            self.parse_put_expr()?
+        };
+        let mut args = vec![first, end];
+        if self.at_span_op() {
+            self.advance();
+            self.advance();
+            args.push(self.parse_put_expr()?);
+        }
+        Ok(Expr::Call {
+            head: Box::new(Expr::Symbol("Span".to_string())),
+            args,
+        })
     }
 
     /// Put infix `expr >> file`, desugared to `Put[expr, file]`.
@@ -2960,8 +3006,13 @@ impl Parser {
     /// follows, the subsequent expressions are grouped into an `Expr::Sequence`.
     fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut args = Vec::new();
-        // Parse first argument
-        let first = self.parse_pattern()?;
+        // Parse first argument. A leading `;;` (e.g. `f[;;3]`) is an open-ended
+        // span whose lower bound is `All`.
+        let first = if self.at_span_op() {
+            Expr::Symbol("All".to_string())
+        } else {
+            self.parse_pattern()?
+        };
         args.push(self.wrap_seq_or_single(first)?);
         // Skip newlines before checking for comma (args can span multiple lines)
         self.skip_newlines();
@@ -2978,7 +3029,26 @@ impl Parser {
     /// If current token is `;`, collect following `;`-separated expressions
     /// into a Sequence. Otherwise return the expression as-is.
     fn wrap_seq_or_single(&mut self, expr: Expr) -> Result<Expr, ParseError> {
-        if self.at(&Token::Semicolon) {
+        if self.at_span_op() {
+            // `a;;b` (optionally `a;;b;;c`) is the Span operator.
+            self.advance(); // first `;`
+            self.advance(); // second `;`
+            let end = if self.at(&Token::RBracket) || self.at(&Token::Comma) {
+                Expr::Symbol("All".to_string())
+            } else {
+                self.parse_pattern()?
+            };
+            let mut span_args = vec![expr, end];
+            if self.at_span_op() {
+                self.advance();
+                self.advance();
+                span_args.push(self.parse_pattern()?);
+            }
+            Ok(Expr::Call {
+                head: Box::new(Expr::Symbol("Span".to_string())),
+                args: span_args,
+            })
+        } else if self.at(&Token::Semicolon) {
             let mut exprs = vec![expr];
             while self.at(&Token::Semicolon) {
                 self.advance();

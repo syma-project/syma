@@ -12,6 +12,7 @@ pub mod nb;
 pub use export::builtin_export;
 pub use import::builtin_import;
 
+use crate::ast::Expr;
 use crate::env::Env;
 use crate::value::EvalError;
 use crate::value::Value;
@@ -143,11 +144,110 @@ pub fn builtin_read_string(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(contents))
 }
 
-/// ImportString[data, "format"] — import from a string using the specified format.
+// ── Import / Export option handling ─────────────────────────────────────────
+
+/// Extract the string key of a `Rule` LHS (string, symbol, or held form).
+fn rule_key(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) | Value::Symbol(s) => Some(s.clone()),
+        Value::Pattern(Expr::Str(s)) | Value::Pattern(Expr::Symbol(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Evaluate an option RHS, unwrapping a held pattern when possible.
+fn eval_option_rhs(v: &Value, env: &Env) -> Value {
+    match v {
+        Value::Pattern(e) => crate::eval::eval(e, env).unwrap_or_else(|_| v.clone()),
+        other => other.clone(),
+    }
+}
+
+/// Collect `"Key" -> value` options from a mix of rules, rule lists and
+/// associations.
+fn collect_options(args: &[Value], env: &Env) -> HashMap<String, Value> {
+    fn add_rule(map: &mut HashMap<String, Value>, lhs: &Value, rhs: &Value, env: &Env) {
+        if let Some(k) = rule_key(lhs) {
+            map.insert(k, eval_option_rhs(rhs, env));
+        }
+    }
+    fn add_pair(map: &mut HashMap<String, Value>, pair: &Value, env: &Env) {
+        match pair {
+            Value::Rule { lhs, rhs, .. } => add_rule(map, lhs, rhs, env),
+            Value::Pattern(Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs }) => add_rule(
+                map,
+                &Value::Pattern(lhs.as_ref().clone()),
+                &Value::Pattern(rhs.as_ref().clone()),
+                env,
+            ),
+            _ => {}
+        }
+    }
+    let mut map = HashMap::new();
+    for arg in args {
+        match arg {
+            Value::Rule { .. } | Value::Pattern(Expr::Rule { .. } | Expr::RuleDelayed { .. }) => {
+                add_pair(&mut map, arg, env)
+            }
+            Value::List(items) => {
+                for it in items {
+                    add_pair(&mut map, it, env);
+                }
+            }
+            Value::Assoc(m) => {
+                for (k, v) in m {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Read a non-negative integer option.
+fn option_usize(map: &HashMap<String, Value>, key: &str) -> usize {
+    map.get(key)
+        .and_then(|v| match v {
+            Value::Integer(n) => n.to_usize(),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn import_options(map: &HashMap<String, Value>) -> formats::ImportOptions {
+    formats::ImportOptions {
+        skip_lines: option_usize(map, "SkipLines"),
+        header_lines: option_usize(map, "HeaderLines"),
+    }
+}
+
+/// True when `v` looks like an option (rule / rule list / association) rather
+/// than a format name.
+fn is_optionish(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Rule { .. } | Value::Pattern(Expr::Rule { .. } | Expr::RuleDelayed { .. })
+    ) || matches!(v, Value::List(_) | Value::Assoc(_))
+}
+
+// ── ImportString / ExportString ─────────────────────────────────────────────
+
+/// ImportString[data, "format"] / ImportString[data, "format", opts...]
 pub fn builtin_import_string(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    import_string_impl(args, &Env::new())
+}
+
+/// Environment-aware `ImportString` (evaluates option values).
+pub fn builtin_import_string_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    import_string_impl(args, env)
+}
+
+fn import_string_impl(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "ImportString requires exactly 2 arguments: ImportString[data, \"format\"]".to_string(),
+            "ImportString requires at least 2 arguments: ImportString[data, \"format\"]"
+                .to_string(),
         ));
     }
     let data = match &args[0] {
@@ -168,21 +268,41 @@ pub fn builtin_import_string(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let format = formats::detect_format("", Some(&format_name))?;
-    if format.is_binary() {
-        return Err(EvalError::Error(format!(
-            "ImportString does not support binary format '{}'",
-            format_name
-        )));
+    let opts = import_options(&collect_options(&args[2..], env));
+    let format = match formats::detect_format("", Some(&format_name)) {
+        Ok(f) => f,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    // Binary formats import straight from the string's bytes (mapped 1:1 onto
+    // characters). PNG is not supported from a string source.
+    if format == formats::Format::Binary {
+        let bytes: Vec<u8> = data.chars().map(|c| (c as u32 & 0xFF) as u8).collect();
+        return formats::format_import_binary_opts(&format, &bytes, &opts);
     }
-    formats::format_import_text(&format, &data)
+    if format.is_binary() {
+        return Ok(Value::Symbol("$Failed".to_string()));
+    }
+    match formats::format_import_text_opts(&format, &data, &opts) {
+        Ok(v) => Ok(v),
+        Err(_) => Ok(Value::Symbol("$Failed".to_string())),
+    }
 }
 
-/// ExportString[data, "format"] — export to a string using the specified format.
+/// ExportString[data, "format"] / ExportString[data, "format", opts...]
 pub fn builtin_export_string(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    export_string_impl(args, &Env::new())
+}
+
+/// Environment-aware `ExportString`.
+pub fn builtin_export_string_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    export_string_impl(args, env)
+}
+
+fn export_string_impl(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "ExportString requires exactly 2 arguments: ExportString[data, \"format\"]".to_string(),
+            "ExportString requires at least 2 arguments: ExportString[data, \"format\"]"
+                .to_string(),
         ));
     }
     let data = &args[0];
@@ -195,14 +315,147 @@ pub fn builtin_export_string(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let format = formats::detect_format("", Some(&format_name))?;
-    match formats::format_export(&format, data)? {
-        formats::ExportOutput::Text(s) => Ok(Value::Str(s)),
-        formats::ExportOutput::Binary(_) => Err(EvalError::Error(format!(
-            "ExportString does not support binary format '{}'",
-            format_name
-        ))),
+    let format = match formats::detect_format("", Some(&format_name)) {
+        Ok(f) => f,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    if format == formats::Format::Binary {
+        // Map bytes onto characters 1:1 so the result round-trips.
+        let bytes = formats::export_binary(data).map_err(|_| {
+            EvalError::Error(format!("ExportString failed for format '{}'", format_name))
+        })?;
+        let s: String = bytes.iter().map(|&b| b as char).collect();
+        return Ok(Value::Str(s));
     }
+    match formats::format_export(&format, data) {
+        Ok(formats::ExportOutput::Text(s)) => Ok(Value::Str(s)),
+        Ok(formats::ExportOutput::Binary(_)) => Ok(Value::Symbol("$Failed".to_string())),
+        Err(_) => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+// ── Import / Export (env-aware wrappers) ────────────────────────────────────
+
+/// Import[path] / Import[path, "format", opts...] — environment-aware form
+/// used at runtime so that option values and `~` are resolved consistently.
+pub fn builtin_import_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "Import requires 1 or 2 arguments: Import[path] or Import[path, \"format\"]"
+                .to_string(),
+        ));
+    }
+    let mut path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    if (path.starts_with("~/") || path == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        path = if path == "~" {
+            home
+        } else {
+            format!("{}{}", home, &path[1..])
+        };
+    }
+
+    // `Import[path, fmt, opts...]` or `Import[path, opts...]`.
+    let (format_name, opt_args): (Option<String>, &[Value]) = match args.get(1) {
+        None => (None, &[]),
+        Some(Value::Str(s)) => (Some(s.clone()), &args[2..]),
+        Some(other) if is_optionish(other) => (None, &args[1..]),
+        Some(other) => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+
+    let format = match formats::detect_format(&path, format_name.as_deref()) {
+        Ok(f) => f,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    let opts = import_options(&collect_options(opt_args, env));
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    match formats::format_import_binary_opts(&format, &data, &opts) {
+        Ok(v) => Ok(v),
+        Err(_) => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+/// Export[path, data] / Export[path, data, "format"] — environment-aware form.
+pub fn builtin_export_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::Error(
+            "Export requires 2 or 3 arguments: Export[path, data] or Export[path, data, \"format\"]"
+                .to_string(),
+        ));
+    }
+    let mut path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    if (path.starts_with("~/") || path == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        path = if path == "~" {
+            home
+        } else {
+            format!("{}{}", home, &path[1..])
+        };
+    }
+    let data = &args[1];
+    let (format_name, opt_args): (Option<String>, &[Value]) = match args.get(2) {
+        None => (None, &[]),
+        Some(Value::Str(s)) => (Some(s.clone()), &args[3..]),
+        Some(other) if is_optionish(other) => (None, &args[2..]),
+        Some(other) => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let _ = env;
+    let format = match formats::detect_format(&path, format_name.as_deref()) {
+        Ok(f) => f,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    let _ = opt_args;
+    let output = match formats::format_export(&format, data) {
+        Ok(o) => o,
+        Err(_) => return Ok(Value::Symbol("$Failed".to_string())),
+    };
+    let bytes = match output {
+        formats::ExportOutput::Text(s) => s.into_bytes(),
+        formats::ExportOutput::Binary(b) => b,
+    };
+    match std::fs::write(&path, &bytes) {
+        Ok(()) => Ok(Value::Null),
+        Err(_) => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+/// Register environment-aware `Import`/`Export` overrides.
+pub fn register(env: &Env) {
+    super::register_builtin_env(env, "Import", builtin_import_env);
+    super::register_builtin_env(env, "Export", builtin_export_env);
+    super::register_builtin_env(env, "ImportString", builtin_import_string_env);
+    super::register_builtin_env(env, "ExportString", builtin_export_string_env);
 }
 
 /// ReadList[path] — read all lines from a file into a list of strings.
@@ -512,8 +765,9 @@ mod tests {
     fn test_import_errors() {
         let result = builtin_import(&[]);
         assert!(result.is_err());
-        let result = builtin_import(&[Value::Str("/nonexistent/file.json".into())]);
-        assert!(result.is_err());
+        // A missing file resolves to `$Failed` rather than an `Err`.
+        let result = builtin_import(&[Value::Str("/nonexistent/file.json".into())]).unwrap();
+        assert_eq!(result, Value::Symbol("$Failed".to_string()));
     }
 
     #[test]
@@ -828,14 +1082,15 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
 
     #[test]
     fn test_import_unknown_format() {
-        let result = builtin_import(&[Value::Str("/tmp/test.unknown".into())]);
-        assert!(result.is_err(), "Should fail for unknown extension");
+        let result = builtin_import(&[Value::Str("/tmp/test.unknown".into())]).unwrap();
+        assert_eq!(result, Value::Symbol("$Failed".to_string()));
     }
 
     #[test]
     fn test_import_string_binary_rejected() {
-        let result = builtin_import_string(&[Value::Str("fake".into()), Value::Str("PNG".into())]);
-        assert!(result.is_err(), "ImportString should reject PNG");
+        let result =
+            builtin_import_string(&[Value::Str("fake".into()), Value::Str("PNG".into())]).unwrap();
+        assert_eq!(result, Value::Symbol("$Failed".to_string()));
     }
 
     #[test]
@@ -843,8 +1098,9 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let result = builtin_export_string(&[
             Value::Integer(rug::Integer::from(1)),
             Value::Str("PNG".into()),
-        ]);
-        assert!(result.is_err(), "ExportString should reject PNG");
+        ])
+        .unwrap();
+        assert_eq!(result, Value::Symbol("$Failed".to_string()));
     }
 
     #[test]
@@ -1187,6 +1443,167 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         builtin_export(&[Value::Str(path.clone()), data.clone()]).unwrap();
         let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
         assert_eq!(imported, data);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── New formats (List/Lines/Words/RawJSON/XML/Binary) ────────────────
+
+    fn int(n: i64) -> Value {
+        Value::Integer(rug::Integer::from(n))
+    }
+
+    fn s(x: &str) -> Value {
+        Value::Str(x.to_string())
+    }
+
+    #[test]
+    fn test_export_string_import_string_lines_roundtrip() {
+        let data = Value::List(vec![s("alpha"), s("beta"), s("gamma")]);
+        let out = builtin_export_string(&[data.clone(), Value::Str("Lines".into())]).unwrap();
+        assert_eq!(out, Value::Str("alpha\nbeta\ngamma\n".into()));
+        let back = builtin_import_string(&[out, Value::Str("Lines".into())]).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn test_export_string_import_string_words() {
+        let out = builtin_export_string(&[
+            Value::List(vec![s("a"), s("b"), s("c")]),
+            Value::Str("Words".into()),
+        ])
+        .unwrap();
+        assert_eq!(out, Value::Str("a b c\n".into()));
+        let back =
+            builtin_import_string(&[Value::Str("  a\tb\nc  ".into()), Value::Str("Words".into())])
+                .unwrap();
+        assert_eq!(back, Value::List(vec![s("a"), s("b"), s("c")]));
+    }
+
+    #[test]
+    fn test_export_string_import_string_list_roundtrip() {
+        let data = Value::List(vec![
+            Value::List(vec![int(1), int(2)]),
+            Value::List(vec![int(3), int(4)]),
+        ]);
+        let out = builtin_export_string(&[data.clone(), Value::Str("List".into())]).unwrap();
+        let back = builtin_import_string(&[out, Value::Str("List".into())]).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn test_raw_json_export_import_roundtrip() {
+        let data = Value::List(vec![int(1), s("two"), Value::Bool(true)]);
+        let out = builtin_export_string(&[data.clone(), Value::Str("RawJSON".into())]).unwrap();
+        // Compact (no pretty-print newlines).
+        match &out {
+            Value::Str(s) => assert!(!s.contains('\n'), "RawJSON should be compact: {s}"),
+            other => panic!("expected string, got {other:?}"),
+        }
+        let back = builtin_import_string(&[out, Value::Str("RawJSON".into())]).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn test_binary_export_string_import_string_roundtrip() {
+        let bytes = Value::List(vec![int(0), int(65), int(255)]);
+        let out = builtin_export_string(&[bytes.clone(), Value::Str("Binary".into())]).unwrap();
+        let back = builtin_import_string(&[out, Value::Str("Binary".into())]).unwrap();
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn test_binary_file_roundtrip() {
+        let path = tmp_path("bytes.bin");
+        let bytes = Value::List(vec![int(1), int(2), int(200), int(255)]);
+        builtin_export(&[Value::Str(path.clone()), bytes.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(imported, bytes);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_xml_import_basic_and_export_roundtrip() {
+        let xml = r#"<note id="1"><to>Bob</to><body>Hello &amp; bye</body></note>"#;
+        let parsed =
+            builtin_import_string(&[Value::Str(xml.into()), Value::Str("XML".into())]).unwrap();
+        match &parsed {
+            Value::Call { head, args } if head == "XMLElement" => {
+                assert_eq!(args[0], s("note"));
+            }
+            other => panic!("expected XMLElement, got {other:?}"),
+        }
+        let out = builtin_export_string(&[parsed, Value::Str("XML".into())]).unwrap();
+        match out {
+            Value::Str(s) => {
+                assert!(s.contains("<note"), "serialized xml: {s}");
+                assert!(
+                    s.contains("&amp;") || s.contains("Hello"),
+                    "serialized xml: {s}"
+                );
+            }
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_string_skip_and_header_lines() {
+        let csv = "h1,h2\nx,y\n1,2\n3,4";
+        // Skip one line, then treat the next as header.
+        let v = builtin_import_string(&[
+            Value::Str(csv.into()),
+            Value::Str("CSV".into()),
+            Value::List(vec![
+                Value::Rule {
+                    lhs: Box::new(Value::Str("SkipLines".into())),
+                    rhs: Box::new(int(1)),
+                    delayed: false,
+                },
+                Value::Rule {
+                    lhs: Box::new(Value::Str("HeaderLines".into())),
+                    rhs: Box::new(int(1)),
+                    delayed: false,
+                },
+            ]),
+        ])
+        .unwrap();
+        assert_eq!(
+            v,
+            Value::List(vec![
+                Value::List(vec![s("1"), s("2")]),
+                Value::List(vec![s("3"), s("4")]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_import_failure_returns_failed() {
+        let missing = builtin_import(&[Value::Str(tmp_path("missing_zzz.json"))]).unwrap();
+        assert_eq!(missing, Value::Symbol("$Failed".to_string()));
+        let bad =
+            builtin_import_string(&[Value::Str("not json".into()), Value::Str("JSON".into())])
+                .unwrap();
+        assert_eq!(bad, Value::Symbol("$Failed".to_string()));
+    }
+
+    #[test]
+    fn test_export_string_unsupported_head_is_failed() {
+        // HTML export is unsupported → `$Failed`.
+        let out = builtin_export_string(&[s("hi"), Value::Str("HTML".into())]).unwrap();
+        assert_eq!(out, Value::Symbol("$Failed".to_string()));
+    }
+
+    #[test]
+    fn test_lines_file_roundtrip_utf8() {
+        let path = tmp_path("lines.txt");
+        let data = Value::List(vec![s("café"), s("日本語"), s("🚀")]);
+        builtin_export(&[
+            Value::Str(path.clone()),
+            data.clone(),
+            Value::Str("Lines".into()),
+        ])
+        .unwrap();
+        let back = builtin_import(&[Value::Str(path.clone()), Value::Str("Lines".into())]).unwrap();
+        assert_eq!(back, data);
         std::fs::remove_file(&path).ok();
     }
 }

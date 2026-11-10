@@ -14,13 +14,19 @@ use rug::{Float, Integer};
 /// An argument ready to be passed to a C function.
 #[derive(Clone)]
 pub enum CArg {
+    I8(i8),
+    I16(i16),
     I32(i32),
     I64(i64),
+    U8(u8),
+    U16(u16),
     U32(u32),
     U64(u64),
     F32(f32),
     F64(f64),
     Bool(i32),
+    /// Raw pointer (`*mut c_void`), carried as an unsigned integer.
+    Ptr(u64),
     /// The `CString` is kept alive here so the `*const c_char` is valid during the call.
     CStr(CString),
 }
@@ -28,24 +34,38 @@ pub enum CArg {
 /// Convert a Syma value to a C argument according to the declared type.
 pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
     match ty {
+        NativeType::I8 => {
+            let n = require_int(v, "Integer8")?;
+            let n = i8::try_from(n).map_err(|_| out_of_range("Integer8", v, n))?;
+            Ok(CArg::I8(n))
+        }
+        NativeType::I16 => {
+            let n = require_int(v, "Integer16")?;
+            let n = i16::try_from(n).map_err(|_| out_of_range("Integer16", v, n))?;
+            Ok(CArg::I16(n))
+        }
         NativeType::I32 => {
             let n = require_int(v, "Integer32")?;
-            let n = i32::try_from(n).map_err(|_| EvalError::TypeError {
-                expected: "Integer32".to_string(),
-                got: format!("Integer {n} out of 32-bit signed range"),
-            })?;
+            let n = i32::try_from(n).map_err(|_| out_of_range("Integer32", v, n))?;
             Ok(CArg::I32(n))
         }
         NativeType::I64 => {
             let n = require_int(v, "Integer64")?;
             Ok(CArg::I64(n))
         }
+        NativeType::U8 => {
+            let n = require_uint(v, "UnsignedInteger8")?;
+            let n = u8::try_from(n).map_err(|_| out_of_range("UnsignedInteger8", v, n))?;
+            Ok(CArg::U8(n))
+        }
+        NativeType::U16 => {
+            let n = require_uint(v, "UnsignedInteger16")?;
+            let n = u16::try_from(n).map_err(|_| out_of_range("UnsignedInteger16", v, n))?;
+            Ok(CArg::U16(n))
+        }
         NativeType::U32 => {
             let n = require_uint(v, "UnsignedInteger32")?;
-            let n = u32::try_from(n).map_err(|_| EvalError::TypeError {
-                expected: "UnsignedInteger32".to_string(),
-                got: format!("integer {n} out of 32-bit unsigned range"),
-            })?;
+            let n = u32::try_from(n).map_err(|_| out_of_range("UnsignedInteger32", v, n))?;
             Ok(CArg::U32(n))
         }
         NativeType::U64 => {
@@ -61,6 +81,20 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
             Ok(CArg::F64(r))
         }
         NativeType::Bool => Ok(CArg::Bool(i32::from(v.to_bool()))),
+        NativeType::Pointer => Ok(CArg::Ptr(require_pointer(v, "Pointer")?)),
+        NativeType::UTF8String => {
+            if let Value::Str(s) = v {
+                let cs = CString::new(s.as_str()).map_err(|e| {
+                    EvalError::FfiError(format!("UTF8String conversion failed: {e}"))
+                })?;
+                Ok(CArg::CStr(cs))
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "String".to_string(),
+                    got: v.type_name().to_string(),
+                })
+            }
+        }
         NativeType::CString => {
             if let Value::Str(s) = v {
                 let cs = CString::new(s.as_str())
@@ -76,6 +110,16 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
         NativeType::Void => Err(EvalError::FfiError(
             "Void cannot be used as an input parameter".to_string(),
         )),
+        NativeType::Struct(_) => Err(EvalError::FfiError(
+            "Struct arguments are not supported (return-only, basic support)".to_string(),
+        )),
+    }
+}
+
+fn out_of_range(ty_name: &str, v: &Value, n: impl std::fmt::Display) -> EvalError {
+    EvalError::TypeError {
+        expected: ty_name.to_string(),
+        got: format!("{} {n} out of range", v.type_name()),
     }
 }
 
@@ -83,8 +127,12 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
 pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
     match ty {
         NativeType::Void => Value::Null,
-        NativeType::I32 => Value::Integer(Integer::from(bits as i32 as i64)),
+        NativeType::I8 => Value::Integer(Integer::from(bits as u8 as i8 as i64)),
+        NativeType::I16 => Value::Integer(Integer::from(bits as u16 as i16 as i64)),
+        NativeType::I32 => Value::Integer(Integer::from(bits as u32 as i32 as i64)),
         NativeType::I64 => Value::Integer(Integer::from(bits as i64)),
+        NativeType::U8 => Value::Integer(Integer::from(bits as u8)),
+        NativeType::U16 => Value::Integer(Integer::from(bits as u16)),
         NativeType::U32 => Value::Integer(Integer::from(bits as u32)),
         NativeType::U64 => Value::Integer(Integer::from(bits)),
         NativeType::F32 => {
@@ -96,7 +144,8 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
             Value::Real(Float::with_val(DEFAULT_PRECISION, f))
         }
         NativeType::Bool => Value::Bool(bits != 0),
-        NativeType::CString => {
+        NativeType::Pointer => Value::Integer(Integer::from(bits)),
+        NativeType::CString | NativeType::UTF8String => {
             let ptr = bits as *const c_char;
             if ptr.is_null() {
                 Value::Null
@@ -105,7 +154,46 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
                 Value::Str(s)
             }
         }
+        NativeType::Struct(fields) => decode_struct(&[bits, 0], fields),
     }
+}
+
+/// Convert a native return value split across two machine words into a `Value`.
+///
+/// Only `Struct` returns consume the second word; everything else ignores it.
+/// This mirrors the SysV convention where an aggregate of two words is
+/// returned in a register pair.
+pub fn c_ret_to_value2(lo: u64, hi: u64, ty: &NativeType) -> Value {
+    match ty {
+        NativeType::Struct(fields) => decode_struct(&[lo, hi], fields),
+        _ => c_ret_to_value(lo, ty),
+    }
+}
+
+/// Decode a by-value struct from its raw little-endian machine words.
+///
+/// Fields are taken in declaration order from a flat little-endian byte
+/// stream. Aggregate/nested fields are not supported beyond one level.
+pub fn decode_struct(words: &[u64], fields: &[NativeType]) -> Value {
+    let mut bytes = Vec::with_capacity(words.len() * 8);
+    for w in words {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    let mut offset = 0usize;
+    let mut out = Vec::with_capacity(fields.len());
+    for f in fields {
+        let size = f.byte_size().unwrap_or(8).max(1);
+        let mut buf = [0u8; 8];
+        let end = (offset + size).min(bytes.len());
+        if offset < bytes.len() {
+            buf[..end - offset].copy_from_slice(&bytes[offset..end]);
+        }
+        let bits = u64::from_le_bytes(buf);
+        out.push(c_ret_to_value(bits, f));
+        // Round up to the field's alignment (natural size), as C would.
+        offset += size;
+    }
+    Value::List(out)
 }
 
 // ── JSON wire marshalling (Tier 2 Python, Tier 3 extensions) ─────────────────
@@ -800,6 +888,36 @@ fn require_uint(v: &Value, ty_name: &str) -> Result<u64, EvalError> {
     }
 }
 
+/// Convert a value to a raw pointer address carried in a `u64`.
+///
+/// Accepts arbitrary-precision integers (including `0`/null and negative
+/// values reinterpreted two's-complement) and non-negative reals.
+fn require_pointer(v: &Value, ty_name: &str) -> Result<u64, EvalError> {
+    let bad = || EvalError::TypeError {
+        expected: ty_name.to_string(),
+        got: v.type_name().to_string(),
+    };
+    match v {
+        Value::Integer(n) => {
+            if let Some(u) = n.to_u64() {
+                Ok(u)
+            } else if let Some(i) = n.to_i64() {
+                Ok(i as u64)
+            } else {
+                Err(EvalError::TypeError {
+                    expected: ty_name.to_string(),
+                    got: format!("Integer {n} out of 64-bit range"),
+                })
+            }
+        }
+        Value::Real(r) => {
+            let f = r.to_f64();
+            if f < 0.0 { Err(bad()) } else { Ok(f as u64) }
+        }
+        _ => Err(bad()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1079,149 @@ mod tests {
     fn test_legacy_values_to_json_rejects_unsupported() {
         let v = Value::Complex { re: 1.0, im: 2.0 };
         assert!(values_to_json(&[v]).is_err());
+    }
+
+    // ── Narrow integer / pointer / string-breadth marshalling ──
+
+    #[test]
+    fn test_c_ret_narrow_signed_extends() {
+        assert_eq!(
+            c_ret_to_value((-1i8) as u64, &NativeType::I8),
+            Value::Integer(Integer::from(-1))
+        );
+        assert_eq!(
+            c_ret_to_value((-3i16) as u64, &NativeType::I16),
+            Value::Integer(Integer::from(-3))
+        );
+        // Upper garbage bits must be ignored (truncate to the declared width).
+        let dirty = 0xDEAD_BEEF_0000_007Fu64;
+        assert_eq!(
+            c_ret_to_value(dirty, &NativeType::I8),
+            Value::Integer(Integer::from(0x7Fi64))
+        );
+    }
+
+    #[test]
+    fn test_c_ret_narrow_unsigned_zero_extends() {
+        assert_eq!(
+            c_ret_to_value(0xFFu64, &NativeType::U8),
+            Value::Integer(Integer::from(255))
+        );
+        assert_eq!(
+            c_ret_to_value(0xFFFFu64, &NativeType::U16),
+            Value::Integer(Integer::from(65535))
+        );
+        // Signed -1 reinterpreted as its low 8 bits (255).
+        assert_eq!(
+            c_ret_to_value((-1i64) as u64, &NativeType::U8),
+            Value::Integer(Integer::from(255))
+        );
+    }
+
+    #[test]
+    fn test_value_to_c_arg_narrow_range_checks() {
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(127)), &NativeType::I8),
+            Ok(CArg::I8(127))
+        ));
+        assert!(value_to_c_arg(&Value::Integer(Integer::from(128)), &NativeType::I8).is_err());
+        assert!(value_to_c_arg(&Value::Integer(Integer::from(-129)), &NativeType::I16).is_ok());
+        assert!(value_to_c_arg(&Value::Integer(Integer::from(256)), &NativeType::U8).is_err());
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(255)), &NativeType::U8),
+            Ok(CArg::U8(255))
+        ));
+        assert!(value_to_c_arg(&Value::Integer(Integer::from(65536)), &NativeType::U16).is_err());
+    }
+
+    #[test]
+    fn test_value_to_c_arg_pointer() {
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(0)), &NativeType::Pointer),
+            Ok(CArg::Ptr(0))
+        ));
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(0x1000)), &NativeType::Pointer),
+            Ok(CArg::Ptr(0x1000))
+        ));
+        // Negative reinterpreted two's-complement, like an address.
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(-1)), &NativeType::Pointer),
+            Ok(CArg::Ptr(u64::MAX))
+        ));
+        assert!(value_to_c_arg(&Value::Str("x".into()), &NativeType::Pointer).is_err());
+    }
+
+    #[test]
+    fn test_c_ret_pointer_is_integer() {
+        assert_eq!(
+            c_ret_to_value(0x4000, &NativeType::Pointer),
+            Value::Integer(Integer::from(0x4000))
+        );
+    }
+
+    #[test]
+    fn test_value_to_c_arg_utf8string() {
+        let ok = Value::Str("héllo".to_string());
+        match value_to_c_arg(&ok, &NativeType::UTF8String).unwrap() {
+            CArg::CStr(cs) => assert_eq!(cs.to_str().unwrap(), "héllo"),
+            _ => panic!("expected CStr"),
+        }
+        // Interior NUL is rejected just like CString.
+        let bad = Value::Str("a\0b".to_string());
+        assert!(value_to_c_arg(&bad, &NativeType::UTF8String).is_err());
+    }
+
+    #[test]
+    fn test_utf8string_is_an_alias_of_cstring_marshalling() {
+        let s = Value::Str("abc".to_string());
+        assert!(value_to_c_arg(&s, &NativeType::CString).is_ok());
+        assert!(value_to_c_arg(&s, &NativeType::UTF8String).is_ok());
+        let cs = CString::new("abc").unwrap();
+        let bits = cs.as_ptr() as usize as u64;
+        assert_eq!(
+            c_ret_to_value(bits, &NativeType::UTF8String),
+            Value::Str("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_struct_return_error_as_input() {
+        let sig = NativeType::Struct(vec![NativeType::I32, NativeType::I32]);
+        assert!(value_to_c_arg(&Value::List(vec![]), &sig).is_err());
+    }
+
+    #[test]
+    fn test_decode_struct_div_t_layout() {
+        let fields = vec![NativeType::I32, NativeType::I32];
+        // Low word holds quotient, high word holds remainder.
+        let word = 7u64 | (2u64 << 32);
+        assert_eq!(
+            decode_struct(&[word, 0], &fields),
+            Value::List(vec![
+                Value::Integer(Integer::from(7)),
+                Value::Integer(Integer::from(2))
+            ])
+        );
+    }
+
+    #[test]
+    fn test_decode_struct_ldiv_t_two_words() {
+        let fields = vec![NativeType::I64, NativeType::I64];
+        assert_eq!(
+            decode_struct(&[10, 3], &fields),
+            Value::List(vec![
+                Value::Integer(Integer::from(10)),
+                Value::Integer(Integer::from(3))
+            ])
+        );
+    }
+
+    #[test]
+    fn test_c_ret_to_value2_non_struct_ignores_high() {
+        assert_eq!(
+            c_ret_to_value2(5, 999, &NativeType::I64),
+            Value::Integer(Integer::from(5))
+        );
     }
 }

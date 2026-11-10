@@ -464,6 +464,57 @@ pub fn builtin_parallel_combine(args: &[Value], env: &Env) -> Result<Value, Eval
     }
 }
 
+/// `ParallelApply[f, expr]` — parallel version of `Apply`.
+///
+/// Applies `f` to the elements of `expr` as its argument sequence (for a list,
+/// `f @@ expr`). Argument order is preserved and results are deterministic.
+pub fn builtin_parallel_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "ParallelApply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let f = &args[0];
+    match &args[1] {
+        Value::List(items) => apply_function(f, items, env),
+        other => apply_function(f, std::slice::from_ref(other), env),
+    }
+}
+
+/// `DistributeDefinitions[syms...]` — make definitions available to workers.
+///
+/// Every worker thread shares the parent environment in this model, so the
+/// distribution is effectively complete already; the (flattened) symbol list is
+/// returned for reporting, matching Wolfram's observable behaviour.
+pub fn builtin_distribute_definitions(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "DistributeDefinitions requires at least 1 argument".to_string(),
+        ));
+    }
+    let mut out = Vec::new();
+    for a in args {
+        match a {
+            Value::List(items) => out.extend(items.iter().cloned()),
+            other => out.push(other.clone()),
+        }
+    }
+    Ok(Value::List(out))
+}
+
+/// `SharedVariables[...]` / `SetSharedVariable[...]` — declare shared variables.
+///
+/// Workers evaluate against a shared parent environment, so this is a
+/// validating no-op that returns `Null`.
+pub fn builtin_shared_variables(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "SharedVariables requires at least 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Null)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +847,124 @@ mod tests {
                 &Value::Integer(rug::Integer::from(expected))
             );
         }
+        cleanup_pool();
+    }
+
+    // ── ParallelApply / DistributeDefinitions / SharedVariables ──
+
+    fn inc(args: &[Value]) -> Result<Value, EvalError> {
+        match args.first() {
+            Some(Value::Integer(n)) => Ok(Value::Integer(n.clone() + 1)),
+            Some(other) => Ok(other.clone()),
+            None => Ok(Value::Null),
+        }
+    }
+
+    fn collect(args: &[Value]) -> Result<Value, EvalError> {
+        Ok(Value::List(args.to_vec()))
+    }
+
+    #[test]
+    fn test_parallel_apply_preserves_argument_order() {
+        let env = Env::new();
+        let f = Value::Builtin("collect".into(), crate::value::BuiltinFn::Pure(collect));
+        let items = Value::List(
+            (0..6)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect(),
+        );
+        let out = builtin_parallel_apply(&[f, items], &env).unwrap();
+        assert_eq!(
+            out,
+            Value::List(
+                (0..6)
+                    .map(|i| Value::Integer(rug::Integer::from(i)))
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn test_parallel_apply_non_list_uses_single_arg() {
+        let env = Env::new();
+        let f = Value::Builtin("inc".into(), crate::value::BuiltinFn::Pure(inc));
+        let out = builtin_parallel_apply(&[f, Value::Integer(4.into())], &env).unwrap();
+        assert_eq!(out, Value::Integer(5.into()));
+    }
+
+    #[test]
+    fn test_parallel_apply_wrong_arity_errors() {
+        let env = Env::new();
+        assert!(builtin_parallel_apply(&[Value::Integer(1.into())], &env).is_err());
+    }
+
+    #[test]
+    fn test_distribute_definitions_flattens_and_returns_args() {
+        let out = builtin_distribute_definitions(&[
+            Value::Symbol("f".into()),
+            Value::List(vec![Value::Symbol("g".into()), Value::Symbol("h".into())]),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![
+                Value::Symbol("f".into()),
+                Value::Symbol("g".into()),
+                Value::Symbol("h".into()),
+            ])
+        );
+        assert!(builtin_distribute_definitions(&[]).is_err());
+    }
+
+    #[test]
+    fn test_shared_variables_returns_null() {
+        assert_eq!(
+            builtin_shared_variables(&[Value::Symbol("x".into())]).unwrap(),
+            Value::Null
+        );
+        assert!(builtin_shared_variables(&[]).is_err());
+    }
+
+    #[test]
+    fn test_parallel_map_sequential_fallback_order_deterministic() {
+        let _serial = serial();
+        cleanup_pool(); // no active pool -> sequential fallback path
+        let env = Env::new();
+        let f = Value::Builtin("inc".into(), crate::value::BuiltinFn::Pure(inc));
+        let expect = Value::List(
+            (1..=10)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect(),
+        );
+        let run = || {
+            let items: Vec<Value> = (0..10)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect();
+            builtin_parallel_map(&[f.clone(), Value::List(items)], &env).unwrap()
+        };
+        assert_eq!(run(), expect);
+        assert_eq!(run(), expect);
+    }
+
+    #[test]
+    fn test_parallel_map_with_pool_order_deterministic() {
+        let _serial = serial();
+        cleanup_pool();
+        launch_kernels(4);
+        let env = Env::new();
+        let f = Value::Builtin("inc".into(), crate::value::BuiltinFn::Pure(inc));
+        let items: Vec<Value> = (0..32)
+            .map(|i| Value::Integer(rug::Integer::from(i)))
+            .collect();
+        let expect = Value::List(
+            (1..=32)
+                .map(|i| Value::Integer(rug::Integer::from(i)))
+                .collect(),
+        );
+        let out = builtin_parallel_map(&[f.clone(), Value::List(items.clone())], &env).unwrap();
+        assert_eq!(out, expect);
+        let out2 = builtin_parallel_map(&[f, Value::List(items)], &env).unwrap();
+        assert_eq!(out2, expect, "repeat run must be identical");
         cleanup_pool();
     }
 }

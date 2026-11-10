@@ -21,6 +21,12 @@ use crate::value::Value;
 /// A set of variable bindings produced by pattern matching.
 pub type Bindings = HashMap<String, Value>;
 
+/// Maximum argument count for which `Orderless` matching falls back to a
+/// permutation search. Beyond this the factorial blow-up is avoided by relying
+/// on the evaluator's canonical argument ordering. Backtracking keeps the
+/// constant small even well below the bound.
+const ORDERLESS_MAX_ARGS: usize = 8;
+
 /// Identity element for a `OneIdentity` head, when it has a known numeric
 /// identity (`Times`→1, `Plus`→0). Used so that a bare value such as `x^2`
 /// can match a `b_*x^2` pattern with `b` defaulting to the identity.
@@ -109,7 +115,7 @@ fn match_one_identity_try(
 ) -> Option<Bindings> {
     if is_orderless
         && synth_args.len() >= 2
-        && synth_args.len() <= 6
+        && synth_args.len() <= ORDERLESS_MAX_ARGS
         && let MatchResult::Match(b) = try_orderless_match(pat_args, synth_args, attr_checker)
     {
         return Some(b);
@@ -821,9 +827,11 @@ fn match_sequence_pattern(
                     continue;
                 }
                 let mut new_bindings = bindings.clone();
-                let seq_val = Value::Sequence(seq_items.to_vec());
+                // Only materialize the consumed run when the sequence is named;
+                // unnamed `__`/`___` are extremely common and this avoids an
+                // O(take) allocation per backtracking candidate.
                 if let Some(n) = name {
-                    new_bindings.insert(n.clone(), seq_val);
+                    new_bindings.insert(n.clone(), Value::Sequence(seq_items.to_vec()));
                 }
                 if let MatchResult::Match(b) = match_sequence_pattern(
                     patterns,
@@ -875,9 +883,9 @@ fn match_sequence_pattern(
                         continue;
                     }
                     let mut new_bindings = bindings.clone();
-                    let seq_val = Value::Sequence(seq_items.to_vec());
+                    // Materialize the run lazily (see the `__` arm above).
                     if let Some(n) = name {
-                        new_bindings.insert(n.clone(), seq_val);
+                        new_bindings.insert(n.clone(), Value::Sequence(seq_items.to_vec()));
                     }
                     if let MatchResult::Match(b) = match_sequence_pattern(
                         patterns,
@@ -1326,33 +1334,38 @@ fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     result
 }
 
-/// Generate all permutations of a slice of indices (Heap's algorithm).
-fn generate_permutations(indices: &[usize]) -> Vec<Vec<usize>> {
-    if indices.is_empty() {
-        return vec![vec![]];
+/// Backtracking helper for [`try_orderless_match`]: assign `pat_args[i..]` to
+/// distinct still-unused slots of `val_args`, pruning as soon as a slot fails
+/// to match. This explores far fewer than the `n!` permutations in practice and
+/// naturally supports consistency checking for repeated pattern variables.
+fn orderless_backtrack(
+    pat_args: &[Expr],
+    val_args: &[Value],
+    i: usize,
+    used: &mut [bool],
+    bindings: &mut Bindings,
+    attr_checker: Option<&AttributeChecker>,
+) -> bool {
+    if i == pat_args.len() {
+        return true;
     }
-    let n = indices.len();
-    let mut result = Vec::new();
-    let mut c = vec![0usize; n];
-    let mut p = indices.to_vec();
-    result.push(p.clone());
-    let mut i = 0;
-    while i < n {
-        if c[i] < i {
-            if i % 2 == 0 {
-                p.swap(0, i);
-            } else {
-                p.swap(c[i], i);
+    for j in 0..val_args.len() {
+        if used[j] {
+            continue;
+        }
+        if let MatchResult::Match(b) = match_pattern(&pat_args[i], &val_args[j], attr_checker) {
+            let snapshot = bindings.clone();
+            if merge_bindings_checked(bindings, b) {
+                used[j] = true;
+                if orderless_backtrack(pat_args, val_args, i + 1, used, bindings, attr_checker) {
+                    return true;
+                }
+                used[j] = false;
             }
-            result.push(p.clone());
-            c[i] += 1;
-            i = 0;
-        } else {
-            c[i] = 0;
-            i += 1;
+            *bindings = snapshot;
         }
     }
-    result
+    false
 }
 
 /// Merge `src` into `dst`, enforcing consistency of repeated pattern
@@ -1370,36 +1383,31 @@ fn merge_bindings_checked(dst: &mut Bindings, src: Bindings) -> bool {
     true
 }
 
-/// Check if there's a permutation of `val_args` that matches `pat_args`.
+/// Check if some permutation of `val_args` matches `pat_args`, i.e. an
+/// `Orderless` (commutative) match. Uses backtracking with pruning rather than
+/// enumerating all `n!` permutations up front.
 fn try_orderless_match(
     pat_args: &[Expr],
     val_args: &[Value],
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
-    let n = pat_args.len();
-    let indices: Vec<usize> = (0..n).collect();
-    for perm in generate_permutations(&indices) {
-        let mut bindings = Bindings::new();
-        let mut ok = true;
-        for (i, &pi) in perm.iter().enumerate() {
-            match match_pattern(&pat_args[i], &val_args[pi], attr_checker) {
-                MatchResult::Match(b) => {
-                    if !merge_bindings_checked(&mut bindings, b) {
-                        ok = false;
-                        break;
-                    }
-                }
-                MatchResult::NoMatch => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            return MatchResult::Match(bindings);
-        }
+    if pat_args.len() != val_args.len() {
+        return MatchResult::NoMatch;
     }
-    MatchResult::NoMatch
+    let mut used = vec![false; val_args.len()];
+    let mut bindings = Bindings::new();
+    if orderless_backtrack(
+        pat_args,
+        val_args,
+        0,
+        &mut used,
+        &mut bindings,
+        attr_checker,
+    ) {
+        MatchResult::Match(bindings)
+    } else {
+        MatchResult::NoMatch
+    }
 }
 
 /// Try a direct ordered match of pattern args against value args.
@@ -1547,10 +1555,10 @@ fn match_call_pattern(
                 return MatchResult::Match(b);
             }
 
-            // 2. Orderless: try permutations of value args (max 6 elements)
+            // 2. Orderless: try permutations of value args (bounded arity)
             if is_orderless
                 && pat_args.len() == val_args.len()
-                && val_args.len() <= 6
+                && val_args.len() <= ORDERLESS_MAX_ARGS
                 && val_args.len() >= 2
                 && let MatchResult::Match(mut b) =
                     try_orderless_match(&pat_args, &val_args, attr_checker)

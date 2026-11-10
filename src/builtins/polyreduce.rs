@@ -1262,8 +1262,8 @@ fn reduce_active(polys: &[VPoly], vars: &[String], active: &[usize]) -> Option<V
             if is_zero_value(&total) {
                 continue;
             }
-            match approx_value(&total) {
-                Some(ap) if ap.abs() < EPS => continue,
+            match complex_approx(&total) {
+                Some((re, im)) if re.abs() < EPS && im.abs() < EPS => continue,
                 Some(_) => return Some(Value::Bool(false)),
                 None => {
                     extra.push(equal(total, int_value(0)));
@@ -2399,6 +2399,432 @@ fn reduce_value(e: &Value, vars: &[String]) -> Option<Value> {
     }
 }
 
+// ── Transcendental solving (Exp/Log/Sqrt/power + elementary trig) ───────────
+
+/// Target domain for `Solve`/`Reduce`. Default is the complex plane, matching
+/// Wolfram Language; `Reals` narrows the admissible solution set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Domain {
+    Complexes,
+    Reals,
+}
+
+/// Parse trailing `Solve`/`Reduce` arguments: a domain symbol and/or
+/// `Assumptions -> ...` (also accepted positionally or inside a list).
+fn parse_domain_and_assumptions(extra: &[Value]) -> (Domain, Vec<Value>) {
+    fn walk(v: &Value, domain: &mut Domain, assumptions: &mut Vec<Value>) {
+        match v {
+            Value::Symbol(s) if s == "Reals" => *domain = Domain::Reals,
+            Value::Symbol(s) if s == "Complexes" => *domain = Domain::Complexes,
+            Value::List(items) => {
+                for i in items {
+                    walk(i, domain, assumptions);
+                }
+            }
+            Value::Rule { lhs, rhs, .. } => {
+                if let Value::Symbol(h) = &**lhs
+                    && h == "Assumptions"
+                {
+                    flatten_conjuncts(rhs, assumptions);
+                }
+            }
+            Value::Pattern(Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs }) => {
+                if matches!(lhs.as_ref(), Expr::Symbol(s) if s == "Assumptions") {
+                    let rhs_v = expr_to_value(rhs);
+                    flatten_conjuncts(&rhs_v, assumptions);
+                }
+            }
+            other => flatten_conjuncts(other, assumptions),
+        }
+    }
+    let mut domain = Domain::Complexes;
+    let mut assumptions: Vec<Value> = Vec::new();
+    for v in extra {
+        walk(v, &mut domain, &mut assumptions);
+    }
+    (domain, assumptions)
+}
+
+/// Sign of a bare symbol inferred from `Assumptions` facts like `a > 0`.
+fn assumption_sign(assumptions: &[Value], name: &str) -> Option<i32> {
+    for a in assumptions {
+        if let Value::Call { head, args } = a
+            && args.len() == 2
+        {
+            let is_name = |v: &Value| matches!(v, Value::Symbol(s) if s == name);
+            let is_zero = |v: &Value| is_zero_value(v);
+            match head.as_str() {
+                "Greater" | "GreaterEqual" if is_name(&args[0]) && is_zero(&args[1]) => {
+                    return Some(1);
+                }
+                "Less" | "LessEqual" if is_name(&args[0]) && is_zero(&args[1]) => return Some(-1),
+                "Greater" | "GreaterEqual" if is_name(&args[1]) && is_zero(&args[0]) => {
+                    return Some(-1);
+                }
+                "Less" | "LessEqual" if is_name(&args[1]) && is_zero(&args[0]) => return Some(1),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Static sign of `v`, using numeric form, `const_sign`, or assumptions.
+fn value_sign(v: &Value, assumptions: &[Value]) -> Option<i32> {
+    if let Some(s) = const_sign(v) {
+        return Some(s);
+    }
+    if let Value::Symbol(name) = v {
+        return assumption_sign(assumptions, name);
+    }
+    None
+}
+
+/// Wrap `value` in `ConditionalExpression` unless the condition is trivially true.
+fn with_condition(value: Value, conds: Vec<Value>) -> Value {
+    match and(conds) {
+        Value::Bool(true) => value,
+        other => call("ConditionalExpression", vec![value, other]),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransKind {
+    Exp,
+    Log,
+    Sqrt,
+    PowBase,
+    Sin,
+    Cos,
+}
+
+/// Recognise a transcendental shape `f[v] ` (or `base^v`) in `v`.
+fn classify_trans(v: &Value, var: &str) -> Option<(TransKind, Value)> {
+    if let Value::Call { head, args } = v {
+        if args.len() == 1 && matches!(&args[0], Value::Symbol(s) if s == var) {
+            let k = match head.as_str() {
+                "Exp" => Some(TransKind::Exp),
+                "Log" => Some(TransKind::Log),
+                "Sqrt" => Some(TransKind::Sqrt),
+                "Sin" => Some(TransKind::Sin),
+                "Cos" => Some(TransKind::Cos),
+                _ => None,
+            };
+            if let Some(k) = k {
+                return Some((k, args[0].clone()));
+            }
+        }
+        if head == "Power"
+            && args.len() == 2
+            && matches!(&args[1], Value::Symbol(s) if s == var)
+            && !involves_vars(&args[0], &[var.to_string()])
+        {
+            if matches!(&args[0], Value::Symbol(s) if s == "E") {
+                return Some((TransKind::Exp, args[0].clone()));
+            }
+            return Some((TransKind::PowBase, args[0].clone()));
+        }
+    }
+    None
+}
+
+/// Match `lhs == rhs` where one side is a transcendental function of `var` and
+/// the other is independent of it. Returns the kind, the free side and the base.
+fn trans_equation(item: &Value, var: &str) -> Option<(TransKind, Value, Value)> {
+    let (l, r) = match item {
+        Value::Call { head, args } if head == "Equal" && args.len() == 2 => {
+            (args[0].clone(), args[1].clone())
+        }
+        other => (other.clone(), int_value(0)),
+    };
+    // Held arguments arrive unevaluated (e.g. `1/2` as `Divide[1, 2]`), so fold
+    // both sides before inspecting their shape.
+    let l = simplify_deep(&l);
+    let r = simplify_deep(&r);
+    let vv = [var.to_string()];
+    if let Some((k, base)) = classify_trans(&l, var)
+        && !involves_vars(&r, &vv)
+    {
+        return Some((k, r, base));
+    }
+    if let Some((k, base)) = classify_trans(&r, var)
+        && !involves_vars(&l, &vv)
+    {
+        return Some((k, l, base));
+    }
+    None
+}
+
+fn pi_times(n: i64, d: i64) -> Value {
+    c_mul(&sym("Pi"), &rat_to_value(&Rational::from((n, d))))
+}
+
+/// Exact rational value of an arithmetic expression over integers/fractions.
+fn as_exact_rational(v: &Value) -> Option<Rational> {
+    match v {
+        Value::Integer(_) | Value::Rational(_) => as_rat(v),
+        Value::Call { head, args } => match head.as_str() {
+            "Divide" if args.len() == 2 => {
+                let a = as_exact_rational(&args[0])?;
+                let b = as_exact_rational(&args[1])?;
+                if b.is_zero() { None } else { Some(a / b) }
+            }
+            "Times" if !args.is_empty() => {
+                let mut acc = Rational::from(1);
+                for a in args {
+                    acc *= as_exact_rational(a)?;
+                }
+                Some(acc)
+            }
+            "Power" if args.len() == 2 => {
+                let b = as_exact_rational(&args[0])?;
+                let n = as_exact_rational(&args[1])?;
+                if n.denom() != &Integer::from(1) {
+                    return None;
+                }
+                let k = n.numer().to_i32()?;
+                let mut acc = Rational::from(1);
+                for _ in 0..k.abs() {
+                    acc *= b.clone();
+                }
+                if k < 0 {
+                    if acc.is_zero() {
+                        None
+                    } else {
+                        Some(Rational::from(1) / acc)
+                    }
+                } else {
+                    Some(acc)
+                }
+            }
+            "Minus" if args.len() == 1 => Some(-as_exact_rational(&args[0])?),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Known exact angles for `Sin`/`Cos` at common rational values.
+fn exact_angle(kind: TransKind, c: &Value) -> Option<Value> {
+    if let Some(rc) = as_exact_rational(c) {
+        if rc == Rational::from((1, 2)) {
+            return match kind {
+                TransKind::Sin => Some(pi_times(1, 6)),
+                TransKind::Cos => Some(pi_times(1, 3)),
+                _ => None,
+            };
+        }
+        if rc == Rational::from((-1, 2)) {
+            return match kind {
+                TransKind::Sin => Some(pi_times(-1, 6)),
+                TransKind::Cos => Some(pi_times(2, 3)),
+                _ => None,
+            };
+        }
+    }
+    let s2 = c_div(&call("Sqrt", vec![int_value(2)]), &int_value(2));
+    let s3 = c_div(&call("Sqrt", vec![int_value(3)]), &int_value(2));
+    if c.struct_eq(&s2) {
+        return Some(pi_times(1, 4));
+    }
+    if c.struct_eq(&s3) {
+        return match kind {
+            TransKind::Sin => Some(pi_times(1, 3)),
+            TransKind::Cos => Some(pi_times(1, 6)),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Periodic solution branches for `Sin[var] == c` / `Cos[var] == c`.
+fn trig_branches(kind: TransKind, c: &Value, domain: Domain, _assumptions: &[Value]) -> Vec<Value> {
+    let pi = sym("Pi");
+    let c1 = call("C", vec![int_value(1)]);
+    let two_pi_c1 = simplify_call("Times", &[int_value(2), pi.clone(), c1.clone()]);
+    let mut conds: Vec<Value> = vec![call("Element", vec![c1, sym("Integers")])];
+    if domain == Domain::Reals {
+        if let Some(x) = approx_value(c)
+            && x.abs() > 1.0 + EPS
+        {
+            return vec![];
+        }
+        let within = approx_value(c)
+            .map(|x| x.abs() <= 1.0 + EPS)
+            .unwrap_or(false);
+        if !within {
+            conds.push(call("GreaterEqual", vec![c.clone(), int_value(-1)]));
+            conds.push(call("LessEqual", vec![c.clone(), int_value(1)]));
+        }
+    }
+    let mk = |expr: Value| with_condition(expr, conds.clone());
+    let rc = as_exact_rational(c);
+    let is_c = |n: i64| rc == Some(Rational::from(n));
+
+    if kind == TransKind::Sin {
+        if rc.as_ref().map(|r| r.is_zero()).unwrap_or(false) {
+            return vec![mk(two_pi_c1.clone()), mk(c_add(&pi, &two_pi_c1))];
+        }
+        if is_c(1) {
+            return vec![mk(c_add(&pi_times(1, 2), &two_pi_c1))];
+        }
+        if is_c(-1) {
+            return vec![mk(c_add(&pi_times(-1, 2), &two_pi_c1))];
+        }
+        let alpha =
+            exact_angle(TransKind::Sin, c).unwrap_or_else(|| call("ArcSin", vec![c.clone()]));
+        return vec![
+            mk(c_add(&alpha, &two_pi_c1)),
+            mk(c_add(&c_sub(&pi, &alpha), &two_pi_c1)),
+        ];
+    }
+
+    // Cosine.
+    if rc.as_ref().map(|r| r.is_zero()).unwrap_or(false) {
+        return vec![
+            mk(c_add(&pi_times(1, 2), &two_pi_c1)),
+            mk(c_add(&pi_times(-1, 2), &two_pi_c1)),
+        ];
+    }
+    if is_c(1) {
+        return vec![mk(two_pi_c1)];
+    }
+    if is_c(-1) {
+        return vec![mk(c_add(&pi, &two_pi_c1))];
+    }
+    let alpha = exact_angle(TransKind::Cos, c).unwrap_or_else(|| call("ArcCos", vec![c.clone()]));
+    vec![
+        mk(c_add(&alpha, &two_pi_c1)),
+        mk(c_add(&c_neg(&alpha), &two_pi_c1)),
+    ]
+}
+
+/// Exact solutions for a recognised transcendental equation, or `None` when the
+/// shape is out of scope. An empty vector means "provably no solution".
+fn trans_solutions(
+    kind: TransKind,
+    base: &Value,
+    rhs: &Value,
+    domain: Domain,
+    assumptions: &[Value],
+) -> Option<Vec<Value>> {
+    match kind {
+        TransKind::Exp => {
+            if domain == Domain::Reals {
+                match value_sign(rhs, assumptions) {
+                    Some(s) if s <= 0 => Some(vec![]),
+                    Some(_) => Some(vec![call("Log", vec![rhs.clone()])]),
+                    None => Some(vec![with_condition(
+                        call("Log", vec![rhs.clone()]),
+                        vec![call("Greater", vec![rhs.clone(), int_value(0)])],
+                    )]),
+                }
+            } else if is_zero_value(rhs) {
+                Some(vec![])
+            } else {
+                Some(vec![call("Log", vec![rhs.clone()])])
+            }
+        }
+        TransKind::Log => Some(vec![call("Power", vec![sym("E"), rhs.clone()])]),
+        TransKind::Sqrt => {
+            let sq = c_mul(rhs, rhs);
+            if domain == Domain::Reals {
+                match value_sign(rhs, assumptions) {
+                    Some(s) if s < 0 => Some(vec![]),
+                    Some(_) => Some(vec![sq]),
+                    None => Some(vec![with_condition(
+                        sq,
+                        vec![call("GreaterEqual", vec![rhs.clone(), int_value(0)])],
+                    )]),
+                }
+            } else {
+                Some(vec![sq])
+            }
+        }
+        TransKind::PowBase => {
+            if numeric_f64(base) == Some(1.0) {
+                return None;
+            }
+            if numeric_f64(base) == Some(0.0) {
+                return Some(vec![]);
+            }
+            let sol = c_div(
+                &call("Log", vec![rhs.clone()]),
+                &call("Log", vec![base.clone()]),
+            );
+            if domain == Domain::Reals {
+                let mut conds: Vec<Value> = Vec::new();
+                match value_sign(base, assumptions) {
+                    Some(s) if s <= 0 => return Some(vec![]),
+                    Some(_) => {}
+                    None => conds.push(call("Greater", vec![base.clone(), int_value(0)])),
+                }
+                if numeric_f64(base) != Some(1.0) && value_sign(base, assumptions).is_none() {
+                    conds.push(call("Unequal", vec![base.clone(), int_value(1)]));
+                }
+                match value_sign(rhs, assumptions) {
+                    Some(s) if s <= 0 => return Some(vec![]),
+                    Some(_) => {}
+                    None => conds.push(call("Greater", vec![rhs.clone(), int_value(0)])),
+                }
+                Some(vec![with_condition(sol, conds)])
+            } else if is_zero_value(rhs) {
+                Some(vec![])
+            } else {
+                Some(vec![sol])
+            }
+        }
+        TransKind::Sin | TransKind::Cos => Some(trig_branches(kind, rhs, domain, assumptions)),
+    }
+}
+
+fn transcendental_solve(
+    item: &Value,
+    var: &str,
+    domain: Domain,
+    assumptions: &[Value],
+) -> Option<Vec<Value>> {
+    let (kind, rhs, base) = trans_equation(item, var)?;
+    trans_solutions(kind, &base, &rhs, domain, assumptions)
+}
+
+/// `Reduce` of a single transcendental equation (logs/roots, no trig so that
+/// the existing unevaluated fallback for `Sin` is preserved).
+fn transcendental_reduce(
+    item: &Value,
+    var: &str,
+    domain: Domain,
+    assumptions: &[Value],
+) -> Option<Value> {
+    let (kind, rhs, base) = trans_equation(item, var)?;
+    if matches!(kind, TransKind::Sin | TransKind::Cos) {
+        return None;
+    }
+    let roots = trans_solutions(kind, &base, &rhs, domain, assumptions)?;
+    if roots.is_empty() {
+        return Some(Value::Bool(false));
+    }
+    let branches: Vec<Value> = roots
+        .into_iter()
+        .map(|r| match r {
+            Value::Call { head, args } if head == "ConditionalExpression" && args.len() == 2 => {
+                and(vec![equal(sym(var), args[0].clone()), args[1].clone()])
+            }
+            other => equal(sym(var), other),
+        })
+        .collect();
+    Some(and(vec![or(branches)]))
+}
+
+/// True when a value is known to be real (used to filter complex roots under
+/// `Domain -> Reals`). Symbolic roots are kept.
+fn is_real_value(v: &Value) -> bool {
+    match complex_approx(v) {
+        Some((_, im)) => im.abs() < 1e-9,
+        None => true,
+    }
+}
+
 // ── Builtins ────────────────────────────────────────────────────────────────
 
 /// GroebnerBasis[polys, vars] — reduced Groebner basis (lexicographic).
@@ -2538,6 +2964,16 @@ pub fn builtin_reduce(args: &[Value]) -> Result<Value, EvalError> {
         collect_symbols(&args[0], &mut syms);
         syms
     };
+    let (domain, assumptions) = parse_domain_and_assumptions(&args[2..]);
+    if vars.len() == 1 {
+        let mut items: Vec<Value> = Vec::new();
+        flatten_conjuncts(&args[0], &mut items);
+        if items.len() == 1
+            && let Some(v) = transcendental_reduce(&items[0], &vars[0], domain, &assumptions)
+        {
+            return Ok(simplify_deep(&v));
+        }
+    }
     match reduce_value(&args[0], &vars) {
         Some(v) => Ok(simplify_deep(&v)),
         None => Ok(Value::Call {
@@ -2571,6 +3007,16 @@ pub fn builtin_cylindrical_decomposition(args: &[Value]) -> Result<Value, EvalEr
         collect_symbols(&args[0], &mut syms);
         syms
     };
+    let (domain, assumptions) = parse_domain_and_assumptions(&args[2..]);
+    if vars.len() == 1 {
+        let mut items: Vec<Value> = Vec::new();
+        flatten_conjuncts(&args[0], &mut items);
+        if items.len() == 1
+            && let Some(v) = transcendental_reduce(&items[0], &vars[0], domain, &assumptions)
+        {
+            return Ok(simplify_deep(&v));
+        }
+    }
     match reduce_value(&args[0], &vars) {
         Some(v) => Ok(simplify_deep(&v)),
         None => Ok(Value::Call {
@@ -2932,8 +3378,8 @@ fn solve_all(
         }
         if is_constant_active(p, active) {
             let total = p.0.values().fold(int_value(0), |acc, c| c_add(&acc, c));
-            match approx_value(&total) {
-                Some(ap) if ap.abs() < EPS => continue,
+            match complex_approx(&total) {
+                Some((re, im)) if re.abs() < EPS && im.abs() < EPS => continue,
                 Some(_) => return Some(vec![]),
                 None => return Some(vec![]),
             }
@@ -3041,13 +3487,14 @@ pub fn builtin_solve(args: &[Value]) -> Result<Value, EvalError> {
         head: "Solve".to_string(),
         args: a.to_vec(),
     };
-    if a.len() != 2 {
+    if a.len() < 2 {
         return Ok(uneval(&a));
     }
     let vars = match parse_vars(&a[1]) {
         Some(v) if !v.is_empty() => v,
         _ => return Ok(uneval(&a)),
     };
+    let (domain, assumptions) = parse_domain_and_assumptions(&a[2..]);
     let mut items: Vec<Value> = Vec::new();
     flatten_conjuncts(&a[0], &mut items);
     if items.iter().any(|x| matches!(x, Value::Bool(false))) {
@@ -3073,12 +3520,22 @@ pub fn builtin_solve(args: &[Value]) -> Result<Value, EvalError> {
                 } else {
                     call("And", combined)
                 };
-                if let Value::List(found) = builtin_solve(&[e, a[1].clone()])? {
+                let mut subargs = vec![e, a[1].clone()];
+                subargs.extend(a[2..].iter().cloned());
+                if let Value::List(found) = builtin_solve(&subargs)? {
                     out.extend(found);
                 }
             }
         }
         return Ok(Value::List(out));
+    }
+    // Transcendental equations that are not polynomial in the variable.
+    if vars.len() == 1
+        && items.len() == 1
+        && let Some(roots) = transcendental_solve(&items[0], &vars[0], domain, &assumptions)
+    {
+        let sols: Vec<Vec<(usize, Value)>> = roots.into_iter().map(|r| vec![(0usize, r)]).collect();
+        return Ok(solve_result_value(&sols, &vars));
     }
     let equations = match equations_from(&items) {
         Some(e) => e,
@@ -3095,6 +3552,13 @@ pub fn builtin_solve(args: &[Value]) -> Result<Value, EvalError> {
     let sols = match solve_all(&polys, &vars, &active) {
         Some(s) => s,
         None => return Ok(uneval(&a)),
+    };
+    let sols = if domain == Domain::Reals && vars.len() == 1 {
+        sols.into_iter()
+            .filter(|s| s.iter().all(|(_, v)| is_real_value(v)))
+            .collect()
+    } else {
+        sols
     };
     Ok(solve_result_value(&sols, &vars))
 }
@@ -4361,5 +4825,122 @@ mod tests {
         let out = eval_str("Reduce[x^2 < 1, {x, y}]").to_string();
         assert!(out.contains("Less[-1, x]"), "got {out}");
         assert!(!out.contains('y'), "y is unconstrained: {out}");
+    }
+
+    // ── Transcendental solving (Exp/Log/power, elementary trig, domains) ──
+
+    #[test]
+    fn test_solve_exp_log() {
+        assert_eq!(
+            eval_str("Solve[Exp[x] == a, x]").to_string(),
+            "{x -> {Log[a]}}"
+        );
+        assert_eq!(
+            eval_str("Solve[Log[x] == a, x]").to_string(),
+            "{x -> {Power[E, a]}}"
+        );
+        let out = eval_str("Solve[b^x == c, x]").to_string();
+        assert!(
+            out.contains("Log[c]") && out.contains("Log[b]"),
+            "got {out}"
+        );
+        assert_eq!(
+            eval_str("Solve[E^x == a, x]").to_string(),
+            "{x -> {Log[a]}}"
+        );
+    }
+
+    #[test]
+    fn test_solve_exp_reals_domain() {
+        let out = eval_str("Solve[Exp[x] == a, x, Reals]").to_string();
+        assert!(
+            out.contains("ConditionalExpression[Log[a], Greater[a, 0]]"),
+            "got {out}"
+        );
+        assert_eq!(
+            eval_str("Solve[Exp[x] == -1, x, Reals]").to_string(),
+            "{x -> {}}"
+        );
+        assert_eq!(eval_str("Solve[Exp[x] == 0, x]").to_string(), "{x -> {}}");
+    }
+
+    #[test]
+    fn test_solve_sqrt_domain() {
+        assert_eq!(
+            eval_str("Solve[Sqrt[x] == a, x]").to_string(),
+            "{x -> {Power[a, 2]}}"
+        );
+        let out = eval_str("Solve[Sqrt[x] == a, x, Reals]").to_string();
+        assert!(
+            out.contains("ConditionalExpression[Power[a, 2], GreaterEqual[a, 0]]"),
+            "got {out}"
+        );
+        assert_eq!(
+            eval_str("Solve[Sqrt[x] == -2, x, Reals]").to_string(),
+            "{x -> {}}"
+        );
+        assert_eq!(
+            eval_str("Solve[Sqrt[x] == 4, x, Reals]").to_string(),
+            "{x -> {16}}"
+        );
+    }
+
+    #[test]
+    fn test_solve_trig_periodic() {
+        let sin = eval_str("Solve[Sin[x] == 0, x]").to_string();
+        assert!(
+            sin.contains("C[1]") && sin.contains("Integers"),
+            "got {sin}"
+        );
+        assert!(sin.contains("Times[2, Pi, C[1]]"), "got {sin}");
+        assert!(sin.contains("Plus[Pi, Times[2, Pi, C[1]]]"), "got {sin}");
+        let cos = eval_str("Solve[Cos[x] == 1/2, x]").to_string();
+        assert!(cos.contains("Times[1/3, Pi]"), "got {cos}");
+        assert!(!cos.contains("ArcCos"), "exact angle expected: {cos}");
+        assert_eq!(
+            eval_str("Solve[Sin[x] == 2, x, Reals]").to_string(),
+            "{x -> {}}"
+        );
+    }
+
+    #[test]
+    fn test_solve_reals_filters_complex_roots() {
+        let def = eval_str("Solve[x^2 + 1 == 0, x]").to_string();
+        assert!(def.contains('I'), "got {def}");
+        assert_eq!(
+            eval_str("Solve[x^2 + 1 == 0, x, Reals]").to_string(),
+            "{x -> {}}"
+        );
+    }
+
+    #[test]
+    fn test_solve_assumptions_drops_condition() {
+        assert_eq!(
+            eval_str("Solve[Exp[x] == a, x, Reals, Assumptions -> a > 0]").to_string(),
+            "{x -> {Log[a]}}"
+        );
+    }
+
+    #[test]
+    fn test_solve_values_transcendental() {
+        assert_eq!(
+            eval_str("SolveValues[Exp[x] == a, x]").to_string(),
+            "{Log[a]}"
+        );
+        assert_eq!(
+            eval_str("SolveValues[Log[x] == a, x]").to_string(),
+            "{Power[E, a]}"
+        );
+    }
+
+    #[test]
+    fn test_reduce_log_root_reals() {
+        let log = eval_str("Reduce[Log[x] == a, x, Reals]").to_string();
+        assert!(!log.contains("Reduce["), "got {log}");
+        assert!(log.contains("Equal[x, Power[E, a]]"), "got {log}");
+        let root = eval_str("Reduce[Sqrt[x] == a, x, Reals]").to_string();
+        assert!(!root.contains("Reduce["), "got {root}");
+        assert!(root.contains("Equal[x, Power[a, 2]]"), "got {root}");
+        assert!(root.contains("GreaterEqual[a, 0]"), "got {root}");
     }
 }

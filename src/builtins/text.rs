@@ -4,6 +4,7 @@
 
 use crate::ast::Expr;
 use crate::env::Env;
+use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
@@ -39,6 +40,25 @@ pub fn builtin_capitalize(args: &[Value]) -> Result<Value, EvalError> {
         Some(first) => {
             let mut out: String = first.to_uppercase().collect();
             out.push_str(&chars.as_str().to_lowercase());
+            Ok(Value::Str(out))
+        }
+    }
+}
+
+/// Decapitalize["string"] — lowercase the first character, leave the rest as-is.
+pub fn builtin_decapitalize(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Decapitalize requires exactly 1 argument".to_string(),
+        ));
+    }
+    let s = str_arg(&args[0], "String")?;
+    let mut chars = s.chars();
+    match chars.next() {
+        None => Ok(Value::Str(String::new())),
+        Some(first) => {
+            let mut out: String = first.to_lowercase().collect();
+            out.push_str(chars.as_str());
             Ok(Value::Str(out))
         }
     }
@@ -477,11 +497,251 @@ pub fn builtin_string_expression(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+// ── Edit distances ─────────────────────────────────────────────────────────
+
+/// Units of a string or list, so HammingDistance handles both argument shapes.
+fn sequence_units(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Str(s) => Some(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+        Value::List(items) => Some(items.clone()),
+        _ => None,
+    }
+}
+
+/// HammingDistance[s1, s2] — number of positions at which the two strings (or
+/// lists) differ. The arguments must have equal length; otherwise the result is
+/// left unevaluated, matching Wolfram Language.
+pub fn builtin_hamming_distance(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "HammingDistance requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let (a, b) = match (sequence_units(&args[0]), sequence_units(&args[1])) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Ok(unevaluated("HammingDistance", args)),
+    };
+    if a.len() != b.len() {
+        return Ok(unevaluated("HammingDistance", args));
+    }
+    let mut dist = 0i64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        if !x.struct_eq(y) {
+            dist += 1;
+        }
+    }
+    Ok(Value::Integer(Integer::from(dist)))
+}
+
+/// DamerauLevenshteinDistance[s1, s2] — the minimum number of insertions,
+/// deletions, substitutions and transpositions of adjacent characters needed
+/// to transform `s1` into `s2` (optimal string alignment distance).
+pub fn builtin_damerau_levenshtein_distance(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "DamerauLevenshteinDistance requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let s1 = str_arg(&args[0], "String")?;
+    let s2 = str_arg(&args[1], "String")?;
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    // True Damerau–Levenshtein distance (with an alphabet table so that
+    // arbitrary transpositions of adjacent characters cost 1).
+    let mut da: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    let max = m + n;
+    let mut h = vec![vec![0usize; n + 2]; m + 2];
+    h[0][0] = max;
+    for i in 0..=m {
+        h[i + 1][0] = max;
+        h[i + 1][1] = i;
+    }
+    for j in 0..=n {
+        h[0][j + 1] = max;
+        h[1][j + 1] = j;
+    }
+    for i in 1..=m {
+        let mut db = 0usize;
+        for j in 1..=n {
+            let i1 = *da.get(&b[j - 1]).unwrap_or(&0);
+            let j1 = db;
+            let (cost, new_db) = if a[i - 1] == b[j - 1] {
+                (0, j)
+            } else {
+                (1, db)
+            };
+            db = new_db;
+            h[i + 1][j + 1] = (h[i][j] + cost).min(h[i + 1][j] + 1).min(h[i][j + 1] + 1);
+            if i1 > 0 && j1 > 0 {
+                h[i + 1][j + 1] = h[i + 1][j + 1].min(h[i1][j1] + (i - i1 - 1) + 1 + (j - j1 - 1));
+            }
+        }
+        da.insert(a[i - 1], i);
+    }
+    Ok(Value::Integer(Integer::from(h[m + 1][n + 1] as i64)))
+}
+
+/// LongestCommonSubstring[s1, s2] — the longest contiguous substring common to
+/// both strings, under its Wolfram-canonical name.
+pub fn builtin_longest_common_substring(args: &[Value]) -> Result<Value, EvalError> {
+    crate::builtins::string::builtin_longest_common_sub_string(args)
+}
+
+/// SequenceAlignment[s1, s2] — a global alignment of two strings, given as a
+/// list of successive matching runs (plain strings) and differing runs, where a
+/// differing run is a pair `{u1, u2}` (with `""` used for a gap).
+pub fn builtin_sequence_alignment(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "SequenceAlignment requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let s1 = str_arg(&args[0], "String")?;
+    let s2 = str_arg(&args[1], "String")?;
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    // Longest-common-subsequence dynamic program.
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1] + 1
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+    // Backtrack into aligned columns; `None` marks a gap.
+    let (mut i, mut j) = (m, n);
+    let mut left: Vec<Option<char>> = Vec::new();
+    let mut right: Vec<Option<char>> = Vec::new();
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            left.push(Some(a[i - 1]));
+            right.push(Some(b[j - 1]));
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            left.push(Some(a[i - 1]));
+            right.push(None);
+            i -= 1;
+        } else {
+            left.push(None);
+            right.push(Some(b[j - 1]));
+            j -= 1;
+        }
+    }
+    while i > 0 {
+        left.push(Some(a[i - 1]));
+        right.push(None);
+        i -= 1;
+    }
+    while j > 0 {
+        left.push(None);
+        right.push(Some(b[j - 1]));
+        j -= 1;
+    }
+    left.reverse();
+    right.reverse();
+    // Group aligned columns into matching runs and merged differing pairs.
+    let mut out: Vec<Value> = Vec::new();
+    let mut run = String::new();
+    let mut diff_l = String::new();
+    let mut diff_r = String::new();
+    fn flush_run(run: &mut String, out: &mut Vec<Value>) {
+        if !run.is_empty() {
+            out.push(Value::Str(std::mem::take(run)));
+        }
+    }
+    for (x, y) in left.iter().zip(right.iter()) {
+        match (x, y) {
+            (Some(cx), Some(cy)) if cx == cy => {
+                if !diff_l.is_empty() || !diff_r.is_empty() {
+                    out.push(Value::List(vec![
+                        Value::Str(std::mem::take(&mut diff_l)),
+                        Value::Str(std::mem::take(&mut diff_r)),
+                    ]));
+                }
+                run.push(*cx);
+            }
+            _ => {
+                flush_run(&mut run, &mut out);
+                if let Some(c) = x {
+                    diff_l.push(*c);
+                }
+                if let Some(c) = y {
+                    diff_r.push(*c);
+                }
+            }
+        }
+    }
+    flush_run(&mut run, &mut out);
+    if !diff_l.is_empty() || !diff_r.is_empty() {
+        out.push(Value::List(vec![Value::Str(diff_l), Value::Str(diff_r)]));
+    }
+    Ok(Value::List(out))
+}
+
+// ── TemplateApply ──────────────────────────────────────────────────────────
+
+/// TemplateApply[template, args] — substitute into a `` ` ``-template.
+///
+/// `template` is either a template string or a `PureFunction` produced by
+/// `StringTemplate`; `args` is a list (positional), an association (named) or a
+/// single value. The result is always a string.
+pub fn builtin_template_apply(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "TemplateApply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let pf = match &args[0] {
+        Value::PureFunction { .. } => args[0].clone(),
+        Value::Str(_) => builtin_string_template(std::slice::from_ref(&args[0]))?,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String or PureFunction".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let params = match &pf {
+        Value::PureFunction { params, .. } => params.clone(),
+        _ => Vec::new(),
+    };
+    let call_args: Vec<Value> = match &args[1] {
+        Value::List(items) => items.clone(),
+        Value::Assoc(map) => params
+            .iter()
+            .map(|p| map.get(p).cloned().unwrap_or(Value::Null))
+            .collect(),
+        other => vec![other.clone()],
+    };
+    let result = apply_function(&pf, &call_args, env)?;
+    Ok(match result {
+        Value::Str(_) => result,
+        other => Value::Str(other.to_string()),
+    })
+}
+
+/// Build an unevaluated `head[args…]` call.
+fn unevaluated(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
     super::register_builtin(env, "Capitalize", builtin_capitalize);
+    super::register_builtin(env, "Decapitalize", builtin_decapitalize);
     super::register_builtin(env, "TitleCase", builtin_title_case);
     super::register_builtin(env, "CharacterRange", builtin_character_range);
     super::register_builtin(env, "Hash", builtin_hash);
@@ -489,6 +749,19 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "StringTemplate", builtin_string_template);
     super::register_builtin(env, "StringReplaceList", builtin_string_replace_list);
     super::register_builtin(env, "StringExpression", builtin_string_expression);
+    super::register_builtin(env, "HammingDistance", builtin_hamming_distance);
+    super::register_builtin(
+        env,
+        "DamerauLevenshteinDistance",
+        builtin_damerau_levenshtein_distance,
+    );
+    super::register_builtin(
+        env,
+        "LongestCommonSubstring",
+        builtin_longest_common_substring,
+    );
+    super::register_builtin(env, "SequenceAlignment", builtin_sequence_alignment);
+    super::register_builtin_env(env, "TemplateApply", builtin_template_apply);
 }
 
 #[cfg(test)]
@@ -725,5 +998,251 @@ mod tests {
         let out =
             crate::builtins::stringpatterns::builtin_string_cases(&[s("abcabc"), pat]).unwrap();
         assert_eq!(out, Value::List(vec![s("ab"), s("ab")]));
+    }
+
+    // ── Tests via the evaluator (covers registration + parsing) ──
+
+    fn eval_str(input: &str) -> Value {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap()
+    }
+
+    #[test]
+    fn test_new_text_builtins_registered() {
+        let env = env_with_builtins();
+        for name in [
+            "Decapitalize",
+            "HammingDistance",
+            "DamerauLevenshteinDistance",
+            "LongestCommonSubstring",
+            "SequenceAlignment",
+            "TemplateApply",
+        ] {
+            assert!(
+                matches!(env.get(name), Some(Value::Builtin(..))),
+                "{name} not registered as builtin"
+            );
+        }
+    }
+
+    // ── Decapitalize ──
+
+    #[test]
+    fn test_decapitalize() {
+        assert_eq!(builtin_decapitalize(&[s("ABC")]).unwrap(), s("aBC"));
+        assert_eq!(builtin_decapitalize(&[s("abc")]).unwrap(), s("abc"));
+        assert_eq!(builtin_decapitalize(&[s("")]).unwrap(), s(""));
+        assert_eq!(eval_str("Decapitalize[\"HELLO\"]"), s("hELLO"));
+    }
+
+    // ── Characters ──
+
+    #[test]
+    fn test_characters() {
+        assert_eq!(
+            eval_str("Characters[\"abc\"]"),
+            Value::List(vec![s("a"), s("b"), s("c")])
+        );
+        assert_eq!(eval_str("Characters[\"\"]"), Value::List(vec![]));
+    }
+
+    // ── ToCharacterCode / FromCharacterCode ──
+
+    #[test]
+    fn test_character_code_roundtrip() {
+        assert_eq!(
+            eval_str("ToCharacterCode[\"ab\"]"),
+            Value::List(vec![int(97), int(98)])
+        );
+        assert_eq!(eval_str("FromCharacterCode[{97, 98}]"), s("ab"));
+    }
+
+    // ── IntegerString / FromDigits string forms ──
+
+    #[test]
+    fn test_integer_string_and_from_digits_string() {
+        assert_eq!(eval_str("IntegerString[255, 16]"), s("ff"));
+        assert_eq!(eval_str("IntegerString[10, 2]"), s("1010"));
+        assert_eq!(eval_str("IntegerString[0]"), s("0"));
+        assert_eq!(eval_str("FromDigits[\"ff\", 16]"), int(255));
+        assert_eq!(eval_str("FromDigits[\"1010\", 2]"), int(10));
+        assert_eq!(eval_str("FromDigits[\"-123\"]"), int(-123));
+    }
+
+    // ── StringRiffle / padding / repeat / alphabet ──
+
+    #[test]
+    fn test_string_riffle() {
+        assert_eq!(eval_str("StringRiffle[{\"a\", \"b\", \"c\"}]"), s("a b c"));
+        assert_eq!(
+            eval_str("StringRiffle[{\"a\", \"b\", \"c\"}, \"-\"]"),
+            s("a-b-c")
+        );
+    }
+
+    #[test]
+    fn test_string_pad() {
+        assert_eq!(eval_str("StringPadLeft[\"ab\", 5]"), s("   ab"));
+        assert_eq!(eval_str("StringPadRight[\"ab\", 5]"), s("ab   "));
+        assert_eq!(eval_str("StringPadLeft[\"ab\", 6, \"xy\"]"), s("xyxyab"));
+        assert_eq!(eval_str("StringPadRight[\"x\", 4, \"-\"]"), s("x---"));
+    }
+
+    #[test]
+    fn test_string_repeat() {
+        assert_eq!(eval_str("StringRepeat[\"ab\", 3]"), s("ababab"));
+        assert_eq!(eval_str("StringRepeat[\"a\", 0]"), s(""));
+    }
+
+    #[test]
+    fn test_alphabet() {
+        let out = eval_str("Alphabet[]");
+        let Value::List(letters) = out else {
+            panic!("Alphabet[] should be a list");
+        };
+        assert_eq!(letters.len(), 26);
+        assert_eq!(letters[0], s("a"));
+        assert_eq!(letters[25], s("z"));
+    }
+
+    #[test]
+    fn test_to_title_case_alias() {
+        assert_eq!(eval_str("ToTitleCase[\"hello world\"]"), s("Hello World"));
+    }
+
+    // ── Edit distances ──
+
+    #[test]
+    fn test_edit_distance() {
+        assert_eq!(eval_str("EditDistance[\"kitten\", \"sitting\"]"), int(3));
+        assert_eq!(eval_str("EditDistance[\"abc\", \"abc\"]"), int(0));
+    }
+
+    #[test]
+    fn test_hamming_distance() {
+        assert_eq!(eval_str("HammingDistance[\"abc\", \"abd\"]"), int(1));
+        assert_eq!(eval_str("HammingDistance[\"abc\", \"abc\"]"), int(0));
+        assert_eq!(
+            eval_str("HammingDistance[\"bccbbcb\", \"ccbbccb\"]"),
+            int(3)
+        );
+        // Unequal lengths stay unevaluated.
+        assert_eq!(
+            eval_str("HammingDistance[\"abc\", \"ab\"]"),
+            Value::Call {
+                head: "HammingDistance".to_string(),
+                args: vec![s("abc"), s("ab")],
+            }
+        );
+        // Lists work too.
+        assert_eq!(eval_str("HammingDistance[{1, 2, 3}, {1, 5, 3}]"), int(1));
+    }
+
+    #[test]
+    fn test_damerau_levenshtein_distance() {
+        // A transposition costs 1, unlike plain LevenshteinDistance.
+        assert_eq!(
+            eval_str("DamerauLevenshteinDistance[\"ab\", \"ba\"]"),
+            int(1)
+        );
+        assert_eq!(
+            eval_str("DamerauLevenshteinDistance[\"ca\", \"abc\"]"),
+            int(2)
+        );
+        assert_eq!(
+            eval_str("DamerauLevenshteinDistance[\"abc\", \"abc\"]"),
+            int(0)
+        );
+    }
+
+    // ── Longest common subsequence / substring ──
+
+    #[test]
+    fn test_longest_common_subsequence() {
+        assert_eq!(
+            eval_str("LongestCommonSubsequence[\"abcdef\", \"acf\"]"),
+            s("acf")
+        );
+    }
+
+    #[test]
+    fn test_longest_common_substring() {
+        assert_eq!(
+            eval_str("LongestCommonSubstring[\"abcdef\", \"xbcdy\"]"),
+            s("bcd")
+        );
+        assert_eq!(eval_str("LongestCommonSubstring[\"abc\", \"xyz\"]"), s(""));
+    }
+
+    // ── SequenceAlignment ──
+
+    #[test]
+    fn test_sequence_alignment_identical() {
+        assert_eq!(
+            eval_str("SequenceAlignment[\"abc\", \"abc\"]"),
+            Value::List(vec![s("abc")])
+        );
+    }
+
+    #[test]
+    fn test_sequence_alignment_substitution() {
+        assert_eq!(
+            eval_str("SequenceAlignment[\"abcXabcXabc\", \"abcYabcYabc\"]"),
+            Value::List(vec![
+                s("abc"),
+                Value::List(vec![s("X"), s("Y")]),
+                s("abc"),
+                Value::List(vec![s("X"), s("Y")]),
+                s("abc"),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_sequence_alignment_gap() {
+        // A gap is represented by an empty string on the gapped side.
+        let out = eval_str("SequenceAlignment[\"ac\", \"abcd\"]");
+        let Value::List(segs) = out else {
+            panic!("SequenceAlignment should yield a list");
+        };
+        // Every segment is either a matching string or a differing pair.
+        for seg in &segs {
+            match seg {
+                Value::Str(_) => {}
+                Value::List(pair) => assert_eq!(pair.len(), 2),
+                other => panic!("unexpected segment {other:?}"),
+            }
+        }
+        assert_eq!(segs.first(), Some(&s("a")));
+    }
+
+    // ── StringTemplate / TemplateApply ──
+
+    #[test]
+    fn test_template_apply_positional() {
+        assert_eq!(
+            eval_str("TemplateApply[\"`1` + `2`\", {\"a\", \"b\"}]"),
+            s("a + b")
+        );
+        assert_eq!(eval_str("TemplateApply[\"v=`1`\", 5]"), s("v=5"));
+    }
+
+    #[test]
+    fn test_template_apply_named() {
+        assert_eq!(
+            eval_str("TemplateApply[\"`x`-`y`\", <|\"x\" -> \"a\", \"y\" -> \"b\"|>]"),
+            s("a-b")
+        );
+    }
+
+    #[test]
+    fn test_template_apply_from_string_template() {
+        assert_eq!(
+            eval_str("TemplateApply[StringTemplate[\"[`1`]\"], {\"go\"}]"),
+            s("[go]")
+        );
     }
 }

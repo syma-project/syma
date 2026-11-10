@@ -165,7 +165,7 @@ pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
                 matches!(v, Value::Integer(i) if *i == 1)
                     || matches!(v, Value::Rational(r) if **r == 1)
             };
-            let mut terms: Vec<Value> = Vec::new();
+            let mut terms: Vec<(i64, Value)> = Vec::new();
             for (i, c) in coefficients.iter().enumerate() {
                 if num_zero(c) {
                     continue;
@@ -194,15 +194,21 @@ pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
                         args: vec![c.clone(), power],
                     }
                 };
-                terms.push(term);
+                terms.push((e, term));
             }
             match terms.len() {
                 0 => Ok(zero),
-                1 => Ok(terms.pop().unwrap()),
-                _ => Ok(Value::Call {
-                    head: "Plus".to_string(),
-                    args: terms,
-                }),
+                1 => Ok(terms.pop().unwrap().1),
+                _ => {
+                    // Emit the polynomial in ascending degree order (the order
+                    // `Series`/`InverseSeries` produce), so `Normal[series]` is
+                    // structurally stable and round-trips through the evaluator.
+                    terms.sort_by_key(|(e, _)| *e);
+                    Ok(Value::Call {
+                        head: "Plus".to_string(),
+                        args: terms.into_iter().map(|(_, t)| t).collect(),
+                    })
+                }
             }
         }
         _ => Err(EvalError::TypeError {
@@ -792,6 +798,7 @@ pub fn builtin_keys(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::List(out))
         }
+        Value::Dataset(inner) => builtin_keys(std::slice::from_ref(inner)),
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
             got: args[0].type_name().to_string(),
@@ -824,6 +831,7 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::List(out))
         }
+        Value::Dataset(inner) => builtin_values(std::slice::from_ref(inner)),
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
             got: args[0].type_name().to_string(),

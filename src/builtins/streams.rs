@@ -24,8 +24,8 @@ const CWD_KEY: &str = "$SymaCurrentDirectory";
 
 /// Live state for one open stream.
 enum StreamEntry {
-    /// A read stream buffering the whole file plus a byte cursor.
-    Read { content: String, pos: usize },
+    /// A read stream buffering the whole file as raw bytes plus a byte cursor.
+    Read { content: Vec<u8>, pos: usize },
     /// A write/append stream backed by an open file.
     Write(File),
 }
@@ -102,6 +102,14 @@ fn input_form(v: &Value) -> String {
     )
 }
 
+/// Render a value for output: strings verbatim, everything else via `Display`.
+fn display_form(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        other => format!("{}", other),
+    }
+}
+
 /// Allocate a fresh handle and insert `entry` under it.
 fn insert_stream(entry: StreamEntry) -> u64 {
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -122,6 +130,85 @@ pub(crate) fn stream_position(handle: u64) -> Option<u64> {
     with_stream(handle, |entry| match entry {
         StreamEntry::Read { pos, .. } => Some(*pos as u64),
         StreamEntry::Write(file) => file.stream_position().ok(),
+    })?
+}
+
+/// Set the byte cursor of an open stream. Returns `false` for unknown handles
+/// or write streams that cannot seek.
+pub(crate) fn set_stream_position(handle: u64, pos: u64) -> bool {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { content, pos: p } => {
+            *p = (pos as usize).min(content.len());
+            true
+        }
+        StreamEntry::Write(file) => file.seek(std::io::SeekFrom::Start(pos)).is_ok(),
+    })
+    .unwrap_or(false)
+}
+
+/// Read all remaining characters from a read stream.
+fn take_all(handle: u64) -> Option<String> {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { content, pos } => {
+            let rest = String::from_utf8_lossy(&content[*pos..]).into_owned();
+            *pos = content.len();
+            Some(rest)
+        }
+        StreamEntry::Write(_) => None,
+    })?
+}
+
+/// Read up to `n` characters from a read stream.
+fn take_chars(handle: u64, n: usize) -> Option<String> {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { content, pos } => {
+            let rest = String::from_utf8_lossy(&content[*pos..]);
+            let taken: String = rest.chars().take(n).collect();
+            // Advance by the number of bytes that produced the taken chars
+            // (exact for valid UTF-8; conservative otherwise).
+            let advance = taken.len().min(content.len() - *pos);
+            *pos += advance;
+            Some(taken)
+        }
+        StreamEntry::Write(_) => None,
+    })?
+}
+
+/// Read up to `n` bytes from a read stream (advancing the cursor).
+fn take_bytes(handle: u64, n: usize) -> Option<Vec<u8>> {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { content, pos } => {
+            if *pos >= content.len() {
+                return Some(Vec::new());
+            }
+            let end = pos.saturating_add(n).min(content.len());
+            let out = content[*pos..end].to_vec();
+            *pos = end;
+            Some(out)
+        }
+        StreamEntry::Write(_) => None,
+    })?
+}
+
+/// Discard up to `n` lines from a read stream.
+fn skip_lines(handle: u64, n: usize) -> Option<()> {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { content, pos } => {
+            for _ in 0..n {
+                if *pos >= content.len() {
+                    break;
+                }
+                let rest = &content[*pos..];
+                let end = rest
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(rest.len());
+                *pos += end;
+            }
+            Some(())
+        }
+        StreamEntry::Write(_) => None,
     })?
 }
 
@@ -181,7 +268,7 @@ pub fn builtin_open_read(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         return inert("OpenRead", args);
     };
     let path = resolve_path(env, &file);
-    match std::fs::read_to_string(&path) {
+    match std::fs::read(&path) {
         Ok(content) => Ok(Value::Integer(rug::Integer::from(insert_stream(
             StreamEntry::Read { content, pos: 0 },
         )))),
@@ -304,8 +391,8 @@ fn next_line(handle: u64) -> Option<String> {
                 return None;
             }
             let rest = &content[*pos..];
-            let end = rest.find('\n').unwrap_or(rest.len());
-            let line = rest[..end].to_string();
+            let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+            let line = String::from_utf8_lossy(&rest[..end]).into_owned();
             *pos += end + 1;
             Some(line)
         }
@@ -371,6 +458,272 @@ pub fn builtin_end_of_file(args: &[Value], _env: &Env) -> Result<Value, EvalErro
     }
 }
 
+// ── ReadString / ReadList / Skip / SetStreamPosition ───────────────────────
+
+/// ReadString[stream] / ReadString[stream, n] — read the rest of a read stream
+/// (or the next `n` characters) as a single string.
+///
+/// `ReadString["file"]` falls back to reading the whole file.
+pub fn builtin_read_string(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.first().and_then(as_handle).is_some()
+        && let Some(handle) = args.first().and_then(as_handle)
+    {
+        let n = match args.get(1) {
+            None => None,
+            Some(Value::Integer(n)) => Some(n.to_usize().unwrap_or(0)),
+            Some(_) => return inert("ReadString", args),
+        };
+        let text = match n {
+            None => take_all(handle),
+            Some(n) => take_chars(handle, n),
+        };
+        return match text {
+            Some(t) => Ok(Value::Str(t)),
+            None => Ok(Value::Symbol("EndOfFile".to_string())),
+        };
+    }
+    // Path fallback: only the 1-argument form writes/reads whole files.
+    if args.len() == 1 {
+        return super::io::builtin_read_string(args);
+    }
+    let _ = env;
+    inert("ReadString", args)
+}
+
+/// ReadList[stream] / ReadList[stream, n] — read the remaining lines (or the
+/// next `n` lines) of a read stream as a list of strings.
+pub fn builtin_read_list(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if let Some(handle) = args.first().and_then(as_handle) {
+        let count = match args.get(1) {
+            None => None,
+            Some(Value::Integer(n)) => Some(n.to_usize().unwrap_or(0)),
+            Some(_) => return inert("ReadList", args),
+        };
+        let mut items = Vec::new();
+        loop {
+            if let Some(n) = count
+                && items.len() >= n
+            {
+                break;
+            }
+            match next_line(handle) {
+                Some(mut line) => {
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                    items.push(Value::Str(line));
+                }
+                None => break,
+            }
+        }
+        return Ok(Value::List(items));
+    }
+    if args.len() == 1 {
+        return super::io::builtin_read_list(args);
+    }
+    inert("ReadList", args)
+}
+
+/// Skip[stream] / Skip[stream, n] — skip `n` lines of a read stream.
+pub fn builtin_skip(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return inert("Skip", args);
+    }
+    let Some(handle) = as_handle(&args[0]) else {
+        return inert("Skip", args);
+    };
+    let n = match args.get(1) {
+        None => 1usize,
+        Some(Value::Integer(n)) => n.to_usize().unwrap_or(1),
+        Some(_) => return inert("Skip", args),
+    };
+    match skip_lines(handle, n) {
+        Some(()) => Ok(Value::Null),
+        None => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+/// SetStreamPosition[stream, pos] — move a stream's cursor to byte `pos`.
+pub fn builtin_set_stream_position(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    let [stream, Value::Integer(pos)] = args else {
+        return inert("SetStreamPosition", args);
+    };
+    let Some(handle) = as_handle(stream) else {
+        return inert("SetStreamPosition", args);
+    };
+    let pos = pos.to_u64().unwrap_or(0);
+    if set_stream_position(handle, pos) {
+        Ok(Value::Integer(rug::Integer::from(pos)))
+    } else {
+        Ok(Value::Symbol("$Failed".to_string()))
+    }
+}
+
+// ── WriteLine ───────────────────────────────────────────────────────────────
+
+/// WriteLine[stream, expr...] — write `expr`s in `InputForm`, newline-terminated.
+///
+/// Falls back to stdout when the first argument is not a stream handle.
+pub fn builtin_write_line(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if let Some(handle) = args.first().and_then(as_handle)
+        && let Some(()) = with_stream(handle, |entry| {
+            if let StreamEntry::Write(file) = entry {
+                let rendered: Vec<String> = args[1..].iter().map(display_form).collect();
+                let mut line = rendered.join(" ");
+                line.push('\n');
+                let _ = file.write_all(line.as_bytes());
+            }
+        })
+    {
+        return Ok(Value::Null);
+    }
+    for arg in args {
+        match arg {
+            Value::Str(s) => print!("{}", s),
+            other => print!("{}", other),
+        }
+    }
+    println!();
+    Ok(Value::Null)
+}
+
+// ── BinaryRead / BinaryWrite ────────────────────────────────────────────────
+
+/// BinaryRead[stream] / BinaryRead[stream, n] — read bytes from a read stream as
+/// a list of integers.
+pub fn builtin_binary_read_stream(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return inert("BinaryRead", args);
+    }
+    let Some(handle) = as_handle(&args[0]) else {
+        return inert("BinaryRead", args);
+    };
+    let n = match args.get(1) {
+        None => usize::MAX,
+        Some(Value::Integer(n)) => n.to_usize().unwrap_or(0),
+        Some(_) => return inert("BinaryRead", args),
+    };
+    match take_bytes(handle, n) {
+        Some(bytes) => Ok(Value::List(
+            bytes
+                .iter()
+                .map(|b| Value::Integer(rug::Integer::from(*b)))
+                .collect(),
+        )),
+        None => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+/// BinaryWrite[stream, {b1, b2, ...}] — write raw bytes to a write stream.
+pub fn builtin_binary_write_stream(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
+    let [stream, Value::List(bytes)] = args else {
+        return inert("BinaryWrite", args);
+    };
+    let Some(handle) = as_handle(stream) else {
+        return inert("BinaryWrite", args);
+    };
+    let mut out = Vec::with_capacity(bytes.len());
+    for b in bytes {
+        match b {
+            Value::Integer(n) => out.push(n.to_u8().unwrap_or(0)),
+            _ => return inert("BinaryWrite", args),
+        }
+    }
+    match with_stream(handle, |entry| {
+        if let StreamEntry::Write(file) = entry {
+            file.write_all(&out).is_ok()
+        } else {
+            false
+        }
+    }) {
+        Some(true) => Ok(Value::Null),
+        _ => Ok(Value::Symbol("$Failed".to_string())),
+    }
+}
+
+// ── Put / Get via streams ───────────────────────────────────────────────────
+
+/// Put[expr..., stream] — write `expr`s to a stream/file in `InputForm`.
+pub fn builtin_put(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return inert("Put", args);
+    }
+    let last = &args[args.len() - 1];
+    if let Some(handle) = as_handle(last) {
+        let ok = with_stream(handle, |entry| {
+            if let StreamEntry::Write(file) = entry {
+                let mut out = String::new();
+                for expr in &args[..args.len() - 1] {
+                    out.push_str(&input_form(expr));
+                    out.push('\n');
+                }
+                file.write_all(out.as_bytes()).is_ok()
+            } else {
+                false
+            }
+        });
+        if ok == Some(true) {
+            return Ok(Value::Null);
+        }
+    }
+    crate::builtins::systemio::builtin_put(args, env)
+}
+
+/// PutAppend[expr..., stream] — append `expr`s to a stream/file in `InputForm`.
+pub fn builtin_put_append(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return inert("PutAppend", args);
+    }
+    let last = &args[args.len() - 1];
+    if let Some(handle) = as_handle(last) {
+        let ok = with_stream(handle, |entry| {
+            if let StreamEntry::Write(file) = entry {
+                let mut out = String::new();
+                for expr in &args[..args.len() - 1] {
+                    out.push_str(&input_form(expr));
+                    out.push('\n');
+                }
+                file.write_all(out.as_bytes()).is_ok()
+            } else {
+                false
+            }
+        });
+        if ok == Some(true) {
+            return Ok(Value::Null);
+        }
+    }
+    crate::builtins::notebook::builtin_put_append(args, env)
+}
+
+/// Get[stream] — read and evaluate the remaining expressions of a read stream.
+///
+/// Falls back to `systemio::Get` for a file name.
+pub fn builtin_get(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return inert("Get", args);
+    }
+    // `Get` is `HoldAll`, so the argument may still be an unevaluated pattern.
+    let arg = match &args[0] {
+        Value::Pattern(e) => crate::eval::eval(e, env)?,
+        other => other.clone(),
+    };
+    if let Some(handle) = as_handle(&arg) {
+        let Some(source) = take_all(handle) else {
+            return Ok(Value::Symbol("$Failed".to_string()));
+        };
+        if source.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        let tokens =
+            crate::lexer::tokenize(&source).map_err(|e| EvalError::Error(format!("Get: {}", e)))?;
+        let stmts = crate::parser::parse_with_suppress(tokens)
+            .map_err(|e| EvalError::Error(format!("Get: {}", e)))?;
+        let exprs: Vec<crate::ast::Expr> = stmts.into_iter().map(|(e, _)| e).collect();
+        return crate::eval::eval_program(&exprs, env);
+    }
+    crate::builtins::systemio::builtin_get(&[arg], env)
+}
+
 /// Register the builtins implemented in this module.
 /// StringToStream[s] — a read stream over the string `s`.
 pub fn builtin_string_to_stream(args: &[Value]) -> Result<Value, EvalError> {
@@ -386,10 +739,13 @@ pub fn builtin_string_to_stream(args: &[Value]) -> Result<Value, EvalError> {
         });
     };
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    STREAMS
-        .lock()
-        .unwrap()
-        .insert(handle, StreamEntry::Read { content: s, pos: 0 });
+    STREAMS.lock().unwrap().insert(
+        handle,
+        StreamEntry::Read {
+            content: s.into_bytes(),
+            pos: 0,
+        },
+    );
     Ok(Value::Integer(rug::Integer::from(handle as i64)))
 }
 
@@ -404,9 +760,17 @@ pub fn register(env: &Env) {
     // recognised; the stdout/path fallbacks preserve the legacy behaviour.
     super::register_builtin_env(env, "Write", builtin_write);
     super::register_builtin_env(env, "WriteString", builtin_write_string);
+    super::register_builtin_env(env, "WriteLine", builtin_write_line);
     super::register_builtin_env(env, "Read", builtin_read);
     super::register_builtin_env(env, "ReadLine", builtin_read_line);
+    super::register_builtin_env(env, "ReadString", builtin_read_string);
+    super::register_builtin_env(env, "ReadList", builtin_read_list);
     super::register_builtin_env(env, "EndOfFile", builtin_end_of_file);
+    super::register_builtin_env(env, "Skip", builtin_skip);
+    super::register_builtin_env(env, "SetStreamPosition", builtin_set_stream_position);
+    // `Put`/`Get` are re-registered so they accept open stream handles too.
+    super::register_builtin_env(env, "Put", builtin_put);
+    super::register_builtin_env(env, "Get", builtin_get);
 
     for name in [
         "OpenWrite",
@@ -417,9 +781,16 @@ pub fn register(env: &Env) {
         "Streams",
         "Write",
         "WriteString",
+        "WriteLine",
         "Read",
         "ReadLine",
+        "ReadString",
+        "ReadList",
         "EndOfFile",
+        "Skip",
+        "SetStreamPosition",
+        "Put",
+        "Get",
     ] {
         if env.get_attributes(name).is_empty() {
             env.set_attributes(name, vec!["Protected".to_string()]);
@@ -566,6 +937,138 @@ mod tests {
         let tokens = crate::lexer::tokenize(&input).unwrap();
         let ast = crate::parser::parse(tokens).unwrap();
         assert_eq!(crate::eval::eval_program(&ast, &env).unwrap(), int(3));
+        fs::remove_file(&path).ok();
+    }
+
+    // ── Stream cursor / reading breadth ──────────────────────────────────
+
+    #[test]
+    fn test_set_stream_position_then_read() {
+        let env = env_with_builtins();
+        let handle = builtin_string_to_stream(&[s("hello\nworld\n")]).unwrap();
+        assert_eq!(
+            builtin_set_stream_position(&[handle.clone(), int(6)], &env).unwrap(),
+            int(6)
+        );
+        assert_eq!(
+            builtin_read_line(&[handle.clone()], &env).unwrap(),
+            s("world")
+        );
+        builtin_close(&[handle], &env).unwrap();
+    }
+
+    #[test]
+    fn test_skip_lines() {
+        let env = env_with_builtins();
+        let handle = builtin_string_to_stream(&[s("a\nb\nc\n")]).unwrap();
+        assert_eq!(
+            builtin_skip(&[handle.clone(), int(1)], &env).unwrap(),
+            Value::Null
+        );
+        assert_eq!(builtin_read_line(&[handle.clone()], &env).unwrap(), s("b"));
+        // Default `Skip[stream]` skips one line.
+        assert_eq!(builtin_skip(&[handle.clone()], &env).unwrap(), Value::Null);
+        assert_eq!(
+            builtin_read_line(&[handle.clone()], &env).unwrap(),
+            Value::Symbol("EndOfFile".to_string())
+        );
+        builtin_close(&[handle], &env).unwrap();
+    }
+
+    #[test]
+    fn test_read_string_chars_and_rest() {
+        let env = env_with_builtins();
+        let handle = builtin_string_to_stream(&[s("hello world\nsecond\n")]).unwrap();
+        assert_eq!(
+            builtin_read_string(&[handle.clone(), int(5)], &env).unwrap(),
+            s("hello")
+        );
+        assert_eq!(
+            builtin_read_string(&[handle.clone()], &env).unwrap(),
+            s(" world\nsecond\n")
+        );
+        builtin_close(&[handle], &env).unwrap();
+    }
+
+    #[test]
+    fn test_read_list_stream() {
+        let env = env_with_builtins();
+        let handle = builtin_string_to_stream(&[s("one\ntwo\nthree\n")]).unwrap();
+        assert_eq!(
+            builtin_read_list(&[handle.clone(), int(2)], &env).unwrap(),
+            Value::List(vec![s("one"), s("two")])
+        );
+        assert_eq!(
+            builtin_read_list(&[handle.clone()], &env).unwrap(),
+            Value::List(vec![s("three")])
+        );
+        builtin_close(&[handle], &env).unwrap();
+    }
+
+    #[test]
+    fn test_write_line_to_stream() {
+        let path = temp_path("writeline");
+        let env = env_with_builtins();
+        let handle = builtin_open_write(&[s(&path)], &env).unwrap();
+        builtin_write_line(&[handle.clone(), s("x"), int(1)], &env).unwrap();
+        builtin_close(&[handle], &env).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "x 1\n");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_binary_read_write_via_stream() {
+        let path = temp_path("binstream");
+        let env = env_with_builtins();
+        let handle = builtin_open_write(&[s(&path)], &env).unwrap();
+        builtin_binary_write_stream(
+            &[
+                handle.clone(),
+                Value::List(vec![int(10), int(20), int(255)]),
+            ],
+            &env,
+        )
+        .unwrap();
+        builtin_close(&[handle], &env).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), vec![10u8, 20, 255]);
+
+        let read = builtin_open_read(&[s(&path)], &env).unwrap();
+        assert_eq!(
+            builtin_binary_read_stream(&[read.clone(), int(2)], &env).unwrap(),
+            Value::List(vec![int(10), int(20)])
+        );
+        assert_eq!(
+            builtin_binary_read_stream(&[read.clone()], &env).unwrap(),
+            Value::List(vec![int(255)])
+        );
+        builtin_close(&[read], &env).unwrap();
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_put_and_get_via_stream() {
+        let path = temp_path("putstream");
+        let env = env_with_builtins();
+        let handle = builtin_open_write(&[s(&path)], &env).unwrap();
+        builtin_put(&[int(41), int(1), handle.clone()], &env).unwrap();
+        builtin_close(&[handle], &env).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "41\n1\n");
+
+        let read = builtin_open_read(&[s(&path)], &env).unwrap();
+        assert_eq!(builtin_get(&[read.clone()], &env).unwrap(), int(1));
+        builtin_close(&[read], &env).unwrap();
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_put_append_via_stream() {
+        let path = temp_path("putappendstream");
+        let env = env_with_builtins();
+        let handle = builtin_open_write(&[s(&path)], &env).unwrap();
+        builtin_put_append(&[int(7), handle.clone()], &env).unwrap();
+        builtin_put_append(&[int(8), handle.clone()], &env).unwrap();
+        builtin_close(&[handle], &env).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "7\n8\n");
         fs::remove_file(&path).ok();
     }
 }
