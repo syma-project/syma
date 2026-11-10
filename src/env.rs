@@ -156,6 +156,17 @@ impl Scope {
         }
     }
 
+    /// Remove and return a binding, walking up the parent chain.
+    pub fn take_propagate(&mut self, name: &str) -> Option<Value> {
+        if let Some(val) = self.bindings.remove(name) {
+            Some(val)
+        } else if let Some(ref parent) = self.parent {
+            parent.lock().unwrap().take_propagate(name)
+        } else {
+            None
+        }
+    }
+
     /// Get all bindings from this scope (without traversing parents).
     pub fn all_bindings(&self) -> HashMap<String, Value> {
         self.bindings.clone()
@@ -269,6 +280,14 @@ impl Env {
     /// Returns true if the variable was found and removed.
     pub fn remove(&self, name: &str) -> bool {
         self.scope.lock().unwrap().remove_propagate(name)
+    }
+
+    /// Remove and return a variable, searching the scope where it was defined.
+    ///
+    /// Unlike [`Env::get`] this transfers ownership of the value, so an
+    /// `Arc` held only by the environment can be uniquely owned afterwards.
+    pub fn take(&self, name: &str) -> Option<Value> {
+        self.scope.lock().unwrap().take_propagate(name)
     }
 
     /// Check if a variable exists in the current scope (not parents).

@@ -130,8 +130,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
         // ── List ──
         Expr::List(items) => {
-            let values: Result<Vec<Value>, _> = items.iter().map(|item| eval(item, env)).collect();
-            Ok(Value::List(flatten_sequences(values?, false)))
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(eval(item, env)?);
+            }
+            Ok(Value::List(flatten_sequences(values, false)))
         }
 
         // ── Association ──
@@ -162,7 +165,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::ReplaceAll { expr, rules } => {
             let val = eval(expr, env)?;
             let rules_val = eval(rules, env)?;
-            rules::apply_rules_value(&val, &rules_val, env)
+            rules::apply_rules_deep(&val, &rules_val, env)
         }
 
         // ── ReplaceRepeated: expr //. rules ──
@@ -171,7 +174,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let rules_val = eval(rules, env)?;
             let max_iterations = 1000;
             for _ in 0..max_iterations {
-                match rules::apply_rules_value(&val, &rules_val, env)? {
+                match rules::apply_rules_deep(&val, &rules_val, env)? {
                     new_val if !new_val.struct_eq(&val) => val = new_val,
                     _ => break,
                 }
@@ -453,7 +456,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 )));
             }
             // Check if function already exists
-            let func = if let Some(Value::Function(f)) = env.get(name) {
+            let func = if let Some(Value::Function(f)) = env.take(name) {
                 Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
             } else {
                 FunctionDef {
@@ -464,6 +467,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
             let mut func = func;
             func.definitions.push(FunctionDefinition {
+                specificity: specificity(params),
                 params: params.clone(),
                 body: body.as_ref().clone(),
                 delayed: *delayed,
@@ -472,7 +476,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
             // Sort definitions so more specific (literal) patterns come first.
             func.definitions
-                .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
+                .sort_by_key(|a| std::cmp::Reverse(a.specificity));
 
             env.set(name.clone(), Value::Function(Arc::new(func)));
             Ok(Value::Null)
@@ -569,7 +573,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         // f[args] = val  → add FunctionDefinition for name with
                         // params = args (as patterns), body = val (converted to Expr)
                         let body_expr = table::value_to_expr(&val);
-                        let func = if let Some(Value::Function(f)) = env.get(name) {
+                        let func = if let Some(Value::Function(f)) = env.take(name) {
                             Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
                         } else {
                             FunctionDef {
@@ -579,6 +583,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         };
                         let mut func = func;
                         func.definitions.push(FunctionDefinition {
+                            specificity: specificity(call_args),
                             params: call_args.clone(),
                             body: body_expr,
                             delayed: false,
@@ -586,7 +591,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                         });
                         // Sort definitions so more specific ones match first
                         func.definitions
-                            .sort_by(|a, b| specificity(&b.params).cmp(&specificity(&a.params)));
+                            .sort_by_key(|a| std::cmp::Reverse(a.specificity));
                         env.set(name.clone(), Value::Function(Arc::new(func)));
                         return Ok(val);
                     }
@@ -1011,8 +1016,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         | Expr::BlankSequence { .. }
         | Expr::BlankNullSequence { .. }
         | Expr::OptionalBlank { .. }
-        | Expr::OptionalNamedBlank { .. }
-        | Expr::PatternGuard { .. } => Ok(Value::Pattern(expr.clone())),
+        | Expr::OptionalNamedBlank { .. } => Ok(Value::Pattern(expr.clone())),
+
+        // A guard (`expr /; cond`) used in evaluated position (e.g. as a
+        // definition body inside `With`): evaluate the condition; when it holds
+        // evaluate the wrapped expression, otherwise keep the guard as an
+        // unevaluated pattern so it can still be used for matching. Conditions
+        // that cannot be evaluated yet (e.g. `_?f`, whose `#` is only bound
+        // during matching) keep the guard unevaluated.
+        Expr::PatternGuard { pattern, condition } => match eval(condition, env) {
+            Ok(Value::Bool(true)) => eval(pattern, env),
+            _ => Ok(Value::Pattern(expr.clone())),
+        },
 
         // ── Slot (look up from env; PureFunction application binds #, #1, ...) ──
         Expr::Slot(None) => env
@@ -1133,7 +1148,7 @@ pub(super) fn extract_guard_expr(expr: &Expr) -> (&Expr, Option<&Expr>) {
 
 /// Convert a symbol string containing `_` into the corresponding pattern AST node.
 /// Handles _Integer, x_, x_Integer, __, ___, x__, x___ and all typed variants.
-fn convert_blank_pattern(s: &str) -> Expr {
+pub(crate) fn convert_blank_pattern(s: &str) -> Expr {
     match s {
         "_" => {
             return Expr::Blank {
@@ -1212,6 +1227,7 @@ fn convert_blank_pattern(s: &str) -> Expr {
 }
 
 /// Evaluate function arguments, respecting HoldAll/HoldFirst/HoldRest attributes.
+#[inline(never)]
 fn eval_args_with_attributes(
     head: &Expr,
     args: &[Expr],
@@ -1240,14 +1256,16 @@ fn eval_args_with_attributes(
             // For Symbol args, evaluate first to resolve bound variable names,
             // then wrap as Pattern to prevent further evaluation.
             // For non-Symbol args, wrap as Pattern directly.
-            let vals = args
-                .iter()
-                .map(|arg| match arg {
-                    Expr::Symbol(_) => eval(arg, env)
-                        .map(|v| Value::Pattern(crate::eval::table::value_to_expr(&v))),
-                    _ => Ok(Value::Pattern(arg.clone())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut vals = Vec::with_capacity(args.len());
+            for arg in args {
+                let v = match arg {
+                    Expr::Symbol(_) => {
+                        Value::Pattern(crate::eval::table::value_to_expr(&eval(arg, env)?))
+                    }
+                    _ => Value::Pattern(arg.clone()),
+                };
+                vals.push(v);
+            }
             return Ok(vals);
         }
         if hold_first {
@@ -1273,7 +1291,11 @@ fn eval_args_with_attributes(
     }
 
     // Default: evaluate all arguments
-    args.iter().map(|a| eval(a, env)).collect()
+    let mut vals = Vec::with_capacity(args.len());
+    for a in args {
+        vals.push(eval(a, env)?);
+    }
+    Ok(vals)
 }
 
 /// Parse a local variable specification list from a Module/With/Block call.
@@ -1534,6 +1556,7 @@ fn substitute_in_expr(expr: &Expr, subs: &[(String, Expr)]) -> Expr {
 }
 
 /// Evaluate a function call.
+#[inline(never)]
 fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     // Special forms that don't evaluate all arguments
     if let Expr::Symbol(s) = head {
@@ -1615,7 +1638,7 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                             } else {
                                 table::value_to_expr(&val)
                             };
-                            let func = if let Some(Value::Function(f)) = env.get(name) {
+                            let func = if let Some(Value::Function(f)) = env.take(name) {
                                 Arc::try_unwrap(f).unwrap_or_else(|arc| (*arc).clone())
                             } else {
                                 FunctionDef {
@@ -1625,15 +1648,15 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                             };
                             let mut func = func;
                             func.definitions.push(FunctionDefinition {
+                                specificity: specificity(call_args),
                                 params: call_args.clone(),
                                 body: body_expr,
                                 delayed: s == "SetDelayed",
                                 guard: None,
                             });
                             // Sort definitions so more specific ones match first
-                            func.definitions.sort_by(|a, b| {
-                                specificity(&b.params).cmp(&specificity(&a.params))
-                            });
+                            func.definitions
+                                .sort_by_key(|a| std::cmp::Reverse(a.specificity));
                             env.set(name.clone(), Value::Function(Arc::new(func)));
                             return Ok(val);
                         }
@@ -1641,6 +1664,20 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
                     }
                     _ => Err(EvalError::Error("Invalid assignment target".to_string())),
                 }
+            }
+            // Clear/ClearAll/Remove are HoldAll-like: their arguments are symbol
+            // names that must not be evaluated before clearing.
+            "Clear" | "ClearAll" | "Remove" => {
+                let head_val = eval(head, env)?;
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Expr::Symbol(sym) => vals.push(Value::Symbol(sym.clone())),
+                        Expr::Str(_) => vals.push(eval(a, env)?),
+                        other => vals.push(eval(other, env)?),
+                    }
+                }
+                apply_function(&head_val, &vals, env)
             }
             "Hold" => {
                 // Don't evaluate arguments. Single arg: Hold[expr]; multi: Hold[expr, ...]
@@ -1995,11 +2032,11 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
 pub(crate) fn flatten_flat_args(name: &str, args: &[Value]) -> Vec<Value> {
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
-        if let Value::Call { head, args: inner } = arg {
-            if head == name {
-                result.extend(flatten_flat_args(name, inner));
-                continue;
-            }
+        if let Value::Call { head, args: inner } = arg
+            && head == name
+        {
+            result.extend(flatten_flat_args(name, inner));
+            continue;
         }
         result.push(arg.clone());
     }
@@ -2015,15 +2052,14 @@ fn normalize_flat_result(name: &str, result: Value, env: &Env) -> Value {
         ref head,
         args: ref a,
     } = result
+        && head == name
     {
-        if head == name {
-            let flat = flatten_flat_args(name, a);
-            if flat.len() != a.len() || flat.as_slice() != a.as_slice() {
-                return Value::Call {
-                    head: head.clone(),
-                    args: flat,
-                };
-            }
+        let flat = flatten_flat_args(name, a);
+        if flat.len() != a.len() || flat.as_slice() != a.as_slice() {
+            return Value::Call {
+                head: head.clone(),
+                args: flat,
+            };
         }
     }
     result
@@ -2100,45 +2136,27 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             .collect();
 
         if !list_indices.is_empty() {
-            if list_indices.len() == args.len() {
-                // All args are lists — do element-wise threading
-                if let Value::List(first) = &args[0] {
-                    let len = first.len();
-                    // All lists must be the same length
-                    let all_same_len = list_indices.iter().all(|&i| {
-                        if let Value::List(items) = &args[i] {
-                            items.len() == len
-                        } else {
-                            false
-                        }
-                    });
-                    if all_same_len {
-                        let mut result = Vec::with_capacity(len);
-                        for i in 0..len {
-                            let thread_args: Vec<Value> = args
-                                .iter()
-                                .map(|a| {
-                                    if let Value::List(items) = a {
-                                        items[i].clone()
-                                    } else {
-                                        a.clone()
-                                    }
-                                })
-                                .collect();
-                            let v = apply_function(func, &thread_args, env)?;
-                            result.push(normalize_flat_result(name, v, env));
-                        }
-                        return Ok(Value::List(result));
-                    }
-                }
-            } else {
-                // Mixed: some args are lists, some are scalars
-                let list_idx = list_indices[0];
-                if let Value::List(items) = &args[list_idx] {
-                    let mut result = Vec::with_capacity(items.len());
-                    for elem in items {
-                        let mut thread_args: Vec<Value> = args.to_vec();
-                        thread_args[list_idx] = elem.clone();
+            // Thread element-wise over *all* list arguments simultaneously.
+            // (Mixed list/scalar args keep the scalars fixed.)
+            if let Value::List(first) = &args[list_indices[0]] {
+                let len = first.len();
+                // Every list argument must have the same length to thread together.
+                let all_same_len = list_indices
+                    .iter()
+                    .all(|&i| matches!(&args[i], Value::List(items) if items.len() == len));
+                if all_same_len {
+                    let mut result = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let thread_args: Vec<Value> = args
+                            .iter()
+                            .map(|a| {
+                                if let Value::List(items) = a {
+                                    items[i].clone()
+                                } else {
+                                    a.clone()
+                                }
+                            })
+                            .collect();
                         let v = apply_function(func, &thread_args, env)?;
                         result.push(normalize_flat_result(name, v, env));
                     }
@@ -2177,6 +2195,11 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         } => ffi::loader::call_native(*fn_ptr, signature, args),
 
         Value::BytecodeFunction(bc_def) => {
+            // Enforce $RecursionLimit for the bytecode tier too. Without this,
+            // a function that gets JIT/bytecode-promoted can recurse past the
+            // limit until the native stack overflows.
+            let _guard = RecursionGuard::new(env, &bc_def.name)?;
+
             #[cfg(feature = "jit")]
             {
                 use std::sync::atomic::Ordering;
@@ -2254,7 +2277,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 
             // Try each definition in order
             let mut found_result: Option<Result<Value, EvalError>> = None;
-            for (_def_idx, def) in func_def.definitions.iter().enumerate() {
+            for def in func_def.definitions.iter() {
                 let match_result = try_match_params(&def.params, args, env)?;
                 if let Some(bindings) = match_result {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)
@@ -2264,7 +2287,9 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                             guard_env.set(name.clone(), value.clone());
                         }
                         let guard_val = eval(guard_expr, &guard_env)?;
-                        if !guard_val.to_bool() {
+                        // A guard must evaluate to exactly `True`; a condition
+                        // that stays symbolic does not select this definition.
+                        if !matches!(guard_val, Value::Bool(true)) {
                             continue;
                         }
                     }
@@ -2274,15 +2299,26 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
                     }
                     // Catch Return[expr] and unwrap it as the function result.
                     // Catch NoMatch and return unevaluated Call (symbolic form).
-                    found_result = Some(match eval(&def.body, &child_env) {
-                        Ok(v) => Ok(v),
-                        Err(EvalError::Return(v)) => Ok(*v),
-                        Err(EvalError::NoMatch { head, args: a }) => {
-                            Ok(Value::Call { head, args: *a })
+                    let body_val = match eval(&def.body, &child_env) {
+                        Ok(v) => v,
+                        Err(EvalError::Return(v)) => *v,
+                        Err(EvalError::NoMatch { head, args: a }) => Value::Call { head, args: *a },
+                        Err(e) => {
+                            found_result = Some(Err(e));
+                            break;
                         }
-                        Err(e) => Err(e),
-                    });
-                    break;
+                    };
+                    // A body whose result is a bare condition (`expr /; cond`,
+                    // e.g. produced inside `With[...]`) acts as a guard on the
+                    // definition: a false condition falls through to the next
+                    // definition instead of being returned.
+                    match resolve_body_condition(body_val, &child_env) {
+                        Some(v) => {
+                            found_result = Some(Ok(v));
+                            break;
+                        }
+                        None => continue,
+                    }
                 }
             }
             Ok(if let Some(r) = found_result {
@@ -2500,10 +2536,26 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
     }
 }
 
+/// Resolve a top-level condition returned from a definition body.
+///
+/// Returns `Some(result)` when the value is not a condition or when the
+/// condition holds (the wrapped expression is evaluated), and `None` when the
+/// condition is definitely false, so the caller can try the next definition.
+fn resolve_body_condition(val: Value, env: &Env) -> Option<Value> {
+    if let Value::Pattern(Expr::PatternGuard { pattern, condition }) = &val {
+        return match eval(condition, env) {
+            Ok(Value::Bool(true)) => Some(eval(pattern, env).unwrap_or(val)),
+            Ok(Value::Bool(false)) => None,
+            _ => Some(val),
+        };
+    }
+    Some(val)
+}
+
 /// Rank specificity of a function definition's parameter list.
 /// Higher score = more specific (tried first in rule ordering).
 fn specificity(params: &[Expr]) -> usize {
-    params.iter().map(|p| specificity_expr(p)).sum()
+    params.iter().map(specificity_expr).sum()
 }
 
 /// Specificity score for a single pattern expression.
@@ -2551,6 +2603,7 @@ fn specificity_expr(p: &Expr) -> usize {
 ///   f[x__] := Total[x]             — sequence of 1+ elements
 ///   f[x___] := {x}                 — sequence of 0+ elements
 ///   f[a_, b__, c_] := {a, b, c}    — mixed fixed and sequence parameters
+#[inline(never)]
 pub(crate) fn try_match_params(
     params: &[Expr],
     args: &[Value],
@@ -2725,10 +2778,23 @@ fn set_part(current: Value, indices: &[i64], val: Value) -> Result<Value, EvalEr
     }
     match current {
         Value::List(mut items) => {
-            let idx = crate::builtins::list::normalize_index(indices[0], items.len())?;
+            // Positive out-of-range indices extend the list with Null padding,
+            // matching symbolic Part assignment (e.g. a[[5]] = x).
+            let idx = if indices[0] > 0 {
+                let i = (indices[0] - 1) as usize;
+                if i >= items.len() {
+                    items.resize(i + 1, Value::Null);
+                }
+                i
+            } else {
+                crate::builtins::list::normalize_index(indices[0], items.len())?
+            };
             items[idx] = set_part(items[idx].clone(), &indices[1..], val)?;
             Ok(Value::List(items))
         }
+        // A Null slot can be promoted to a list when deeper indices are assigned,
+        // e.g. a = {{1}}; a[[2, 1]] = 9.
+        Value::Null => set_part(Value::List(Vec::new()), indices, val),
         other => Err(EvalError::TypeError {
             expected: "List".to_string(),
             got: other.type_name().to_string(),
@@ -2937,6 +3003,18 @@ mod tests {
                 input, ast, e
             );
         })
+    }
+
+    #[test]
+    fn test_value_expr_sizes() {
+        println!(
+            "SIZEOF Value={} Expr={} EvalError={} ResultVE={} VecExpr={}",
+            std::mem::size_of::<Value>(),
+            std::mem::size_of::<Expr>(),
+            std::mem::size_of::<EvalError>(),
+            std::mem::size_of::<Result<Value, EvalError>>(),
+            std::mem::size_of::<Vec<Expr>>()
+        );
     }
 
     // ── Atoms ──
@@ -5564,5 +5642,202 @@ mod tests {
         // Block uses dynamic scoping: f sees Block's x=5, not the original x=100
         let result = eval_str("x = 100; f = Function[{a}, x]; Block[{x = 5}, f[0]]");
         assert_eq!(result, Value::Integer(Integer::from(5)));
+    }
+
+    // ── Regression: ReplaceAll descends into subexpressions ──
+
+    #[test]
+    fn test_replace_all_descends_into_lists() {
+        assert_eq!(
+            eval_str("{1, 2, 3} /. x_Integer :> x + 1"),
+            Value::List(vec![
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(4)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_replace_all_descends_into_calls() {
+        let result = eval_str("f[1, 2] /. x_Integer :> x + 1");
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "f");
+                assert_eq!(
+                    args,
+                    vec![
+                        Value::Integer(Integer::from(2)),
+                        Value::Integer(Integer::from(3))
+                    ]
+                );
+            }
+            other => panic!("Expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replace_all_replaces_head() {
+        assert_eq!(
+            eval_str("f[1] /. f -> g"),
+            Value::Call {
+                head: "g".to_string(),
+                args: vec![Value::Integer(Integer::from(1))],
+            }
+        );
+    }
+
+    #[test]
+    fn test_replace_all_first_matching_rule_wins() {
+        // The first rule matches with an unchanged result; it must still win
+        // instead of falling through to a later rule.
+        assert_eq!(
+            eval_str("a /. {x_ -> x, a -> b}"),
+            Value::Symbol("a".to_string())
+        );
+        assert_eq!(
+            eval_str("a /. {a -> b, x_ -> x}"),
+            Value::Symbol("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_replace_all_typed_blank_rule() {
+        assert_eq!(
+            eval_str("1 /. _Integer -> 99"),
+            Value::Integer(Integer::from(99))
+        );
+        // Non-integer does not match -> unchanged
+        assert_eq!(
+            eval_str(r#""s" /. _Integer -> 99"#),
+            Value::Str("s".to_string())
+        );
+    }
+
+    // ── Regression: typed blanks in Switch / match ──
+
+    #[test]
+    fn test_switch_typed_blank_pattern() {
+        assert_eq!(
+            eval_str(r#"Switch[5, x_Integer, "int", _, "other"]"#),
+            Value::Str("int".to_string())
+        );
+        assert_eq!(
+            eval_str(r#"Switch[5.0, x_Integer, "int", _, "other"]"#),
+            Value::Str("other".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_typed_blank_pattern() {
+        assert_eq!(
+            eval_str(r#"match 5 { x_Integer => "int"; _ => "other" }"#),
+            Value::Str("int".to_string())
+        );
+    }
+
+    // ── Regression: Listable threads over all list args at once ──
+
+    #[test]
+    fn test_listable_threads_over_multiple_lists() {
+        assert_eq!(
+            eval_str("Plus[{1, 2, 3}, {10, 20, 30}, 100]"),
+            Value::List(vec![
+                Value::Integer(Integer::from(111)),
+                Value::Integer(Integer::from(122)),
+                Value::Integer(Integer::from(133)),
+            ])
+        );
+    }
+
+    // ── Regression: empty iterator specs must not panic ──
+
+    #[test]
+    fn test_empty_iterator_spec_no_panic() {
+        assert_eq!(eval_str("Table[x, {}]"), Value::Symbol("x".to_string()));
+        assert_eq!(eval_str("Sum[x, {}]"), Value::Symbol("x".to_string()));
+        assert_eq!(eval_str("Product[x, {}]"), Value::Symbol("x".to_string()));
+    }
+
+    // ── Regression: numeric complex results for negative roots ──
+
+    #[test]
+    fn test_n_sqrt_negative_is_complex() {
+        assert_eq!(eval_str("N[Sqrt[-4]]"), Value::Complex { re: 0.0, im: 2.0 });
+    }
+
+    #[test]
+    fn test_n_negative_power_fractional_is_complex() {
+        match eval_str("N[(-4)^0.5]") {
+            Value::Complex { im, .. } => assert!((im - 2.0).abs() < 1e-9),
+            other => panic!("Expected Complex, got {other:?}"),
+        }
+    }
+
+    // ── Regression: Product supports multiple iterators ──
+
+    #[test]
+    fn test_product_multiple_iterators() {
+        assert_eq!(
+            eval_str("Product[i + j, {i, 2}, {j, 2}]"),
+            Value::Integer(Integer::from(72))
+        );
+    }
+
+    // ── Regression: Clear / Remove hold their symbol arguments ──
+
+    #[test]
+    fn test_clear_removes_definition() {
+        assert_eq!(
+            eval_str("f[x_] := x^2; Clear[f]; f[3]"),
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Integer(Integer::from(3))],
+            }
+        );
+    }
+
+    #[test]
+    fn test_clear_removes_value() {
+        assert_eq!(
+            eval_str("x = 5; Clear[x]; x"),
+            Value::Symbol("x".to_string())
+        );
+    }
+
+    // ── Regression: Part assignment extends lists ──
+
+    #[test]
+    fn test_part_assign_extends_list() {
+        assert_eq!(
+            eval_str("a = {1, 2, 3}; a[[5]] = 9; a"),
+            Value::List(vec![
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(3)),
+                Value::Null,
+                Value::Integer(Integer::from(9)),
+            ])
+        );
+    }
+
+    // ── Regression: ReplaceAll descends into held expressions ──
+
+    #[test]
+    fn test_replace_all_descends_into_hold() {
+        assert_eq!(
+            eval_str("x = Hold[1 + 2] /. 1 -> 5; ReleaseHold[x]"),
+            Value::Integer(Integer::from(7))
+        );
+    }
+
+    // ── Regression: matching a pattern against an evaluated pattern value ──
+
+    #[test]
+    fn test_match_against_pattern_value_terminates() {
+        // Previously infinite-recursed (stack overflow) because unwrapping the
+        // value produced an identical Pattern wrapper.
+        assert_eq!(eval_str("MatchQ[x_, x_]"), Value::Bool(true));
+        assert_eq!(eval_str("MatchQ[foo_bar, foo_bar]"), Value::Bool(false));
     }
 }

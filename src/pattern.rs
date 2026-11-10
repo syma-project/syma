@@ -89,15 +89,10 @@ pub fn unwrap_expr_to_value(expr: &Expr) -> Value {
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Str(s) => Value::Str(s.clone()),
         Expr::Null => Value::Null,
-        Expr::List(items) => Value::List(
-            items
-                .iter()
-                .map(|item| unwrap_expr_to_value(item))
-                .collect(),
-        ),
+        Expr::List(items) => Value::List(items.iter().map(unwrap_expr_to_value).collect()),
         Expr::Call { head, args } => {
             let h = unwrap_expr_to_value(head);
-            let a: Vec<Value> = args.iter().map(|arg| unwrap_expr_to_value(arg)).collect();
+            let a: Vec<Value> = args.iter().map(unwrap_expr_to_value).collect();
             match h {
                 Value::Symbol(name) => Value::Call {
                     head: name,
@@ -123,7 +118,13 @@ pub fn match_pattern(
 ) -> MatchResult {
     // Unwrap Value::Pattern/Value::Hold/Value::HoldComplete for HoldAll/HoldAllComplete arguments
     if let Value::Pattern(expr) = value {
-        return match_pattern(pattern, &unwrap_expr_to_value(expr), attr_checker);
+        let unwrapped = unwrap_expr_to_value(expr);
+        // `unwrap_expr_to_value` maps pattern nodes (Blank/NamedBlank/...) back to
+        // Value::Pattern, so unwrapping again would not terminate. Only recurse
+        // when the unwrapped value is not an identical Pattern wrapper.
+        if !matches!(&unwrapped, Value::Pattern(e) if e == expr) {
+            return match_pattern(pattern, &unwrapped, attr_checker);
+        }
     }
     if let Value::Hold(inner) = value {
         return match_pattern(pattern, inner, attr_checker);
@@ -323,15 +324,16 @@ pub fn match_pattern(
             }
         }
 
-        // ── Symbol (matches exact symbol or named blank) ──
+        // ── Symbol (matches exact symbol or blank pattern) ──
+        // A symbol containing `_` is a blank pattern when it reaches the matcher
+        // unevaluated, e.g. as a rule LHS, a Switch/match case, or a held
+        // argument: `_`, `x_`, `_Integer`, `x_Integer`, `__`, `x___`, ...
+        // Normalize it to the corresponding pattern node and retry.
         Expr::Symbol(s) => {
-            // Handle x_ as a named blank pattern (parsed as Symbol("x_"))
-            if s.ends_with('_') && s.len() > 1 {
-                let name = &s[..s.len() - 1];
-                let mut bindings = HashMap::new();
-                bindings.insert(name.to_string(), value.clone());
-                MatchResult::Match(bindings)
-            } else if let Value::Symbol(v) = value {
+            if s.contains('_') {
+                return match_pattern(&crate::eval::convert_blank_pattern(s), value, attr_checker);
+            }
+            if let Value::Symbol(v) = value {
                 if s == v {
                     MatchResult::Match(HashMap::new())
                 } else {
@@ -630,6 +632,67 @@ fn match_sequence_pattern(
             MatchResult::NoMatch
         }
 
+        // Repeated[pat] / Repeated[pat, n] — consume 1+ (or exactly n)
+        // consecutive elements that each match `pat`.
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated") => {
+            let pat = match args.first() {
+                Some(p) => p,
+                None => return MatchResult::NoMatch,
+            };
+            let exact = if args.len() == 2 {
+                match &args[1] {
+                    Expr::Integer(n) => match n.to_usize() {
+                        Some(v) if v > 0 => Some(v),
+                        _ => return MatchResult::NoMatch,
+                    },
+                    _ => return MatchResult::NoMatch,
+                }
+            } else {
+                None
+            };
+            let remaining = items.len() - val_idx;
+            let (min_take, max_take) = match exact {
+                Some(n) => {
+                    if n > remaining {
+                        return MatchResult::NoMatch;
+                    }
+                    (n, n)
+                }
+                None => {
+                    if remaining == 0 {
+                        return MatchResult::NoMatch;
+                    }
+                    (1, remaining)
+                }
+            };
+            for take in (min_take..=max_take).rev() {
+                let mut ok = true;
+                let mut new_bindings = bindings.clone();
+                for item in &items[val_idx..val_idx + take] {
+                    match match_pattern(pat, item, attr_checker) {
+                        MatchResult::Match(b) => new_bindings.extend(b),
+                        MatchResult::NoMatch => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok
+                    && let MatchResult::Match(b) = match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx + take,
+                        &mut new_bindings,
+                        attr_checker,
+                    )
+                {
+                    return MatchResult::Match(b);
+                }
+            }
+            MatchResult::NoMatch
+        }
+
         // Regular pattern: match one element
         _ => {
             if val_idx >= items.len() {
@@ -653,6 +716,18 @@ fn match_sequence_pattern(
     }
 }
 
+/// True for patterns that can consume a variable number of list elements:
+/// BlankSequence (`__`), BlankNullSequence (`___`), and Repeated.
+fn is_sequence_like(p: &Expr) -> bool {
+    match p {
+        Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. } => true,
+        Expr::Call { head, .. } => {
+            matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated")
+        }
+        _ => false,
+    }
+}
+
 /// Match a list pattern against a list value.
 fn match_list_pattern(
     patterns: &[Expr],
@@ -660,12 +735,7 @@ fn match_list_pattern(
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
     // Check if any sequence patterns exist
-    let has_sequences = patterns.iter().any(|p| {
-        matches!(
-            p,
-            Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
-        )
-    });
+    let has_sequences = patterns.iter().any(is_sequence_like);
 
     if !has_sequences {
         // Fast path: no sequences, direct matching
@@ -869,11 +939,8 @@ fn match_call_pattern(
             if let Value::Call { head: vhead, .. } = value {
                 let mut b = HashMap::new();
                 // For NamedBlank, bind the name; for Blank, ignore
-                match head {
-                    Expr::NamedBlank { name, .. } => {
-                        b.insert(name.clone(), Value::Symbol(vhead.clone()));
-                    }
-                    _ => {}
+                if let Expr::NamedBlank { name, .. } = head {
+                    b.insert(name.clone(), Value::Symbol(vhead.clone()));
                 }
                 Some((vhead.clone(), b))
             } else {
@@ -922,13 +989,8 @@ fn match_call_pattern(
                 vargs.clone()
             };
 
-            // Check if any pattern args contain sequences (__, ___)
-            let has_sequences = pat_args.iter().any(|p| {
-                matches!(
-                    p,
-                    Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. }
-                )
-            });
+            // Check if any pattern args contain sequences (__, ___, Repeated)
+            let has_sequences = pat_args.iter().any(is_sequence_like);
 
             if has_sequences {
                 // Use recursive backtracking sequence matcher for __ and ___
@@ -975,13 +1037,12 @@ fn match_call_pattern(
         }
         _ => {
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
-            if let Expr::Symbol(s) = head {
-                if args.len() == 1
-                    && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
-                    && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
-                {
-                    return MatchResult::Match(b);
-                }
+            if let Expr::Symbol(s) = head
+                && args.len() == 1
+                && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
+                && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+            {
+                return MatchResult::Match(b);
             }
             MatchResult::NoMatch
         }
@@ -1563,5 +1624,155 @@ mod tests {
             match_pattern(&pat, &Value::Integer(Integer::from(0)), None),
             MatchResult::NoMatch
         ));
+    }
+
+    // ── Unevaluated blank symbols (rule LHS / Switch cases / held args) ──
+
+    #[test]
+    fn test_symbol_typed_blank_pattern() {
+        // "x_Integer" reaching the matcher as a raw symbol must be treated as a
+        // typed named blank, not as a literal symbol.
+        let pattern = Expr::Symbol("x_Integer".to_string());
+        if let MatchResult::Match(bindings) =
+            match_pattern(&pattern, &Value::Integer(Integer::from(42)), None)
+        {
+            assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(42))));
+        } else {
+            panic!("Expected typed blank to match Integer");
+        }
+        assert!(matches!(
+            match_pattern(&pattern, &Value::Str("hi".to_string()), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_symbol_plain_and_typed_blank_pattern() {
+        // "_" is an anonymous blank; "_Integer" is a type-constrained blank.
+        let blank = Expr::Symbol("_".to_string());
+        assert!(matches!(
+            match_pattern(&blank, &Value::Integer(Integer::from(1)), None),
+            MatchResult::Match(_)
+        ));
+        let typed = Expr::Symbol("_Integer".to_string());
+        assert!(matches!(
+            match_pattern(&typed, &Value::Integer(Integer::from(1)), None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&typed, &Value::Str("s".to_string()), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_symbol_sequence_pattern() {
+        // "x___" reaching the matcher raw must become a BlankNullSequence.
+        let pattern = Expr::Symbol("x___".to_string());
+        if let MatchResult::Match(bindings) =
+            match_pattern(&pattern, &Value::Integer(Integer::from(7)), None)
+        {
+            assert_eq!(bindings.get("x"), Some(&Value::Integer(Integer::from(7))));
+        } else {
+            panic!("Expected blank null sequence to match");
+        }
+    }
+
+    #[test]
+    fn test_plain_symbol_still_exact_matches() {
+        // A symbol without '_' remains a literal symbol pattern.
+        let pattern = Expr::Symbol("foo".to_string());
+        assert!(matches!(
+            match_pattern(&pattern, &Value::Symbol("foo".to_string()), None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&pattern, &Value::Symbol("bar".to_string()), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    // ── Repeated inside list patterns ──
+
+    fn repeated_pat(inner: Expr, count: Option<i64>) -> Expr {
+        let mut args = vec![inner];
+        if let Some(n) = count {
+            args.push(Expr::Integer(Integer::from(n)));
+        }
+        Expr::Call {
+            head: Box::new(Expr::Symbol("Repeated".to_string())),
+            args,
+        }
+    }
+
+    #[test]
+    fn test_repeated_in_list_pattern() {
+        let pat = Expr::List(vec![repeated_pat(
+            Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: Some("Integer".to_string()),
+            },
+            None,
+        )]);
+        // All integers -> match
+        let val = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(3)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::Match(_)
+        ));
+        // Non-integer element -> no match
+        let val2 = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Str("a".to_string()),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val2, None),
+            MatchResult::NoMatch
+        ));
+        // Repeated matches 1+ elements; empty list does not match
+        assert!(matches!(
+            match_pattern(&pat, &Value::List(vec![]), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_repeated_n_in_list_pattern_with_trailing() {
+        let pat = Expr::List(vec![
+            repeated_pat(Expr::Integer(Integer::from(1)), Some(2)),
+            Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            },
+        ]);
+        let val = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(5)),
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_match_pattern_value_terminates() {
+        // A Pattern value whose unwrap is another identical Pattern must not
+        // recurse forever.
+        let pattern = Expr::Symbol("x_".to_string());
+        let value = Value::Pattern(Expr::NamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        });
+        if let MatchResult::Match(bindings) = match_pattern(&pattern, &value, None) {
+            assert!(bindings.contains_key("x"));
+        } else {
+            panic!("Expected match against pattern value");
+        }
     }
 }

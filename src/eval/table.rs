@@ -115,8 +115,8 @@ pub(super) fn eval_iterator_spec(
     items: &[Expr],
     env: &Env,
 ) -> Result<(String, Vec<Value>), EvalError> {
-    let var_name = match &items[0] {
-        Expr::Symbol(s) => s.clone(),
+    let var_name = match items.first() {
+        Some(Expr::Symbol(s)) => s.clone(),
         _ => {
             return Err(EvalError::Error(
                 "iterator variable must be a symbol".to_string(),
@@ -187,13 +187,20 @@ pub(super) fn eval_iterator_spec(
                 let mut i = min;
                 while i <= max {
                     values.push(Value::Integer(Integer::from(i)));
-                    i += step;
+                    // Guard against i64 overflow past i64::MAX.
+                    match i.checked_add(step) {
+                        Some(next) => i = next,
+                        None => break,
+                    }
                 }
             } else {
                 let mut i = min;
                 while i >= max {
                     values.push(Value::Integer(Integer::from(i)));
-                    i += step;
+                    match i.checked_add(step) {
+                        Some(next) => i = next,
+                        None => break,
+                    }
                 }
             }
             Ok((var_name, values))
@@ -244,6 +251,11 @@ fn eval_table_recursive(
             ));
         }
     };
+
+    // `Table[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(expr, env);
+    }
 
     // {n} — count-only form (no iterator variable)
     if iter_items.len() == 1 {
@@ -313,6 +325,11 @@ fn eval_sum_recursive(expr: &Expr, iter_specs: &[Expr], env: &Env) -> Result<Val
         }
     };
 
+    // `Sum[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(expr, env);
+    }
+
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
     let child_env = env.child();
@@ -327,14 +344,23 @@ fn eval_sum_recursive(expr: &Expr, iter_specs: &[Expr], env: &Env) -> Result<Val
     Ok(acc)
 }
 
-/// Product[expr, {i, min, max}] — like Sum but multiplies results.
+/// Product[expr, {i, min, max}, ...] — like Sum but multiplies results.
+///
+/// Supports multiple iterators for nested products.
 pub(super) fn eval_product(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Product requires exactly 2 arguments".to_string(),
+            "Product requires at least 2 arguments: Product[expr, {i, min, max}, ...]".to_string(),
         ));
     }
-    let iter_items = match &args[1] {
+    eval_product_recursive(&args[0], &args[1..], env)
+}
+
+fn eval_product_recursive(expr: &Expr, iter_specs: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if iter_specs.is_empty() {
+        return super::eval(expr, env);
+    }
+    let iter_items = match &iter_specs[0] {
         Expr::List(items) => items,
         _ => {
             return Err(EvalError::Error(
@@ -343,16 +369,20 @@ pub(super) fn eval_product(args: &[Expr], env: &Env) -> Result<Value, EvalError>
         }
     };
 
+    // `Product[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(expr, env);
+    }
+
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
-    let expr = &args[0];
     let child_env = env.child();
     let mut acc = Value::Integer(Integer::from(1));
 
     for val in values {
         child_env.set(var_name.clone(), val);
-        let val = super::eval(expr, &child_env)?;
-        acc = crate::builtins::mul_values_public(&acc, &val)?;
+        let term = eval_product_recursive(expr, &iter_specs[1..], &child_env)?;
+        acc = crate::builtins::mul_values_public(&acc, &term)?;
     }
 
     Ok(acc)
@@ -623,6 +653,11 @@ pub(super) fn eval_parallel_table(args: &[Expr], env: &Env) -> Result<Value, Eva
         }
     };
 
+    // `ParallelTable[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(expr, env);
+    }
+
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
     // For small iteration counts, sequential is faster
@@ -675,6 +710,11 @@ pub(super) fn eval_parallel_sum(args: &[Expr], env: &Env) -> Result<Value, EvalE
             ));
         }
     };
+
+    // `ParallelSum[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(&args[0], env);
+    }
 
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
@@ -851,6 +891,11 @@ pub(super) fn eval_parallel_product(args: &[Expr], env: &Env) -> Result<Value, E
         }
     };
 
+    // `ParallelProduct[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        return super::eval(&args[0], env);
+    }
+
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 
     if values.is_empty() {
@@ -921,6 +966,12 @@ pub(super) fn eval_parallel_do(args: &[Expr], env: &Env) -> Result<Value, EvalEr
             ));
         }
     };
+
+    // `ParallelDo[expr, {}]` — empty spec: no iteration, evaluate expr once.
+    if iter_items.is_empty() {
+        super::eval(expr, env)?;
+        return Ok(Value::Null);
+    }
 
     let (var_name, values) = eval_iterator_spec(iter_items, env)?;
 

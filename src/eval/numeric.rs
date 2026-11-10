@@ -57,7 +57,22 @@ pub(super) fn numeric_eval_expr(
                         let bf = to_float(b, prec_bits);
                         let ef = to_float(e, prec_bits);
                         match (bf, ef) {
-                            (Some(b), Some(e)) => Ok(Value::Real(b.pow(e))),
+                            (Some(b), Some(e)) => {
+                                // Negative base with a non-integer exponent has a
+                                // complex principal value: b^e = |b|^e * e^{i π e}.
+                                let bv = b.to_f64();
+                                let ev = e.to_f64();
+                                if bv < 0.0 && ev.fract() != 0.0 {
+                                    let r = (-bv).powf(ev);
+                                    let angle = std::f64::consts::PI * ev;
+                                    Ok(Value::Complex {
+                                        re: r * angle.cos(),
+                                        im: r * angle.sin(),
+                                    })
+                                } else {
+                                    Ok(Value::Real(b.pow(e)))
+                                }
+                            }
                             _ => crate::eval::apply_function(
                                 &super::eval(head, env)?,
                                 &evaluated_args,
@@ -124,7 +139,16 @@ pub(super) fn numeric_eval_expr(
                     }
                     "Sqrt" if evaluated_args.len() == 1 => {
                         if let Some(f) = to_float(&evaluated_args[0], prec_bits) {
-                            Ok(Value::Real(f.sqrt()))
+                            let fv = f.to_f64();
+                            if fv < 0.0 {
+                                // Complex principal square root.
+                                Ok(Value::Complex {
+                                    re: 0.0,
+                                    im: (-fv).sqrt(),
+                                })
+                            } else {
+                                Ok(Value::Real(f.sqrt()))
+                            }
                         } else {
                             crate::eval::apply_function(
                                 &super::eval(head, env)?,
