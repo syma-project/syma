@@ -440,6 +440,11 @@ pub struct FunctionDefinition {
     pub body: Expr,
     pub delayed: bool,
     pub guard: Option<Expr>,
+    /// Cached specificity rank of `params` (higher = more specific).
+    ///
+    /// Computed once when the definition is created so that the definitions
+    /// list can be re-sorted cheaply on every insertion.
+    pub specificity: usize,
 }
 
 /// A class definition with fields, methods, constructor, and inheritance info.
@@ -792,6 +797,11 @@ impl Value {
     }
 
     /// Convert to boolean.
+    ///
+    /// Falsy values are `False`, numeric zeros, `Complex` zero, `Null`, and
+    /// empty lists/packed arrays; everything else is truthy. An unevaluated
+    /// `Call` (for example a symbolic comparison such as `x > 0`) is falsy,
+    /// because it has not reduced to `True`.
     pub fn to_bool(&self) -> bool {
         match self {
             Value::Formatted { value, .. } => value.to_bool(),
@@ -799,24 +809,32 @@ impl Value {
             Value::Integer(n) => !n.is_zero(),
             Value::Real(r) => !r.is_zero(),
             Value::Rational(r) => !r.is_zero(),
+            Value::Complex { re, im } => !(*re == 0.0 && *im == 0.0),
             Value::Null => false,
             Value::List(l) => !l.is_empty(),
             Value::PackedArray(pa) => !pa.is_empty(),
+            Value::Call { .. } => false,
             _ => true,
         }
     }
 
-    /// Try to convert to i64.
+    /// Try to convert to i64, truncating toward zero.
+    ///
+    /// Integral reals and rationals are converted without an intermediate
+    /// `f64` step, so values such as `2^53 + 1` survive intact. Values outside
+    /// the `i64` range yield `None`, matching `Value::Integer`.
     pub fn to_integer(&self) -> Option<i64> {
         match self {
             Value::Formatted { value, .. } => value.to_integer(),
             Value::Integer(n) => n.to_i64(),
-            Value::Real(r) => Some(r.to_f64() as i64),
+            Value::Real(r) => r
+                .to_integer_round(rug::float::Round::Zero)
+                .and_then(|(i, _)| i.to_i64()),
             Value::Rational(r) => {
                 if *r.denom() == 1 {
                     r.numer().to_i64()
                 } else {
-                    Some(r.to_f64() as i64)
+                    Integer::from(r.trunc_ref()).to_i64()
                 }
             }
             _ => None,
@@ -915,6 +933,7 @@ impl Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant, clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -996,6 +1015,80 @@ mod tests {
             Some(3)
         );
         assert_eq!(Value::Str("s".to_string()).to_integer(), None);
+    }
+
+    #[test]
+    fn test_to_integer_truncates_toward_zero() {
+        // Non-integral values must truncate, not round.
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 3.9)).to_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, -3.9)).to_integer(),
+            Some(-3)
+        );
+        assert_eq!(
+            Value::Rational(Box::new(Rational::from((7, 2)))).to_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            Value::Rational(Box::new(Rational::from((-7, 2)))).to_integer(),
+            Some(-3)
+        );
+    }
+
+    #[test]
+    fn test_to_integer_large_real_keeps_precision() {
+        // 2^53 + 1 is not representable in f64; an f64 round-trip would lose the +1.
+        let big = 9_007_199_254_740_993i64;
+        assert_eq!(
+            Value::Real(Float::with_val(DEFAULT_PRECISION, Integer::from(big))).to_integer(),
+            Some(big)
+        );
+    }
+
+    #[test]
+    fn test_to_bool_unevaluated_call_is_false() {
+        // A symbolic, unevaluated comparison has not reduced to True.
+        let call = Value::Call {
+            head: "Greater".to_string(),
+            args: vec![
+                Value::Symbol("x".to_string()),
+                Value::Integer(Integer::from(0)),
+            ],
+        };
+        assert!(!call.to_bool());
+    }
+
+    #[test]
+    fn test_to_bool_complex_zero() {
+        assert!(!Value::Complex { re: 0.0, im: 0.0 }.to_bool());
+        assert!(Value::Complex { re: 0.0, im: 1.0 }.to_bool());
+    }
+
+    #[test]
+    fn test_display_scientific_form_negative_integer() {
+        let neg = Value::Formatted {
+            format: Format::ScientificForm { digits: 3 },
+            value: Box::new(Value::Integer(Integer::from(-150))),
+        };
+        assert_eq!(format!("{}", neg), "-1.50·10^2");
+        let single = Value::Formatted {
+            format: Format::ScientificForm { digits: 3 },
+            value: Box::new(Value::Integer(Integer::from(-5))),
+        };
+        assert_eq!(format!("{}", single), "-5·10^0");
+    }
+
+    #[test]
+    fn test_display_base_form_non_finite() {
+        let nan = Value::Formatted {
+            format: Format::BaseForm(16),
+            value: Box::new(Value::Real(Float::with_val(DEFAULT_PRECISION, f64::NAN))),
+        };
+        // Must not panic on the failed `to_integer`.
+        assert!(format!("{}", nan).ends_with("(base 16)"));
     }
 
     #[test]
@@ -1621,7 +1714,16 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                         format_input_form(base, f)?;
                     }
                     write!(f, "^")?;
-                    format_input_form(exp, f)
+                    if matches!(
+                        exp,
+                        Value::Call { head: h, .. } if h == "Plus" || h == "Times" || h == "Divide"
+                    ) {
+                        write!(f, "(")?;
+                        format_input_form(exp, f)?;
+                        write!(f, ")")
+                    } else {
+                        format_input_form(exp, f)
+                    }
                 }
                 "Divide" if args.len() == 2 => {
                     format_input_form(&args[0], f)?;
@@ -1942,8 +2044,8 @@ fn is_value_zero(v: &Value) -> bool {
 /// Check if a value is exactly 1 (for coefficient display in SeriesData).
 fn is_value_one(v: &Value) -> bool {
     match v {
-        Value::Integer(n) => *n == Integer::from(1),
-        Value::Rational(r) => **r == Rational::from(1),
+        Value::Integer(n) => *n == 1,
+        Value::Rational(r) => **r == 1,
         _ => false,
     }
 }
@@ -2052,14 +2154,16 @@ fn format_number_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> f
 fn format_scientific_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match v {
         Value::Integer(n) => {
-            let s = n.to_string();
-            let exp = s.len() - 1;
+            let negative = *n < 0;
+            let s = n.clone().abs().to_string();
+            let exp = s.len() as i64 - 1;
+            let sign = if negative { "-" } else { "" };
             let first = &s[..1];
-            let rest = if s.len() > 1 { &s[1..] } else { "" };
+            let rest = &s[1..];
             if rest.is_empty() {
-                write!(f, "{}·10^{}", first, exp)
+                write!(f, "{}{}·10^{}", sign, first, exp)
             } else {
-                write!(f, "{}.{}·10^{}", first, rest, exp)
+                write!(f, "{}{}.{}·10^{}", sign, first, rest, exp)
             }
         }
         Value::Real(r) => {
@@ -2095,9 +2199,14 @@ fn format_base_form(v: &Value, base: u32, f: &mut fmt::Formatter<'_>) -> fmt::Re
         }
         Value::Real(r) => {
             // Convert to a rational approximation and show integer part in base
-            let integer_part = r.clone().floor().to_integer().unwrap();
-            let int_str = integer_part.to_string_radix(base as i32);
-            write!(f, "{}(base {})", int_str, base)
+            match r.clone().floor().to_integer() {
+                Some(integer_part) => {
+                    let int_str = integer_part.to_string_radix(base as i32);
+                    write!(f, "{}(base {})", int_str, base)
+                }
+                // NaN/infinity cannot be floored to an exact integer.
+                None => write!(f, "{}(base {})", r, base),
+            }
         }
         Value::Rational(r) => {
             let f_val = Float::with_val(64, r.numer()) / Float::with_val(64, r.denom());

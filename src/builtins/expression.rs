@@ -9,6 +9,7 @@
 use crate::ast::Expr;
 use crate::env::Env;
 use crate::eval::eval;
+use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
@@ -96,6 +97,20 @@ fn parse_level_spec(spec: &Value) -> Vec<(i32, i32)> {
     }
 }
 
+/// Rewrite negative (from-the-bottom) level specs into absolute depths.
+///
+/// Wolfram-style level `-1` denotes the leaves, `-2` their parents, and so on.
+/// `compute_depth` returns the maximum depth, so `-1` maps to that depth.
+fn normalize_level_spec(spec: Vec<(i32, i32)>, expr: &Value) -> Vec<(i32, i32)> {
+    let max_depth = compute_depth(expr) as i32;
+    spec.into_iter()
+        .map(|(lo, hi)| {
+            let abs = |l: i32| if l < 0 { (max_depth + 1 + l).max(0) } else { l };
+            (abs(lo), abs(hi))
+        })
+        .collect()
+}
+
 /// Count the total number of leaves in a value tree.
 fn count_leaves(val: &Value) -> usize {
     match val {
@@ -154,6 +169,7 @@ pub fn builtin_level(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         vec![(0, i32::MAX)]
     };
+    let spec = normalize_level_spec(spec, &args[0]);
     let parts = collect_at_level(&args[0], 0, &spec);
     Ok(Value::List(parts))
 }
@@ -270,6 +286,7 @@ pub fn builtin_replace(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     } else {
         vec![(-1, -1)] // default: leaves only
     };
+    let spec = normalize_level_spec(spec, &args[0]);
     let parts = collect_at_level(&args[0], 0, &spec);
     let rule = &args[1];
 
@@ -386,38 +403,40 @@ fn value_replace_child(val: &Value, pos: usize, new_child: &Value) -> Result<Val
 
 /// Try applying a rule to a value. Returns the value unchanged if rule doesn't match.
 fn try_apply_rule(val: &Value, rule: &Value, env: &Env) -> Result<Value, EvalError> {
-    match rule {
-        Value::Rule {
-            lhs,
-            rhs,
-            delayed: false,
-        } => {
-            // Immediate rule: check if val matches lhs
-            if val.struct_eq(lhs) {
-                Ok((**rhs).clone())
-            } else {
-                Ok(val.clone())
-            }
+    let (lhs, rhs, delayed) = match rule {
+        Value::Rule { lhs, rhs, delayed } => (lhs.as_ref(), rhs.as_ref(), *delayed),
+        _ => return Ok(val.clone()),
+    };
+
+    // A rule's sides are held as `Pattern` expressions when it comes from the
+    // evaluator, but may also be plain values when constructed directly.
+    let matched = match lhs {
+        Value::Pattern(pat_expr) => {
+            let checker = AttributeChecker::new(env.attributes.clone());
+            matches!(
+                match_pattern(pat_expr, val, Some(&checker)),
+                MatchResult::Match(_)
+            )
         }
-        Value::Rule {
-            lhs,
-            rhs,
-            delayed: true,
-        } => {
-            // Delayed rule: check structural match, then evaluate rhs
-            if val.struct_eq(lhs) {
-                eval(&convert_value_to_expr(rhs), env)
-            } else {
-                Ok(val.clone())
-            }
-        }
-        _ => Ok(val.clone()),
+        _ => val.struct_eq(lhs),
+    };
+    if !matched {
+        return Ok(val.clone());
+    }
+
+    // Immediate rules store a held rhs too, so evaluate it in both cases.
+    match rhs {
+        Value::Pattern(_) => eval(&convert_value_to_expr(rhs), env),
+        _ if delayed => eval(&convert_value_to_expr(rhs), env),
+        _ => Ok(rhs.clone()),
     }
 }
 
 /// Convert a Value back to an Expr for evaluation.
 fn convert_value_to_expr(val: &Value) -> Expr {
     match val {
+        // Held arguments arrive wrapped as `Pattern`; evaluate the inner expr.
+        Value::Pattern(expr) => expr.clone(),
         Value::Integer(n) => Expr::Integer(n.clone()),
         Value::Real(r) => Expr::Real(r.clone()),
         Value::Str(s) => Expr::Str(s.clone()),
@@ -547,7 +566,8 @@ pub fn builtin_numeric_q(args: &[Value]) -> Result<Value, EvalError> {
 fn is_numeric_value(val: &Value) -> bool {
     match val {
         Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Complex { .. } => true,
-        Value::List(items) => items.iter().any(is_numeric_value),
+        // Every element must be numeric, not merely one of them.
+        Value::List(items) => items.iter().all(is_numeric_value),
         Value::Call { head, args } => {
             // Known numeric functions
             is_numeric_function(head) && args.iter().all(is_numeric_value)
@@ -600,7 +620,7 @@ pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
     )))
 }
 
-/// IntegerQ[val] is already implemented in math.rs; adding ExactNumberQ here.
+// IntegerQ[val] is already implemented in math.rs; adding ExactNumberQ here.
 
 /// ExactNumberQ[val] — True if val is an exact number (Integer, Rational, or complex with exact parts).
 pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
@@ -618,7 +638,7 @@ pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
 /// VectorQ[list] — True if list is a uniform list of atoms.
 /// VectorQ[list, test] — True if list is a uniform list and all elements pass test.
 pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "VectorQ expects 1 or 2 arguments".to_string(),
         ));
@@ -684,22 +704,24 @@ pub fn builtin_matrix_q(args: &[Value]) -> Result<Value, EvalError> {
             "MatrixQ expects exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
+    let is_matrix = match &args[0] {
         Value::List(rows) => {
             if rows.is_empty() {
-                return Ok(Value::Bool(true));
+                true
+            } else {
+                match &rows[0] {
+                    Value::List(cols) => {
+                        let row_len = cols.len();
+                        rows.iter()
+                            .all(|row| matches!(row, Value::List(c) if c.len() == row_len))
+                    }
+                    _ => false,
+                }
             }
-            let row_len = match &rows[0] {
-                Value::List(cols) => cols.len(),
-                _ => return Ok(Value::Bool(false)),
-            };
-            rows.iter()
-                .all(|row| matches!(row, Value::List(cols) if cols.len() == row_len))
         }
         _ => false,
-    }
-    .then(|| Value::Bool(true))
-    .ok_or_else(|| EvalError::Error("MatrixQ: not a matrix".to_string()))
+    };
+    Ok(Value::Bool(is_matrix))
 }
 
 /// ScalarQ[val] — True if val is not a List or Call (a scalar value).
@@ -781,8 +803,7 @@ fn apply_together(val: &Value) -> Value {
     match val {
         Value::Call { head, args } if head == "Plus" => {
             // Combine all terms over a common denominator
-            let fractions: Vec<(Value, Value)> =
-                args.iter().map(|term| term_to_fraction(term)).collect();
+            let fractions: Vec<(Value, Value)> = args.iter().map(term_to_fraction).collect();
 
             if fractions.is_empty() {
                 return val.clone();
@@ -814,10 +835,11 @@ fn apply_together(val: &Value) -> Value {
 
 /// Convert a value to (numerator, denominator).
 fn term_to_fraction(term: &Value) -> (Value, Value) {
-    if let Value::Call { head, args } = term {
-        if head == "Divide" && args.len() == 2 {
-            return (args[0].clone(), args[1].clone());
-        }
+    if let Value::Call { head, args } = term
+        && head == "Divide"
+        && args.len() == 2
+    {
+        return (args[0].clone(), args[1].clone());
     }
     (term.clone(), Value::Integer(Integer::from(1)))
 }
@@ -892,21 +914,22 @@ pub fn builtin_cancel(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn cancel_value(val: &Value) -> Value {
-    if let Value::Call { head, args } = val {
-        if head == "Divide" && args.len() == 2 {
-            // Factor both numerator and denominator
-            let num_factors = factor_value(&args[0]);
-            let den_factors = factor_value(&args[1]);
-            // Try to find and cancel common factors
-            let (cancelled_num, cancelled_den) = cancel_common_factors(&num_factors, &den_factors);
-            if is_one(&cancelled_den) {
-                return cancelled_num;
-            }
-            return Value::Call {
-                head: "Divide".to_string(),
-                args: vec![cancelled_num, cancelled_den],
-            };
+    if let Value::Call { head, args } = val
+        && head == "Divide"
+        && args.len() == 2
+    {
+        // Factor both numerator and denominator
+        let num_factors = factor_value(&args[0]);
+        let den_factors = factor_value(&args[1]);
+        // Try to find and cancel common factors
+        let (cancelled_num, cancelled_den) = cancel_common_factors(&num_factors, &den_factors);
+        if is_one(&cancelled_den) {
+            return cancelled_num;
         }
+        return Value::Call {
+            head: "Divide".to_string(),
+            args: vec![cancelled_num, cancelled_den],
+        };
     }
     val.clone()
 }
@@ -918,60 +941,61 @@ fn factor_value(val: &Value) -> Value {
 
 fn cancel_common_factors(num: &Value, den: &Value) -> (Value, Value) {
     // Simple cancellation: if both are Times with matching factors
-    if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den) {
-        if h1 == "Times" && h2 == "Times" {
-            let mut remaining_num: Vec<Value> = Vec::new();
-            let mut remaining_den: Vec<Value> = Vec::new();
-            let mut used_den: Vec<bool> = vec![false; a2.len()];
+    if let (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) = (num, den)
+        && h1 == "Times"
+        && h2 == "Times"
+    {
+        let mut remaining_num: Vec<Value> = Vec::new();
+        let mut remaining_den: Vec<Value> = Vec::new();
+        let mut used_den: Vec<bool> = vec![false; a2.len()];
 
-            for n in a1 {
-                let mut found = false;
-                for (j, d) in a2.iter().enumerate() {
-                    if !used_den[j] && n.struct_eq(d) {
-                        used_den[j] = true;
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    remaining_num.push(n.clone());
-                }
-            }
+        for n in a1 {
+            let mut found = false;
             for (j, d) in a2.iter().enumerate() {
-                if !used_den[j] {
-                    remaining_den.push(d.clone());
+                if !used_den[j] && n.struct_eq(d) {
+                    used_den[j] = true;
+                    found = true;
+                    break;
                 }
             }
-
-            let result_num = if remaining_num.is_empty() {
-                Value::Integer(Integer::from(1))
-            } else if remaining_num.len() == 1 {
-                remaining_num.into_iter().next().unwrap()
-            } else {
-                Value::Call {
-                    head: "Times".to_string(),
-                    args: remaining_num,
-                }
-            };
-            let result_den = if remaining_den.is_empty() {
-                Value::Integer(Integer::from(1))
-            } else if remaining_den.len() == 1 {
-                remaining_den.into_iter().next().unwrap()
-            } else {
-                Value::Call {
-                    head: "Times".to_string(),
-                    args: remaining_den,
-                }
-            };
-            return (result_num, result_den);
+            if !found {
+                remaining_num.push(n.clone());
+            }
         }
+        for (j, d) in a2.iter().enumerate() {
+            if !used_den[j] {
+                remaining_den.push(d.clone());
+            }
+        }
+
+        let result_num = if remaining_num.is_empty() {
+            Value::Integer(Integer::from(1))
+        } else if remaining_num.len() == 1 {
+            remaining_num.into_iter().next().unwrap()
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: remaining_num,
+            }
+        };
+        let result_den = if remaining_den.is_empty() {
+            Value::Integer(Integer::from(1))
+        } else if remaining_den.len() == 1 {
+            remaining_den.into_iter().next().unwrap()
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: remaining_den,
+            }
+        };
+        return (result_num, result_den);
     }
     (num.clone(), den.clone())
 }
 
 /// Apart[expr] — partial fraction decomposition.
 pub fn builtin_apart(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
             "Apart expects 1 or 2 arguments".to_string(),
         ));
@@ -1088,7 +1112,7 @@ fn extract_power_and_coeff(term: &Value, var: &str) -> (i64, Value) {
         }
         Value::Call { head, args } if head == "Times" => {
             let mut power: i64 = 0;
-            let mut coeff = Value::Integer(Integer::from(1));
+            let coeff;
             let mut other_factors: Vec<Value> = Vec::new();
 
             for arg in args {
@@ -1139,7 +1163,7 @@ fn sum_values(values: &[Value]) -> Value {
 }
 
 fn is_one(val: &Value) -> bool {
-    matches!(val, Value::Integer(n) if *n == rug::Integer::from(1))
+    matches!(val, Value::Integer(n) if *n == 1)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1152,4 +1176,163 @@ fn builtin_apply(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
         return Err(EvalError::Error("Apply requires 2 arguments".to_string()));
     }
     Ok(args[1].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::Env;
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+    fn sym(s: &str) -> Value {
+        Value::Symbol(s.to_string())
+    }
+    fn list(v: Vec<Value>) -> Value {
+        Value::List(v)
+    }
+
+    fn env_with_builtins() -> Env {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        env
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = env_with_builtins();
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap_or_else(|e| panic!("parse {input}: {e:?}"));
+        crate::eval::eval_program(&ast, &env).unwrap_or_else(|e| panic!("eval {input}: {e:?}"))
+    }
+
+    #[test]
+    fn test_level_positive_spec() {
+        let expr = list(vec![sym("a"), sym("b")]);
+        assert_eq!(
+            builtin_level(&[expr.clone(), int(0)]).unwrap(),
+            list(vec![expr])
+        );
+    }
+
+    #[test]
+    fn test_level_negative_spec_selects_leaves() {
+        // Regression: negative levels were previously never matched.
+        let expr = list(vec![sym("a"), sym("b")]);
+        assert_eq!(
+            builtin_level(&[expr, int(-1)]).unwrap(),
+            list(vec![sym("a"), sym("b")])
+        );
+    }
+
+    #[test]
+    fn test_level_negative_level_end_to_end() {
+        assert_eq!(
+            eval_str("Level[{a, b, c}, -1]"),
+            list(vec![sym("a"), sym("b"), sym("c")])
+        );
+    }
+
+    #[test]
+    fn test_matrix_q_false_end_to_end() {
+        assert_eq!(eval_str("MatrixQ[5]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_check_returns_fallback_on_error() {
+        // `Check` holds its first argument, so it arrives wrapped as Value::Pattern.
+        let bad = Value::Pattern(Expr::Call {
+            head: Box::new(Expr::Symbol("Extract".to_string())),
+            args: vec![
+                Expr::List(vec![
+                    Expr::Integer(Integer::from(1)),
+                    Expr::Integer(Integer::from(2)),
+                ]),
+                Expr::Integer(Integer::from(5)),
+            ],
+        });
+        let fallback = Value::Pattern(Expr::Integer(Integer::from(99)));
+        let out = builtin_check(&[bad, fallback], &env_with_builtins()).unwrap();
+        assert_eq!(out, int(99));
+    }
+
+    #[test]
+    fn test_replace_default_level_replaces_leaves() {
+        // Regression: the default (-1, -1) spec previously matched nothing.
+        let expr = list(vec![sym("a"), sym("b")]);
+        let rule = Value::Rule {
+            lhs: Box::new(sym("a")),
+            rhs: Box::new(sym("x")),
+            delayed: false,
+        };
+        let out = builtin_replace(&[expr, rule], &Env::new()).unwrap();
+        assert_eq!(out, list(vec![sym("x"), sym("b")]));
+    }
+
+    #[test]
+    fn test_numeric_q_requires_all_elements() {
+        assert_eq!(
+            builtin_numeric_q(&[list(vec![int(1), sym("x")])]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_numeric_q(&[list(vec![int(1), int(2)])]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_numeric_q(&[Value::Call {
+                head: "Sin".to_string(),
+                args: vec![sym("x")],
+            }])
+            .unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_matrix_q_returns_false_not_error() {
+        // Regression: a non-matrix previously produced an EvalError.
+        assert_eq!(builtin_matrix_q(&[int(5)]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            builtin_matrix_q(&[list(vec![])]).unwrap(),
+            Value::Bool(true)
+        );
+        let ragged = list(vec![list(vec![int(1)]), list(vec![int(1), int(2)])]);
+        assert_eq!(builtin_matrix_q(&[ragged]).unwrap(), Value::Bool(false));
+        let matrix = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
+        assert_eq!(builtin_matrix_q(&[matrix]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_extract_indices() {
+        let expr = list(vec![int(10), int(20)]);
+        assert_eq!(builtin_extract(&[expr.clone(), int(2)]).unwrap(), int(20));
+        assert_eq!(
+            builtin_extract(&[expr, list(vec![int(1)])]).unwrap(),
+            int(10)
+        );
+    }
+
+    #[test]
+    fn test_replace_list_matches_pattern_rule() {
+        // Regression: evaluator-produced rule sides are held as `Value::Pattern`,
+        // so matching must go through the pattern engine, not `struct_eq`.
+        assert_eq!(
+            eval_str("ReplaceList[{a, b}, {a, b} -> z]"),
+            list(vec![sym("z")])
+        );
+    }
+
+    #[test]
+    fn test_replace_at_level_applies_pattern_rule() {
+        let expr = list(vec![sym("a"), sym("b")]);
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Pattern(Expr::Symbol("a".to_string()))),
+            rhs: Box::new(Value::Pattern(Expr::Symbol("x".to_string()))),
+            delayed: false,
+        };
+        // Level 1 (the elements); the default leaves spec is normalized above.
+        let out = builtin_replace(&[expr, rule, int(1)], &env_with_builtins()).unwrap();
+        assert_eq!(out, list(vec![sym("x"), sym("b")]));
+    }
 }

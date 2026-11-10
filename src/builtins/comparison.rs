@@ -2,13 +2,68 @@ use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Rational;
 
+/// Numeric equality that promotes across the numeric types.
+///
+/// Returns `None` when either operand is not a number, so callers can fall
+/// back to structural comparison.
+fn numeric_eq(a: &Value, b: &Value) -> Option<bool> {
+    use Value::*;
+    let rat_to_float = |r: &rug::Rational| -> Float {
+        Float::with_val(DEFAULT_PRECISION, r.numer())
+            / Float::with_val(DEFAULT_PRECISION, r.denom())
+    };
+    match (a, b) {
+        (Integer(x), Integer(y)) => Some(x == y),
+        (Rational(x), Rational(y)) => Some(x == y),
+        (Real(x), Real(y)) => Some(x == y),
+        (Integer(x), Rational(y)) | (Rational(y), Integer(x)) => {
+            Some(y.numer() == &rug::Integer::from(x * y.denom()))
+        }
+        (Integer(x), Real(y)) | (Real(y), Integer(x)) => {
+            Some(Float::with_val(DEFAULT_PRECISION, x) == *y)
+        }
+        (Rational(x), Real(y)) | (Real(y), Rational(x)) => Some(rat_to_float(x) == *y),
+        (Complex { re: r1, im: i1 }, Complex { re: r2, im: i2 }) => Some(r1 == r2 && i1 == i2),
+        (Complex { re, im }, other) | (other, Complex { re, im }) if *im == 0.0 => {
+            other.to_real().map(|o| *re == o)
+        }
+        _ => None,
+    }
+}
+
+/// Equality used by `Equal`/`Unequal`: numbers compare by value (so `1 == 1.0`)
+/// while everything else compares structurally.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    // `Formatted` is only a display hint; compare the underlying values.
+    if let Value::Formatted { value, .. } = a {
+        return values_equal(value, b);
+    }
+    if let Value::Formatted { value, .. } = b {
+        return values_equal(a, value);
+    }
+    if let Some(eq) = numeric_eq(a, b) {
+        return eq;
+    }
+    match (a, b) {
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| values_equal(p, q))
+        }
+        (Value::Call { head: h1, args: a1 }, Value::Call { head: h2, args: a2 }) => {
+            h1 == h2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(p, q)| values_equal(p, q))
+        }
+        _ => a.struct_eq(b),
+    }
+}
+
 pub fn builtin_equal(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "Equal requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(args[0].struct_eq(&args[1])))
+    Ok(Value::Bool(values_equal(&args[0], &args[1])))
 }
 
 pub fn builtin_unequal(args: &[Value]) -> Result<Value, EvalError> {
@@ -17,7 +72,7 @@ pub fn builtin_unequal(args: &[Value]) -> Result<Value, EvalError> {
             "Unequal requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(!args[0].struct_eq(&args[1])))
+    Ok(Value::Bool(!values_equal(&args[0], &args[1])))
 }
 
 pub fn builtin_less(args: &[Value]) -> Result<Value, EvalError> {
@@ -209,6 +264,66 @@ mod tests {
             builtin_equal(&[Value::Str("hi".into()), Value::Str("bye".into())]).unwrap(),
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn test_equal_numeric_promotion() {
+        assert_eq!(
+            builtin_equal(&[int(1), real(1.0)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_equal(&[real(1.0), int(1)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_equal(&[rational(1, 2), real(0.5)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_equal(&[int(2), rational(4, 2)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_equal(&[int(1), real(1.5)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_equal_nested_numeric_promotion() {
+        let a = Value::List(vec![int(1), real(2.5)]);
+        let b = Value::List(vec![real(1.0), rational(5, 2)]);
+        assert_eq!(builtin_equal(&[a, b]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_equal_symbolic_stays_structural() {
+        let x = Value::Symbol("x".into());
+        let y = Value::Symbol("y".into());
+        assert_eq!(builtin_equal(&[x.clone(), x]).unwrap(), Value::Bool(true));
+        assert_eq!(
+            builtin_equal(&[Value::Symbol("x".into()), y]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_unequal_numeric_promotion() {
+        assert_eq!(
+            builtin_unequal(&[int(1), real(1.0)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_unequal(&[int(1), real(1.5)]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_equal_complex_zero_imag() {
+        let c = Value::Complex { re: 2.0, im: 0.0 };
+        assert_eq!(builtin_equal(&[c, real(2.0)]).unwrap(), Value::Bool(true));
     }
 
     #[test]

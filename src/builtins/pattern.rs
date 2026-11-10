@@ -156,7 +156,7 @@ fn matches_value(
     match pattern {
         Value::Hold(inner) | Value::HoldComplete(inner) => {
             // Unwrap hold wrappers for comparison
-            return matches_value(value, inner, attr_checker, env);
+            matches_value(value, inner, attr_checker, env)
         }
         Value::Pattern(pat_expr) => {
             // Handle PatternGuard with guard evaluation
@@ -261,7 +261,7 @@ fn extract_dispatch_key_expr(expr: &Expr) -> Option<(String, Vec<Option<String>>
                 Expr::Symbol(s) => s.clone(),
                 _ => return None,
             };
-            let arg_keys = args.iter().map(|arg| get_arg_dispatch_key(arg)).collect();
+            let arg_keys = args.iter().map(get_arg_dispatch_key).collect();
             Some((head_name, arg_keys))
         }
         Expr::Symbol(s) => Some((s.clone(), vec![])),
