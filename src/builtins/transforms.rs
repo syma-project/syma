@@ -2539,71 +2539,9 @@ fn builtin_nproduct(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(num_to_value(product))
 }
 
+/// `NIntegrate` — adaptive Gauss–Kronrod quadrature (see `eval/numeric.rs`).
 fn builtin_nintegrate(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "NIntegrate requires at least 2 arguments".to_string(),
-        ));
-    }
-    let f = unwrap(&args[0]);
-    let spec = unwrap(&args[1]);
-    let items = match &spec {
-        Value::List(items) if items.len() == 3 => items,
-        other => return Err(type_err("List {x, a, b} integration limits", other)),
-    };
-    let var = match &items[0] {
-        Value::Symbol(s) => s.clone(),
-        other => return Err(type_err("Symbol integration variable", other)),
-    };
-    let a = eval_bound(&items[1], env)?;
-    let b = eval_bound(&items[2], env)?;
-    let value = adaptive_simpson(&f, &var, a, b, env)?;
-    Ok(super::real(value))
-}
-
-const NINT_TOL: f64 = 1e-10;
-const NINT_MAX_DEPTH: usize = 50;
-
-fn adaptive_simpson(f: &Value, var: &str, a: f64, b: f64, env: &Env) -> Result<f64, EvalError> {
-    let fa = eval_at_num(f, var, a, env)?;
-    let fb = eval_at_num(f, var, b, env)?;
-    let m = 0.5 * (a + b);
-    let fm = eval_at_num(f, var, m, env)?;
-    let whole = simpson(a, b, fa, fm, fb);
-    simpson_rec(f, var, a, b, fa, fm, fb, whole, 0, env)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn simpson_rec(
-    f: &Value,
-    var: &str,
-    a: f64,
-    b: f64,
-    fa: f64,
-    fm: f64,
-    fb: f64,
-    whole: f64,
-    depth: usize,
-    env: &Env,
-) -> Result<f64, EvalError> {
-    let m = 0.5 * (a + b);
-    let lm = 0.5 * (a + m);
-    let rm = 0.5 * (m + b);
-    let flm = eval_at_num(f, var, lm, env)?;
-    let frm = eval_at_num(f, var, rm, env)?;
-    let left = simpson(a, m, fa, flm, fm);
-    let right = simpson(m, b, fm, frm, fb);
-    let delta = left + right - whole;
-    if depth >= NINT_MAX_DEPTH || delta.abs() <= 15.0 * NINT_TOL {
-        return Ok(left + right + delta / 15.0);
-    }
-    let l = simpson_rec(f, var, a, m, fa, flm, fm, left, depth + 1, env)?;
-    let r = simpson_rec(f, var, m, b, fm, frm, fb, right, depth + 1, env)?;
-    Ok(l + r)
-}
-
-fn simpson(a: f64, b: f64, fa: f64, fm: f64, fb: f64) -> f64 {
-    (b - a) / 6.0 * (fa + 4.0 * fm + fb)
+    crate::eval::numeric::nintegrate(args, env)
 }
 
 // ── Registration ────────────────────────────────────────────────────────────

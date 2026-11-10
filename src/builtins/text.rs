@@ -402,17 +402,6 @@ fn pattern_str(v: &Value) -> Option<&str> {
     }
 }
 
-/// True when `v` is a `StringExpression` (directly or after rule wrapping).
-fn is_string_expression(v: &Value) -> bool {
-    match v {
-        Value::Call { head, .. } => head == "StringExpression",
-        Value::Pattern(Expr::Call { head, .. }) => {
-            matches!(head.as_ref(), Expr::Symbol(h) if h == "StringExpression")
-        }
-        _ => false,
-    }
-}
-
 /// Convert a string pattern or StringExpression to a glob pattern.
 fn pattern_to_glob(v: &Value) -> Option<String> {
     match v {
@@ -488,34 +477,6 @@ pub fn builtin_string_expression(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
-/// StringMatchQ override that understands StringExpression patterns.
-fn builtin_string_match_q_expr(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() == 2
-        && let Some(glob) = pattern_to_glob(&args[1])
-    {
-        let s = str_arg(&args[0], "String")?;
-        return Ok(Value::Bool(super::string::glob_match(&glob, s)));
-    }
-    super::string::builtin_string_match_q(args)
-}
-
-/// StringCases override that understands StringExpression patterns.
-fn builtin_string_cases_expr(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() == 2
-        && is_string_expression(&args[1])
-        && let Some(glob) = pattern_to_glob(&args[1])
-    {
-        let s = str_arg(&args[0], "String")?;
-        let chars: Vec<char> = s.chars().collect();
-        let matches: Vec<Value> = find_glob_matches(&chars, &glob)
-            .into_iter()
-            .map(|(a, b)| Value::Str(chars[a..b].iter().collect()))
-            .collect();
-        return Ok(Value::List(matches));
-    }
-    super::list::builtin_string_cases(args)
-}
-
 // ── Registration ───────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -528,9 +489,6 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "StringTemplate", builtin_string_template);
     super::register_builtin(env, "StringReplaceList", builtin_string_replace_list);
     super::register_builtin(env, "StringExpression", builtin_string_expression);
-    // Pattern-aware overrides (registered after the base implementations).
-    super::register_builtin(env, "StringMatchQ", builtin_string_match_q_expr);
-    super::register_builtin(env, "StringCases", builtin_string_cases_expr);
 }
 
 #[cfg(test)]
@@ -747,36 +705,25 @@ mod tests {
     }
 
     #[test]
-    fn test_string_match_q_expression() {
+    fn test_string_expression_string_match_q() {
+        // `stringpatterns` owns StringMatchQ and understands StringExpression.
         let pat = expr("StringExpression", vec![s("a"), s("b")]);
         assert_eq!(
-            builtin_string_match_q_expr(&[s("ab"), pat.clone()]).unwrap(),
+            crate::builtins::stringpatterns::builtin_string_match_q(&[s("ab"), pat.clone()])
+                .unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            builtin_string_match_q_expr(&[s("ac"), pat]).unwrap(),
+            crate::builtins::stringpatterns::builtin_string_match_q(&[s("ac"), pat]).unwrap(),
             Value::Bool(false)
         );
     }
 
     #[test]
-    fn test_string_match_q_falls_back() {
-        assert_eq!(
-            builtin_string_match_q_expr(&[s("hello"), s("h*")]).unwrap(),
-            Value::Bool(true)
-        );
-    }
-
-    #[test]
-    fn test_string_cases_expression() {
+    fn test_string_expression_string_cases() {
         let pat = expr("StringExpression", vec![s("a"), s("b")]);
-        let out = builtin_string_cases_expr(&[s("abcabc"), pat]).unwrap();
+        let out =
+            crate::builtins::stringpatterns::builtin_string_cases(&[s("abcabc"), pat]).unwrap();
         assert_eq!(out, Value::List(vec![s("ab"), s("ab")]));
-    }
-
-    #[test]
-    fn test_string_cases_falls_back() {
-        let out = builtin_string_cases_expr(&[s("abc"), s("b")]).unwrap();
-        assert_eq!(out, Value::List(vec![s("b")]));
     }
 }

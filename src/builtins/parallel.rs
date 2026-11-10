@@ -468,9 +468,29 @@ pub fn builtin_parallel_combine(args: &[Value], env: &Env) -> Result<Value, Eval
 mod tests {
     use super::*;
 
-    /// Ensure the global pool is clean before each test.
+    /// Serializes tests that touch the process-global `KERNEL_POOL`. Rust runs
+    /// `#[test]`s concurrently by default, and the pool is shared state, so
+    /// tests calling `cleanup_pool`/`launch_kernels`/`pool_size`/`parallel_batch`
+    /// must not interleave. Poison-tolerant so a panicking test does not wedge
+    /// the others.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    /// RAII guard holding the global test lock for the duration of a test body.
+    struct SerialGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn serial() -> SerialGuard {
+        SerialGuard {
+            _guard: TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+
+    /// Ensure the global pool is fully reset before/after a test: `None` drops
+    /// the `Arc<ThreadPool>`, which shuts the workers down and joins them, so no
+    /// pool state leaks into the next test.
     fn cleanup_pool() {
-        *get_pool().lock().unwrap() = None;
+        *get_pool().lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]
@@ -498,6 +518,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_sequential_fallback() {
+        let _serial = serial();
         cleanup_pool();
         let jobs: Vec<Job> = (0..5)
             .map(|i| Box::new(move || Ok(Value::Integer(rug::Integer::from(i * 2)))) as Job)
@@ -516,6 +537,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_with_pool() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(4);
 
@@ -538,12 +560,14 @@ mod tests {
 
     #[test]
     fn test_pool_size_default() {
+        let _serial = serial();
         cleanup_pool();
         assert_eq!(pool_size(), 1);
     }
 
     #[test]
     fn test_pool_size_with_pool() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(8);
         assert_eq!(pool_size(), 8);
@@ -553,6 +577,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_panic_recovery() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(2);
 
@@ -585,6 +610,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_empty_jobs() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(4);
         let results = parallel_batch(vec![]);
@@ -594,6 +620,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_preserves_order_despite_completion_order() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(4);
         // Later jobs finish first: job `i` sleeps `n - i` milliseconds, so
@@ -621,6 +648,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_is_deterministic_across_runs() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(4);
         let run = || {
@@ -647,6 +675,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_error_stays_at_its_index() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(3);
         let jobs: Vec<Job> = (0..6)
@@ -680,6 +709,7 @@ mod tests {
 
     #[test]
     fn test_launch_kernels_zero_clamped_via_pool() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(0);
         assert_eq!(pool_size(), 1);
@@ -696,6 +726,7 @@ mod tests {
     /// waiting on inner jobs that nobody can pick up.
     #[test]
     fn test_nested_parallel_batch_single_worker_no_deadlock() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(1);
 
@@ -733,6 +764,7 @@ mod tests {
 
     #[test]
     fn test_nested_parallel_batch_multi_worker_no_deadlock() {
+        let _serial = serial();
         cleanup_pool();
         launch_kernels(2);
 

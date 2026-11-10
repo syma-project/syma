@@ -67,6 +67,7 @@ pub mod symbolicmanip;
 pub mod symbolicmore;
 pub mod systeminfo;
 pub mod systemio;
+pub mod tensor;
 pub mod text;
 pub mod timeseries;
 pub mod transforms;
@@ -141,9 +142,7 @@ pub fn register_builtins(env: &Env) {
     #[allow(clippy::type_complexity)]
     const PURE_BUILTINS: &[(&str, fn(&[Value]) -> Result<Value, EvalError>)] = &[
         ("AbortKernels", parallel::builtin_abort_kernels),
-        ("Abs", arithmetic::builtin_abs),
         ("AbsArg", arithmetic::builtin_abs_arg),
-        ("AbsoluteTime", calendar::builtin_absolute_time),
         ("Accumulate", list::builtin_accumulate),
         ("ActivateTrig", integration::builtin_activate_trig),
         ("Alphabet", string::builtin_alphabet),
@@ -171,11 +170,9 @@ pub fn register_builtins(env: &Env) {
         ("Arg", arithmetic::builtin_arg),
         ("Arrangements", combinatorics::builtin_arrangements),
         ("ArrayPad", list::builtin_array_pad),
-        ("ArrayReshape", list::builtin_array_reshape),
         ("ArrayFlatten", linalg::builtin_array_flatten),
         ("AssociationQ", association::builtin_association_q),
         ("AtomQ", integration::builtin_atom_q),
-        ("BaseForm", format::builtin_base_form),
         ("BellB", combinatorics::builtin_bell_b),
         ("BernoulliB", discrete::builtin_bernoulli_b),
         ("Binarize", image::builtin_binarize),
@@ -228,15 +225,7 @@ pub fn register_builtins(env: &Env) {
         ("Csch", math::builtin_csch),
         ("Dataset", dataset::builtin_dataset),
         ("DatasetQ", dataset::builtin_dataset_q),
-        ("DateDifference", calendar::builtin_date_difference),
-        ("DateList", calendar::builtin_date_list),
-        ("DateObject", calendar::builtin_date_object),
-        ("DatePlus", calendar::builtin_date_plus),
-        ("DateString", calendar::builtin_date_string),
-        ("DayCount", calendar::builtin_day_count),
-        ("DayName", calendar::builtin_day_name),
         ("DeactivateTrig", integration::builtin_deactivate_trig),
-        ("Defer", format::builtin_defer),
         ("Delete", list::builtin_delete),
         ("DeleteDuplicates", list::builtin_delete_duplicates),
         ("DeleteFile", io::builtin_delete_file),
@@ -256,7 +245,6 @@ pub fn register_builtins(env: &Env) {
         ("Dispatch", pattern::builtin_dispatch),
         ("Dist", integration::builtin_dist),
         ("Distrib", integration::builtin_distrib),
-        ("Divide", arithmetic::builtin_divide),
         ("Divisible", number_theory::builtin_divisible),
         ("DivisorSigma", number_theory::builtin_divisor_sigma),
         ("Divisors", number_theory::builtin_divisors),
@@ -311,7 +299,6 @@ pub fn register_builtins(env: &Env) {
         ("Flatten", list::builtin_flatten),
         ("Floor", math::builtin_floor),
         ("FracPart", integration::builtin_frac_part),
-        ("FractionalPart", math::builtin_fractional_part),
         ("FreeFactors", integration::builtin_free_factors),
         ("FromCharacterCode", string::builtin_from_character_code),
         (
@@ -323,21 +310,19 @@ pub fn register_builtins(env: &Env) {
             number_theory::builtin_from_continued_fraction,
         ),
         ("FromDigits", number_theory::builtin_from_digits),
-        ("FullForm", format::builtin_full_form),
         ("FunctionExpand", integration::builtin_function_expand),
         ("FunctionOfLog", integration::builtin_function_of_log),
         ("FunctionOfQ", integration::builtin_function_of_q),
         ("GCD", math::builtin_gcd),
-        ("Gamma", math::builtin_gamma),
+        // `Gamma` is owned by `specialfunctions` (registered last).
         ("Gather", list::builtin_gather),
         ("GaussianFilter", image::builtin_gaussian_filter),
         ("GeQ", integration::builtin_ge_q),
         ("Greater", comparison::builtin_greater),
         ("GreaterEqual", comparison::builtin_greater_equal),
-        ("Grid", format::builtin_grid),
         ("GtQ", integration::builtin_gt_q),
         ("HalfIntegerQ", integration::builtin_half_integer_q),
-        ("HarmonicNumber", combinatorics::builtin_harmonic_number),
+        // `HarmonicNumber` is owned by `specialfunctions` (registered last).
         ("Haversine", math::builtin_haversine),
         ("Head", pattern::builtin_head),
         ("HyperbolicQ", integration::builtin_hyperbolic_q),
@@ -360,7 +345,6 @@ pub fn register_builtins(env: &Env) {
         ("IndependentQ", integration::builtin_independent_q),
         ("InertTrigQ", integration::builtin_inert_trig_q),
         ("Input", io::builtin_input),
-        ("InputForm", format::builtin_input_form),
         ("Insert", list::builtin_insert),
         ("IntBinomialQ", integration::builtin_int_binomial_q),
         ("IntHide", integration::builtin_int_hide),
@@ -369,7 +353,6 @@ pub fn register_builtins(env: &Env) {
         ("IntQuadraticQ", integration::builtin_int_quadratic_q),
         ("IntegerDigits", number_theory::builtin_integer_digits),
         ("IntegerLength", number_theory::builtin_integer_length),
-        ("IntegerPart", math::builtin_integer_part),
         (
             "IntegerPartitions",
             combinatorics::builtin_integer_partitions,
@@ -397,7 +380,6 @@ pub fn register_builtins(env: &Env) {
         ("Last", list::builtin_last),
         ("LaunchKernels", parallel::builtin_launch_kernels),
         ("LeQ", integration::builtin_le_q),
-        ("LeapYearQ", calendar::builtin_leap_year_q),
         ("Length", list::builtin_length),
         ("Less", comparison::builtin_less),
         ("LessEqual", comparison::builtin_less_equal),
@@ -408,7 +390,6 @@ pub fn register_builtins(env: &Env) {
         ("LinearQ", integration::builtin_linear_q),
         ("LinearRecurrence", discrete::builtin_linear_recurrence),
         ("LiouvilleLambda", number_theory::builtin_liouville_lambda),
-        ("ListConvolve", list::builtin_list_convolve),
         ("LocalSymbol", localsymbol::builtin_local_symbol),
         ("Log", math::builtin_log),
         ("Log10", math::builtin_log10),
@@ -424,46 +405,35 @@ pub fn register_builtins(env: &Env) {
         ("LucasL", combinatorics::builtin_lucas_l),
         ("Majority", logical::builtin_majority),
         ("MangoldtLambda", number_theory::builtin_mangoldt_lambda),
-        ("MatrixForm", format::builtin_matrix_form),
         ("Max", math::builtin_max),
         ("MemberQ", list::builtin_member_q),
         ("Message", builtin_message),
         ("MessageName", builtin_message_name),
         ("Min", math::builtin_min),
-        ("Minus", arithmetic::builtin_minus),
         ("Mod", math::builtin_mod),
         ("MoebiusMu", number_theory::builtin_moebius_mu),
-        ("MonthName", calendar::builtin_month_name),
         ("Most", list::builtin_most),
-        ("MovingAverage", list::builtin_moving_average),
         ("Multinomial", combinatorics::builtin_multinomial),
         ("NLimit", symbolicmanip::builtin_nlimit),
         ("Nand", logical::builtin_nand),
         ("NeQ", integration::builtin_ne_q),
-        ("Nearest", list::builtin_nearest),
         ("NegQ", integration::builtin_neg_q),
         ("NegativeQ", math::builtin_negative_q),
         ("NextPrime", number_theory::builtin_next_prime),
         ("NiceSqrtQ", integration::builtin_nice_sqrt_q),
-        ("NonNegativeQ", math::builtin_non_negative_q),
         ("NonfreeFactors", integration::builtin_nonfree_factors),
         ("NonsumQ", integration::builtin_nonsum_q),
         ("Nor", logical::builtin_nor),
-        ("Normal", association::builtin_normal),
         ("Not", logical::builtin_not),
-        ("Now", calendar::builtin_now),
         ("NumberExpand", number_theory::builtin_number_expand),
-        ("NumberForm", format::builtin_number_form),
         ("Numer", integration::builtin_numer),
         ("Numerator", integration::builtin_numerator),
         ("NumericalOrder", math::builtin_numerical_order),
         ("OddQ", integration::builtin_odd_q),
         ("Order", comparison::builtin_order),
         ("Ordering", list::builtin_ordering),
-        ("OutputForm", format::builtin_output_form),
         ("PadLeft", list::builtin_pad_left),
         ("PadRight", list::builtin_pad_right),
-        ("PaddedForm", format::builtin_padded_form),
         ("ParallelDo", parallel::builtin_parallel_do),
         ("ParallelEvaluate", parallel::builtin_parallel_evaluate),
         ("ParallelProduct", parallel::builtin_parallel_product),
@@ -471,7 +441,6 @@ pub fn register_builtins(env: &Env) {
         ("ParallelTable", parallel::builtin_parallel_table),
         ("ParallelTry", parallel::builtin_parallel_try),
         ("ParentDirectory", filesystem::builtin_parent_directory),
-        ("Part", list::builtin_part),
         ("Partition", list::builtin_partition),
         ("PartitionsP", combinatorics::builtin_partitions_p),
         ("PartitionsQ", combinatorics::builtin_partitions_q),
@@ -479,7 +448,6 @@ pub fn register_builtins(env: &Env) {
         ("PerfectSquareQ", integration::builtin_perfect_square_q),
         ("Permutations", combinatorics::builtin_permutations),
         ("Plot", graphics::builtin_plot_stub),
-        ("Plus", arithmetic::builtin_plus),
         ("Pochhammer", number_theory::builtin_pochhammer),
         ("PolyQ", integration::builtin_poly_q),
         ("PolynomialGCD", symbolicmanip::builtin_polynomial_gcd),
@@ -501,7 +469,6 @@ pub fn register_builtins(env: &Env) {
         ("PosQ", integration::builtin_pos_q),
         ("Position", list::builtin_position),
         ("PositiveQ", math::builtin_positive_q),
-        ("Power", arithmetic::builtin_power),
         ("PowerMod", number_theory::builtin_power_mod),
         ("PowerQ", integration::builtin_power_q),
         ("Prepend", list::builtin_prepend),
@@ -521,11 +488,6 @@ pub fn register_builtins(env: &Env) {
         ("Quotient", math::builtin_quotient),
         ("QuotientRemainder", math::builtin_quotient_remainder),
         ("Ramp", math::builtin_ramp),
-        ("RandomArray", random::builtin_random_array),
-        ("RandomChoice", random::builtin_random_choice),
-        ("RandomComplex", random::builtin_random_complex),
-        ("RandomInteger", random::builtin_random_integer),
-        ("RandomReal", random::builtin_random_real),
         ("Range", list::builtin_range),
         ("RationalQ", integration::builtin_rational_q),
         ("Re", arithmetic::builtin_re),
@@ -538,7 +500,6 @@ pub fn register_builtins(env: &Env) {
         ("RemoveContent", integration::builtin_remove_content),
         ("ReplacePart", list::builtin_replace_part),
         ("Rescale", math::builtin_rescale),
-        ("Residue", number_theory::builtin_residue),
         ("Resultant", symbolicmanip::builtin_resultant),
         ("Rest", list::builtin_rest),
         ("Reverse", list::builtin_reverse),
@@ -549,7 +510,6 @@ pub fn register_builtins(env: &Env) {
         ("Rt", integration::builtin_rt),
         ("RunProcess", io::builtin_run_process),
         ("SameQ", comparison::builtin_same_q),
-        ("ScientificForm", format::builtin_scientific_form),
         ("Sec", math::builtin_sec),
         ("SecDegrees", math::builtin_sec_degrees),
         ("Sech", math::builtin_sech),
@@ -559,8 +519,6 @@ pub fn register_builtins(env: &Env) {
             "SeriesCoefficient",
             symbolicmanip::builtin_series_coefficient,
         ),
-        ("Shallow", format::builtin_shallow),
-        ("Short", format::builtin_short),
         ("ShowStep", integration::builtin_show_step),
         ("Sign", arithmetic::builtin_sign),
         ("Simp", integration::builtin_simp),
@@ -576,32 +534,22 @@ pub fn register_builtins(env: &Env) {
         ("SplitProduct", integration::builtin_split_product),
         ("Sqrt", math::builtin_sqrt),
         ("SquareFreeQ", number_theory::builtin_square_free_q),
-        ("StandardForm", format::builtin_standard_form),
         ("StirlingS1", combinatorics::builtin_stirling_s1),
         ("StirlingS2", combinatorics::builtin_stirling_s2),
-        ("StringCases", list::builtin_string_cases),
-        ("StringContainsQ", string::builtin_string_contains_q),
-        ("StringCount", string::builtin_string_count),
+        // `StringCases` is owned by `stringpatterns` (registered last).
         ("StringDelete", string::builtin_string_delete),
         ("StringDrop", string::builtin_string_drop),
-        ("StringEndsQ", string::builtin_string_ends_q),
-        ("StringForm", format::builtin_string_form),
-        ("StringFreeQ", string::builtin_string_free_q),
         ("StringInsert", string::builtin_string_insert),
         ("StringJoin", string::builtin_string_join),
         ("StringLength", string::builtin_string_length),
-        ("StringMatchQ", string::builtin_string_match_q),
+        // `StringMatchQ` is owned by `stringpatterns` (registered last).
         ("StringPadLeft", string::builtin_string_pad_left),
         ("StringPadRight", string::builtin_string_pad_right),
         ("StringPartition", string::builtin_string_partition),
         ("StringPart", string::builtin_string_part),
-        ("StringPosition", string::builtin_string_position),
         ("StringRepeat", string::builtin_string_repeat),
-        ("StringReplace", string::builtin_string_replace),
         ("StringReverse", string::builtin_string_reverse),
         ("StringRiffle", string::builtin_string_riffle),
-        ("StringSplit", string::builtin_string_split),
-        ("StringStartsQ", string::builtin_string_starts_q),
         ("StringTake", string::builtin_string_take),
         ("StringToByteArray", string::builtin_string_to_byte_array),
         ("StringTrim", string::builtin_string_trim),
@@ -613,27 +561,21 @@ pub fn register_builtins(env: &Env) {
         ("Sum", list::builtin_sum),
         ("SumQ", integration::builtin_sum_q),
         ("SumSimplerQ", integration::builtin_sum_simpler_q),
-        ("SyntaxLength", format::builtin_syntax_length),
-        ("SyntaxQ", format::builtin_syntax_q),
         ("Table", list::builtin_table),
-        ("TableForm", format::builtin_table_form),
         ("Take", list::builtin_take),
         ("Tally", list::builtin_tally),
         ("Tan", math::builtin_tan),
         ("TanDegrees", math::builtin_tan_degrees),
         ("Tanh", math::builtin_tanh),
-        ("TeXForm", format::builtin_tex_form),
         ("TextWords", string::builtin_text_words),
         ("Thread", list::builtin_thread),
         ("Throw", error::builtin_throw),
-        ("Times", arithmetic::builtin_times),
         ("ToCharacterCode", string::builtin_to_character_code),
         ("ToDigits", number_theory::builtin_to_digits),
         ("ToExpression", string::builtin_to_expression),
         ("ToLowerCase", string::builtin_to_lower_case),
         ("ToString", string::builtin_to_string),
         ("ToUpperCase", string::builtin_to_upper_case),
-        ("Today", calendar::builtin_today),
         ("Together", symbolicmanip::builtin_together),
         ("Total", list::builtin_total),
         ("Transpose", list::builtin_transpose),
@@ -653,11 +595,8 @@ pub fn register_builtins(env: &Env) {
         ("Unitize", math::builtin_unitize),
         ("UnsameQ", comparison::builtin_unsame_q),
         ("UpperCaseQ", string::builtin_upper_case_q),
-        ("Values", association::builtin_values),
         ("WordCount", string::builtin_word_count),
-        ("Write", io::builtin_write),
         ("WriteLine", io::builtin_write_line),
-        ("WriteString", io::builtin_write_string),
         ("Xor", logical::builtin_xor),
         ("ZeroQ", math::builtin_zero_q),
     ];
@@ -722,7 +661,6 @@ pub fn register_builtins(env: &Env) {
         ("If", integration::builtin_if),
         ("Implies", logical::builtin_implies),
         ("Infix", builtin_infix),
-        ("Inner", list::builtin_inner),
         ("Integrate", symbolic::builtin_integrate),
         ("KeyMap", association::builtin_key_map),
         ("KeySortBy", association::builtin_key_sort_by),
@@ -759,7 +697,6 @@ pub fn register_builtins(env: &Env) {
         ("PositionLast", operators::builtin_position_last),
         ("Postfix", builtin_postfix),
         ("Prefix", builtin_prefix),
-        ("RSolve", discrete::builtin_rsolve),
         ("Remove", clearing::builtin_remove),
         ("Replace", operators::builtin_replace),
         ("ReplaceAll", crate::eval::rules::builtin_replace_all),
@@ -770,6 +707,7 @@ pub fn register_builtins(env: &Env) {
         ("SelectLast", operators::builtin_select_last),
         ("Series", symbolic::builtin_series),
         ("SetAttributes", symbolic::builtin_set_attributes),
+        ("Simplify", symbolic::builtin_simplify_env),
         ("SortBy", dataset::builtin_sort_by),
         ("SplitBy", list::builtin_split_by),
         ("TakeWhile", list::builtin_take_while),
@@ -803,12 +741,11 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "Check", expression::builtin_check);
     register_builtin(env, "NumericQ", expression::builtin_numeric_q);
     register_builtin(env, "RealQ", expression::builtin_real_q);
-    register_builtin(env, "ExactNumberQ", expression::builtin_exact_number_q);
-    register_builtin_env(env, "VectorQ", expression::builtin_vector_q);
-    register_builtin(env, "MatrixQ", expression::builtin_matrix_q);
+    // `ExactNumberQ` is owned by `predicates` (registered last).
+    // `VectorQ`/`MatrixQ`/`ArrayQ` are owned by `predicates` (registered last)
+    // so their optional test-function argument is honoured consistently.
     register_builtin(env, "ScalarQ", expression::builtin_scalar_q);
-    register_builtin(env, "ArrayQ", expression::builtin_array_q);
-    register_builtin(env, "FullSimplify", expression::builtin_full_simplify);
+    register_builtin_env(env, "FullSimplify", expression::builtin_full_simplify_env);
 
     // ── String ──
 
@@ -1258,11 +1195,13 @@ pub fn register_builtins(env: &Env) {
 
     // ── Gap-fill modules (Mathematica parity) ──
     text::register(env);
+    format::register(env);
     string::register(env);
     listmore::register(env);
     linalgmore::register(env);
     statsmore::register(env);
     transforms::register(env);
+    discrete::register(env);
     symbolicmore::register(env);
     introspect::register(env);
     fit::register(env);
@@ -1292,6 +1231,13 @@ pub fn register_builtins(env: &Env) {
     calculusmore::register(env);
     notebook::register(env);
     regions::register(env);
+    // `tensor` owns the tensor-algebra surface (TensorProduct/TensorContract/…)
+    // and re-installs the higher-rank Dot/Tr/Inner it shares with `linalg`.
+    tensor::register(env);
+    // `random` is authoritative over the random-number surface (SeedRandom,
+    // RandomVariate, RandomPrime, RandomGraph, …) and must run after the
+    // modules that also touch it (statistics, statsmore, bitextra, graphtheory).
+    random::register(env);
     // `names` owns the symbol/context introspection surface; register it last
     // so it is authoritative over the overlapping session helpers.
     names::register(env);
@@ -1356,6 +1302,9 @@ pub fn register_builtins(env: &Env) {
     developer::register(env);
     systeminfo::register(env);
     algebraic::register(env);
+    // Message-aware overrides (Message/Assert/Quiet/On/Off/HoldForm) run last
+    // so they take precedence over the earlier core registrations.
+    error::register(env);
     specialfunctions::register_sfs(env);
 
     // ── Add SYMA_HOME/Packages and SystemFiles to module search path ──
@@ -1382,9 +1331,6 @@ pub fn register_builtins(env: &Env) {
             }
         }
     }
-
-    // ── Special functions ──
-    specialfunctions::register_sfs(env);
 
     // ── System limits ──
     env.set(
@@ -1811,6 +1757,14 @@ mod registration_tests {
     use super::*;
     use crate::env::Env;
 
+    fn eval_str(input: &str) -> Value {
+        let env = Env::new();
+        register_builtins(&env);
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap()
+    }
+
     /// `Sign` was registered three times (arithmetic, integration, math), with
     /// the last registration shadowing the complex-aware implementation. Guard
     /// that the complex-aware version wins.
@@ -1831,5 +1785,82 @@ mod registration_tests {
             }
             other => panic!("expected complex result, got {other:?}"),
         }
+    }
+
+    /// `VectorQ`/`MatrixQ`/`ArrayQ` resolve to the shape predicates (which
+    /// honour an optional test function) rather than the old shadowed set.
+    #[test]
+    fn shape_predicates_dispatch() {
+        assert_eq!(eval_str("VectorQ[{1, 2, 3}]"), Value::Bool(true));
+        assert_eq!(eval_str("VectorQ[{1, {2}}]"), Value::Bool(false));
+        assert_eq!(eval_str("VectorQ[{1, 2, 3}, IntegerQ]"), Value::Bool(true));
+        assert_eq!(eval_str("VectorQ[{1, 2, x}, IntegerQ]"), Value::Bool(false));
+        assert_eq!(eval_str("MatrixQ[{{1, 2}, {3, 4}}]"), Value::Bool(true));
+        assert_eq!(eval_str("MatrixQ[{{1, 2}, {3, 4, 5}}]"), Value::Bool(false));
+        assert_eq!(eval_str("ArrayQ[{{1, 2}, {3, 4}}]"), Value::Bool(true));
+        assert_eq!(eval_str("ArrayQ[{{1, 2}, {3}}]"), Value::Bool(false));
+    }
+
+    /// `StringCases`/`StringMatchQ` are owned by `stringpatterns`.
+    #[test]
+    fn string_pattern_builtins_dispatch() {
+        assert_eq!(eval_str("StringMatchQ[\"abc\", \"a*\"]"), Value::Bool(true));
+        assert_eq!(
+            eval_str("StringMatchQ[\"abc\", \"b*\"]"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_str("StringCases[\"a1b22c\", DigitCharacter]"),
+            Value::List(vec![
+                Value::Str("1".into()),
+                Value::Str("2".into()),
+                Value::Str("2".into())
+            ])
+        );
+    }
+
+    /// `HarmonicNumber` keeps its `Infinity` special case (specialfunctions is
+    /// the single registration).
+    #[test]
+    fn harmonic_number_dispatch() {
+        assert_eq!(
+            eval_str("HarmonicNumber[Infinity]"),
+            Value::Symbol("Infinity".into())
+        );
+        // H_2 = 1 + 1/2 = 3/2.
+        let v = eval_str("HarmonicNumber[2]");
+        assert!((to_f64(&v).unwrap() - 1.5).abs() < 1e-12);
+    }
+
+    /// `Dimensions` dispatches plain arrays and `Dataset` values through the
+    /// same implementation.
+    #[test]
+    fn dimensions_dispatch() {
+        assert_eq!(
+            eval_str("Dimensions[{{1, 2}, {3, 4}}]"),
+            Value::List(vec![Value::Integer(2.into()), Value::Integer(2.into())])
+        );
+        assert_eq!(
+            eval_str("Dimensions[Dataset[{{1, 2}, {3, 4}}]]"),
+            Value::List(vec![Value::Integer(2.into()), Value::Integer(2.into())])
+        );
+    }
+
+    /// `ColorNegate` handles both an RGB color value and an image.
+    #[test]
+    fn color_negate_dispatches_color_and_image() {
+        let color = eval_str("ColorNegate[RGBColor[0.2, 0.4, 0.6]]");
+        match color {
+            Value::Call { head, args } if head == "RGBColor" => {
+                let vals: Vec<f64> = args.iter().map(|a| to_f64(a).unwrap()).collect();
+                assert!((vals[0] - 0.8).abs() < 1e-9, "{vals:?}");
+                assert!((vals[1] - 0.6).abs() < 1e-9, "{vals:?}");
+                assert!((vals[2] - 0.4).abs() < 1e-9, "{vals:?}");
+            }
+            other => panic!("expected RGBColor result, got {other:?}"),
+        }
+
+        let img = eval_str("ColorNegate[Image[{{0, 128}, {200, 64}}]]");
+        assert!(matches!(img, Value::Image(_)), "got {img:?}");
     }
 }

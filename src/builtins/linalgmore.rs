@@ -3152,7 +3152,7 @@ pub fn register(env: &Env) {
         ("ConjugateTranspose", builtin_conjugate_transpose),
         ("Adjugate", builtin_adjugate),
         ("LeviCivitaTensor", builtin_levi_civita_tensor),
-        ("KroneckerProduct", super::linalg::builtin_kronecker_product),
+        // `KroneckerProduct` is owned by `tensor`.
         ("RotationMatrix", builtin_rotation_matrix),
         ("TranslationTransform", builtin_translation_transform),
         ("ScalingMatrix", builtin_scaling_matrix),

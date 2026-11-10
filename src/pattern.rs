@@ -21,6 +21,105 @@ use crate::value::Value;
 /// A set of variable bindings produced by pattern matching.
 pub type Bindings = HashMap<String, Value>;
 
+/// Identity element for a `OneIdentity` head, when it has a known numeric
+/// identity (`Times`→1, `Plus`→0). Used so that a bare value such as `x^2`
+/// can match a `b_*x^2` pattern with `b` defaulting to the identity.
+fn one_identity_element(head: &str) -> Option<Value> {
+    match head {
+        "Times" | "Power" => Some(Value::Integer(rug::Integer::from(1))),
+        "Plus" => Some(Value::Integer(rug::Integer::from(0))),
+        _ => None,
+    }
+}
+
+/// Whether a head should be treated as `OneIdentity` for pattern matching.
+/// `Power` is special-cased because `x` must be allowed to match `x_^n_`
+/// (with `n` = 1) even though `Power` lacks the attribute.
+fn head_is_one_identity(head: &str, attr_checker: Option<&AttributeChecker>) -> bool {
+    head == "Power" || attr_checker.is_some_and(|c| c.has_attr(head, "OneIdentity"))
+}
+
+/// OneIdentity fallback for call patterns: a bare value can stand in for a
+/// synthesized `h[...]` in which the slot absorbing the value is the only
+/// "real" one and every other slot is an `Optional` pattern filled by its
+/// default (or the head's identity element). This matches Mathematica:
+/// `n_. x_` matches `x`, but `n_ x_` does not.
+///
+/// `Power` is special-cased (`x` stands for `x^1`).
+fn match_one_identity_pattern(
+    head_name: &str,
+    pat_args: &[Expr],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> Option<Bindings> {
+    let pat_args: Vec<Expr> = flatten_expr_args(head_name, pat_args);
+    if pat_args.is_empty() {
+        return None;
+    }
+    let is_orderless = attr_checker.is_some_and(|c| c.has_attr(head_name, "Orderless"));
+
+    let id = one_identity_element(head_name)?;
+    // Try each slot as the one absorbing `value`; every other slot must be an
+    // `Optional` pattern (filled by its default / the identity element) so that
+    // `n_. x_` matches `x` but `n_ x_` does not (Mathematica semantics).
+    for value_slot in 0..pat_args.len() {
+        let mut synth_args: Vec<Value> = Vec::with_capacity(pat_args.len());
+        let mut fillable = true;
+        for (j, p) in pat_args.iter().enumerate() {
+            if j == value_slot {
+                synth_args.push(value.clone());
+            } else if let Some(fill) = optional_fill(p, &id) {
+                synth_args.push(fill);
+            } else {
+                fillable = false;
+                break;
+            }
+        }
+        if !fillable {
+            continue;
+        }
+        if let Some(b) = match_one_identity_try(&pat_args, &synth_args, is_orderless, attr_checker)
+        {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// If `p` is an `Optional` pattern, the value filling its slot when absent:
+/// its explicit default, or the head's identity element `id`.
+fn optional_fill(p: &Expr, id: &Value) -> Option<Value> {
+    match p {
+        Expr::OptionalBlank { default_value, .. }
+        | Expr::OptionalNamedBlank { default_value, .. } => Some(
+            default_value
+                .as_ref()
+                .map(|d| unwrap_expr_to_value(d))
+                .unwrap_or_else(|| id.clone()),
+        ),
+        _ => None,
+    }
+}
+
+fn match_one_identity_try(
+    pat_args: &[Expr],
+    synth_args: &[Value],
+    is_orderless: bool,
+    attr_checker: Option<&AttributeChecker>,
+) -> Option<Bindings> {
+    if is_orderless
+        && synth_args.len() >= 2
+        && synth_args.len() <= 6
+        && let MatchResult::Match(b) = try_orderless_match(pat_args, synth_args, attr_checker)
+    {
+        return Some(b);
+    }
+    if let MatchResult::Match(b) = try_ordered_match(pat_args, synth_args, attr_checker) {
+        return Some(b);
+    }
+    None
+}
+
 /// Lightweight attribute checker for the pattern engine.
 ///
 /// Wraps the shared attribute map so the pattern engine can query
@@ -1256,6 +1355,21 @@ fn generate_permutations(indices: &[usize]) -> Vec<Vec<usize>> {
     result
 }
 
+/// Merge `src` into `dst`, enforcing consistency of repeated pattern
+/// variables (e.g. `f[x_, x_]` requires both slots to be equal). Returns
+/// false on conflict.
+fn merge_bindings_checked(dst: &mut Bindings, src: Bindings) -> bool {
+    for (k, v) in src {
+        match dst.get(&k) {
+            Some(existing) if !existing.struct_eq(&v) => return false,
+            _ => {
+                dst.insert(k, v);
+            }
+        }
+    }
+    true
+}
+
 /// Check if there's a permutation of `val_args` that matches `pat_args`.
 fn try_orderless_match(
     pat_args: &[Expr],
@@ -1269,7 +1383,12 @@ fn try_orderless_match(
         let mut ok = true;
         for (i, &pi) in perm.iter().enumerate() {
             match match_pattern(&pat_args[i], &val_args[pi], attr_checker) {
-                MatchResult::Match(b) => bindings.extend(b),
+                MatchResult::Match(b) => {
+                    if !merge_bindings_checked(&mut bindings, b) {
+                        ok = false;
+                        break;
+                    }
+                }
                 MatchResult::NoMatch => {
                     ok = false;
                     break;
@@ -1295,7 +1414,11 @@ fn try_ordered_match(
     let mut bindings = Bindings::new();
     for (pat, val) in pat_args.iter().zip(val_args.iter()) {
         match match_pattern(pat, val, attr_checker) {
-            MatchResult::Match(b) => bindings.extend(b),
+            MatchResult::Match(b) => {
+                if !merge_bindings_checked(&mut bindings, b) {
+                    return MatchResult::NoMatch;
+                }
+            }
             MatchResult::NoMatch => return MatchResult::NoMatch,
         }
     }
@@ -1312,6 +1435,28 @@ fn match_call_pattern(
     value: &Value,
     attr_checker: Option<&AttributeChecker>,
 ) -> MatchResult {
+    // The parser represents `a/b` as `Divide[a, b]`, but `Integrate` (and WL
+    // generally) express division as `Times[a, Power[b, -1]]`. Rewrite a
+    // `Divide` pattern to its `Times` form so `/` rule patterns match the
+    // normalized values produced by the integrator.
+    if let Expr::Symbol(h) = head
+        && h == "Divide"
+        && args.len() == 2
+        && !matches!(value, Value::Call { head: vh, .. } if vh == "Divide")
+    {
+        let rewritten = Expr::Call {
+            head: Box::new(Expr::Symbol("Times".to_string())),
+            args: vec![
+                args[0].clone(),
+                Expr::Call {
+                    head: Box::new(Expr::Symbol("Power".to_string())),
+                    args: vec![args[1].clone(), Expr::Integer(rug::Integer::from(-1))],
+                },
+            ],
+        };
+        return match_pattern(&rewritten, value, attr_checker);
+    }
+
     // Match pattern head against value head.
     // The head can be a Symbol ("Plus"), a NamedBlank ("f_"), or a Blank ("_").
     let head_match: Option<(String, Bindings)> = match head {
@@ -1345,8 +1490,16 @@ fn match_call_pattern(
             if matches!(head, Expr::Symbol(_)) && head_name != *vhead {
                 // OneIdentity fallback: try matching inner pattern directly
                 if args.len() == 1
-                    && attr_checker.is_some_and(|c| c.has_attr(&head_name, "OneIdentity"))
+                    && head_is_one_identity(&head_name, attr_checker)
                     && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+                {
+                    return MatchResult::Match(b);
+                }
+                // OneIdentity fallback: treat the bare value as `head[value]`
+                // with identity elements for the remaining pattern slots.
+                if head_is_one_identity(&head_name, attr_checker)
+                    && let Some(b) =
+                        match_one_identity_pattern(&head_name, args, value, attr_checker)
                 {
                     return MatchResult::Match(b);
                 }
@@ -1420,11 +1573,18 @@ fn match_call_pattern(
         _ => {
             // Not a call value. With OneIdentity and single-arg pattern, try direct match.
             if let Expr::Symbol(s) = head
-                && args.len() == 1
-                && attr_checker.is_some_and(|c| c.has_attr(s, "OneIdentity"))
-                && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+                && head_is_one_identity(s, attr_checker)
             {
-                return MatchResult::Match(b);
+                if args.len() == 1
+                    && let MatchResult::Match(b) = match_pattern(&args[0], value, attr_checker)
+                {
+                    return MatchResult::Match(b);
+                }
+                // OneIdentity: treat the bare value as `head[value]` with
+                // identity elements filling the remaining pattern slots.
+                if let Some(b) = match_one_identity_pattern(s, args, value, attr_checker) {
+                    return MatchResult::Match(b);
+                }
             }
             MatchResult::NoMatch
         }

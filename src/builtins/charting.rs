@@ -2698,7 +2698,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "BarChart", builtin_bar_chart);
     register_builtin(env, "BarChart3D", builtin_bar_chart_3d);
     register_builtin(env, "Histogram", builtin_histogram);
-    register_builtin(env, "HistogramList", builtin_histogram_list);
+    // `HistogramList` is registered by `statistics`; `ListPolarPlot`,
+    // `ListStreamPlot`, `ListContourPlot` and `ListDensityPlot` by `graphics3d`.
     register_builtin(env, "PieChart", builtin_pie_chart);
     register_builtin(env, "DonutChart", builtin_donut_chart);
     register_builtin(env, "BubbleChart", builtin_bubble_chart);
@@ -2714,10 +2715,6 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "ComplexPlot", builtin_complex_plot);
     register_builtin(env, "ListLogPlot", builtin_list_log_plot);
     register_builtin(env, "ListLogLogPlot", builtin_list_log_log_plot);
-    register_builtin(env, "ListPolarPlot", builtin_list_polar_plot);
-    register_builtin(env, "ListStreamPlot", builtin_list_stream_plot);
-    register_builtin(env, "ListContourPlot", builtin_list_contour_plot);
-    register_builtin(env, "ListDensityPlot", builtin_list_density_plot);
     register_builtin(env, "BarLegend", builtin_bar_legend);
     register_builtin(env, "SwatchLegend", builtin_swatch_legend);
 }
@@ -2727,7 +2724,6 @@ pub const SYMBOLS: &[&str] = &[
     "BarChart",
     "BarChart3D",
     "Histogram",
-    "HistogramList",
     "PieChart",
     "DonutChart",
     "BubbleChart",
@@ -2743,10 +2739,6 @@ pub const SYMBOLS: &[&str] = &[
     "ComplexPlot",
     "ListLogPlot",
     "ListLogLogPlot",
-    "ListPolarPlot",
-    "ListStreamPlot",
-    "ListContourPlot",
-    "ListDensityPlot",
     "BarLegend",
     "SwatchLegend",
     "ChartLayout",

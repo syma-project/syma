@@ -2184,10 +2184,9 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
 /// Register all Statistics builtins in the environment.
 pub fn register(env: &crate::env::Env) {
     use super::register_builtin;
-    // Core descriptive
-    register_builtin(env, "Mean", builtin_mean);
+    // Core descriptive. `Mean`/`Variance` are owned by `timeseries` (registered
+    // later, and it delegates back here for non-series values).
     register_builtin(env, "Median", builtin_median);
-    register_builtin(env, "Variance", builtin_variance);
     register_builtin(env, "StandardDeviation", builtin_standard_deviation);
     register_builtin(env, "Quantile", builtin_quantile);
     register_builtin(env, "Covariance", builtin_covariance);
@@ -2240,8 +2239,7 @@ pub fn register(env: &crate::env::Env) {
     // Distribution functions
     register_builtin(env, "PDF", builtin_pdf);
     register_builtin(env, "CDF", builtin_cdf);
-    // Random sampling
-    register_builtin(env, "RandomVariate", builtin_random_variate);
+    // Random sampling (`RandomVariate` is owned by `random`, registered later).
 }
 
 /// Symbol names exported by the Statistics package.

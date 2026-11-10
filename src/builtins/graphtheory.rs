@@ -448,15 +448,265 @@ fn resolve(g: &Graph, v: &Value) -> Option<usize> {
     g.index_of(v)
 }
 
-/// FindShortestPath[g, s, t]
+/// Extract per-edge weights from an `EdgeWeight -> {..}` option on a graph value.
+///
+/// Missing entries default to `1`, so unweighted graphs behave exactly as before.
+fn edge_weights(graph_expr: &Value, n: usize) -> Vec<f64> {
+    let mut w = vec![1.0; n];
+    if let Value::Call { head, args } = graph_expr
+        && head == "Graph"
+    {
+        for a in args {
+            if let Value::Rule { lhs, rhs, .. } = a
+                && to_vertex(lhs) == Value::Symbol("EdgeWeight".to_string())
+            {
+                let rhs = to_vertex(rhs);
+                match &rhs {
+                    Value::List(ws) => {
+                        for (i, x) in ws.iter().enumerate() {
+                            if i < n
+                                && let Some(f) = numeric(x)
+                            {
+                                w[i] = f;
+                            }
+                        }
+                    }
+                    other => {
+                        if let Some(f) = numeric(other) {
+                            w.fill(f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    w
+}
+
+/// Numeric value: an exact integer when `x` is integral, otherwise a real.
+fn num(x: f64) -> Value {
+    if x.is_finite() && x.fract() == 0.0 && x.abs() <= 9.0e15 {
+        Value::Integer(Integer::from(x as i64))
+    } else {
+        real(x)
+    }
+}
+
+/// Coerce a (possibly unevaluated) value to `f64`, folding simple arithmetic.
+///
+/// Weights living inside a held `Graph[...]` keep negative literals as
+/// `Times[-1, 1]`, which `Value::to_real` alone does not understand.
+fn numeric(v: &Value) -> Option<f64> {
+    if let Some(x) = v.to_real() {
+        return Some(x);
+    }
+    match v {
+        Value::Pattern(e) => numeric(&crate::pattern::unwrap_expr_to_value(e)),
+        Value::Call { head, args } if head == "Times" => {
+            let mut p = 1.0;
+            for a in args {
+                p *= numeric(a)?;
+            }
+            Some(p)
+        }
+        Value::Call { head, args } if head == "Plus" => {
+            let mut s = 0.0;
+            for a in args {
+                s += numeric(a)?;
+            }
+            Some(s)
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            Some(numeric(&args[0])?.powf(numeric(&args[1])?))
+        }
+        Value::Call { head, args } if head == "Rational" && args.len() == 2 => {
+            Some(numeric(&args[0])? / numeric(&args[1])?)
+        }
+        _ => None,
+    }
+}
+
+/// Weighted out-adjacency (undirected edges contribute both directions).
+fn weighted_adj(g: &Graph, weights: &[f64]) -> Vec<Vec<(usize, f64)>> {
+    let mut adj = vec![Vec::new(); g.vertices.len()];
+    for (i, e) in g.edges.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(1.0);
+        adj[e.a].push((e.b, w));
+        if !e.directed {
+            adj[e.b].push((e.a, w));
+        }
+    }
+    adj
+}
+
+/// Single-source shortest distances (Dijkstra when all weights are non-negative).
+fn shortest_tree(g: &Graph, weights: &[f64], source: usize) -> (Vec<Option<f64>>, Vec<usize>) {
+    if weights.iter().all(|w| *w >= 0.0) {
+        dijkstra(g, weights, source)
+    } else {
+        bellman_ford(g, weights, source)
+    }
+}
+
+/// O(V²) Dijkstra; ties are broken by ascending vertex index for determinism.
+fn dijkstra(g: &Graph, weights: &[f64], source: usize) -> (Vec<Option<f64>>, Vec<usize>) {
+    let n = g.vertices.len();
+    let adj = weighted_adj(g, weights);
+    let mut dist: Vec<Option<f64>> = vec![None; n];
+    let mut parent = vec![usize::MAX; n];
+    if source < n {
+        dist[source] = Some(0.0);
+    }
+    let mut done = vec![false; n];
+    loop {
+        let mut u = usize::MAX;
+        let mut best = f64::INFINITY;
+        for i in 0..n {
+            if !done[i]
+                && let Some(d) = dist[i]
+                && d < best
+            {
+                best = d;
+                u = i;
+            }
+        }
+        if u == usize::MAX {
+            break;
+        }
+        done[u] = true;
+        for &(w, wt) in &adj[u] {
+            let nd = best + wt;
+            if dist[w].is_none_or(|d| nd < d) {
+                dist[w] = Some(nd);
+                parent[w] = u;
+            }
+        }
+    }
+    (dist, parent)
+}
+
+/// Bellman–Ford single-source shortest distances (also handles negative weights).
+fn bellman_ford(g: &Graph, weights: &[f64], source: usize) -> (Vec<Option<f64>>, Vec<usize>) {
+    let n = g.vertices.len();
+    let mut dist: Vec<Option<f64>> = vec![None; n];
+    let mut parent = vec![usize::MAX; n];
+    if source < n {
+        dist[source] = Some(0.0);
+    }
+    let mut arcs = Vec::new();
+    for (i, e) in g.edges.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(1.0);
+        arcs.push((e.a, e.b, w));
+        if !e.directed {
+            arcs.push((e.b, e.a, w));
+        }
+    }
+    for _ in 0..n {
+        let mut changed = false;
+        for &(a, b, w) in &arcs {
+            if let Some(da) = dist[a] {
+                let nd = da + w;
+                if dist[b].is_none_or(|d| nd < d) {
+                    dist[b] = Some(nd);
+                    parent[b] = a;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (dist, parent)
+}
+
+/// Reconstruct the shortest path `s -> t` from parent pointers (`[]` if unreachable).
+fn build_path(parent: &[usize], s: usize, t: usize) -> Vec<usize> {
+    if s == t {
+        return vec![s];
+    }
+    let mut path = vec![t];
+    let mut cur = t;
+    while cur != s {
+        let p = parent[cur];
+        if p == usize::MAX {
+            return Vec::new();
+        }
+        path.push(p);
+        cur = p;
+        if path.len() > parent.len() + 1 {
+            return Vec::new();
+        }
+    }
+    path.reverse();
+    path
+}
+
+/// Render an index path as a list of the corresponding vertex values.
+fn path_values(g: &Graph, idx: &[usize]) -> Value {
+    Value::List(idx.iter().map(|i| g.vertices[*i].clone()).collect())
+}
+
+/// True when a value is the `All` symbol.
+fn is_all(v: &Value) -> bool {
+    matches!(v, Value::Symbol(s) if s == "All")
+}
+
+/// FindShortestPath[g, s, t] / FindShortestPath[g, s] / FindShortestPath[g, All] /
+/// FindShortestPath[g, All, t]. Weighted via a `EdgeWeight -> {..}` option.
 pub fn builtin_find_shortest_path(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 3 {
+    if args.len() < 2 || args.len() > 3 {
         return Ok(unevaluated("FindShortestPath", args));
     }
-    let Some(g) = as_graph(&args[0]) else {
+    let gv = &args[0];
+    let Some(g) = as_graph(gv) else {
         return Ok(unevaluated("FindShortestPath", args));
     };
+    let weights = edge_weights(gv, g.edges.len());
+    let n = g.vertices.len();
+
+    // All-pairs matrix of paths.
+    if args.len() == 2 && is_all(&args[1]) {
+        let rows = (0..n)
+            .map(|s| {
+                let (_, parent) = shortest_tree(&g, &weights, s);
+                Value::List(
+                    (0..n)
+                        .map(|t| path_values(&g, &build_path(&parent, s, t)))
+                        .collect(),
+                )
+            })
+            .collect();
+        return Ok(Value::List(rows));
+    }
+    // Paths from every vertex to a common target.
+    if args.len() == 3 && is_all(&args[1]) {
+        let tval = to_vertex(&args[2]);
+        let Some(ti) = resolve(&g, &tval) else {
+            return Ok(Value::List(vec![]));
+        };
+        let out = (0..n)
+            .map(|s| {
+                let (_, parent) = shortest_tree(&g, &weights, s);
+                path_values(&g, &build_path(&parent, s, ti))
+            })
+            .collect();
+        return Ok(Value::List(out));
+    }
+
     let sval = to_vertex(&args[1]);
+    // Paths from a source to every vertex.
+    if args.len() == 2 {
+        let Some(si) = resolve(&g, &sval) else {
+            return Ok(unevaluated("FindShortestPath", args));
+        };
+        let (_, parent) = shortest_tree(&g, &weights, si);
+        let out = (0..n)
+            .map(|t| path_values(&g, &build_path(&parent, si, t)))
+            .collect();
+        return Ok(Value::List(out));
+    }
+
     let tval = to_vertex(&args[2]);
     if sval == tval {
         return Ok(Value::List(vec![sval]));
@@ -464,42 +714,46 @@ pub fn builtin_find_shortest_path(args: &[Value]) -> Result<Value, EvalError> {
     let (Some(si), Some(ti)) = (resolve(&g, &sval), resolve(&g, &tval)) else {
         return Ok(Value::List(vec![]));
     };
-    let adj = g.out_neighbors();
-    let (dist, parent) = bfs(&g, &adj, si);
-    if dist[ti] < 0 {
-        return Ok(Value::List(vec![]));
-    }
-    let mut path = vec![ti];
-    let mut cur = ti;
-    while cur != si {
-        cur = parent[cur];
-        path.push(cur);
-    }
-    path.reverse();
-    Ok(Value::List(
-        path.into_iter().map(|i| g.vertices[i].clone()).collect(),
-    ))
+    let (_, parent) = shortest_tree(&g, &weights, si);
+    Ok(path_values(&g, &build_path(&parent, si, ti)))
 }
 
-/// GraphDistance[g, s, t] or GraphDistance[g, s]
+/// GraphDistance[g, s, t] / GraphDistance[g, s] / GraphDistance[g, All].
 pub fn builtin_graph_distance(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 && args.len() != 3 {
         return Ok(unevaluated("GraphDistance", args));
     }
-    let Some(g) = as_graph(&args[0]) else {
+    let gv = &args[0];
+    let Some(g) = as_graph(gv) else {
         return Ok(unevaluated("GraphDistance", args));
     };
-    let adj = g.out_neighbors();
+    let weights = edge_weights(gv, g.edges.len());
     let infinity = || Value::Symbol("Infinity".to_string());
+
+    // All-pairs distance matrix.
+    if args.len() == 2 && is_all(&args[1]) {
+        let rows = (0..g.vertices.len())
+            .map(|s| {
+                let (dist, _) = shortest_tree(&g, &weights, s);
+                Value::List(
+                    dist.into_iter()
+                        .map(|d| d.map_or(infinity(), num))
+                        .collect(),
+                )
+            })
+            .collect();
+        return Ok(Value::List(rows));
+    }
+
     let sval = to_vertex(&args[1]);
     if args.len() == 2 {
         let Some(si) = resolve(&g, &sval) else {
             return Ok(unevaluated("GraphDistance", args));
         };
-        let (dist, _) = bfs(&g, &adj, si);
+        let (dist, _) = shortest_tree(&g, &weights, si);
         let out = dist
             .into_iter()
-            .map(|d| if d < 0 { infinity() } else { int(d as usize) })
+            .map(|d| d.map_or(infinity(), num))
             .collect();
         return Ok(Value::List(out));
     }
@@ -510,12 +764,8 @@ pub fn builtin_graph_distance(args: &[Value]) -> Result<Value, EvalError> {
     let (Some(si), Some(ti)) = (resolve(&g, &sval), resolve(&g, &tval)) else {
         return Ok(infinity());
     };
-    let (dist, _) = bfs(&g, &adj, si);
-    if dist[ti] < 0 {
-        Ok(infinity())
-    } else {
-        Ok(int(dist[ti] as usize))
-    }
+    let (dist, _) = shortest_tree(&g, &weights, si);
+    Ok(dist[ti].map_or(infinity(), num))
 }
 
 /// NeighborhoodGraph[g, v] / NeighborhoodGraph[g, {v1, ...}]
@@ -776,17 +1026,21 @@ fn edge_matches(g: &Graph, e: &Edge, spec: &Value) -> bool {
     })
 }
 
-/// GraphDistanceMatrix[g]
+/// GraphDistanceMatrix[g] — all-pairs shortest-path lengths (weighted when present).
 pub fn builtin_graph_distance_matrix(args: &[Value]) -> Result<Value, EvalError> {
-    let Some(g) = args.first().and_then(as_graph) else {
+    let Some(gv) = args.first() else {
         return Ok(unevaluated("GraphDistanceMatrix", args));
     };
-    let rows = all_pairs(&g)
-        .into_iter()
-        .map(|row| {
+    let Some(g) = as_graph(gv) else {
+        return Ok(unevaluated("GraphDistanceMatrix", args));
+    };
+    let weights = edge_weights(gv, g.edges.len());
+    let rows = (0..g.vertices.len())
+        .map(|s| {
+            let (dist, _) = shortest_tree(&g, &weights, s);
             Value::List(
-                row.into_iter()
-                    .map(|d| if d < 0 { infinity() } else { int(d as usize) })
+                dist.into_iter()
+                    .map(|d| d.map_or_else(infinity, num))
                     .collect(),
             )
         })
@@ -2134,6 +2388,896 @@ pub fn builtin_random_graph(args: &[Value]) -> Result<Value, EvalError> {
     Ok(graph_value(&g))
 }
 
+// ── Weighted paths: Bellman–Ford / Floyd–Warshall ───────────────────────────
+
+/// Whether the graph has a self-loop.
+fn has_self_loop(g: &Graph) -> bool {
+    g.edges.iter().any(|e| e.a == e.b)
+}
+
+/// Whether the graph has a pair of parallel edges.
+fn has_parallel_edges(g: &Graph) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    for e in &g.edges {
+        if e.a == e.b {
+            continue;
+        }
+        let key = (e.a.min(e.b), e.a.max(e.b));
+        if !seen.insert(key) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the graph is weakly connected (empty graph counts as connected).
+fn weakly_connected(g: &Graph) -> bool {
+    let n = g.vertices.len();
+    if n == 0 {
+        return true;
+    }
+    let adj = g.weak_neighbors();
+    let mut seen = vec![false; n];
+    let mut stack = vec![0usize];
+    seen[0] = true;
+    while let Some(u) = stack.pop() {
+        for &w in &adj[u] {
+            if !seen[w] {
+                seen[w] = true;
+                stack.push(w);
+            }
+        }
+    }
+    seen.iter().all(|b| *b)
+}
+
+/// Floyd–Warshall all-pairs shortest distances (`None` = unreachable).
+#[allow(clippy::needless_range_loop)]
+fn floyd_warshall(g: &Graph, weights: &[f64]) -> Vec<Vec<Option<f64>>> {
+    let n = g.vertices.len();
+    let mut d: Vec<Vec<Option<f64>>> = vec![vec![None; n]; n];
+    for i in 0..n {
+        d[i][i] = Some(0.0);
+    }
+    for (i, e) in g.edges.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(1.0);
+        d[e.a][e.b] = Some(d[e.a][e.b].map_or(w, |p| p.min(w)));
+        if !e.directed {
+            d[e.b][e.a] = Some(d[e.b][e.a].map_or(w, |p| p.min(w)));
+        }
+    }
+    for k in 0..n {
+        for i in 0..n {
+            let Some(ik) = d[i][k] else { continue };
+            for j in 0..n {
+                if let Some(kj) = d[k][j] {
+                    let nd = ik + kj;
+                    if d[i][j].is_none_or(|p| nd < p) {
+                        d[i][j] = Some(nd);
+                    }
+                }
+            }
+        }
+    }
+    d
+}
+
+/// BellmanFord[g, s] — single-source shortest distances (list); BellmanFord[g, s, t].
+pub fn builtin_bellman_ford(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 && args.len() != 3 {
+        return Ok(unevaluated("BellmanFord", args));
+    }
+    let gv = &args[0];
+    let Some(g) = as_graph(gv) else {
+        return Ok(unevaluated("BellmanFord", args));
+    };
+    let weights = edge_weights(gv, g.edges.len());
+    let sval = to_vertex(&args[1]);
+    let Some(si) = resolve(&g, &sval) else {
+        return Ok(unevaluated("BellmanFord", args));
+    };
+    // Bellman–Ford semantics regardless of sign.
+    let (dist, _) = bellman_ford(&g, &weights, si);
+    if args.len() == 2 {
+        let out = dist
+            .into_iter()
+            .map(|d| d.map_or_else(infinity, num))
+            .collect();
+        return Ok(Value::List(out));
+    }
+    let tval = to_vertex(&args[2]);
+    let Some(ti) = resolve(&g, &tval) else {
+        return Ok(infinity());
+    };
+    Ok(dist[ti].map_or_else(infinity, num))
+}
+
+/// Floyd[g] — all-pairs shortest-path matrix of distances.
+pub fn builtin_floyd(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(gv) = args.first() else {
+        return Ok(unevaluated("Floyd", args));
+    };
+    let Some(g) = as_graph(gv) else {
+        return Ok(unevaluated("Floyd", args));
+    };
+    let weights = edge_weights(gv, g.edges.len());
+    let rows = floyd_warshall(&g, &weights)
+        .into_iter()
+        .map(|row| {
+            Value::List(
+                row.into_iter()
+                    .map(|d| d.map_or_else(infinity, num))
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(Value::List(rows))
+}
+
+// ── Max flow ────────────────────────────────────────────────────────────────
+
+/// Capacity used for "infinite" arcs in the connectivity reductions.
+const INF_CAP: f64 = 1.0e15;
+
+/// Edmonds–Karp max flow on a residual capacity matrix.
+fn maxflow_matrix(cap: &mut [Vec<f64>], s: usize, t: usize) -> f64 {
+    let n = cap.len();
+    if s >= n || t >= n {
+        return 0.0;
+    }
+    let mut flow = 0.0;
+    loop {
+        let mut parent = vec![usize::MAX; n];
+        parent[s] = s;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(s);
+        while let Some(u) = queue.pop_front() {
+            for v in 0..n {
+                if parent[v] == usize::MAX && cap[u][v] > 0.0 {
+                    parent[v] = u;
+                    queue.push_back(v);
+                }
+            }
+        }
+        if parent[t] == usize::MAX {
+            break;
+        }
+        let mut aug = f64::INFINITY;
+        let mut v = t;
+        while v != s {
+            let u = parent[v];
+            aug = aug.min(cap[u][v]);
+            v = u;
+        }
+        let mut v = t;
+        while v != s {
+            let u = parent[v];
+            cap[u][v] -= aug;
+            cap[v][u] += aug;
+            v = u;
+        }
+        flow += aug;
+    }
+    flow
+}
+
+/// Residual capacity matrix from a graph with per-edge capacities.
+fn capacity_matrix(g: &Graph, caps: &[f64]) -> Vec<Vec<f64>> {
+    let n = g.vertices.len();
+    let mut cap = vec![vec![0.0; n]; n];
+    for (i, e) in g.edges.iter().enumerate() {
+        let c = caps.get(i).copied().unwrap_or(1.0);
+        cap[e.a][e.b] += c;
+        if !e.directed {
+            cap[e.b][e.a] += c;
+        }
+    }
+    cap
+}
+
+/// MaxFlow[g, s, t] / FindMaximumFlow[g, s, t] — Edmonds–Karp value.
+fn maxflow_value(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Ok(unevaluated(name, args));
+    }
+    let gv = &args[0];
+    let Some(g) = as_graph(gv) else {
+        return Ok(unevaluated(name, args));
+    };
+    let caps = edge_weights(gv, g.edges.len());
+    let (sval, tval) = (to_vertex(&args[1]), to_vertex(&args[2]));
+    let (Some(si), Some(ti)) = (resolve(&g, &sval), resolve(&g, &tval)) else {
+        return Ok(unevaluated(name, args));
+    };
+    let mut cap = capacity_matrix(&g, &caps);
+    Ok(num(maxflow_matrix(&mut cap, si, ti)))
+}
+
+/// MaxFlow[g, s, t]
+pub fn builtin_max_flow(args: &[Value]) -> Result<Value, EvalError> {
+    maxflow_value("MaxFlow", args)
+}
+
+/// FindMaximumFlow[g, s, t]
+pub fn builtin_find_maximum_flow(args: &[Value]) -> Result<Value, EvalError> {
+    maxflow_value("FindMaximumFlow", args)
+}
+
+// ── Connectivity (Menger via max flow) ──────────────────────────────────────
+
+/// Number of internally vertex-disjoint `s`–`t` paths (node-splitting max flow).
+fn vertex_connectivity_pair(g: &Graph, s: usize, t: usize) -> f64 {
+    let n = g.vertices.len();
+    let in_ = |v: usize| 2 * v;
+    let out_ = |v: usize| 2 * v + 1;
+    let mut cap = vec![vec![0.0; 2 * n]; 2 * n];
+    for v in 0..n {
+        let c = if v == s || v == t { INF_CAP } else { 1.0 };
+        cap[in_(v)][out_(v)] += c;
+    }
+    for e in &g.edges {
+        // Unit edge capacity: two internally vertex-disjoint paths are also
+        // edge-disjoint, so this yields the exact Menger count (and keeps an
+        // adjacent `s`–`t` from being saturated by a single infinite arc).
+        cap[out_(e.a)][in_(e.b)] += 1.0;
+        if !e.directed {
+            cap[out_(e.b)][in_(e.a)] += 1.0;
+        }
+    }
+    maxflow_matrix(&mut cap, out_(s), in_(t))
+}
+
+/// VertexConnectivity[g] — minimum vertex cut via Menger's theorem.
+pub fn builtin_vertex_connectivity(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("VertexConnectivity", args));
+    };
+    let n = g.vertices.len();
+    if n <= 1 {
+        return Ok(int(0));
+    }
+    if !weakly_connected(&g) {
+        return Ok(int(0));
+    }
+    let mut best = usize::MAX;
+    for s in 0..n {
+        for t in (s + 1)..n {
+            let f = vertex_connectivity_pair(&g, s, t).round();
+            best = best.min(f as usize);
+        }
+    }
+    Ok(int(best))
+}
+
+/// EdgeConnectivity[g] — minimum edge cut via max flow with unit capacities.
+pub fn builtin_edge_connectivity(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("EdgeConnectivity", args));
+    };
+    let n = g.vertices.len();
+    if n <= 1 {
+        return Ok(int(0));
+    }
+    if !weakly_connected(&g) {
+        return Ok(int(0));
+    }
+    let unit = vec![1.0; g.edges.len()];
+    let mut best = f64::INFINITY;
+    for s in 0..n {
+        for t in (s + 1)..n {
+            let mut cap = capacity_matrix(&g, &unit);
+            best = best.min(maxflow_matrix(&mut cap, s, t));
+        }
+    }
+    Ok(num(best))
+}
+
+// ── Structural predicates ───────────────────────────────────────────────────
+
+/// Directed cycle detection via tri-colour DFS.
+fn has_directed_cycle(g: &Graph) -> bool {
+    fn dfs(u: usize, adj: &[Vec<usize>], color: &mut [u8]) -> bool {
+        color[u] = 1;
+        for &w in &adj[u] {
+            if color[w] == 1 {
+                return true;
+            }
+            if color[w] == 0 && dfs(w, adj, color) {
+                return true;
+            }
+        }
+        color[u] = 2;
+        false
+    }
+    let adj = g.out_neighbors();
+    let mut color = vec![0u8; adj.len()];
+    for s in 0..adj.len() {
+        if color[s] == 0 && dfs(s, &adj, &mut color) {
+            return true;
+        }
+    }
+    false
+}
+
+/// AcyclicGraphQ[g]
+pub fn builtin_acyclic_graph_q(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("AcyclicGraphQ", args));
+    };
+    if g.is_directed() {
+        return Ok(Value::Bool(!has_directed_cycle(&g)));
+    }
+    if has_self_loop(&g) || has_parallel_edges(&g) {
+        return Ok(Value::Bool(false));
+    }
+    let mut uf = UnionFind::new(g.vertices.len());
+    for e in &g.edges {
+        if !uf.union(e.a, e.b) {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+/// TreeGraphQ[g] — connected, simple, acyclic.
+pub fn builtin_tree_graph_q(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("TreeGraphQ", args));
+    };
+    let n = g.vertices.len();
+    let simple = !has_self_loop(&g) && !has_parallel_edges(&g);
+    let ok = simple && g.edges.len() == n.saturating_sub(1) && weakly_connected(&g);
+    Ok(Value::Bool(ok))
+}
+
+/// BipartiteGraphQ[g] — 2-colourable under weak adjacency.
+pub fn builtin_bipartite_graph_q(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("BipartiteGraphQ", args));
+    };
+    if has_self_loop(&g) {
+        return Ok(Value::Bool(false));
+    }
+    let n = g.vertices.len();
+    let adj = g.weak_neighbors();
+    let mut color = vec![-1i8; n];
+    for s in 0..n {
+        if color[s] != -1 {
+            continue;
+        }
+        color[s] = 0;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(s);
+        while let Some(u) = queue.pop_front() {
+            for &w in &adj[u] {
+                if color[w] == -1 {
+                    color[w] = 1 - color[u];
+                    queue.push_back(w);
+                } else if color[w] == color[u] {
+                    return Ok(Value::Bool(false));
+                }
+            }
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+// ── Graph transforms ────────────────────────────────────────────────────────
+
+/// WeightedAdjacencyMatrix[g] — weights on edges (default `1`).
+pub fn builtin_weighted_adjacency_matrix(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(gv) = args.first() else {
+        return Ok(unevaluated("WeightedAdjacencyMatrix", args));
+    };
+    let Some(g) = as_graph(gv) else {
+        return Ok(unevaluated("WeightedAdjacencyMatrix", args));
+    };
+    let weights = edge_weights(gv, g.edges.len());
+    let n = g.vertices.len();
+    let mut m = vec![vec![0.0f64; n]; n];
+    for (i, e) in g.edges.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(1.0);
+        m[e.a][e.b] += w;
+        if !e.directed {
+            m[e.b][e.a] += w;
+        }
+    }
+    let rows = m
+        .into_iter()
+        .map(|row| Value::List(row.into_iter().map(num).collect()))
+        .collect();
+    Ok(Value::List(rows))
+}
+
+/// WeightedAdjacencyGraph[m] — build a (directed/undirected) weighted graph from a matrix.
+#[allow(clippy::needless_range_loop)]
+pub fn builtin_weighted_adjacency_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(Value::List(rows)) = args.first() else {
+        return Ok(unevaluated("WeightedAdjacencyGraph", args));
+    };
+    let n = rows.len();
+    let mut m = vec![vec![0.0f64; n]; n];
+    for (i, row) in rows.iter().enumerate() {
+        let Value::List(cells) = row else {
+            return Ok(unevaluated("WeightedAdjacencyGraph", args));
+        };
+        if cells.len() != n {
+            return Ok(unevaluated("WeightedAdjacencyGraph", args));
+        }
+        for (j, c) in cells.iter().enumerate() {
+            m[i][j] = numeric(c).unwrap_or(0.0);
+        }
+    }
+    let symmetric = (0..n).all(|i| (0..n).all(|j| m[i][j] == m[j][i]));
+    let mut verts = Vec::new();
+    for i in 0..n {
+        verts.push(int(i + 1));
+    }
+    let mut edges = Vec::new();
+    let mut ws = Vec::new();
+    if symmetric {
+        for i in 0..n {
+            if m[i][i] != 0.0 {
+                edges.push(Value::Call {
+                    head: "UndirectedEdge".to_string(),
+                    args: vec![int(i + 1), int(i + 1)],
+                });
+                ws.push(num(m[i][i]));
+            }
+            for j in (i + 1)..n {
+                if m[i][j] != 0.0 {
+                    edges.push(Value::Call {
+                        head: "UndirectedEdge".to_string(),
+                        args: vec![int(i + 1), int(j + 1)],
+                    });
+                    ws.push(num(m[i][j]));
+                }
+            }
+        }
+    } else {
+        for i in 0..n {
+            for j in 0..n {
+                if i == j || m[i][j] == 0.0 {
+                    continue;
+                }
+                edges.push(Value::Call {
+                    head: "DirectedEdge".to_string(),
+                    args: vec![int(i + 1), int(j + 1)],
+                });
+                ws.push(num(m[i][j]));
+            }
+        }
+    }
+    let mut out = Value::Call {
+        head: "Graph".to_string(),
+        args: vec![Value::List(verts), Value::List(edges)],
+    };
+    if let Value::Call { args, .. } = &mut out {
+        args.push(Value::Rule {
+            lhs: Box::new(Value::Symbol("EdgeWeight".to_string())),
+            rhs: Box::new(Value::List(ws)),
+            delayed: false,
+        });
+    }
+    Ok(out)
+}
+
+/// SimpleGraph[g] — drop self-loops and duplicate edges.
+pub fn builtin_simple_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("SimpleGraph", args));
+    };
+    let mut out = Graph::new();
+    for v in &g.vertices {
+        out.intern(v.clone());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for e in &g.edges {
+        if e.a == e.b {
+            continue;
+        }
+        let key = (e.a.min(e.b), e.a.max(e.b));
+        if seen.insert(key) {
+            out.edges.push(Edge {
+                a: e.a,
+                b: e.b,
+                directed: e.directed,
+            });
+        }
+    }
+    Ok(graph_value(&out))
+}
+
+/// IndexGraph[g] — relabel vertices to `1..n`.
+pub fn builtin_index_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("IndexGraph", args));
+    };
+    let mut out = Graph::new();
+    for i in 0..g.vertices.len() {
+        out.intern(int(i + 1));
+    }
+    for e in &g.edges {
+        out.edges.push(Edge {
+            a: e.a,
+            b: e.b,
+            directed: e.directed,
+        });
+    }
+    Ok(graph_value(&out))
+}
+
+/// VertexComponent[g, v] / VertexComponent[g] — weakly connected component(s).
+pub fn builtin_vertex_component(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("VertexComponent", args));
+    };
+    if args.len() == 1 {
+        return builtin_connected_components(args);
+    }
+    let v = to_vertex(&args[1]);
+    let Some(start) = g.index_of(&v) else {
+        return Ok(unevaluated("VertexComponent", args));
+    };
+    let adj = g.weak_neighbors();
+    let n = g.vertices.len();
+    let mut seen = vec![false; n];
+    let mut stack = vec![start];
+    seen[start] = true;
+    let mut comp = Vec::new();
+    while let Some(u) = stack.pop() {
+        comp.push(u);
+        for &w in &adj[u] {
+            if !seen[w] {
+                seen[w] = true;
+                stack.push(w);
+            }
+        }
+    }
+    comp.sort_unstable();
+    Ok(Value::List(
+        comp.into_iter().map(|i| g.vertices[i].clone()).collect(),
+    ))
+}
+
+/// EdgeContract[g, e] — contract the endpoints of an edge.
+pub fn builtin_edge_contract(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated("EdgeContract", args));
+    }
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("EdgeContract", args));
+    };
+    let Some((pairs, _)) = edge_parts(&args[1]) else {
+        return Ok(unevaluated("EdgeContract", args));
+    };
+    let (a, b) = (&pairs[0].0, &pairs[0].1);
+    let (Some(ai), Some(bi)) = (g.index_of(a), g.index_of(b)) else {
+        return Ok(unevaluated("EdgeContract", args));
+    };
+    let spec = Value::List(vec![g.vertices[ai].clone(), g.vertices[bi].clone()]);
+    builtin_vertex_contract(&[graph_value(&g), spec])
+}
+
+/// Contract[g, spec] — edge contract when `spec` is an edge, else vertex contract.
+pub fn builtin_contract(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated("Contract", args));
+    }
+    if is_edge(&args[1]) {
+        return builtin_edge_contract(args);
+    }
+    builtin_vertex_contract(args)
+}
+
+// ── Girth ───────────────────────────────────────────────────────────────────
+
+/// Girth[g] — length of the shortest cycle (Infinity when acyclic).
+pub fn builtin_girth(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("Girth", args));
+    };
+    if has_self_loop(&g) {
+        return Ok(int(1));
+    }
+    if has_parallel_edges(&g) {
+        return Ok(int(2));
+    }
+    let n = g.vertices.len();
+    let adj = g.weak_neighbors();
+    let mut best = usize::MAX;
+    for s in 0..n {
+        let mut dist = vec![-1i64; n];
+        let mut parent = vec![usize::MAX; n];
+        dist[s] = 0;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(s);
+        while let Some(u) = queue.pop_front() {
+            for &w in &adj[u] {
+                if dist[w] < 0 {
+                    dist[w] = dist[u] + 1;
+                    parent[w] = u;
+                    queue.push_back(w);
+                } else if parent[u] != w && w != u {
+                    let c = (dist[u] + dist[w] + 1) as usize;
+                    best = best.min(c);
+                }
+            }
+        }
+    }
+    if best == usize::MAX {
+        Ok(infinity())
+    } else {
+        Ok(int(best))
+    }
+}
+
+// ── Generators ──────────────────────────────────────────────────────────────
+
+/// Build `Graph[{1..n}, edges]` from index pairs (1-based).
+fn indexed_graph(n: usize, pairs: &[(usize, usize)]) -> Value {
+    let verts: Vec<Value> = (1..=n).map(int).collect();
+    let edges: Vec<Value> = pairs
+        .iter()
+        .map(|(a, b)| Value::Call {
+            head: "UndirectedEdge".to_string(),
+            args: vec![int(*a), int(*b)],
+        })
+        .collect();
+    Value::Call {
+        head: "Graph".to_string(),
+        args: vec![Value::List(verts), Value::List(edges)],
+    }
+}
+
+/// Interpret the first argument as either a vertex count (integer) or a vertex list.
+fn vertices_arg(args: &[Value], min: usize) -> Option<Vec<Value>> {
+    match args.first() {
+        Some(Value::List(items)) => {
+            if items.len() < min {
+                None
+            } else {
+                Some(items.iter().map(to_vertex).collect())
+            }
+        }
+        Some(v) => {
+            let n = v.to_integer()?;
+            if n < min as i64 {
+                return None;
+            }
+            Some((1..=n).map(|k| int(k as usize)).collect())
+        }
+        None => None,
+    }
+}
+
+/// PathGraph[n] / PathGraph[{v...}]
+pub fn builtin_path_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(vs) = vertices_arg(args, 1) else {
+        return Ok(unevaluated("PathGraph", args));
+    };
+    let n = vs.len();
+    let mut out = Graph::new();
+    for v in vs {
+        out.intern(v);
+    }
+    for i in 0..n.saturating_sub(1) {
+        out.edges.push(Edge {
+            a: i,
+            b: i + 1,
+            directed: false,
+        });
+    }
+    Ok(graph_value(&out))
+}
+
+/// CycleGraph[n] / CycleGraph[{v...}] — requires at least 3 vertices.
+pub fn builtin_cycle_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(vs) = vertices_arg(args, 3) else {
+        return Ok(unevaluated("CycleGraph", args));
+    };
+    let n = vs.len();
+    let mut out = Graph::new();
+    for v in vs {
+        out.intern(v);
+    }
+    for i in 0..n {
+        out.edges.push(Edge {
+            a: i,
+            b: (i + 1) % n,
+            directed: false,
+        });
+    }
+    Ok(graph_value(&out))
+}
+
+/// CompleteGraph[n]
+pub fn builtin_complete_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(vs) = vertices_arg(args, 0) else {
+        return Ok(unevaluated("CompleteGraph", args));
+    };
+    let n = vs.len();
+    let mut out = Graph::new();
+    for v in vs {
+        out.intern(v);
+    }
+    for a in 0..n {
+        for b in (a + 1)..n {
+            out.edges.push(Edge {
+                a,
+                b,
+                directed: false,
+            });
+        }
+    }
+    Ok(graph_value(&out))
+}
+
+/// CompleteKPartiteGraph[{k1, ...}] / CompleteKPartiteGraph[k1, k2, ...]
+pub fn builtin_complete_k_partite_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let sizes: Vec<usize> = match args {
+        [Value::List(items)] => {
+            let mut v = Vec::new();
+            for it in items {
+                let Some(k) = it.to_integer().filter(|k| *k > 0) else {
+                    return Ok(unevaluated("CompleteKPartiteGraph", args));
+                };
+                v.push(k as usize);
+            }
+            v
+        }
+        many => {
+            let mut v = Vec::new();
+            for it in many {
+                let Some(k) = it.to_integer().filter(|k| *k > 0) else {
+                    return Ok(unevaluated("CompleteKPartiteGraph", args));
+                };
+                v.push(k as usize);
+            }
+            v
+        }
+    };
+    if sizes.is_empty() {
+        return Ok(unevaluated("CompleteKPartiteGraph", args));
+    }
+    let n: usize = sizes.iter().sum();
+    let mut part = Vec::with_capacity(n);
+    for (pi, k) in sizes.iter().enumerate() {
+        part.extend(std::iter::repeat_n(pi, *k));
+    }
+    let mut out = Graph::new();
+    for i in 0..n {
+        out.intern(int(i + 1));
+    }
+    for a in 0..n {
+        for b in (a + 1)..n {
+            if part[a] != part[b] {
+                out.edges.push(Edge {
+                    a,
+                    b,
+                    directed: false,
+                });
+            }
+        }
+    }
+    Ok(graph_value(&out))
+}
+
+/// StarGraph[n] / StarGraph[{v...}] — centre vertex `1`, leaves `2..n`.
+pub fn builtin_star_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(vs) = vertices_arg(args, 1) else {
+        return Ok(unevaluated("StarGraph", args));
+    };
+    let n = vs.len();
+    let mut out = Graph::new();
+    for v in vs {
+        out.intern(v);
+    }
+    for i in 1..n {
+        out.edges.push(Edge {
+            a: 0,
+            b: i,
+            directed: false,
+        });
+    }
+    Ok(graph_value(&out))
+}
+
+/// GridGraph[{m, n}]
+pub fn builtin_grid_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(Value::List(dims)) = args.first() else {
+        return Ok(unevaluated("GridGraph", args));
+    };
+    if dims.len() != 2 {
+        return Ok(unevaluated("GridGraph", args));
+    }
+    let (Some(m), Some(n)) = (
+        dims[0].to_integer().filter(|v| *v >= 1),
+        dims[1].to_integer().filter(|v| *v >= 1),
+    ) else {
+        return Ok(unevaluated("GridGraph", args));
+    };
+    let (m, n) = (m as usize, n as usize);
+    let total = m * n;
+    let idx = |r: usize, c: usize| r * n + c + 1;
+    let mut pairs = Vec::new();
+    for r in 0..m {
+        for c in 0..n {
+            if c + 1 < n {
+                pairs.push((idx(r, c), idx(r, c + 1)));
+            }
+            if r + 1 < m {
+                pairs.push((idx(r, c), idx(r + 1, c)));
+            }
+        }
+    }
+    Ok(indexed_graph(total, &pairs))
+}
+
+/// PetersenGraph[] — the 3-regular Petersen graph on 10 vertices.
+pub fn builtin_petersen_graph(args: &[Value]) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        return Ok(unevaluated("PetersenGraph", args));
+    }
+    let pairs = [
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 1),
+        (6, 8),
+        (8, 10),
+        (10, 7),
+        (7, 9),
+        (9, 6),
+        (1, 6),
+        (2, 7),
+        (3, 8),
+        (4, 9),
+        (5, 10),
+    ];
+    Ok(indexed_graph(10, &pairs))
+}
+
+/// TreeGraph[{edges}] / TreeGraph[{vertices}, {edges}] — a tree from its edges.
+pub fn builtin_tree_graph(args: &[Value]) -> Result<Value, EvalError> {
+    let (vlist, elist): (Option<&Vec<Value>>, Option<&Vec<Value>>) = match args {
+        [Value::List(es)] => (None, Some(es)),
+        [Value::List(vs), Value::List(es)] => (Some(vs), Some(es)),
+        _ => return Ok(unevaluated("TreeGraph", args)),
+    };
+    let mut g = Graph::new();
+    if let Some(vs) = vlist {
+        for v in vs {
+            g.intern(to_vertex(v));
+        }
+    }
+    for e in elist.into_iter().flatten() {
+        if add_edge_expr(&mut g, e).is_none() {
+            return Ok(unevaluated("TreeGraph", args));
+        }
+    }
+    Ok(graph_value(&g))
+}
+
+/// RandomTree[n] — deterministic random recursive tree on `1..n` (seeded RNG).
+pub fn builtin_random_tree(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(n) = args
+        .first()
+        .and_then(|v| v.to_integer())
+        .filter(|n| *n >= 1)
+    else {
+        return Ok(unevaluated("RandomTree", args));
+    };
+    let n = n as usize;
+    let mut pairs = Vec::new();
+    for i in 2..=n {
+        let j = 1 + (super::random::next_u64() as usize) % (i - 1);
+        pairs.push((j, i));
+    }
+    Ok(indexed_graph(n, &pairs))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -2205,7 +3349,46 @@ pub fn register(env: &Env) {
     );
     register_builtin(env, "ClusteringCoefficient", builtin_clustering_coefficient);
     register_builtin(env, "GraphAssortativity", builtin_graph_assortativity);
-    register_builtin(env, "RandomGraph", builtin_random_graph);
+    // `RandomGraph` is owned by `random` (registered later) so the random
+    // subsystem is the single seed-driven authority for graph generators.
+    register_builtin(env, "BellmanFord", builtin_bellman_ford);
+    register_builtin(env, "Floyd", builtin_floyd);
+    register_builtin(env, "MaxFlow", builtin_max_flow);
+    register_builtin(env, "FindMaximumFlow", builtin_find_maximum_flow);
+    register_builtin(env, "VertexConnectivity", builtin_vertex_connectivity);
+    register_builtin(env, "EdgeConnectivity", builtin_edge_connectivity);
+    register_builtin(env, "Girth", builtin_girth);
+    register_builtin(env, "AcyclicGraphQ", builtin_acyclic_graph_q);
+    register_builtin(env, "TreeGraphQ", builtin_tree_graph_q);
+    register_builtin(env, "BipartiteGraphQ", builtin_bipartite_graph_q);
+    register_builtin(
+        env,
+        "WeightedAdjacencyMatrix",
+        builtin_weighted_adjacency_matrix,
+    );
+    register_builtin(
+        env,
+        "WeightedAdjacencyGraph",
+        builtin_weighted_adjacency_graph,
+    );
+    register_builtin(env, "SimpleGraph", builtin_simple_graph);
+    register_builtin(env, "IndexGraph", builtin_index_graph);
+    register_builtin(env, "VertexComponent", builtin_vertex_component);
+    register_builtin(env, "EdgeContract", builtin_edge_contract);
+    register_builtin(env, "Contract", builtin_contract);
+    register_builtin(env, "PathGraph", builtin_path_graph);
+    register_builtin(env, "CycleGraph", builtin_cycle_graph);
+    register_builtin(env, "CompleteGraph", builtin_complete_graph);
+    register_builtin(
+        env,
+        "CompleteKPartiteGraph",
+        builtin_complete_k_partite_graph,
+    );
+    register_builtin(env, "StarGraph", builtin_star_graph);
+    register_builtin(env, "GridGraph", builtin_grid_graph);
+    register_builtin(env, "PetersenGraph", builtin_petersen_graph);
+    register_builtin(env, "TreeGraph", builtin_tree_graph);
+    register_builtin(env, "RandomTree", builtin_random_tree);
 
     // `Degree` is also the angle constant π/180 (a `Value::Real` installed by the
     // core constant table). Because a value cannot simultaneously be a callable and
@@ -2862,6 +4045,228 @@ mod tests {
         );
         assert!(
             matches!(eval_str("RandomGraph[5]"), Value::Call { head, .. } if head == "RandomGraph")
+        );
+    }
+
+    // ── Weighted shortest paths ─────────────────────────────────────────────
+
+    #[test]
+    fn test_weighted_shortest_path() {
+        let g = "Graph[{1<->2, 2<->3, 1<->3}, EdgeWeight -> {10, 1, 2}]";
+        assert_eq!(
+            ints(&eval_str(&format!("FindShortestPath[{g}, 1, 3]"))),
+            vec![1, 3]
+        );
+        assert_eq!(eval_str(&format!("GraphDistance[{g}, 1, 3]")), int(2));
+        // Via the cheap-looking chain is longer.
+        assert_eq!(eval_str(&format!("GraphDistance[{g}, 1, 2]")), int(3));
+        // All-pairs shapes.
+        let all = eval_str(&format!("FindShortestPath[{g}, All]"));
+        match all {
+            Value::List(rows) => assert_eq!(rows.len(), 3),
+            _ => panic!("expected matrix of paths"),
+        }
+        // Single-source list of paths.
+        match eval_str(&format!("FindShortestPath[{g}, 1]")) {
+            Value::List(items) => assert_eq!(items.len(), 3),
+            _ => panic!("expected list"),
+        }
+    }
+
+    #[test]
+    fn test_bellman_ford_and_floyd() {
+        let g = "Graph[{1<->2, 2<->3, 1<->3}, EdgeWeight -> {10, 1, 2}]";
+        assert_eq!(eval_str(&format!("BellmanFord[{g}, 1, 3]")), int(2));
+        assert_eq!(
+            ints(&eval_str(&format!("BellmanFord[{g}, 1]"))),
+            vec![0, 3, 2]
+        );
+        assert_eq!(eval_str(&format!("Floyd[{g}][[1, 3]]")), int(2));
+        // Negative weight exercised by Bellman–Ford (directed, so no negative cycle).
+        let n = "Graph[{1->2, 1->3, 2->3}, EdgeWeight -> {-1, 5, 2}]";
+        assert_eq!(eval_str(&format!("BellmanFord[{n}, 1, 3]")), int(1));
+    }
+
+    // ── Max flow and connectivity ───────────────────────────────────────────
+
+    #[test]
+    fn test_max_flow() {
+        let g = "Graph[{1->2, 1->3, 2->4, 3->4}]";
+        assert_eq!(eval_str(&format!("MaxFlow[{g}, 1, 4]")), int(2));
+        assert_eq!(eval_str(&format!("FindMaximumFlow[{g}, 1, 4]")), int(2));
+        let cap = "Graph[{1->2, 1->3, 2->4, 3->4}, EdgeWeight -> {3, 2, 2, 3}]";
+        assert_eq!(eval_str(&format!("MaxFlow[{cap}, 1, 4]")), int(4));
+    }
+
+    #[test]
+    fn test_connectivity() {
+        assert_eq!(eval_str("EdgeConnectivity[PathGraph[4]]"), int(1));
+        assert_eq!(eval_str("EdgeConnectivity[CycleGraph[4]]"), int(2));
+        assert_eq!(eval_str("EdgeConnectivity[CompleteGraph[4]]"), int(3));
+        assert_eq!(eval_str("VertexConnectivity[PathGraph[4]]"), int(1));
+        assert_eq!(eval_str("VertexConnectivity[CycleGraph[4]]"), int(2));
+        assert_eq!(eval_str("VertexConnectivity[CompleteGraph[4]]"), int(3));
+        assert_eq!(eval_str("EdgeConnectivity[Graph[{1<->2, 3<->4}]]"), int(0));
+        assert_eq!(
+            eval_str("VertexConnectivity[Graph[{1<->2, 3<->4}]]"),
+            int(0)
+        );
+    }
+
+    // ── Structural predicates ───────────────────────────────────────────────
+
+    #[test]
+    fn test_structural_predicates() {
+        assert_eq!(eval_str("Girth[CycleGraph[5]]"), int(5));
+        assert_eq!(eval_str("Girth[CompleteGraph[3]]"), int(3));
+        assert_eq!(eval_str("Girth[PathGraph[4]]"), infinity());
+        assert_eq!(eval_str("Girth[Graph[{1<->1}]]"), int(1));
+        assert_eq!(eval_str("Girth[Graph[{1<->2, 1<->2}]]"), int(2));
+
+        assert_eq!(eval_str("AcyclicGraphQ[PathGraph[4]]"), Value::Bool(true));
+        assert_eq!(eval_str("AcyclicGraphQ[CycleGraph[3]]"), Value::Bool(false));
+        assert_eq!(
+            eval_str("AcyclicGraphQ[Graph[{1->2, 2->3}]]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_str("AcyclicGraphQ[Graph[{1->2, 2->3, 3->1}]]"),
+            Value::Bool(false)
+        );
+
+        assert_eq!(eval_str("TreeGraphQ[PathGraph[4]]"), Value::Bool(true));
+        assert_eq!(eval_str("TreeGraphQ[StarGraph[4]]"), Value::Bool(true));
+        assert_eq!(eval_str("TreeGraphQ[CycleGraph[3]]"), Value::Bool(false));
+        assert_eq!(
+            eval_str("TreeGraphQ[Graph[{1<->2, 3<->4}]]"),
+            Value::Bool(false)
+        );
+
+        assert_eq!(eval_str("BipartiteGraphQ[PathGraph[4]]"), Value::Bool(true));
+        assert_eq!(
+            eval_str("BipartiteGraphQ[CycleGraph[4]]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_str("BipartiteGraphQ[CycleGraph[3]]"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_str("BipartiteGraphQ[PetersenGraph[]]"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_str("AcyclicGraphQ[PetersenGraph[]]"),
+            Value::Bool(false)
+        );
+    }
+
+    // ── Weighted adjacency ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_weighted_adjacency() {
+        assert_eq!(
+            eval_str("WeightedAdjacencyMatrix[Graph[{1<->2, 2<->3}, EdgeWeight -> {5, 7}]]"),
+            eval_str("{{0, 5, 0}, {5, 0, 7}, {0, 7, 0}}")
+        );
+        // Unweighted defaults to 1.
+        assert_eq!(
+            eval_str("WeightedAdjacencyMatrix[Graph[{1<->2}]]"),
+            eval_str("{{0, 1}, {1, 0}}")
+        );
+        let m = "{{0, 2}, {3, 0}}";
+        assert_eq!(
+            eval_str(&format!(
+                "WeightedAdjacencyMatrix[WeightedAdjacencyGraph[{m}]]"
+            )),
+            eval_str(m)
+        );
+        assert_eq!(
+            eval_str(&format!("EdgeCount[WeightedAdjacencyGraph[{m}]]")),
+            int(2)
+        );
+    }
+
+    // ── Transforms ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_transforms() {
+        assert_eq!(
+            eval_str("EdgeCount[SimpleGraph[Graph[{1<->2, 1<->2, 2<->2, 2<->3}]]]"),
+            int(2)
+        );
+        assert_eq!(
+            eval_str("VertexCount[SimpleGraph[Graph[{1<->2, 1<->2, 2<->2}]]]"),
+            int(2)
+        );
+        assert_eq!(
+            ints(&eval_str(
+                "VertexList[IndexGraph[Graph[{\"a\", \"b\"}, {\"a\"->\"b\"}]]]"
+            )),
+            vec![1, 2]
+        );
+        assert_eq!(
+            ints(&eval_str("VertexComponent[Graph[{1<->2, 3<->4}], 2]")),
+            vec![1, 2]
+        );
+        // EdgeContract merges the endpoints.
+        let c = eval_str("EdgeContract[Graph[{1<->2, 2<->3}], 1<->2]");
+        assert_eq!(eval_str(&format!("VertexCount[{c}]")), int(2));
+        assert_eq!(eval_str(&format!("EdgeCount[{c}]")), int(1));
+        // Contract dispatches on an edge spec.
+        assert_eq!(
+            eval_str("EdgeCount[Contract[Graph[{1<->2, 2<->3}], 1<->2]]"),
+            int(1)
+        );
+    }
+
+    // ── Generators ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_generators() {
+        assert_eq!(eval_str("VertexCount[PathGraph[4]]"), int(4));
+        assert_eq!(eval_str("EdgeCount[PathGraph[4]]"), int(3));
+        assert_eq!(eval_str("VertexCount[CycleGraph[5]]"), int(5));
+        assert_eq!(eval_str("EdgeCount[CycleGraph[5]]"), int(5));
+        assert_eq!(eval_str("EdgeCount[CompleteGraph[4]]"), int(6));
+        assert_eq!(eval_str("VertexCount[CompleteKPartiteGraph[2, 3]]"), int(5));
+        assert_eq!(eval_str("EdgeCount[CompleteKPartiteGraph[2, 3]]"), int(6));
+        assert_eq!(
+            eval_str("EdgeCount[CompleteKPartiteGraph[{2, 2, 2}]]"),
+            int(12)
+        );
+        assert_eq!(eval_str("EdgeCount[StarGraph[4]]"), int(3));
+        assert_eq!(eval_str("VertexCount[GridGraph[{2, 3}]]"), int(6));
+        assert_eq!(eval_str("EdgeCount[GridGraph[{2, 3}]]"), int(7));
+        assert_eq!(eval_str("VertexCount[PetersenGraph[]]"), int(10));
+        assert_eq!(eval_str("EdgeCount[PetersenGraph[]]"), int(15));
+        assert_eq!(eval_str("Girth[PetersenGraph[]]"), int(5));
+        assert_eq!(eval_str("EdgeConnectivity[PetersenGraph[]]"), int(3));
+        assert_eq!(eval_str("VertexConnectivity[PetersenGraph[]]"), int(3));
+        assert_eq!(
+            eval_str("EdgeCount[TreeGraph[{1<->2, 2<->3, 1<->4}]]"),
+            int(3)
+        );
+        assert_eq!(
+            eval_str("VertexCount[TreeGraph[{1<->2, 2<->3, 1<->4}]]"),
+            int(4)
+        );
+        assert!(matches!(
+            eval_str("CycleGraph[2]"),
+            Value::Call { head, .. } if head == "CycleGraph"
+        ));
+    }
+
+    #[test]
+    fn test_random_tree_seeded() {
+        let a = eval_str("SeedRandom[3]; EdgeList[RandomTree[6]]");
+        let b = eval_str("SeedRandom[3]; EdgeList[RandomTree[6]]");
+        assert_eq!(a, b);
+        assert_eq!(eval_str("VertexCount[RandomTree[6]]"), int(6));
+        assert_eq!(eval_str("EdgeCount[RandomTree[6]]"), int(5));
+        assert_eq!(
+            eval_str("TreeGraphQ[SeedRandom[3]; RandomTree[6]]"),
+            Value::Bool(true)
         );
     }
 }

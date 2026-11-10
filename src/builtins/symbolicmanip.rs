@@ -60,6 +60,38 @@ fn is_zero_v(v: &Value) -> bool {
         Value::Integer(n) => n.is_zero(),
         Value::Real(r) => r.is_zero(),
         Value::Rational(r) => r.is_zero(),
+        // `0/d` is zero for any nonzero `d`, and a product with a zero factor
+        // collapses to zero. These shapes appear in unsimplified intermediates.
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            is_zero_v(&args[0]) && !is_zero_v(&args[1])
+        }
+        Value::Call { head, args } if head == "Times" => args.iter().any(is_zero_v),
+        Value::Call { head, args } if head == "Plus" => {
+            if args.iter().all(is_zero_v) {
+                true
+            } else if args.iter().all(is_numeric_expr) {
+                numeric_eval(v).is_zero()
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// True for an expression with no free symbols other than `E`/`Pi`, using only
+/// arithmetic and elementary-function heads — i.e. something `numeric_eval` can
+/// approximate.
+fn is_numeric_expr(v: &Value) -> bool {
+    match v {
+        Value::Integer(_) | Value::Rational(_) | Value::Real(_) => true,
+        Value::Symbol(s) => matches!(s.as_str(), "E" | "Pi"),
+        Value::Call { head, args } => {
+            matches!(
+                head.as_str(),
+                "Plus" | "Times" | "Divide" | "Power" | "Sin" | "Cos" | "Tan" | "Exp" | "Log"
+            ) && args.iter().all(is_numeric_expr)
+        }
         _ => false,
     }
 }
@@ -81,7 +113,7 @@ thread_local! {
 }
 
 /// Simplify a call node using the symbolic module (re-export for use here).
-fn simplify_call(head: &str, args: &[Value]) -> Value {
+pub(crate) fn simplify_call(head: &str, args: &[Value]) -> Value {
     let depth = SIMPLIFY_DEPTH.get();
     if depth > 100 {
         return call_ref(head, args);
@@ -109,12 +141,13 @@ fn simplify_call_inner(head: &str, args: &[Value]) -> Value {
         "Sin" if args.len() == 1 && is_zero_v(&args[0]) => Value::Integer(Integer::from(0)),
         "Cos" if args.len() == 1 && is_zero_v(&args[0]) => Value::Integer(Integer::from(1)),
         "Exp" if args.len() == 1 && is_zero_v(&args[0]) => Value::Integer(Integer::from(1)),
+        "Log" if args.len() == 1 && is_one_v(&args[0]) => Value::Integer(Integer::from(0)),
         _ => call_ref(head, args),
     }
 }
 
 /// Simplify a value recursively.
-fn simplify_value(val: &Value) -> Value {
+pub(crate) fn simplify_value(val: &Value) -> Value {
     match val {
         Value::Call { head, args } => {
             let sargs: Vec<Value> = args.iter().map(simplify_value).collect();
@@ -154,9 +187,10 @@ fn simplify_plus(args: &[Value]) -> Value {
     }
     let mut terms: Vec<Value> = Vec::new();
     for arg in args {
+        if is_zero_v(arg) {
+            continue;
+        }
         match arg {
-            Value::Integer(n) if n.is_zero() => {}
-            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {}
             Value::Call { head, args: a } if head == "Plus" => {
                 terms.extend(a.iter().cloned());
             }
@@ -295,13 +329,13 @@ fn simplify_times(args: &[Value]) -> Value {
     }
     let mut flat: Vec<Value> = Vec::new();
     for arg in args {
+        if is_zero_v(arg) {
+            return Value::Integer(Integer::from(0));
+        }
+        if is_one_v(arg) {
+            continue;
+        }
         match arg {
-            Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
-            Value::Integer(n) if *n == 1 => continue,
-            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {
-                return Value::Integer(Integer::from(0));
-            }
-            Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 1.0) => continue,
             Value::Call { head, args: a } if head == "Times" => {
                 flat.extend(a.iter().cloned());
             }
@@ -389,6 +423,20 @@ fn simplify_power(args: &[Value]) -> Value {
         _ => match &args[0] {
             Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(0)),
             Value::Integer(n) if *n == 1 => Value::Integer(Integer::from(1)),
+            // Collapse (b^m)^n -> b^(m n) so denominators stay a single power
+            // (keeps repeated-differentiation expressions from exploding).
+            Value::Call { head: bh, args: ba }
+                if bh == "Power"
+                    && ba.len() == 2
+                    && let Value::Integer(m) = &ba[1]
+                    && let Value::Integer(n) = &args[1] =>
+            {
+                let new_exp = simplify_call(
+                    "Times",
+                    &[Value::Integer(m.clone()), Value::Integer(n.clone())],
+                );
+                simplify_call("Power", &[ba[0].clone(), new_exp])
+            }
             _ => call_ref("Power", args),
         },
     }
@@ -587,7 +635,7 @@ fn binom(n: i64, k: i64) -> i64 {
 }
 
 /// Differentiate expr with respect to var (basic rules, no env dispatch).
-fn basic_diff(expr: &Value, var: &str) -> Value {
+pub(crate) fn basic_diff(expr: &Value, var: &str) -> Value {
     match expr {
         Value::Integer(_) | Value::Real(_) | Value::Rational(_) => Value::Integer(Integer::from(0)),
         Value::Symbol(s) => {
@@ -602,14 +650,40 @@ fn basic_diff(expr: &Value, var: &str) -> Value {
                 let terms: Vec<Value> = args.iter().map(|a| basic_diff(a, var)).collect();
                 simplify_call("Plus", &terms)
             }
-            "Times" if args.len() == 2 => {
-                let d_left = basic_diff(&args[0], var);
-                let d_right = basic_diff(&args[1], var);
-                simplify_call(
+            "Times" => {
+                // General product rule over any arity.
+                let terms: Vec<Value> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let mut factors = args.clone();
+                        factors[i] = basic_diff(a, var);
+                        simplify_call("Times", &factors)
+                    })
+                    .collect();
+                simplify_call("Plus", &terms)
+            }
+            "Divide" if args.len() == 2 => {
+                // Quotient rule: (u' v - u v') / v^2.
+                let num = &args[0];
+                let den = &args[1];
+                let dn = basic_diff(num, var);
+                let dd = basic_diff(den, var);
+                let top = simplify_call(
                     "Plus",
                     &[
-                        simplify_call("Times", &[d_left, args[1].clone()]),
-                        simplify_call("Times", &[args[0].clone(), d_right]),
+                        simplify_call("Times", &[dn, den.clone()]),
+                        simplify_call(
+                            "Times",
+                            &[Value::Integer(Integer::from(-1)), num.clone(), dd],
+                        ),
+                    ],
+                );
+                simplify_call(
+                    "Divide",
+                    &[
+                        top,
+                        simplify_call("Power", &[den.clone(), Value::Integer(Integer::from(2))]),
                     ],
                 )
             }
@@ -639,7 +713,21 @@ fn basic_diff(expr: &Value, var: &str) -> Value {
                     let d_exp = basic_diff(exp, var);
                     simplify_call("Times", &[call("Exp", vec![exp.clone()]), d_exp])
                 } else {
-                    call("D", vec![expr.clone(), Value::Symbol(var.to_string())])
+                    // General u^v: u^v * (v' Log[u] + v u'/u).
+                    let d_base = basic_diff(base, var);
+                    let d_exp = basic_diff(exp, var);
+                    let t1 = simplify_call("Times", &[d_exp, call("Log", vec![base.clone()])]);
+                    let t2 = simplify_call(
+                        "Divide",
+                        &[simplify_call("Times", &[exp.clone(), d_base]), base.clone()],
+                    );
+                    simplify_call(
+                        "Times",
+                        &[
+                            call("Power", vec![base.clone(), exp.clone()]),
+                            simplify_call("Plus", &[t1, t2]),
+                        ],
+                    )
                 }
             }
             "Sin" if args.len() == 1 => {
@@ -716,6 +804,11 @@ fn is_any_infinity(v: &Value) -> bool {
     is_infinity(v) || is_neg_infinity(v)
 }
 
+/// Check if a value is an unevaluated `Limit[...]` call.
+fn is_unevaluated_limit(v: &Value) -> bool {
+    matches!(v, Value::Call { head, .. } if head == "Limit")
+}
+
 /// Parse the var -> target rule from Limit's second argument.
 /// Returns (var_name, target_value).
 ///
@@ -769,12 +862,39 @@ fn is_known_constant_sym(s: &str) -> bool {
     matches!(s, "Pi" | "E" | "Infinity" | "I")
 }
 
+/// True for a literal positive numeric constant (`Integer`/`Rational`/`Real` > 0).
+fn is_positive_const_num(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_positive(),
+        Value::Rational(r) => r.is_positive(),
+        Value::Real(r) => *r > Float::with_val(DEFAULT_PRECISION, 0.0),
+        _ => false,
+    }
+}
+
+/// True for a positive constant base usable in `b^u` (positive numeric literal
+/// or the constants `E`/`Pi`).
+fn is_positive_constant_base(v: &Value) -> bool {
+    is_positive_const_num(v) || matches!(v, Value::Symbol(s) if s == "E" || s == "Pi")
+}
+
+/// True when a positive constant base is strictly greater than 1.
+fn base_is_gt_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n > 1,
+        Value::Rational(r) => **r > 1,
+        Value::Real(r) => *r > Float::with_val(DEFAULT_PRECISION, 1.0),
+        Value::Symbol(s) => s == "E" || s == "Pi",
+        _ => true,
+    }
+}
+
 // ── Limit ──
 
 pub fn builtin_limit(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "Limit requires exactly 2 arguments: Limit[expr, var -> x0]".to_string(),
+            "Limit requires 2 or 3 arguments: Limit[expr, var -> x0, opts...]".to_string(),
         ));
     }
     let expr = unwrap_pattern(&args[0]);
@@ -784,14 +904,75 @@ pub fn builtin_limit(args: &[Value]) -> Result<Value, EvalError> {
             return Ok(call("Limit", args.to_vec()));
         }
     };
-    let r = compute_limit(&expr, &var, &target);
+    // One-sided direction. `Direction -> 1` approaches the limit point from
+    // above (larger values, x -> x0^+); `Direction -> -1` from below. Anything
+    // else (including an absent option) is treated as a two-sided limit.
+    let dir = if args.len() == 3 {
+        parse_direction(&args[2])
+    } else {
+        0
+    };
+    let r = compute_limit(&expr, &var, &target, dir);
     if std::env::var("SYMA_LIMIT_DEBUG").is_ok() {
-        eprintln!("LIMIT expr={expr:?} var={var} target={target:?} -> {r:?}");
+        eprintln!("LIMIT expr={expr:?} var={var} target={target:?} dir={dir} -> {r:?}");
     }
     Ok(r)
 }
 
-fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
+/// Parse a `Direction -> ±1` option, returning `1`/`-1` (or `0` when absent or
+/// unrecognized).
+fn parse_direction(arg: &Value) -> i64 {
+    let rule = unwrap_pattern(arg);
+    let rhs = match &rule {
+        Value::Rule { lhs, rhs, .. } => {
+            if pattern_symbol_name(lhs.as_ref()).as_deref() != Some("Direction") {
+                return 0;
+            }
+            unwrap_pattern(rhs.as_ref())
+        }
+        Value::Call { head, args } if head == "Rule" && args.len() == 2 => {
+            if pattern_symbol_name(&args[0]).as_deref() != Some("Direction") {
+                return 0;
+            }
+            unwrap_pattern(&args[1])
+        }
+        _ => return 0,
+    };
+    match direction_value_to_i64(&rhs) {
+        Some(1) => 1,
+        Some(-1) => -1,
+        _ => 0,
+    }
+}
+
+/// Extract `1`/`-1` from a direction value, tolerating the unevaluated
+/// `Times[-1, 1]` produced for the literal `-1` in held rule arguments.
+fn direction_value_to_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Integer(n) => n.to_i64(),
+        Value::Call { head, args } if head == "Times" => {
+            let mut sign = 1i64;
+            let mut mag = 1i64;
+            for a in args {
+                match a {
+                    Value::Integer(n) => {
+                        let x = n.to_i64()?;
+                        if x == -1 {
+                            sign = -sign;
+                        } else {
+                            mag *= x;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            Some(sign * mag)
+        }
+        _ => None,
+    }
+}
+
+fn compute_limit(expr: &Value, var: &str, target: &Value, dir: i64) -> Value {
     // Constant expressions (no dependence on var)
     if !free_appears_p(expr, var) {
         return expr.clone();
@@ -801,13 +982,39 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
     // that -Infinity is not mistaken for +Infinity (is_infinity would be false
     // for Times[-1, Infinity], but keep the order robust either way).
     if is_neg_infinity(target) {
-        return limit_at_infinity(expr, var, true);
+        return limit_at_infinity(expr, var, true, dir);
     }
     if is_infinity(target) {
-        return limit_at_infinity(expr, var, false);
+        return limit_at_infinity(expr, var, false, dir);
     }
 
     let target_val = target.clone();
+
+    // Sums and products: take the limit of each factor/term (so a term like
+    // `0/0` is resolved by its own L'Hôpital pass instead of the whole
+    // expression being substituted and mis-evaluated).
+    if let Value::Call { head, args } = expr {
+        if head == "Plus" {
+            let terms: Vec<Value> = args
+                .iter()
+                .map(|a| compute_limit(a, var, target, dir))
+                .collect();
+            if !terms.iter().any(is_unevaluated_limit) {
+                return simplify_value(&call("Plus", terms));
+            }
+        } else if head == "Times" {
+            let lims: Vec<Value> = args
+                .iter()
+                .map(|a| compute_limit(a, var, target, dir))
+                .collect();
+            let any_limit = lims.iter().any(is_unevaluated_limit);
+            let any_zero = lims.iter().any(is_zero_v);
+            let any_inf = lims.iter().any(is_any_infinity);
+            if !any_limit && !(any_zero && any_inf) && !any_inf {
+                return simplify_value(&call("Times", lims));
+            }
+        }
+    }
 
     // Handle specific function forms at the target
     match expr {
@@ -825,50 +1032,36 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
         {
             return limit_power_at_point(&args[1], target);
         }
-        // Limit[Log[x], x -> 0] = -Infinity
+        // Limit[Log[x], x -> 0] = -Infinity (from above). From below Log is
+        // complex-valued, so the one-sided limit is left unevaluated.
         Value::Call { head, args }
             if head == "Log"
                 && args.len() == 1
                 && args[0].struct_eq(&Value::Symbol(var.to_string()))
                 && is_zero_v(target) =>
         {
-            return call(
-                "Times",
-                vec![
-                    Value::Integer(Integer::from(-1)),
-                    Value::Symbol("Infinity".to_string()),
-                ],
-            );
+            if dir == -1 {
+                return unevaluated_limit(expr, var, &target_val);
+            }
+            return neg_infinity();
         }
-        // Limit[1/x, x -> 0] -> unevaluated
+        // Quotient: substitute, then resolve 0/0 (L'Hôpital) or nonzero/0.
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
             let num = &args[0];
             let den = &args[1];
-            let den_at_target = substitute(den, var, target);
-            let den_simplified = simplify_value(&den_at_target);
-            let num_at_target = substitute(num, var, target);
-            let num_simplified = simplify_value(&num_at_target);
+            let den_simplified = simplify_value(&substitute(den, var, target));
+            let num_simplified = simplify_value(&substitute(num, var, target));
 
-            // If denominator is 0, check for 0/0 (L'Hôpital)
             if is_zero_v(&den_simplified) {
                 if is_zero_v(&num_simplified) {
-                    // 0/0 indeterminate form: try L'Hôpital's rule
-                    let d_num = basic_diff(num, var);
-                    let d_den = basic_diff(den, var);
-                    let d_num_at = simplify_value(&substitute(&d_num, var, target));
-                    let d_den_at = simplify_value(&substitute(&d_den, var, target));
-                    if !is_zero_v(&d_den_at) {
-                        return simplify_value(&call("Divide", vec![d_num_at, d_den_at]));
+                    if let Some(r) = lhopital_finite(num, den, var, target, dir) {
+                        return r;
                     }
+                } else if let Some(r) = zero_den_limit(&num_simplified, den, var, target, dir) {
+                    return r;
                 }
-                // Infinity or undefined — return unevaluated
-                return call(
-                    "Limit",
-                    vec![
-                        expr.clone(),
-                        call("Rule", vec![Value::Symbol(var.to_string()), target_val]),
-                    ],
-                );
+                // Diverging or undefined — return unevaluated
+                return unevaluated_limit(expr, var, &target_val);
             }
             // Direct substitution works
             return simplify_value(&call("Divide", vec![num_simplified, den_simplified]));
@@ -894,40 +1087,11 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
                 && args.len() == 2
             {
                 if is_zero_v(&args[0]) && is_zero_v(&args[1]) {
-                    // Apply L'Hôpital
-                    let d_num = basic_diff(expr, var);
-                    let _d_den = basic_diff(expr, var);
-                    let d_result = simplify_value(&substitute(&d_num, var, target));
-                    if let Value::Call {
-                        head: dh,
-                        args: dargs,
-                    } = &d_result
-                        && dh == "Divide"
-                        && dargs.len() == 2
-                        && !is_zero_v(&dargs[1])
-                    {
-                        return d_result;
+                    // 0/0 indeterminate form: iterated L'Hôpital.
+                    if let Some(r) = lhopital_finite(&args[0], &args[1], var, target, dir) {
+                        return r;
                     }
-                    if !is_zero_v(&d_result)
-                        && !matches!(&d_result, Value::Call { head, .. } if head == "Divide" && {
-                            let d = &d_result;
-                            if let Value::Call { args: aa, .. } = d {
-                                aa.len() == 2 && is_zero_v(&aa[1])
-                            } else { false }
-                        })
-                    {
-                        return d_result;
-                    }
-                    return call(
-                        "Limit",
-                        vec![
-                            expr.clone(),
-                            call(
-                                "Rule",
-                                vec![Value::Symbol(var.to_string()), target_val.clone()],
-                            ),
-                        ],
-                    );
+                    return unevaluated_limit(expr, var, &target_val);
                 }
                 if is_zero_v(&args[1]) {
                     return call(
@@ -959,23 +1123,35 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
         && args.len() == 2
         && is_zero_v(&args[0])
         && is_zero_v(&args[1])
+        && let Some(r) = lhopital_finite(&args[0], &args[1], var, target, dir)
     {
-        let d_num = basic_diff(expr, var);
-        let _d_den = basic_diff(expr, var);
-        let d_ratio = simplify_value(&substitute(&d_num, var, target));
-        if let Value::Call { head: dh, args: da } = &d_ratio
-            && dh == "Divide"
-            && da.len() == 2
-            && !is_zero_v(&da[1])
-        {
-            return d_ratio;
-        }
-        if !matches!(&d_ratio, Value::Call { head, .. } if head == "D") {
-            return d_ratio;
-        }
+        return r;
     }
 
     // Return unevaluated
+    unevaluated_limit(expr, var, target)
+}
+
+// ── L'Hôpital / divergence helpers ──
+
+/// Maximum number of L'Hôpital iterations before giving up (keeps any loop
+/// bounded even on pathological inputs).
+const MAX_LHOPITAL: usize = 24;
+
+fn infinity() -> Value {
+    Value::Symbol("Infinity".to_string())
+}
+
+fn neg_infinity() -> Value {
+    call("Times", vec![Value::Integer(Integer::from(-1)), infinity()])
+}
+
+fn signed_infinity(neg: bool) -> Value {
+    if neg { neg_infinity() } else { infinity() }
+}
+
+/// Build an unevaluated `Limit[expr, var -> target]`.
+fn unevaluated_limit(expr: &Value, var: &str, target: &Value) -> Value {
     call(
         "Limit",
         vec![
@@ -983,6 +1159,121 @@ fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
             call("Rule", vec![Value::Symbol(var.to_string()), target.clone()]),
         ],
     )
+}
+
+/// Fold integer literals through `Plus`/`Times`/`Power` so a probe value like
+/// `Power[-1, 2]` (which `simplify_value` leaves alone) becomes the integer
+/// `1`. Used only for sign probing.
+fn fold_constants(v: &Value) -> Value {
+    match v {
+        Value::Call { head, args } => {
+            let a: Vec<Value> = args.iter().map(fold_constants).collect();
+            match head.as_str() {
+                "Power" if a.len() == 2 => {
+                    if let (Value::Integer(b), Value::Integer(e)) = (&a[0], &a[1])
+                        && let Some(ei) = e.to_i64()
+                        && (0..=64).contains(&ei)
+                    {
+                        return Value::Integer(b.clone().pow(ei as u32));
+                    }
+                    simplify_call("Power", &a)
+                }
+                "Plus" | "Times" => simplify_call(head, &a),
+                _ => call_ref(head, &a),
+            }
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Resolve a `finite-nonzero / 0` limit. Returns `None` (leave unevaluated)
+/// when the two sides disagree (two-sided) or the sign cannot be pinned down.
+fn zero_den_limit(
+    num_lim: &Value,
+    den: &Value,
+    var: &str,
+    target: &Value,
+    dir: i64,
+) -> Option<Value> {
+    let num_neg = is_neg_number(num_lim);
+
+    // Sign of `den` at a probe point one unit to the side of the target.
+    let probe = |delta: i64| -> Option<bool> {
+        let at = call(
+            "Plus",
+            vec![target.clone(), Value::Integer(Integer::from(delta))],
+        );
+        let v = simplify_value(&fold_constants(&substitute(den, var, &at)));
+        if is_zero_v(&v) {
+            None
+        } else if is_neg_number(&v) {
+            Some(true)
+        } else if is_numeric_constant(&v) {
+            Some(false)
+        } else {
+            None
+        }
+    };
+
+    if dir > 0 {
+        return Some(signed_infinity(num_neg ^ probe(1)?));
+    }
+    if dir < 0 {
+        return Some(signed_infinity(num_neg ^ probe(-1)?));
+    }
+    // Two-sided: only a consistent sign on both sides is infinite.
+    let left = probe(-1)?;
+    let right = probe(1)?;
+    if left != right {
+        return None;
+    }
+    Some(signed_infinity(num_neg ^ left))
+}
+
+/// Iterated L'Hôpital at a finite target for `num/den` (0/0 or ∞/∞).
+fn lhopital_finite(
+    num0: &Value,
+    den0: &Value,
+    var: &str,
+    target: &Value,
+    dir: i64,
+) -> Option<Value> {
+    let mut num = simplify_value(num0);
+    let mut den = simplify_value(den0);
+    for _ in 0..MAX_LHOPITAL {
+        let nl = compute_limit(&num, var, target, dir);
+        let dl = compute_limit(&den, var, target, dir);
+        let n_zero = is_zero_v(&nl);
+        let d_zero = is_zero_v(&dl);
+        let n_inf = is_any_infinity(&nl);
+        let d_inf = is_any_infinity(&dl);
+
+        if (n_zero && d_zero) || (n_inf && d_inf) {
+            // Both constant and still indeterminate -> 0/0 or ∞/∞, give up.
+            if !free_appears_p(&num, var) && !free_appears_p(&den, var) {
+                return None;
+            }
+            num = simplify_value(&basic_diff(&num, var));
+            den = simplify_value(&basic_diff(&den, var));
+            continue;
+        }
+        if matches!(&nl, Value::Call { head, .. } if head == "Limit")
+            || matches!(&dl, Value::Call { head, .. } if head == "Limit")
+        {
+            return None;
+        }
+        if d_zero {
+            return zero_den_limit(&nl, &den, var, target, dir);
+        }
+        if d_inf {
+            return Some(Value::Integer(Integer::from(0)));
+        }
+        if n_inf {
+            return Some(signed_infinity(is_neg_infinity(&nl) ^ is_neg_number(&dl)));
+        }
+        return Some(exact_div(&nl, &dl));
+    }
+    None
 }
 
 fn limit_power_at_point(exp: &Value, target: &Value) -> Value {
@@ -1070,7 +1361,139 @@ fn recip_split(v: &Value) -> Option<(Value, Value)> {
     }
 }
 
-fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
+/// Relative growth of an expression as `x -> ±Infinity`. Used to resolve
+/// `∞/∞` quotients that are not polynomial (e.g. `Exp[x]/x`, `Log[x]/x^n`).
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum Growth {
+    Zero,
+    Log,
+    Poly,
+    Exp,
+}
+
+fn growth_class(expr: &Value, var: &str, neg: bool) -> Option<Growth> {
+    if !free_appears_p(expr, var) {
+        return Some(Growth::Zero);
+    }
+    match expr {
+        Value::Symbol(s) if s == var => Some(Growth::Poly),
+        Value::Call { head, args } if head == "Log" && args.len() == 1 => {
+            if is_infinity(&limit_at_infinity(&args[0], var, neg, 0)) {
+                Some(Growth::Log)
+            } else {
+                None
+            }
+        }
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => {
+            classify_exp_argument(&args[0], var, neg)
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if args[0].struct_eq(&Value::Symbol("E".to_string())) || is_positive_const_num(&args[0])
+            {
+                classify_exp_argument(&args[1], var, neg)
+            } else if args[0].struct_eq(&Value::Symbol(var.to_string())) {
+                match &args[1] {
+                    Value::Integer(n) if n.is_positive() => Some(Growth::Poly),
+                    Value::Integer(_) => Some(Growth::Zero),
+                    // Symbolic exponent: treat as polynomial growth.
+                    _ => Some(Growth::Poly),
+                }
+            } else {
+                None
+            }
+        }
+        Value::Call { head, args } if head == "Times" || head == "Plus" => {
+            let mut best = Growth::Zero;
+            for a in args {
+                let g = growth_class(a, var, neg)?;
+                if g > best {
+                    best = g;
+                }
+            }
+            Some(best)
+        }
+        _ => None,
+    }
+}
+
+/// Classify `Exp[u]` by the behaviour of `u`: exponential when `u -> +∞`,
+/// decaying (`Zero`) when `u -> -∞`, otherwise unclassified.
+fn classify_exp_argument(arg: &Value, var: &str, neg: bool) -> Option<Growth> {
+    let l = limit_at_infinity(arg, var, neg, 0);
+    if is_infinity(&l) {
+        Some(Growth::Exp)
+    } else if is_neg_infinity(&l) {
+        Some(Growth::Zero)
+    } else {
+        None
+    }
+}
+
+/// Extract the exponent `u` of `Exp[u]` or `E^u`.
+fn exponential_exponent(expr: &Value) -> Option<Value> {
+    match expr {
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => Some(args[0].clone()),
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && args[0].struct_eq(&Value::Symbol("E".to_string())) =>
+        {
+            Some(args[1].clone())
+        }
+        _ => None,
+    }
+}
+
+/// Iterated L'Hôpital for `∞/∞` (or `0/0`) as `x -> ±Infinity`.
+fn lhopital_infinity(num0: &Value, den0: &Value, var: &str, neg: bool, dir: i64) -> Option<Value> {
+    let mut num = simplify_value(num0);
+    let mut den = simplify_value(den0);
+    for _ in 0..MAX_LHOPITAL {
+        let nl = limit_at_infinity(&num, var, neg, dir);
+        let dl = limit_at_infinity(&den, var, neg, dir);
+        if std::env::var("SYMA_LIMIT_DEBUG").is_ok() {
+            eprintln!("LINF num={num:?} den={den:?} nl={nl:?} dl={dl:?}");
+        }
+        let n_zero = is_zero_v(&nl);
+        let d_zero = is_zero_v(&dl);
+        let n_inf = is_any_infinity(&nl);
+        let d_inf = is_any_infinity(&dl);
+
+        if (n_zero && d_zero) || (n_inf && d_inf) {
+            // Both constant and still indeterminate -> give up.
+            if !free_appears_p(&num, var) && !free_appears_p(&den, var) {
+                return None;
+            }
+            num = simplify_value(&basic_diff(&num, var));
+            den = simplify_value(&basic_diff(&den, var));
+            continue;
+        }
+        if matches!(&nl, Value::Call { head, .. } if head == "Limit")
+            || matches!(&dl, Value::Call { head, .. } if head == "Limit")
+        {
+            return None;
+        }
+        if d_zero {
+            if n_inf {
+                return Some(infinity());
+            }
+            return Some(signed_infinity(is_neg_number(&nl)));
+        }
+        if d_inf {
+            return Some(Value::Integer(Integer::from(0)));
+        }
+        if n_inf {
+            return Some(signed_infinity(is_neg_infinity(&nl) ^ is_neg_number(&dl)));
+        }
+        if n_zero {
+            return Some(Value::Integer(Integer::from(0)));
+        }
+        return Some(simplify_value(&call("Divide", vec![nl, dl])));
+    }
+    None
+}
+
+fn limit_at_infinity(expr: &Value, var: &str, neg: bool, dir: i64) -> Value {
     match expr {
         // Constant
         _ if !free_appears_p(expr, var) => expr.clone(),
@@ -1113,12 +1536,60 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                 // n == 0
                 Value::Integer(Integer::from(1))
             } else {
-                // Non-integer exponent, return unevaluated
-                expr.clone()
+                // Non-integer exponent: assume growth for a symbolic/positive
+                // exponent, decay for a negative one.
+                match &args[1] {
+                    Value::Rational(r) => {
+                        if r.is_positive() {
+                            infinity()
+                        } else {
+                            Value::Integer(Integer::from(0))
+                        }
+                    }
+                    Value::Real(r) => {
+                        if *r > 0 {
+                            infinity()
+                        } else {
+                            Value::Integer(Integer::from(0))
+                        }
+                    }
+                    _ => infinity(),
+                }
             }
         }
-        // (1 + w)^v at infinity, where w -> 0 and v grows: limit is E^(v*w).
-        // E.g. (1 + 1/n)^n -> E as n -> Infinity.
+        // b^u at +/- Infinity for a positive constant base b != 1: exponential
+        // growth/decay. E.g. E^x -> Infinity, 2^x -> Infinity, (1/2)^x -> 0.
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && is_positive_constant_base(&args[0])
+                && free_appears_p(&args[1], var) =>
+        {
+            let base = &args[0];
+            let base_gt_one = base_is_gt_one(base);
+            let el = limit_at_infinity(&args[1], var, neg, dir);
+            if is_infinity(&el) {
+                return if base_gt_one {
+                    infinity()
+                } else {
+                    Value::Integer(Integer::from(0))
+                };
+            }
+            if is_neg_infinity(&el) {
+                return if base_gt_one {
+                    Value::Integer(Integer::from(0))
+                } else {
+                    infinity()
+                };
+            }
+            if !matches!(&el, Value::Call { head: kh, .. } if kh == "Limit") {
+                return simplify_call("Power", &[base.clone(), el]);
+            }
+            expr.clone()
+        }
+        // (c + w)^v at infinity, where c > 0 is constant, w -> 0 and v may
+        // grow: limit is c^lim(v) * E^(lim(v*w/c)). For c == 1 this is the
+        // classic (1 + 1/n)^n -> E; it also covers (1 + a/x)^(b x) -> E^(a b).
         Value::Call { head, args }
             if head == "Power" && args.len() == 2 && free_appears_p(&args[0], var) =>
         {
@@ -1128,29 +1599,64 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                 && bh == "Plus"
                 && pa.len() == 2
             {
-                let w = if is_one_v(&pa[0]) {
-                    Some(&pa[1])
-                } else if is_one_v(&pa[1]) {
-                    Some(&pa[0])
+                let (c, w) = if is_positive_const_num(&pa[0]) && free_appears_p(&pa[1], var) {
+                    (Some(&pa[0]), Some(&pa[1]))
+                } else if is_positive_const_num(&pa[1]) && free_appears_p(&pa[0], var) {
+                    (Some(&pa[1]), Some(&pa[0]))
                 } else {
-                    None
+                    (None, None)
                 };
-                if let Some(w) = w
-                    && is_zero_v(&limit_at_infinity(w, var, neg))
+                if let (Some(c), Some(w)) = (c, w)
+                    && is_zero_v(&limit_at_infinity(w, var, neg, dir))
                 {
-                    // v * w, cancelling a reciprocal denominator when present so
-                    // that e.g. n * (1/n) collapses to 1 instead of Infinity.
-                    let prod = if let Some((num, den)) = recip_split(w) {
+                    let c_is_one = is_one_v(c);
+                    // v/c * w, cancelling a reciprocal denominator when present
+                    // so that e.g. n * (1/n) collapses to 1 instead of Infinity.
+                    let num = if c_is_one {
+                        exp.clone()
+                    } else {
+                        simplify_value(&call("Divide", vec![exp.clone(), c.clone()]))
+                    };
+                    let prod = if let Some((wn, wd)) = recip_split(w) {
                         simplify_value(&call(
                             "Divide",
-                            vec![simplify_call("Times", &[exp.clone(), num]), den],
+                            vec![simplify_call("Times", &[num, wn]), wd],
                         ))
                     } else {
-                        simplify_value(&call("Times", vec![exp.clone(), w.clone()]))
+                        simplify_value(&call("Times", vec![num, w.clone()]))
                     };
-                    let k = limit_at_infinity(&prod, var, neg);
+                    let k = limit_at_infinity(&prod, var, neg, dir);
                     if !matches!(&k, Value::Call { head: kh, .. } if kh == "Limit") {
-                        return simplify_call("Power", &[Value::Symbol("E".to_string()), k]);
+                        let factor = if c_is_one {
+                            Value::Integer(Integer::from(1))
+                        } else {
+                            let el = limit_at_infinity(exp, var, neg, dir);
+                            if is_infinity(&el) {
+                                if base_is_gt_one(c) {
+                                    infinity()
+                                } else {
+                                    Value::Integer(Integer::from(0))
+                                }
+                            } else if is_neg_infinity(&el) {
+                                if base_is_gt_one(c) {
+                                    Value::Integer(Integer::from(0))
+                                } else {
+                                    infinity()
+                                }
+                            } else if matches!(&el, Value::Call { head: kh, .. } if kh == "Limit") {
+                                return expr.clone();
+                            } else {
+                                simplify_call("Power", &[c.clone(), el])
+                            }
+                        };
+                        let e_pow = simplify_call("Power", &[Value::Symbol("E".to_string()), k]);
+                        if is_any_infinity(&factor) {
+                            return factor;
+                        }
+                        if is_zero_v(&factor) {
+                            return Value::Integer(Integer::from(0));
+                        }
+                        return simplify_call("Times", &[factor, e_pow]);
                     }
                 }
             }
@@ -1245,7 +1751,7 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
         Value::Call { head, args } if head == "Plus" => {
             let terms: Vec<Value> = args
                 .iter()
-                .map(|a| limit_at_infinity(a, var, neg))
+                .map(|a| limit_at_infinity(a, var, neg, dir))
                 .collect();
             // A single-sided infinite term dominates the finite ones.
             let has_pos = terms.iter().any(is_infinity);
@@ -1270,8 +1776,8 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
         }
         // Times: product
         Value::Call { head, args } if head == "Times" && args.len() == 2 => {
-            let l = limit_at_infinity(&args[0], var, neg);
-            let r = limit_at_infinity(&args[1], var, neg);
+            let l = limit_at_infinity(&args[0], var, neg, dir);
+            let r = limit_at_infinity(&args[1], var, neg, dir);
             // Handle infinities before the numeric-constant fold: `Infinity` is
             // itself a known constant, so `Times[3, Infinity]` must collapse.
             if is_any_infinity(&l) || is_any_infinity(&r) {
@@ -1306,8 +1812,8 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
         }
         // Divide
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            let num_lim = limit_at_infinity(&args[0], var, neg);
-            let den_lim = limit_at_infinity(&args[1], var, neg);
+            let num_lim = limit_at_infinity(&args[0], var, neg, dir);
+            let den_lim = limit_at_infinity(&args[1], var, neg, dir);
             if is_zero_v(&den_lim) {
                 return Value::Symbol("Infinity".to_string());
             }
@@ -1357,6 +1863,49 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                     let lead_den = simplify_value(&dc[dc.len() - 1]);
                     return simplify_call("Divide", &[lead_num, lead_den]);
                 }
+                // Non-polynomial ∞/∞: compare growth classes (Log < poly <
+                // exponential), then fall back to iterated L'Hôpital.
+                let gn = growth_class(&args[0], var, neg);
+                let gd = growth_class(&args[1], var, neg);
+                if let (Some(gn), Some(gd)) = (gn, gd)
+                    && gn != gd
+                {
+                    return if gn < gd {
+                        Value::Integer(Integer::from(0))
+                    } else {
+                        infinity()
+                    };
+                }
+                // Equal exponential growth: compare the exponents, since
+                // `E^u / E^v = E^(u - v)`.
+                if gn == Some(Growth::Exp)
+                    && gd == Some(Growth::Exp)
+                    && let (Some(e1), Some(e2)) = (
+                        exponential_exponent(&args[0]),
+                        exponential_exponent(&args[1]),
+                    )
+                {
+                    let diff = simplify_value(&call(
+                        "Plus",
+                        vec![
+                            e1,
+                            call("Times", vec![Value::Integer(Integer::from(-1)), e2]),
+                        ],
+                    ));
+                    let k = limit_at_infinity(&diff, var, neg, dir);
+                    if is_infinity(&k) {
+                        return infinity();
+                    }
+                    if is_neg_infinity(&k) {
+                        return Value::Integer(Integer::from(0));
+                    }
+                    if !is_unevaluated_limit(&k) {
+                        return simplify_call("Power", &[Value::Symbol("E".to_string()), k]);
+                    }
+                }
+                if let Some(r) = lhopital_infinity(&args[0], &args[1], var, neg, dir) {
+                    return r;
+                }
                 return call(
                     "Limit",
                     vec![
@@ -1399,7 +1948,7 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                 }
                 if let Some((deg, dominant)) = best_term {
                     if deg > 0 {
-                        return limit_at_infinity(&dominant, var, neg);
+                        return limit_at_infinity(&dominant, var, neg, dir);
                     }
                     if deg == 0 {
                         return dominant;
@@ -3296,7 +3845,7 @@ pub fn builtin_series_coefficient(args: &[Value]) -> Result<Value, EvalError> {
     {
         let same_var = matches!(&**variable, Value::Symbol(s) if s == &var);
         if same_var
-            && (**expansion_point).struct_eq(x0)
+            && same_number(expansion_point, x0)
             && let Some(n) = value_to_i64(n_arg)
         {
             // coeffs[i] pairs with exponent (min_exponent + i) / denominator.
@@ -3326,6 +3875,21 @@ fn value_to_i64(v: &Value) -> Option<i64> {
         Value::Real(r) if r.is_integer() => r.to_integer().and_then(|i| i.to_i64()),
         _ => None,
     }
+}
+
+fn numeric_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(i) => Some(i.to_f64()),
+        Value::Rational(r) => Some(r.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        _ => None,
+    }
+}
+
+/// Structural equality that also treats numerically equal numbers as equal, so
+/// `0` and `0.` (after `N`) are the same expansion point.
+fn same_number(a: &Value, b: &Value) -> bool {
+    a.struct_eq(b) || matches!((numeric_f64(a), numeric_f64(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Is `expr` a polynomial in `var` (Plus/Times/Power with non-negative
@@ -3495,12 +4059,22 @@ fn series_coefficient(expr: &Value, var: &str, x0: &Value, n: i64) -> Value {
         }
     }
 
-    // Non-polynomial (or x0 != 0): use the derivative/factorial formula.
+    // Non-polynomial (or x0 != 0): use the derivative/factorial formula,
+    // evaluating the derivative at x0 through `Limit` so removable
+    // singularities (e.g. `Sin[x]/x` at 0) resolve.
     let mut result_expr = expr.clone();
     for _ in 0..n {
         result_expr = basic_diff(&result_expr, var);
     }
-    let evaluated = simplify_value(&substitute(&result_expr, var, x0));
+    let rule = Value::Rule {
+        lhs: Box::new(Value::Symbol(var.to_string())),
+        rhs: Box::new(x0.clone()),
+        delayed: false,
+    };
+    let evaluated = match builtin_limit(&[result_expr.clone(), rule]) {
+        Ok(v) if !is_unevaluated_limit(&v) => v,
+        _ => simplify_value(&substitute(&result_expr, var, x0)),
+    };
 
     // Divide by n!
     let factorial = factorial_value(n);
@@ -4793,6 +5367,160 @@ mod tests {
         assert!(matches!(&result, Value::Integer(n) if *n == 1));
     }
 
+    // ── Limit: L'Hôpital, exponential dominance, one-sided ──
+
+    fn inf() -> Value {
+        val_sym("Infinity")
+    }
+    fn is_inf(v: &Value) -> bool {
+        matches!(v, Value::Symbol(s) if s == "Infinity")
+    }
+    fn is_neg_inf(v: &Value) -> bool {
+        matches!(v, Value::Call { head, args }
+            if head == "Times" && args.len() == 2
+                && matches!(&args[0], Value::Integer(n) if *n == -1)
+                && matches!(&args[1], Value::Symbol(s) if s == "Infinity"))
+    }
+    fn lim(expr: Value, var: &str, target: Value) -> Value {
+        builtin_limit(&[expr, val_rule(val_sym(var), target)]).unwrap()
+    }
+    fn div(num: Value, den: Value) -> Value {
+        val_call("Divide", vec![num, den])
+    }
+
+    #[test]
+    fn test_limit_exp_over_x_at_infinity() {
+        let expr = div(val_call("Exp", vec![val_sym("x")]), val_sym("x"));
+        assert!(is_inf(&lim(expr, "x", inf())));
+    }
+
+    #[test]
+    fn test_limit_log_over_x_at_infinity() {
+        let expr = div(val_call("Log", vec![val_sym("x")]), val_sym("x"));
+        let r = lim(expr, "x", inf());
+        assert!(
+            matches!(r, Value::Integer(ref n) if n.is_zero()),
+            "got {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_limit_poly_over_exp_at_infinity() {
+        let expr = div(
+            val_call("Power", vec![val_sym("x"), val_int(2)]),
+            val_call("Exp", vec![val_sym("x")]),
+        );
+        let r = lim(expr, "x", inf());
+        assert!(
+            matches!(r, Value::Integer(ref n) if n.is_zero()),
+            "got {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_limit_exp_over_poly_at_infinity() {
+        let expr = div(
+            val_call("Power", vec![val_sym("E"), val_sym("x")]),
+            val_call("Power", vec![val_sym("x"), val_int(2)]),
+        );
+        assert!(is_inf(&lim(expr, "x", inf())));
+    }
+
+    #[test]
+    fn test_limit_log_over_poly_at_infinity() {
+        let expr = div(
+            val_call("Log", vec![val_sym("x")]),
+            val_call("Power", vec![val_sym("x"), val_int(2)]),
+        );
+        let r = lim(expr, "x", inf());
+        assert!(
+            matches!(r, Value::Integer(ref n) if n.is_zero()),
+            "got {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_limit_poly_over_log_at_infinity() {
+        let expr = div(
+            val_call("Power", vec![val_sym("x"), val_int(2)]),
+            val_call("Log", vec![val_sym("x")]),
+        );
+        assert!(is_inf(&lim(expr, "x", inf())));
+    }
+
+    #[test]
+    fn test_limit_one_plus_a_over_x_pow_x() {
+        let base = val_call("Plus", vec![val_int(1), div(val_sym("a"), val_sym("x"))]);
+        let expr = val_call("Power", vec![base, val_sym("x")]);
+        let r = lim(expr, "x", inf());
+        match &r {
+            Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+                assert!(matches!(&args[0], Value::Symbol(s) if s == "E"));
+                assert!(matches!(&args[1], Value::Symbol(s) if s == "a"));
+            }
+            other => panic!("expected E^a, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_limit_one_plus_a_over_x_pow_bx() {
+        let base = val_call("Plus", vec![val_int(1), div(val_sym("a"), val_sym("x"))]);
+        let exp = val_call("Times", vec![val_sym("b"), val_sym("x")]);
+        let expr = val_call("Power", vec![base, exp]);
+        let r = lim(expr, "x", inf());
+        // Expect E^(a b).
+        match &r {
+            Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+                assert!(matches!(&args[0], Value::Symbol(s) if s == "E"));
+                assert!(matches!(&args[1], Value::Call { head: h, .. } if h == "Times"));
+            }
+            other => panic!("expected E^(a b), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_limit_cos_minus_one_over_x2() {
+        let num = val_call(
+            "Plus",
+            vec![val_call("Cos", vec![val_sym("x")]), val_int(-1)],
+        );
+        let expr = div(num, val_call("Power", vec![val_sym("x"), val_int(2)]));
+        let r = lim(expr, "x", val_int(0));
+        assert!((numeric_eval(&r).to_f64() + 0.5).abs() < 1e-9, "got {r:?}");
+    }
+
+    #[test]
+    fn test_limit_direction_from_above_and_below() {
+        let expr = div(val_int(1), val_sym("x"));
+        let right = builtin_limit(&[
+            expr.clone(),
+            val_rule(val_sym("x"), val_int(0)),
+            val_rule(val_sym("Direction"), val_int(1)),
+        ])
+        .unwrap();
+        assert!(
+            is_inf(&right),
+            "Direction->1 expected +Infinity, got {right:?}"
+        );
+        let left = builtin_limit(&[
+            expr,
+            val_rule(val_sym("x"), val_int(0)),
+            val_rule(val_sym("Direction"), val_int(-1)),
+        ])
+        .unwrap();
+        assert!(
+            is_neg_inf(&left),
+            "Direction->-1 expected -Infinity, got {left:?}"
+        );
+    }
+
+    #[test]
+    fn test_limit_two_sided_one_over_x_unevaluated() {
+        let expr = div(val_int(1), val_sym("x"));
+        let r = lim(expr, "x", val_int(0));
+        assert!(matches!(&r, Value::Call { head, .. } if head == "Limit"));
+    }
+
     // ── Together tests ──
 
     #[test]
@@ -5329,6 +6057,108 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(&c3, Value::Integer(n) if *n == Integer::from(1)));
+    }
+
+    // ── Series tests (drive the symbolic `Series` builtin directly) ──
+
+    fn series(expr: Value, var: &str, x0: Value, n: i64) -> Value {
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        crate::builtins::symbolic::builtin_series(
+            &[expr, Value::List(vec![val_sym(var), x0, val_int(n)])],
+            &env,
+        )
+        .unwrap()
+    }
+
+    fn series_coeff_at(sd: &Value, k: i64) -> Value {
+        if let Value::SeriesData {
+            coefficients,
+            min_exponent,
+            denominator,
+            ..
+        } = sd
+        {
+            let target = k * i64::from(*denominator);
+            for (i, c) in coefficients.iter().enumerate() {
+                if i64::from(*min_exponent) + i as i64 == target {
+                    return c.clone();
+                }
+            }
+            return val_int(0);
+        }
+        panic!("not a SeriesData: {sd:?}");
+    }
+
+    #[test]
+    fn test_series_exp() {
+        let sd = series(val_call("Exp", vec![val_sym("x")]), "x", val_int(0), 5);
+        assert!((numeric_eval(&series_coeff_at(&sd, 3)).to_f64() - 1.0 / 6.0).abs() < 1e-9);
+        assert!((numeric_eval(&series_coeff_at(&sd, 5)).to_f64() - 1.0 / 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_series_log_one_plus_x() {
+        let sd = series(
+            val_call(
+                "Log",
+                vec![val_call("Plus", vec![val_int(1), val_sym("x")])],
+            ),
+            "x",
+            val_int(0),
+            4,
+        );
+        assert!((numeric_eval(&series_coeff_at(&sd, 1)).to_f64() - 1.0).abs() < 1e-9);
+        assert!((numeric_eval(&series_coeff_at(&sd, 2)).to_f64() + 0.5).abs() < 1e-9);
+        assert!((numeric_eval(&series_coeff_at(&sd, 3)).to_f64() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_series_geometric() {
+        let expr = val_call(
+            "Power",
+            vec![
+                val_call(
+                    "Plus",
+                    vec![
+                        val_int(1),
+                        val_call("Times", vec![val_int(-1), val_sym("x")]),
+                    ],
+                ),
+                val_int(-1),
+            ],
+        );
+        let sd = series(expr, "x", val_int(0), 5);
+        for k in 0..=5 {
+            assert!(
+                (numeric_eval(&series_coeff_at(&sd, k)).to_f64() - 1.0).abs() < 1e-9,
+                "coeff {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_series_sin_over_x() {
+        let expr = val_call(
+            "Divide",
+            vec![val_call("Sin", vec![val_sym("x")]), val_sym("x")],
+        );
+        let sd = series(expr, "x", val_int(0), 4);
+        assert!((numeric_eval(&series_coeff_at(&sd, 0)).to_f64() - 1.0).abs() < 1e-9);
+        assert!(numeric_eval(&series_coeff_at(&sd, 1)).to_f64().abs() < 1e-9);
+        assert!((numeric_eval(&series_coeff_at(&sd, 2)).to_f64() + 1.0 / 6.0).abs() < 1e-9);
+        assert!((numeric_eval(&series_coeff_at(&sd, 4)).to_f64() - 1.0 / 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_series_coefficient_exp_third() {
+        let expr = val_call("Exp", vec![val_sym("x")]);
+        let c = builtin_series_coefficient(&[
+            expr,
+            Value::List(vec![val_sym("x"), val_int(0), val_int(3)]),
+        ])
+        .unwrap();
+        assert!((numeric_eval(&c).to_f64() - 1.0 / 6.0).abs() < 1e-9);
     }
 
     // ══════════════════════ Polynomial algebra builtins ══════════════════════

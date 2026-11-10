@@ -244,7 +244,6 @@ fn test_absolute_time() {
 
 // ── DaysInMonth ──
 
-#[ignore = "DaysInMonth returns unevaluated"]
 #[test]
 fn test_days_in_month_feb_2024() {
     let out = syma_eval("DaysInMonth[{2024, 2}]");
@@ -254,7 +253,6 @@ fn test_days_in_month_feb_2024() {
     );
 }
 
-#[ignore = "DaysInMonth returns unevaluated"]
 #[test]
 fn test_days_in_month_feb_2023() {
     let out = syma_eval("DaysInMonth[{2023, 2}]");
@@ -262,4 +260,78 @@ fn test_days_in_month_feb_2023() {
         out.contains("28"),
         "DaysInMonth[{{2023,2}}] should be 28, got: {out}"
     );
+}
+
+// ── Hardening: AbsoluteTime round-trip ──
+
+#[test]
+fn test_absolute_time_1900_is_zero() {
+    assert_eq!(syma_eval("AbsoluteTime[{1900, 1, 1}]"), "0");
+    assert_eq!(syma_eval("FromAbsoluteTime[0]"), "{1900, 1, 1, 0, 0, 0}");
+}
+
+#[test]
+fn test_absolute_time_from_absolute_time_roundtrip() {
+    let out = syma_eval("FromAbsoluteTime[AbsoluteTime[{2024, 2, 29, 12, 30, 15}]]");
+    assert_eq!(out, "{2024, 2, 29, 12, 30, 15.0}");
+}
+
+// ── Hardening: DateObject arithmetic ──
+
+#[test]
+fn test_date_object_plus_quantity() {
+    let out = syma_eval("DateList[DateObject[{2024, 1, 15}] + Quantity[10, \"Days\"]]");
+    assert_eq!(out, "{2024, 1, 25, 0, 0, 0}");
+}
+
+#[test]
+fn test_date_object_minus_quantity() {
+    let out = syma_eval("DateList[DateObject[{2024, 1, 15}] - Quantity[1, \"Days\"]]");
+    assert_eq!(out, "{2024, 1, 14, 0, 0, 0}");
+}
+
+// ── Hardening: DateDifference returns Quantity ──
+
+#[test]
+fn test_date_difference_is_quantity() {
+    assert_eq!(
+        syma_eval("DateDifference[{2024, 1, 1}, {2024, 1, 11}]"),
+        "Quantity[10, \"Days\"]"
+    );
+    assert_eq!(
+        syma_eval("DateDifference[{2024, 1, 1}, {2024, 1, 2}, \"Hours\"]"),
+        "Quantity[24, \"Hours\"]"
+    );
+}
+
+// ── Hardening: DateString / FromDateString ──
+
+#[test]
+fn test_date_string_list_format() {
+    assert_eq!(
+        syma_eval("DateString[{\"Year\", \"-\", \"Month\", \"-\", \"Day\"}, {2024, 1, 15}]"),
+        "\"2024-01-15\""
+    );
+}
+
+#[test]
+fn test_from_date_string_roundtrip() {
+    let out = syma_eval("DateList[FromDateString[\"2024-02-29T12:30:15\"]]");
+    assert_eq!(out, "{2024, 2, 29, 12, 30, 15.0}");
+}
+
+// ── Hardening: JulianDate / negative years ──
+
+#[test]
+fn test_julian_date_j2000() {
+    assert_eq!(syma_eval("JulianDate[{2000, 1, 1, 12, 0, 0}]"), "2451545.0");
+}
+
+#[test]
+fn test_negative_year_roundtrip() {
+    let out = syma_eval("FromJulianDate[JulianDate[{-44, 3, 15}]]");
+    assert_eq!(out, "{-44, 3, 15, 0, 0, 0}");
+    // JulianDate agrees with FromJulianDate for BC dates too.
+    let jd = syma_eval("JulianDate[{-44, 3, 15}]");
+    assert!(jd.parse::<f64>().unwrap() > 0.0, "got {jd}");
 }

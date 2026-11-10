@@ -13,7 +13,7 @@ fn value_to_pattern_expr(val: &Value) -> Expr {
         Value::Pattern(expr) => expr.clone(),
         Value::List(items) => Expr::List(items.iter().map(value_to_pattern_expr).collect()),
         Value::Call { head, args } => Expr::Call {
-            head: Box::new(Expr::Symbol(head.clone())),
+            head: Box::new(pattern_head_to_expr(head)),
             args: args.iter().map(value_to_pattern_expr).collect(),
         },
         Value::Integer(n) => Expr::Integer(n.clone()),
@@ -27,6 +27,20 @@ fn value_to_pattern_expr(val: &Value) -> Expr {
         Value::Builtin(name, _) => Expr::Symbol(name.clone()),
         _ => Expr::Symbol(val.to_string()),
     }
+}
+
+/// Reconstruct a pattern head from a `Value::Call`'s head string. A call whose
+/// head is itself a pattern (e.g. `f_[u_]`, `_[x]`) is stored with the head's
+/// display text, `"Pattern[f_]"`, so parse it back into a pattern node rather
+/// than treating it as a literal symbol named `Pattern[f_]`.
+fn pattern_head_to_expr(head: &str) -> Expr {
+    if let Some(inner) = head
+        .strip_prefix("Pattern[")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        return crate::eval::convert_blank_pattern(inner);
+    }
+    Expr::Symbol(head.to_string())
 }
 
 /// Function heads that introduce pattern structure even when none of their
@@ -54,7 +68,9 @@ fn contains_pattern_value(val: &Value) -> bool {
         Value::Pattern(_) => true,
         Value::List(items) => items.iter().any(contains_pattern_value),
         Value::Call { head, args } => {
-            is_pattern_head(head) || args.iter().any(contains_pattern_value)
+            is_pattern_head(head)
+                || head.starts_with("Pattern[")
+                || args.iter().any(contains_pattern_value)
         }
         _ => false,
     }

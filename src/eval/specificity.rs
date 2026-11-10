@@ -11,6 +11,20 @@ use super::eval;
 /// Re-export for use in sibling modules.
 pub(crate) use crate::pattern::Bindings;
 
+/// Merge `src` into `dst`, enforcing consistency of repeated parameter names
+/// (e.g. `f[x_, x_]` only matches when both arguments are equal).
+fn merge_bindings_checked(dst: &mut Bindings, src: Bindings) -> bool {
+    for (k, v) in src {
+        match dst.get(&k) {
+            Some(existing) if !existing.struct_eq(&v) => return false,
+            _ => {
+                dst.insert(k, v);
+            }
+        }
+    }
+    true
+}
+
 /// Rank specificity of a function definition's parameter list.
 pub(super) fn specificity(params: &[Expr]) -> usize {
     params.iter().map(specificity_expr).sum()
@@ -230,7 +244,9 @@ fn try_match_params_inner(
             let (inner_pat, guard) = extract_guard_expr(param);
             match match_pattern(inner_pat, arg, Some(&_attr_checker)) {
                 MatchResult::Match(b) => {
-                    bindings.extend(b);
+                    if !merge_bindings_checked(&mut bindings, b) {
+                        return Ok(None);
+                    }
                     if let Some(g) = guard {
                         guard_exprs.push(g.clone());
                     }

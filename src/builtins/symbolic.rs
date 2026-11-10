@@ -36,14 +36,83 @@ pub fn builtin_simplify(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let simplified = simplify_value(&args[0]);
-    // Optional second argument: an option list that may contain
-    // `Assumptions -> a`. When present, refine the result under `a`.
+    // Optional second argument: an `Assumptions -> a` option (or a bare
+    // assumption). When present, refine the result under `a`.
     if args.len() == 2
         && let Some(assumption) = extract_assumptions_option(&args[1])
     {
         return Ok(refine_value(&simplified, &assumption));
     }
+    if args.len() == 2
+        && let Some(assumption) = bare_assumption(&args[1])
+    {
+        return Ok(refine_value(&simplified, &assumption));
+    }
     Ok(simplified)
+}
+
+/// Environment-aware `Simplify`: like [`builtin_simplify`] but also honours the
+/// ambient `$Assumptions` set by `Assuming[...]` (or `$Assumptions = ...`).
+pub fn builtin_simplify_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "Simplify requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let simplified = simplify_value(&args[0]);
+    let assum = effective_assumptions(args.get(1), env);
+    if assumptions_present(&assum) {
+        Ok(refine_value(&simplified, &assum))
+    } else {
+        Ok(simplified)
+    }
+}
+
+/// Combine a caller-supplied second argument with the ambient `$Assumptions`.
+pub fn effective_assumptions(second: Option<&Value>, env: &Env) -> Value {
+    let explicit =
+        second.and_then(|s| extract_assumptions_option(s).or_else(|| bare_assumption(s)));
+    let env_assum = env.get("$Assumptions").unwrap_or_else(no_assumptions);
+    combine_assumptions(explicit.unwrap_or_else(no_assumptions), env_assum)
+}
+
+/// True when `a` carries at least one usable assumption condition.
+pub fn assumptions_present(a: &Value) -> bool {
+    match a {
+        Value::List(items) => !items.is_empty(),
+        Value::Symbol(s) if s == "True" => false,
+        Value::Null => false,
+        _ => true,
+    }
+}
+
+fn no_assumptions() -> Value {
+    Value::List(vec![])
+}
+
+/// Conjoin two assumption values, dropping empty ones.
+pub fn combine_assumptions(a: Value, b: Value) -> Value {
+    if !assumptions_present(&a) {
+        return b;
+    }
+    if !assumptions_present(&b) {
+        return a;
+    }
+    Value::Call {
+        head: "And".to_string(),
+        args: vec![a, b],
+    }
+}
+
+/// Interpret a second argument that is not an `Assumptions -> ...` option as a
+/// bare assumption, e.g. `Simplify[expr, x > 0]`. Option lists (lists of rules
+/// or a bare rule) yield `None`.
+fn bare_assumption(second: &Value) -> Option<Value> {
+    match second {
+        Value::Rule { .. } => None,
+        Value::List(items) if items.iter().any(|i| matches!(i, Value::Rule { .. })) => None,
+        _ => Some(unwrap_held(second)),
+    }
 }
 
 /// Extract the value of an `Assumptions -> a` option from an option argument.
@@ -74,156 +143,27 @@ fn unwrap_held(v: &Value) -> Value {
 
 // ── Refine (used by Simplify with Assumptions) ──
 
-/// Apply assumption-based refinements to an expression. This mirrors the
-/// subset of `Refine` needed by `Simplify[expr, Assumptions -> a]`:
-/// `Sqrt[x^2]`/`Abs[x]`/`Sign[x]` under sign/realness assumptions.
+/// Apply assumption-based refinements to an expression. Delegates to the
+/// `Refine` implementation so `Simplify[expr, Assumptions -> a]` and
+/// `Refine[expr, a]` stay in lock-step.
 fn refine_value(val: &Value, assum: &Value) -> Value {
-    match val {
-        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => {
-            if let Value::Call {
-                head: ph,
-                args: pargs,
-            } = &args[0]
-                && ph == "Power"
-                && pargs.len() == 2
-                && matches!(&pargs[1], Value::Integer(e) if *e == 2)
-            {
-                let var = &pargs[0];
-                if implies_positive(var, assum) || implies_non_negative(var, assum) {
-                    return var.clone();
-                }
-                if implies_real(var, assum) {
-                    return call("Abs", vec![var.clone()]);
-                }
-            }
-            let refined = refine_value(&args[0], assum);
-            if refined != args[0] {
-                call("Sqrt", vec![refined])
-            } else {
-                val.clone()
-            }
-        }
-        Value::Call { head, args } if head == "Abs" && args.len() == 1 => {
-            let var = &args[0];
-            if implies_positive(var, assum) || implies_non_negative(var, assum) {
-                return var.clone();
-            }
-            if implies_negative(var, assum) {
-                return simplify_call("Times", &[Value::Integer(Integer::from(-1)), var.clone()]);
-            }
-            let refined = refine_value(&args[0], assum);
-            if refined != args[0] {
-                call("Abs", vec![refined])
-            } else {
-                val.clone()
-            }
-        }
-        Value::Call { head, args } if head == "Sign" && args.len() == 1 => {
-            let var = &args[0];
-            if implies_positive(var, assum) {
-                return Value::Integer(Integer::from(1));
-            }
-            if implies_negative(var, assum) {
-                return Value::Integer(Integer::from(-1));
-            }
-            let refined = refine_value(&args[0], assum);
-            if refined != args[0] {
-                call("Sign", vec![refined])
-            } else {
-                val.clone()
-            }
-        }
-        Value::Call { head, args } if head == "Conjugate" && args.len() == 1 => {
-            if implies_real(&args[0], assum) {
-                return args[0].clone();
-            }
-            let refined = refine_value(&args[0], assum);
-            if refined != args[0] {
-                call("Conjugate", vec![refined])
-            } else {
-                val.clone()
-            }
-        }
-        Value::List(items) => Value::List(items.iter().map(|v| refine_value(v, assum)).collect()),
-        Value::Call { head, args } => {
-            let refined_args: Vec<Value> = args.iter().map(|a| refine_value(a, assum)).collect();
-            if refined_args.iter().zip(args).any(|(r, a)| r != a) {
-                call(head, refined_args)
-            } else {
-                val.clone()
-            }
-        }
-        _ => val.clone(),
-    }
-}
-
-fn assumption_conditions(assum: &Value) -> Vec<&Value> {
-    match assum {
-        Value::Call { head, args } if head == "And" => {
-            args.iter().flat_map(assumption_conditions).collect()
-        }
-        Value::List(items) => items.iter().flat_map(assumption_conditions).collect(),
-        Value::Symbol(s) if s == "True" => vec![],
-        _ => vec![assum],
-    }
-}
-
-fn assumption_var_is(v: &Value, target: &Value) -> bool {
-    match (v, target) {
-        (Value::Symbol(a), Value::Symbol(b)) => a == b,
-        _ => v == target,
-    }
-}
-
-fn implies_positive(var: &Value, assum: &Value) -> bool {
-    assumption_conditions(assum).iter().any(|cond| {
-        matches!(cond,
-            Value::Call { head, args } if head == "Greater" && args.len() == 2
-                && ((assumption_var_is(&args[0], var)
-                    && matches!(&args[1], Value::Integer(n) if n.is_zero()))
-                    || (assumption_var_is(&args[1], var)
-                        && matches!(&args[0], Value::Integer(n) if n.is_zero()))))
-    })
-}
-
-fn implies_non_negative(var: &Value, assum: &Value) -> bool {
-    assumption_conditions(assum).iter().any(|cond| {
-        matches!(cond,
-            Value::Call { head, args } if head == "GreaterEqual" && args.len() == 2
-                && ((assumption_var_is(&args[0], var)
-                    && matches!(&args[1], Value::Integer(n) if n.is_zero()))
-                    || (assumption_var_is(&args[1], var)
-                        && matches!(&args[0], Value::Integer(n) if n.is_zero()))))
-    }) || implies_positive(var, assum)
-}
-
-fn implies_negative(var: &Value, assum: &Value) -> bool {
-    assumption_conditions(assum).iter().any(|cond| {
-        matches!(cond,
-            Value::Call { head, args } if head == "Less" && args.len() == 2
-                && ((assumption_var_is(&args[0], var)
-                    && matches!(&args[1], Value::Integer(n) if n.is_zero()))
-                    || (assumption_var_is(&args[1], var)
-                        && matches!(&args[0], Value::Integer(n) if n.is_zero()))))
-    })
-}
-
-fn implies_real(var: &Value, assum: &Value) -> bool {
-    assumption_conditions(assum).iter().any(|cond| {
-        matches!(cond,
-            Value::Call { head, args }
-                if head == "Element"
-                    && args.len() == 2
-                    && assumption_var_is(&args[0], var)
-                    && matches!(&args[1], Value::Symbol(d) if d == "Reals"))
-    })
+    crate::builtins::domains::refine_expr(val, assum).unwrap_or_else(|_| val.clone())
 }
 
 fn simplify_value(val: &Value) -> Value {
     match val {
         Value::Call { head, args } => {
             let simplified_args: Vec<Value> = args.iter().map(simplify_value).collect();
-            simplify_call(head, &simplified_args)
+            let result = simplify_call(head, &simplified_args);
+            // Re-canonicalise trig after simplification: the pass above expands
+            // multiple angles to single angles to expose cancellations, and
+            // `canonicalize_trig` folds the surviving terms back to the
+            // lowest-complexity (normally multiple-angle) form.
+            if std::env::var_os("SYMA_NO_TRIGCANON").is_some() {
+                result
+            } else {
+                canonicalize_trig(&result)
+            }
         }
         _ => val.clone(),
     }
@@ -346,7 +286,7 @@ fn reduce_multiple_angle(term: &Value) -> Vec<Value> {
 }
 
 /// Recognize a term of the form `c * f[u]^2`, returning `(c, u, f)`.
-fn trig_square(term: &Value) -> Option<(Integer, Value, &'static str)> {
+fn trig_square_parts(term: &Value) -> Option<(Integer, Value, &'static str)> {
     let (coeff, inner) = match term {
         Value::Call { head, args } if head == "Times" && args.len() == 2 => match &args[0] {
             Value::Integer(c) => (c.clone(), &args[1]),
@@ -371,13 +311,13 @@ fn trig_square(term: &Value) -> Option<(Integer, Value, &'static str)> {
 /// Fold `Sin[u]^2 + Cos[u]^2 -> 1` (with equal coefficients) into the terms.
 fn fold_pythagorean(terms: Vec<Value>) -> Vec<Value> {
     for i in 0..terms.len() {
-        if let Some((ci, ui, fi)) = trig_square(&terms[i]) {
+        if let Some((ci, ui, fi)) = trig_square_parts(&terms[i]) {
             let want = if fi == "Sin" { "Cos" } else { "Sin" };
             for j in 0..terms.len() {
                 if i == j {
                     continue;
                 }
-                if let Some((cj, uj, fj)) = trig_square(&terms[j])
+                if let Some((cj, uj, fj)) = trig_square_parts(&terms[j])
                     && fj == want
                     && ui == uj
                     && ci == cj
@@ -395,6 +335,294 @@ fn fold_pythagorean(terms: Vec<Value>) -> Vec<Value> {
         }
     }
     terms
+}
+
+// ── Trig canonicalization ──
+//
+// Rewrite surviving trig terms toward a canonical, lowest-complexity form:
+//   * `Sin[u]^2 + Cos[u]^2`              → `1`               (Pythagorean)
+//   * `Cos[u]^2 - Sin[u]^2`              → `Cos[2 u]`         (double angle)
+//   * `c - Sin[u]^2` / `c - 2 Sin[u]^2`  → `(c-1) + Cos[u]^2` / `(c-1) + Cos[2 u]`
+//   * `c Sin[u] Cos[u]`                  → `(c/2) Sin[2 u]`
+//   * `a Sin[u]^2 + b Cos[u]^2` with `a == -b` → `a Cos[2 u]`
+//
+// `u` may be any expression (including `k x` or a sum), so `Sin[2 (x + y)]`
+// and friends are handled. Every rewrite strictly shrinks the term count, and
+// the pass is bounded, so it cannot loop.
+
+/// Canonicalise trig subexpressions bottom-up.
+fn canonicalize_trig(val: &Value) -> Value {
+    let val = match val {
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(canonicalize_trig).collect(),
+        },
+        Value::List(items) => Value::List(items.iter().map(canonicalize_trig).collect()),
+        _ => val.clone(),
+    };
+    match &val {
+        Value::Call { head, args } if head == "Plus" => {
+            let mut terms = args.clone();
+            let bound = terms.len() + 1;
+            for _ in 0..bound {
+                match collapse_trig_sum(&terms) {
+                    Some(next) => terms = next,
+                    None => break,
+                }
+            }
+            // Combining like terms lets a collapsed `Cos[2 u]` cancel against a
+            // pre-existing multiple of it (e.g. `-Cos[2 u] + Cos[2 u] → 0`).
+            let terms = fold_integer_constants(combine_like_terms(terms));
+            match terms.len() {
+                0 => Value::Integer(Integer::from(0)),
+                1 => terms.into_iter().next().unwrap(),
+                _ => Value::Call {
+                    head: "Plus".to_string(),
+                    args: terms,
+                },
+            }
+        }
+        Value::Call { head, args } if head == "Times" => {
+            collapse_trig_product(args).unwrap_or_else(|| val.clone())
+        }
+        _ => val,
+    }
+}
+
+/// Sum the integer terms of a `Plus`, leaving the symbolic terms untouched.
+fn fold_integer_constants(terms: Vec<Value>) -> Vec<Value> {
+    let mut sum = Integer::from(0);
+    let mut has_int = false;
+    let mut kept: Vec<Value> = Vec::new();
+    for t in terms {
+        if let Value::Integer(n) = t {
+            sum += n;
+            has_int = true;
+        } else {
+            kept.push(t);
+        }
+    }
+    if has_int {
+        kept.push(Value::Integer(sum));
+    }
+    kept
+}
+
+/// Match a factor of the form `Sin[u]` or `Cos[u]`, returning `(is_sin, u)`.
+fn trig_factor(v: &Value) -> Option<(bool, Value)> {
+    if let Value::Call { head, args } = v
+        && args.len() == 1
+    {
+        if head == "Sin" {
+            return Some((true, args[0].clone()));
+        }
+        if head == "Cos" {
+            return Some((false, args[0].clone()));
+        }
+    }
+    None
+}
+
+/// Decompose a term into `(integer_coeff, is_sin, u)` if it is a numeric
+/// multiple of `Sin[u]^2` or `Cos[u]^2`.
+fn trig_square_term(term: &Value) -> Option<(Integer, bool, Value)> {
+    let (coeff, base) = match term {
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => match &args[0] {
+            Value::Integer(c) => (c.clone(), &args[1]),
+            _ => (Integer::from(1), term),
+        },
+        _ => (Integer::from(1), term),
+    };
+    if let Value::Call { head, args } = base
+        && head == "Power"
+        && args.len() == 2
+        && matches!(&args[1], Value::Integer(n) if *n == 2)
+        && let Some((is_sin, u)) = trig_factor(&args[0])
+    {
+        return Some((coeff, is_sin, u));
+    }
+    None
+}
+
+/// `2 * u`, normalised through `simplify_call` so `2*(2 w) -> 4 w`.
+fn times_two(u: &Value) -> Value {
+    simplify_call("Times", &[int(2), u.clone()])
+}
+
+/// Attach `coeff` to `base`, dropping a unit coefficient.
+fn scale_term(coeff: Integer, base: Value) -> Value {
+    if coeff.is_zero() {
+        Value::Integer(Integer::from(0))
+    } else if coeff == 1 {
+        base
+    } else {
+        simplify_call("Times", &[Value::Integer(coeff), base])
+    }
+}
+
+/// Fold one pair/case in a `Plus` (bounded: each fold shrinks the term list).
+fn collapse_trig_sum(terms: &[Value]) -> Option<Vec<Value>> {
+    let mut squares: Vec<(usize, Integer, bool, Value)> = Vec::new();
+    let mut constant = Integer::from(0);
+    let mut constant_idx: Vec<usize> = Vec::new();
+    for (i, t) in terms.iter().enumerate() {
+        if let Some((c, is_sin, u)) = trig_square_term(t) {
+            squares.push((i, c, is_sin, u));
+        } else if let Value::Integer(n) = t {
+            constant += n;
+            constant_idx.push(i);
+        }
+    }
+
+    // Pairwise: `a Cos[u]^2 + b Sin[u]^2`.
+    for a in 0..squares.len() {
+        for b in (a + 1)..squares.len() {
+            if squares[a].2 == squares[b].2 || !commutative_eq(&squares[a].3, &squares[b].3) {
+                continue;
+            }
+            // Normalise so `cos` indexes the Cos^2 term and `sin` the Sin^2 term.
+            let (cos, sin) = if squares[a].2 {
+                (&squares[b], &squares[a])
+            } else {
+                (&squares[a], &squares[b])
+            };
+            let a_coeff = cos.1.clone(); // coefficient on Cos^2
+            let b_coeff = sin.1.clone(); // coefficient on Sin^2
+            let result = if a_coeff == b_coeff {
+                Some(Value::Integer(a_coeff.clone()))
+            } else if a_coeff == -b_coeff.clone() {
+                Some(scale_term(a_coeff, call("Cos", vec![times_two(&cos.3)])))
+            } else {
+                None
+            };
+            if let Some(result) = result {
+                let mut new_terms: Vec<Value> = terms
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != cos.0 && *k != sin.0)
+                    .map(|(_, t)| t.clone())
+                    .collect();
+                new_terms.push(result);
+                return Some(new_terms);
+            }
+        }
+    }
+
+    // Single square plus a constant. Uses `1 - Sin[u]^2 = Cos[u]^2`,
+    // `1 - 2 Sin[u]^2 = Cos[2 u]`, `2 Cos[u]^2 - 1 = Cos[2 u]` and sign
+    // variants, requiring a constant term so the rewrite can only help.
+    if squares.len() == 1 && !constant_idx.is_empty() {
+        let (idx, coeff, is_sin, u) = &squares[0];
+        let cos2 = call("Cos", vec![times_two(u)]);
+        let (residual, result): (Integer, Option<Value>) = if *is_sin {
+            if *coeff == 2 {
+                (
+                    Integer::from(&constant + 1),
+                    Some(scale_term(Integer::from(-1), cos2)),
+                )
+            } else if *coeff == -2 {
+                (
+                    Integer::from(&constant - 1),
+                    Some(scale_term(Integer::from(1), cos2)),
+                )
+            } else if *coeff == -1 {
+                (
+                    Integer::from(&constant - 1),
+                    Some(simplify_call(
+                        "Power",
+                        &[call("Cos", vec![u.clone()]), int(2)],
+                    )),
+                )
+            } else {
+                (constant.clone(), None)
+            }
+        } else if *coeff == 2 {
+            (
+                Integer::from(&constant + 1),
+                Some(scale_term(Integer::from(1), cos2)),
+            )
+        } else if *coeff == -2 {
+            (
+                Integer::from(&constant - 1),
+                Some(scale_term(Integer::from(-1), cos2)),
+            )
+        } else if *coeff == -1 {
+            (
+                Integer::from(&constant - 1),
+                Some(simplify_call(
+                    "Power",
+                    &[call("Sin", vec![u.clone()]), int(2)],
+                )),
+            )
+        } else {
+            (constant.clone(), None)
+        };
+        if let Some(result) = result {
+            let mut new_terms: Vec<Value> = Vec::new();
+            for (i, t) in terms.iter().enumerate() {
+                if i == *idx || constant_idx.contains(&i) {
+                    continue;
+                }
+                new_terms.push(t.clone());
+            }
+            if !residual.is_zero() {
+                new_terms.push(Value::Integer(residual));
+            }
+            new_terms.push(result);
+            return Some(new_terms);
+        }
+    }
+    None
+}
+
+/// Fold `c * Sin[u] * Cos[u] → (c/2) Sin[2 u]` inside a product.
+fn collapse_trig_product(args: &[Value]) -> Option<Value> {
+    let mut coeff = Rational::from(1);
+    let mut sin_u: Option<Value> = None;
+    let mut cos_u: Option<Value> = None;
+    let mut rest: Vec<Value> = Vec::new();
+    for f in args {
+        match f {
+            Value::Integer(n) => coeff *= Rational::from(n.clone()),
+            Value::Rational(r) => coeff *= (**r).clone(),
+            Value::Real(_) => return None,
+            _ => {
+                if let Some((is_sin, u)) = trig_factor(f) {
+                    if is_sin {
+                        if sin_u.is_none() {
+                            sin_u = Some(u);
+                        } else {
+                            rest.push(f.clone());
+                        }
+                    } else if cos_u.is_none() {
+                        cos_u = Some(u);
+                    } else {
+                        rest.push(f.clone());
+                    }
+                } else {
+                    rest.push(f.clone());
+                }
+            }
+        }
+    }
+    let u = sin_u?;
+    let cu = cos_u?;
+    if !commutative_eq(&u, &cu) || coeff.is_zero() {
+        return None;
+    }
+    let half = coeff / Rational::from(2);
+    let half_value = if half.is_integer() {
+        Value::Integer(half.numer().clone())
+    } else {
+        Value::Rational(Box::new(half))
+    };
+    let sin2 = call("Sin", vec![times_two(&u)]);
+    let mut factors: Vec<Value> = rest;
+    if !matches!(&half_value, Value::Integer(n) if *n == 1) {
+        factors.push(half_value);
+    }
+    factors.push(sin2);
+    Some(simplify_call("Times", &factors))
 }
 
 /// Combine like terms: terms with same base get their coefficients added.
@@ -1181,8 +1409,6 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     lazy_load_d(env)?;
-
-    // Unwrap Hold/Pattern wrappers from HoldAll attribute
     let mut unwrapped: Vec<Value> = args
         .iter()
         .map(|a| match a {
@@ -1302,6 +1528,11 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     {
         // Call eval_d_2 directly with already-unwrapped args
         let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
+        // If the inner derivative did not reduce (e.g. no rule matched in a bare
+        // environment), re-differentiating would loop forever; stop here.
+        if inner_result == concrete {
+            return Ok(inner_result);
+        }
         return eval_d_2(inner_result, var, env);
     }
 
@@ -1400,8 +1631,11 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     })
 }
 
-/// Create a Plus of values (single arg → that arg, two args → Plus[a,b])
+/// Create a Plus of values (single arg → that arg, two args → Plus[a,b]).
+/// Explicit zero terms are dropped so the Rust differentiation fast paths do
+/// not produce `Plus[..., 0]` (which would otherwise fall through the `D` rules).
 fn make_plus(items: Vec<Value>) -> Value {
+    let items: Vec<Value> = items.into_iter().filter(|v| !is_zero(v)).collect();
     match items.len() {
         0 => Value::Integer(rug::Integer::from(0)),
         1 => items.into_iter().next().unwrap(),
@@ -1448,6 +1682,27 @@ fn is_zero(v: &Value) -> bool {
 /// Tries disk first (search_paths, executable-relative), falls back to embedded.
 /// Caches the parsed AST so subsequent calls are cheap.
 fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
+    use std::cell::Cell;
+    thread_local! {
+        // Evaluating the definitions below can re-enter `D` (e.g. while the
+        // LHS `D[c_, x_]` is inspected), so guard against recursive reloads.
+        static LOADING: Cell<bool> = const { Cell::new(false) };
+    }
+    // Already loaded (D.syma replaces the builtin with a `Function`): avoid
+    // re-evaluating the definitions, which would re-enter `D` and diverge.
+    if matches!(env.get("D"), Some(Value::Function(_))) {
+        return Ok(());
+    }
+    if LOADING.with(Cell::get) {
+        return Ok(());
+    }
+    LOADING.with(|c| c.set(true));
+    let result = lazy_load_d_inner(env);
+    LOADING.with(|c| c.set(false));
+    result
+}
+
+fn lazy_load_d_inner(env: &Env) -> Result<(), EvalError> {
     use std::sync::OnceLock;
     static PARSED_AST: OnceLock<Vec<(crate::ast::Expr, bool)>> = OnceLock::new();
 
@@ -1602,7 +1857,11 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     // `1/(1+x^2)`), whereas the hardcoded forms are exact.
     let hardcoded = integrate(&expr, &var_name);
     let hardcoded_ok = !matches!(&hardcoded, Value::Call { head, .. } if head == "Integrate");
-    let mut antideriv = if hardcoded_ok {
+    // The generic Rubi exponential-substitution rule hijacks `x^g(x)` and
+    // returns a spurious (non-)antiderivative, e.g. `x^x` came back as the
+    // integrand itself. Prefer the unevaluated hardcoded form for that shape.
+    let prefer_hardcoded = hardcoded_ok || is_var_power_of_var(&expr, &var_name);
+    let mut antideriv = if prefer_hardcoded {
         Some(hardcoded.clone())
     } else {
         None
@@ -1866,6 +2125,30 @@ fn integrate(expr: &Value, var: &str) -> Value {
                     call("Integrate", vec![expr.clone(), x])
                 }
             }
+            // ∫ b^u dx = b^u / (u' Log[b]) for a constant base `b` and a
+            // linear exponent `u` (e.g. `a^x`, `E^x`, `2^(3 x + 1)`).
+            // Non-linear exponents (`E^(x^2)`) fall through unevaluated.
+            "Power"
+                if args.len() == 2
+                    && is_constant_wrt(&args[0], var)
+                    && !is_constant_wrt(&args[1], var) =>
+            {
+                if let Some((a, _b)) = try_extract_linear(&args[1], var)
+                    && !a.struct_eq(&Value::Integer(Integer::from(0)))
+                {
+                    let log_base = simplify_call("Log", &[args[0].clone()]);
+                    let inv = simplify_call(
+                        "Times",
+                        &[
+                            simplify_call("Power", &[a, Value::Integer(Integer::from(-1))]),
+                            simplify_call("Power", &[log_base, Value::Integer(Integer::from(-1))]),
+                        ],
+                    );
+                    simplify_call("Times", &[expr.clone(), inv])
+                } else {
+                    call("Integrate", vec![expr.clone(), x])
+                }
+            }
             // ∫ dx/(a + b x^2) = 1/Sqrt[a b] ArcTan[Sqrt[b/a] x]
             "Power"
                 if args.len() == 2
@@ -1903,6 +2186,19 @@ fn integrate(expr: &Value, var: &str) -> Value {
                                 "Power",
                                 &[Value::Real(new_exp), Value::Integer(Integer::from(-1))],
                             ),
+                        ],
+                    )
+                }
+                // Symbolic (or rational) constant exponent: ∫ x^e dx =
+                // x^(e+1)/(e+1), valid for e != -1.
+                _ if is_constant_wrt(&args[1], var) => {
+                    let new_exp =
+                        simplify_call("Plus", &[args[1].clone(), Value::Integer(Integer::from(1))]);
+                    simplify_call(
+                        "Times",
+                        &[
+                            simplify_call("Power", &[x.clone(), new_exp.clone()]),
+                            simplify_call("Power", &[new_exp, Value::Integer(Integer::from(-1))]),
                         ],
                     )
                 }
@@ -2240,6 +2536,21 @@ fn is_constant_wrt(val: &Value, var: &str) -> bool {
         Value::Call { args, .. } => args.iter().all(|a| is_constant_wrt(a, var)),
         _ => true,
     }
+}
+
+/// True for `var^g(var)` with a non-constant exponent `g` — the shape
+/// `∫ x^g(x) dx` for which Mathematica (and Rubi) leave the integral
+/// unevaluated (`x^x` being the canonical example).
+fn is_var_power_of_var(expr: &Value, var: &str) -> bool {
+    let x = Value::Symbol(var.to_string());
+    matches!(
+        expr,
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && args[0].struct_eq(&x)
+                && !is_constant_wrt(&args[1], var)
+    )
 }
 
 // ── Factor ──
@@ -3121,6 +3432,62 @@ fn extract_term_coeff_degree(term: &Value, var: &str) -> (Value, i64) {
 
 // ── Series ──
 
+/// Convert a purely numeric expression tree to an exact `Rational`, if
+/// possible (folding `Plus`/`Times`/`Divide`/integer `Power`). Used to keep
+/// series coefficients as `Rational`s rather than `Divide`/`Times` trees.
+fn to_exact_rational(v: &Value) -> Option<Rational> {
+    fn fold(v: &Value) -> Option<Rational> {
+        match v {
+            Value::Integer(n) => Some(Rational::from(n.clone())),
+            Value::Rational(r) => Some((**r).clone()),
+            Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+                let a = fold(&args[0])?;
+                let b = fold(&args[1])?;
+                if b.is_zero() {
+                    return None;
+                }
+                Some(a / b)
+            }
+            Value::Call { head, args } if head == "Times" => {
+                let mut acc = Rational::from(1);
+                for a in args {
+                    acc *= fold(a)?;
+                }
+                Some(acc)
+            }
+            Value::Call { head, args } if head == "Plus" => {
+                let mut acc = Rational::from(0);
+                for a in args {
+                    acc += fold(a)?;
+                }
+                Some(acc)
+            }
+            Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+                let b = fold(&args[0])?;
+                let e = fold(&args[1])?;
+                if e.is_integer() {
+                    let exp = e.numer().to_i32()?;
+                    if (-32..=32).contains(&exp) {
+                        return Some(b.pow(exp));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    fold(v)
+}
+
+/// Normalize a coefficient to an exact `Integer`/`Rational` when it is numeric.
+fn normalize_coefficient(v: &Value) -> Value {
+    match to_exact_rational(v) {
+        Some(r) if *r.denom() == 1 => Value::Integer(r.numer().clone()),
+        Some(r) => Value::Rational(Box::new(r)),
+        None => v.clone(),
+    }
+}
+
 /// Series[expr, {x, x0, n}] — Taylor series expansion.
 pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
@@ -3157,40 +3524,50 @@ pub fn builtin_series(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         got: spec[2].type_name().to_string(),
     })?;
 
-    let _x_sym = Value::Symbol(var.clone());
-    let mut coefficients: Vec<Value> = Vec::new();
-    let mut derivative = args[0].clone();
+    let _ = env;
+    // Use the `symbolicmanip` simplifier/derivative: its `simplify_call` keeps
+    // `a/b` as a `Divide` (needed for L'Hôpital) and `basic_diff` covers the
+    // full arity of `Times`, quotients, and variable exponents.
+    let simp = crate::builtins::symbolicmanip::simplify_call;
 
+    // Synthetic-division coefficient extraction: each coefficient is the limit
+    // of the remainder over (x - x0)^n, kept as an explicit num/den. This keeps
+    // the working expressions small (no exploding derivative denominators).
+    let x_minus_x0 = simp(
+        "Plus",
+        &[
+            Value::Symbol(var.clone()),
+            simp("Times", &[Value::Integer(Integer::from(-1)), x0.clone()]),
+        ],
+    );
+    let rule = Value::Rule {
+        lhs: Box::new(Value::Symbol(var.clone())),
+        rhs: Box::new(x0.clone()),
+        delayed: false,
+    };
+    let mut coefficients: Vec<Value> = Vec::new();
+    let mut num = args[0].clone();
+    let mut den = Value::Integer(Integer::from(1));
     for n in 0..=order {
-        let coeff_val = substitute_and_eval(&derivative, &var, &x0);
-        let factorial_val = Value::Integer(super::math::factorial(n));
-        let coeff = match (&coeff_val, &factorial_val) {
-            (Value::Integer(c), Value::Integer(f)) if !f.is_zero() => {
-                Value::Rational(Box::new(Rational::from((c.clone(), f.clone()))))
-            }
-            (Value::Real(c), Value::Integer(f)) if !f.is_zero() => {
-                let f_f = Float::with_val(DEFAULT_PRECISION, f);
-                Value::Real(c / f_f)
-            }
-            _ => simplify_call(
-                "Times",
-                &[
-                    coeff_val,
-                    simplify_call("Power", &[factorial_val, Value::Integer(Integer::from(-1))]),
-                ],
-            ),
-        };
-        let coeff = combine_plus_terms(coeff);
-        coefficients.push(coeff);
-        derivative = crate::eval::apply_function(
-            &Value::Builtin("D".to_string(), crate::value::BuiltinFn::Env(builtin_d)),
-            &[derivative.clone(), Value::Symbol(var.clone())],
-            env,
-        )
-        .unwrap_or(Value::Call {
-            head: "D".to_string(),
-            args: vec![derivative.clone(), Value::Symbol(var.clone())],
-        });
+        let ratio = simp("Divide", &[num.clone(), den.clone()]);
+        let coeff_val =
+            match crate::builtins::symbolicmanip::builtin_limit(&[ratio.clone(), rule.clone()]) {
+                Ok(v) if !matches!(&v, Value::Call { head, .. } if head == "Limit") => v,
+                _ => substitute_and_eval(&ratio, &var, &x0),
+            };
+        if std::env::var("SYMA_SERIES_DEBUG").is_ok() {
+            eprintln!("SERIES n={n} ratio={ratio:?} coeff={coeff_val:?}");
+        }
+        coefficients.push(normalize_coefficient(&combine_plus_terms(
+            coeff_val.clone(),
+        )));
+        // Advance: num <- num - c_n*den, den <- den*(x - x0).
+        let sub = simp(
+            "Times",
+            &[Value::Integer(Integer::from(-1)), coeff_val, den.clone()],
+        );
+        num = simp("Plus", &[num, sub]);
+        den = simp("Times", &[den, x_minus_x0.clone()]);
     }
 
     Ok(Value::SeriesData {
@@ -3886,6 +4263,99 @@ mod tests {
         }
     }
 
+    /// Structural "does `expr` contain `target` anywhere" check.
+    fn contains(expr: &Value, target: &Value) -> bool {
+        if expr.struct_eq(target) {
+            return true;
+        }
+        match expr {
+            Value::Call { args, .. } => args.iter().any(|a| contains(a, target)),
+            Value::List(items) => items.iter().any(|a| contains(a, target)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_integrate_x_to_the_x_unevaluated() {
+        // Regression: Integrate[x^x, x] used to return the integrand `x^x`
+        // (from a spurious Rubi exponential-substitution match). Mathematica
+        // leaves it unevaluated.
+        let env = env();
+        let expr = call("Power", vec![sym("x"), sym("x")]);
+        let result = builtin_integrate(&[expr.clone(), sym("x")], &env).unwrap();
+        match &result {
+            Value::Call { head, args } if head == "Integrate" => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], expr);
+                assert_eq!(args[1], sym("x"));
+            }
+            _ => panic!("Expected unevaluated Integrate[x^x, x], got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_integrate_symbolic_power_regression() {
+        // Integrate[x^n, x] = x^(n+1)/(n+1)
+        let env = env();
+        let expr = call("Power", vec![sym("x"), sym("n")]);
+        let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
+        let n_plus_1 = call("Plus", vec![sym("n"), int(1)]);
+        assert!(
+            contains(&result, &call("Power", vec![sym("x"), n_plus_1.clone()])),
+            "expected x^(n+1) in {result:?}"
+        );
+        assert!(
+            contains(&result, &call("Power", vec![n_plus_1, int(-1)])),
+            "expected 1/(n+1) in {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_integrate_constant_base_exponential_regression() {
+        // Integrate[a^x, x] = a^x/Log[a]
+        let env = env();
+        let expr = call("Power", vec![sym("a"), sym("x")]);
+        let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
+        assert!(
+            contains(
+                &result,
+                &call("Power", vec![call("Log", vec![sym("a")]), int(-1)])
+            ),
+            "expected Log[a]^-1 in {result:?}"
+        );
+        assert!(
+            contains(&result, &call("Power", vec![sym("a"), sym("x")])),
+            "expected a^x in {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_integrate_reciprocal_quadratic_regression() {
+        // Integrate[1/(1+x^2), x] = ArcTan[x]
+        let env = env();
+        let denom = call("Plus", vec![int(1), call("Power", vec![sym("x"), int(2)])]);
+        let expr = call("Power", vec![denom, int(-1)]);
+        let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
+        assert!(
+            contains(&result, &call("ArcTan", vec![sym("x")])),
+            "expected ArcTan[x] in {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_integrate_definite_x_squared() {
+        // Integrate[x^2, {x, 0, 1}] = 1/3
+        let env = env();
+        let expr = call("Power", vec![sym("x"), int(2)]);
+        let bounds = list(vec![sym("x"), int(0), int(1)]);
+        let result = builtin_integrate(&[expr, bounds], &env).unwrap();
+        let one_third = Value::Rational(Box::new(rug::Rational::from((1, 3))));
+        assert!(
+            result == one_third || result == sym("1/3"),
+            "expected 1/3, got {result:?}"
+        );
+    }
+
     // ── Solve tests ──
 
     /// Extract the solution values from a `{var -> {v1, ...}}` result.
@@ -4082,10 +4552,127 @@ mod tests {
     // ── Simplify tests ──
 
     #[test]
+    fn test_d_constant_smoke() {
+        assert_eq!(eval_src("D[1, {x, 1}]"), int(0));
+        assert_eq!(eval_src("D[x^2, x]"), eval_src("2 x"));
+    }
+
+    #[test]
     fn test_simplify_trivial() {
         // Simplify[x] = x
         let result = builtin_simplify(&[sym("x")]).unwrap();
         assert_eq!(result, sym("x"));
+    }
+
+    /// Evaluate a source string in a fresh, fully-registered environment.
+    fn eval_src(src: &str) -> Value {
+        let e = env();
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let stmts = crate::parser::parse_with_suppress(tokens).unwrap();
+        let mut last = Value::Null;
+        for (expr, _) in stmts {
+            last = crate::eval::eval(&expr, &e).unwrap();
+        }
+        last
+    }
+
+    #[test]
+    fn test_simplify_double_angle_collapse() {
+        // Cos[x]^2 - Sin[x]^2 → Cos[2 x]
+        assert_eq!(
+            eval_src("Simplify[Cos[x]^2 - Sin[x]^2]"),
+            eval_src("Cos[2 x]")
+        );
+        // Sin[x]^2 - Cos[x]^2 → -Cos[2 x]
+        assert_eq!(
+            eval_src("Simplify[Sin[x]^2 - Cos[x]^2]"),
+            eval_src("-Cos[2 x]")
+        );
+        // 2 Sin[x] Cos[x] → Sin[2 x]
+        assert_eq!(eval_src("Simplify[2 Sin[x] Cos[x]]"), eval_src("Sin[2 x]"));
+        // Sin[x] Cos[x] → Sin[2 x]/2
+        assert_eq!(
+            eval_src("Simplify[Sin[x] Cos[x]]"),
+            eval_src("1/2 Sin[2 x]")
+        );
+        // Angles that are themselves sums / multiples.
+        assert_eq!(
+            eval_src("Simplify[2 Sin[x + y] Cos[x + y]]"),
+            eval_src("Sin[2 (x + y)]")
+        );
+        assert_eq!(
+            eval_src("Simplify[Cos[2 x] - (Cos[x]^2 - Sin[x]^2)]"),
+            int(0)
+        );
+    }
+
+    #[test]
+    fn test_simplify_pythagorean() {
+        assert_eq!(eval_src("Simplify[Sin[x]^2 + Cos[x]^2]"), int(1));
+        assert_eq!(eval_src("Simplify[3 Sin[x]^2 + 3 Cos[x]^2]"), int(3));
+        assert_eq!(eval_src("Simplify[1 - Sin[x]^2]"), eval_src("Cos[x]^2"));
+        assert_eq!(eval_src("Simplify[1 - 2 Sin[x]^2]"), eval_src("Cos[2 x]"));
+        assert_eq!(eval_src("Simplify[2 Cos[x]^2 - 1]"), eval_src("Cos[2 x]"));
+    }
+
+    #[test]
+    fn test_simplify_normal_inputs_unchanged() {
+        assert_eq!(eval_src("Simplify[x + x]"), eval_src("2 x"));
+        assert_eq!(eval_src("Simplify[(x^2 - 1)/(x - 1)]"), eval_src("x + 1"));
+        // Sin[2 x] is already canonical — must stay.
+        assert_eq!(eval_src("Simplify[Sin[2 x]]"), eval_src("Sin[2 x]"));
+    }
+
+    #[test]
+    fn test_simplify_no_assumptions_no_overreach() {
+        assert_eq!(eval_src("Simplify[Sqrt[x^2]]"), eval_src("Sqrt[x^2]"));
+        assert_eq!(eval_src("Simplify[Abs[x]]"), eval_src("Abs[x]"));
+        assert_eq!(eval_src("Simplify[Sign[x]]"), eval_src("Sign[x]"));
+        assert_eq!(eval_src("Simplify[Conjugate[x]]"), eval_src("Conjugate[x]"));
+        assert_eq!(eval_src("Simplify[Sqrt[a b]]"), eval_src("Sqrt[a b]"));
+    }
+
+    #[test]
+    fn test_simplify_assumptions_option() {
+        assert_eq!(
+            eval_src("Simplify[Sqrt[x^2], Assumptions -> x > 0]"),
+            sym("x")
+        );
+        assert_eq!(
+            eval_src("Simplify[Sqrt[x^2], Assumptions -> x < 0]"),
+            eval_src("-x")
+        );
+        assert_eq!(
+            eval_src("Simplify[Sqrt[x^2], Assumptions -> Element[x, Reals]]"),
+            eval_src("Abs[x]")
+        );
+        // Bare assumption (no `Assumptions ->`).
+        assert_eq!(eval_src("Simplify[Abs[x], x < 0]"), eval_src("-x"));
+    }
+
+    #[test]
+    fn test_simplify_assuming_feeds_assumptions() {
+        assert_eq!(eval_src("Assuming[x > 0, Simplify[Sqrt[x^2]]]"), sym("x"));
+        assert_eq!(
+            eval_src("Assuming[x < 0, Simplify[Abs[x]]]"),
+            eval_src("-x")
+        );
+        assert_eq!(
+            eval_src("Assuming[Element[x, Reals], Refine[Conjugate[x]]]"),
+            sym("x")
+        );
+    }
+
+    #[test]
+    fn test_simplify_positive_power_and_sqrt_split() {
+        assert_eq!(
+            eval_src("Simplify[Sqrt[a b], Assumptions -> a > 0 && b > 0]"),
+            eval_src("Sqrt[a] Sqrt[b]")
+        );
+        assert_eq!(
+            eval_src("Simplify[(x y)^2, Assumptions -> x > 0 && y > 0]"),
+            eval_src("x^2 y^2")
+        );
     }
 
     // ── CoefficientList ──

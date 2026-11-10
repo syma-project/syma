@@ -1,9 +1,18 @@
+use crate::ast::Expr;
+use crate::env::Env;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
 use std::collections::HashMap;
 
 // ── Helpers ──
+
+/// Seconds from 1900-01-01T00:00:00Z to 1970-01-01T00:00:00Z (25 567 days).
+///
+/// Absolute times are measured from the start of 1900-01-01, matching
+/// Wolfram Language `AbsoluteTime`. The internal calendar helpers work in Unix
+/// seconds; this constant bridges the two origins.
+const ABSOLUTE_TIME_EPOCH_1900: f64 = 2_208_988_800.0;
 
 fn is_leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
@@ -470,7 +479,10 @@ fn month_name(month: i64) -> &'static str {
 // ── Builtin implementations ──
 
 /// `AbsoluteTime[]` or `AbsoluteTime[date]`
-/// Returns Unix timestamp (seconds since 1970-01-01).
+///
+/// Seconds since 1900-01-01T00:00:00Z (Wolfram Language convention). This is
+/// leap-second free: every day is exactly 86400 s. `FromAbsoluteTime` is the
+/// exact inverse.
 pub fn builtin_absolute_time(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
         0 => {
@@ -478,17 +490,46 @@ pub fn builtin_absolute_time(args: &[Value]) -> Result<Value, EvalError> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs_f64();
-            Ok(val_real(now))
+            Ok(val_real(now + ABSOLUTE_TIME_EPOCH_1900))
         }
         1 => {
             let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
             let secs = date_to_unix_seconds(y, m, d, h, mi, s);
-            Ok(val_real(secs))
+            Ok(val_real(secs + ABSOLUTE_TIME_EPOCH_1900))
         }
         _ => Err(EvalError::Error(
             "AbsoluteTime takes 0 or 1 argument".to_string(),
         )),
     }
+}
+
+/// `FromAbsoluteTime[abs]` — inverse of `AbsoluteTime`.
+///
+/// Returns a `{year, month, day, hour, minute, second}` date list.
+pub fn builtin_from_absolute_time(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FromAbsoluteTime requires exactly 1 argument".to_string(),
+        ));
+    }
+    let abs = match &args[0] {
+        Value::Integer(n) => n.to_f64(),
+        Value::Real(r) => r.to_f64(),
+        Value::Rational(r) => r.as_ref().to_f64(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    if !abs.is_finite() {
+        return Err(EvalError::Error(
+            "FromAbsoluteTime requires a finite argument".to_string(),
+        ));
+    }
+    let dt = unix_seconds_to_datetime(abs - ABSOLUTE_TIME_EPOCH_1900);
+    Ok(datetime_to_datelist(dt, 6))
 }
 
 /// `Now` — current date/time as {year, month, day, hour, minute, second}.
@@ -507,46 +548,74 @@ pub fn builtin_now(args: &[Value]) -> Result<Value, EvalError> {
     ]))
 }
 
-/// `DateString[]` or `DateString[spec]` or `DateString[date]` or `DateString[spec, date]`
+/// Default `DateString` rendering: `YYYY-MM-DD HH:MM:SS`.
+fn default_date_string(y: i64, m: i64, d: i64, h: i64, mi: i64, s: f64) -> Value {
+    Value::Str(format!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+        format_year(y),
+        m,
+        d,
+        h,
+        mi,
+        s as i64
+    ))
+}
+
+/// Format a (possibly negative) year with at least four digits and an explicit
+/// sign for BC/proleptic-negative years.
+fn format_year(y: i64) -> String {
+    if y < 0 {
+        format!("-{:04}", y.unsigned_abs())
+    } else {
+        format!("{:04}", y)
+    }
+}
+
+/// True when `v` looks like a format specification rather than a date: a string
+/// or a list whose elements are all strings/symbols.
+fn is_format_spec(v: &Value) -> bool {
+    match v {
+        Value::Str(_) | Value::Symbol(_) => true,
+        Value::List(elems) => {
+            !elems.is_empty()
+                && elems
+                    .iter()
+                    .all(|e| matches!(e, Value::Str(_) | Value::Symbol(_)))
+        }
+        _ => false,
+    }
+}
+
+/// `DateString[]`, `DateString[format]`, `DateString[date]`,
+/// `DateString[format, date]`.
+///
+/// `format` may be a keyword such as `"ISO8601"` or a list of keywords and
+/// literals such as `{"Year", "-", "Month", "-", "Day"}`.
 pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
         0 => {
             let (y, m, d, h, mi, s) = get_current_datetime();
-            Ok(Value::Str(format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                y, m, d, h, mi, s as i64
-            )))
+            Ok(default_date_string(y, m, d, h, mi, s))
         }
         1 => {
-            // A string is interpreted as a format specification; anything else
-            // is interpreted as a date.
-            match &args[0] {
-                Value::Str(spec) => {
-                    let (y, m, d, h, mi, s) = get_current_datetime();
-                    format_date_string(spec, y, m, d, h, mi, s)
-                }
-                other => {
-                    let (y, m, d, h, mi, s) = date_spec_to_datetime(other)?;
-                    Ok(Value::Str(format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        y, m, d, h, mi, s as i64
-                    )))
-                }
+            if is_format_spec(&args[0]) {
+                let (y, m, d, h, mi, s) = get_current_datetime();
+                format_date_spec(&args[0], y, m, d, h, mi, s)
+            } else {
+                let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
+                Ok(default_date_string(y, m, d, h, mi, s))
             }
         }
         2 => {
-            // DateString[spec, date]
-            let spec = match &args[0] {
-                Value::Str(s) => s.clone(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
-                }
-            };
+            // DateString[format, date]
+            if !is_format_spec(&args[0]) {
+                return Err(EvalError::TypeError {
+                    expected: "String or List".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
             let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[1])?;
-            format_date_string(&spec, y, m, d, h, mi, s)
+            format_date_spec(&args[0], y, m, d, h, mi, s)
         }
         _ => Err(EvalError::Error(
             "DateString takes 0, 1, or 2 arguments".to_string(),
@@ -554,6 +623,71 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// Render a format specification (keyword or list of keywords/literals).
+fn format_date_spec(
+    spec: &Value,
+    y: i64,
+    m: i64,
+    d: i64,
+    h: i64,
+    mi: i64,
+    s: f64,
+) -> Result<Value, EvalError> {
+    match spec {
+        Value::Str(tok) => Ok(Value::Str(format_date_token(tok, y, m, d, h, mi, s)?)),
+        Value::Symbol(tok) => Ok(Value::Str(format_date_token(tok, y, m, d, h, mi, s)?)),
+        Value::List(elems) => {
+            let mut out = String::new();
+            for e in elems {
+                match e {
+                    Value::Str(tok) | Value::Symbol(tok) => {
+                        if is_date_token(tok) {
+                            out.push_str(&format_date_token(tok, y, m, d, h, mi, s)?);
+                        } else {
+                            out.push_str(tok);
+                        }
+                    }
+                    other => out.push_str(&other.to_string()),
+                }
+            }
+            Ok(Value::Str(out))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "String or List".to_string(),
+            got: other.type_name().to_string(),
+        }),
+    }
+}
+
+/// True when `tok` names a recognized date/time format element.
+fn is_date_token(tok: &str) -> bool {
+    matches!(
+        tok,
+        "ISO8601"
+            | "ISODate"
+            | "ISODateTime"
+            | "ShortDate"
+            | "LongDate"
+            | "DateTime"
+            | "Time"
+            | "Year"
+            | "Month"
+            | "MonthName"
+            | "MonthNameShort"
+            | "Day"
+            | "DayName"
+            | "DayNameShort"
+            | "DayShortName"
+            | "Hour"
+            | "Hour12"
+            | "Minute"
+            | "Second"
+            | "AMPM"
+    )
+}
+
+/// Backwards-compatible single-token formatter used by tests.
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_date_string(
     spec: &str,
     y: i64,
@@ -563,23 +697,119 @@ fn format_date_string(
     mi: i64,
     s: f64,
 ) -> Result<Value, EvalError> {
+    Ok(Value::Str(format_date_token(spec, y, m, d, h, mi, s)?))
+}
+
+fn format_date_token(
+    spec: &str,
+    y: i64,
+    m: i64,
+    d: i64,
+    h: i64,
+    mi: i64,
+    s: f64,
+) -> Result<String, EvalError> {
+    let year = format_year(y);
+    let dow = day_of_week(y, m, d) as usize;
     let result = match spec {
-        "ISO8601" => format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            y, m, d, h, mi, s as i64
+        "ISO8601" | "ISODateTime" => format!(
+            "{}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            year, m, d, h, mi, s as i64
         ),
-        "ShortDate" => format!("{:02}/{:02}/{:04}", m, d, y),
-        "LongDate" => format!("{}, {:02}, {:04}", month_name(m), d, y),
-        "Year" => format!("{:04}", y),
+        "ISODate" | "ShortDate" => {
+            if spec == "ISODate" {
+                format!("{}-{:02}-{:02}", year, m, d)
+            } else {
+                format!("{:02}/{:02}/{}", m, d, year)
+            }
+        }
+        "LongDate" => format!("{}, {:02}, {}", month_name(m), d, year),
+        "DateTime" => format!(
+            "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+            year, m, d, h, mi, s as i64
+        ),
+        "Time" => format!("{:02}:{:02}:{:02}", h, mi, s as i64),
+        "Year" => year,
         "Month" => format!("{:02}", m),
+        "MonthName" => month_name(m).to_string(),
+        "MonthNameShort" => month_name(m)[..3].to_string(),
         "Day" => format!("{:02}", d),
+        "DayName" => DAY_NAMES[dow].to_string(),
+        "DayNameShort" | "DayShortName" => DAY_SHORT_NAMES[dow].to_string(),
         "Hour" => format!("{:02}", h),
+        "Hour12" => format!("{:02}", h.rem_euclid(24).rem_euclid(12).max(1)),
         "Minute" => format!("{:02}", mi),
         "Second" => format!("{:02}", s as i64),
-        "Time" => format!("{:02}:{:02}:{:02}", h, mi, s as i64),
+        "AMPM" => {
+            if h.rem_euclid(24) < 12 {
+                "AM".to_string()
+            } else {
+                "PM".to_string()
+            }
+        }
         _ => return Err(EvalError::Error(format!("Unknown date format: {}", spec))),
     };
-    Ok(Value::Str(result))
+    Ok(result)
+}
+
+/// `FromDateString[string]` or `FromDateString[string, format]`.
+///
+/// Parses an ISO-8601-style date string (optionally followed by a time and a
+/// trailing `Z`/offset designator) into a `DateObject`. Returns `$Failed`-free
+/// errors for unparseable input.
+pub fn builtin_from_date_string(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "FromDateString requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    // Optional second argument is a format hint; the parser is permissive
+    // enough that only a couple of shapes need explicit handling.
+    if let Some(fmt) = args.get(1) {
+        match fmt {
+            Value::Str(f) | Value::Symbol(f) => {
+                // "Time" parses the string as a time of day on today's date.
+                if f.as_str() == "Time" {
+                    let (h, mi, sec) = parse_time_component(s.trim())?;
+                    let (y, m, d, _, _, _) = get_current_datetime();
+                    return Ok(make_date_object(
+                        y,
+                        m,
+                        d,
+                        h,
+                        mi,
+                        sec,
+                        Value::Str("UTC".to_string()),
+                    ));
+                }
+            }
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "String".to_string(),
+                    got: fmt.type_name().to_string(),
+                });
+            }
+        }
+    }
+    let (y, m, d, h, mi, sec) = parse_iso_date(&s)?;
+    Ok(make_date_object(
+        y,
+        m,
+        d,
+        h,
+        mi,
+        sec,
+        Value::Str("UTC".to_string()),
+    ))
 }
 
 /// `DatePlus[datespec, duration]`
@@ -591,21 +821,100 @@ pub fn builtin_date_plus(args: &[Value]) -> Result<Value, EvalError> {
     }
     let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
 
+    let (amount, unit) = parse_duration_spec(&args[1])?;
+    let seconds_per_unit = unit_to_seconds(&unit)?;
+    let delta = amount * seconds_per_unit;
+
+    // Preserve a `DateObject` result when given one.
+    if is_date_object(&args[0]) {
+        let quantity = Value::Call {
+            head: "Quantity".to_string(),
+            args: vec![val_real(delta), Value::Str("Seconds".to_string())],
+        };
+        return builtin_date_object_plus(&[args[0].clone(), quantity]);
+    }
+
     let input_len = match &args[0] {
         Value::List(elems) => elems.len(),
         _ => 6,
     };
-
-    let (amount, unit) = parse_duration_spec(&args[1])?;
-    let seconds_per_unit = unit_to_seconds(&unit)?;
-    let delta = amount * seconds_per_unit;
 
     let base_secs = date_to_unix_seconds(y, m, d, h, mi, s);
     let result_secs = base_secs + delta;
     Ok(format_datetime_components(result_secs, input_len))
 }
 
-/// `DateDifference[date1, date2]` or `DateDifference[date1, date2, unit]`
+/// Canonical (plural) name for a granularity keyword, or `None` if unknown.
+fn canonical_unit(unit: &str) -> Option<&'static str> {
+    match unit {
+        "Second" | "Seconds" => Some("Seconds"),
+        "Minute" | "Minutes" => Some("Minutes"),
+        "Hour" | "Hours" => Some("Hours"),
+        "Day" | "Days" => Some("Days"),
+        "Week" | "Weeks" => Some("Weeks"),
+        "Month" | "Months" => Some("Months"),
+        "Quarter" | "Quarters" => Some("Quarters"),
+        "Year" | "Years" => Some("Years"),
+        _ => None,
+    }
+}
+
+/// Build a `Quantity[magnitude, unit]`, keeping an exact integer when possible.
+fn quantity_value(magnitude: f64, unit: &str) -> Value {
+    let mag = if magnitude.fract() == 0.0 && magnitude.abs() < 9.0e15 {
+        val_int(magnitude as i64)
+    } else {
+        val_real(magnitude)
+    };
+    Value::Call {
+        head: "Quantity".to_string(),
+        args: vec![mag, Value::Str(unit.to_string())],
+    }
+}
+
+/// Whole calendar months between two `(y, m, d)` dates (signed, truncating the
+/// partial month toward zero), matching `DateDifference[..., "Months"]`.
+fn whole_months_between(dt1: (i64, i64, i64), dt2: (i64, i64, i64)) -> i64 {
+    let mut months = (dt2.0 - dt1.0) * 12 + (dt2.1 - dt1.1);
+    // Drop the trailing partial month when the day-of-month has not been reached.
+    if months > 0 && dt2.2 < dt1.2 {
+        months -= 1;
+    } else if months < 0 && dt2.2 > dt1.2 {
+        months += 1;
+    }
+    months
+}
+
+/// Difference in `unit`, where calendar units (`Months`/`Years`/`Quarters`) are
+/// counted on the calendar and fixed units are derived from the exact elapsed
+/// seconds.
+fn date_difference_in_unit(
+    dt1: (i64, i64, i64, i64, i64, f64),
+    dt2: (i64, i64, i64, i64, i64, f64),
+    unit: &str,
+) -> f64 {
+    let (y1, m1, d1) = (dt1.0, dt1.1, dt1.2);
+    match unit {
+        "Months" => whole_months_between((y1, m1, d1), (dt2.0, dt2.1, dt2.2)) as f64,
+        "Quarters" => whole_months_between((y1, m1, d1), (dt2.0, dt2.1, dt2.2)) as f64 / 3.0,
+        "Years" => {
+            let months = whole_months_between((y1, m1, d1), (dt2.0, dt2.1, dt2.2));
+            months as f64 / 12.0
+        }
+        _ => {
+            let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
+            let secs2 = date_to_unix_seconds(dt2.0, dt2.1, dt2.2, dt2.3, dt2.4, dt2.5);
+            let per = unit_to_seconds(unit).unwrap_or(86400.0);
+            (secs2 - secs1) / per
+        }
+    }
+}
+
+/// `DateDifference[date1, date2]`, `DateDifference[date1, date2, unit]`, or
+/// `DateDifference[date1, date2, {unit1, unit2, ...}]`.
+///
+/// Returns a `Quantity` (or a list of `Quantity`) in the requested
+/// granularity, matching the Wolfram Language.
 pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
@@ -616,25 +925,87 @@ pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
     let dt1 = date_spec_to_datetime(&args[0])?;
     let dt2 = date_spec_to_datetime(&args[1])?;
 
-    let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
-    let secs2 = date_to_unix_seconds(dt2.0, dt2.1, dt2.2, dt2.3, dt2.4, dt2.5);
-    let diff = secs2 - secs1;
+    if args.len() == 2 {
+        let diff = date_difference_in_unit(dt1, dt2, "Days");
+        return Ok(quantity_value(diff, "Days"));
+    }
 
-    if args.len() == 3 {
-        let unit = match &args[2] {
-            Value::Str(s) => s.clone(),
-            Value::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "String".to_string(),
-                    got: args[2].type_name().to_string(),
-                });
+    let unit_arg = &args[2];
+    match unit_arg {
+        Value::Str(unit) | Value::Symbol(unit) => {
+            let Some(unit) = canonical_unit(unit) else {
+                return Err(EvalError::Error(format!("Unknown time unit: {}", unit)));
+            };
+            Ok(quantity_value(
+                date_difference_in_unit(dt1, dt2, unit),
+                unit,
+            ))
+        }
+        Value::List(units) => {
+            let mut out = Vec::with_capacity(units.len());
+            let mut cursor = dt1;
+            for u in units {
+                let unit = match u {
+                    Value::Str(s) | Value::Symbol(s) => canonical_unit(s)
+                        .ok_or_else(|| EvalError::Error(format!("Unknown time unit: {}", s)))?,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".to_string(),
+                            got: u.type_name().to_string(),
+                        });
+                    }
+                };
+                let magnitude = date_difference_in_unit(cursor, dt2, unit);
+                let whole = magnitude.trunc();
+                out.push(quantity_value(whole, unit));
+                // Advance the cursor by the consumed amount so later units are
+                // measured from the remaining span.
+                let consumed = unit_seconds_for_component(unit, whole, cursor, dt2);
+                cursor = consumed.unwrap_or(cursor);
             }
-        };
-        let divisor = unit_to_seconds(&unit)?;
-        Ok(val_real(diff / divisor))
-    } else {
-        Ok(val_real(diff))
+            Ok(Value::List(out))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "String or List".to_string(),
+            got: other.type_name().to_string(),
+        }),
+    }
+}
+
+/// Seconds consumed by `whole` units of `unit` starting at `cursor`.
+fn unit_seconds_for_component(
+    unit: &str,
+    whole: f64,
+    cursor: (i64, i64, i64, i64, i64, f64),
+    _end: (i64, i64, i64, i64, i64, f64),
+) -> Option<(i64, i64, i64, i64, i64, f64)> {
+    if whole == 0.0 {
+        return Some(cursor);
+    }
+    let secs = unit_to_seconds(unit).ok()? * whole;
+    let base = date_to_unix_seconds(cursor.0, cursor.1, cursor.2, cursor.3, cursor.4, cursor.5);
+    Some(unix_seconds_to_datetime(base + secs))
+}
+
+/// True when `v` is a `DateObject` instance.
+fn is_date_object(v: &Value) -> bool {
+    matches!(v, Value::Object { class_name, .. } if class_name == "DateObject")
+}
+
+/// Build a `DateObject` carrying the given components and fixed-offset
+/// time-zone designator.
+fn make_date_object(y: i64, m: i64, d: i64, h: i64, mi: i64, s: f64, tz: Value) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("year".to_string(), val_int(y));
+    fields.insert("month".to_string(), val_int(m));
+    fields.insert("day".to_string(), val_int(d));
+    fields.insert("hour".to_string(), val_int(h));
+    fields.insert("minute".to_string(), val_int(mi));
+    fields.insert("second".to_string(), val_real(s));
+    fields.insert("timezone".to_string(), tz);
+    Value::Object {
+        class_name: "DateObject".to_string(),
+        fields,
     }
 }
 
@@ -649,19 +1020,83 @@ pub fn builtin_date_object(args: &[Value]) -> Result<Value, EvalError> {
             ));
         }
     };
+    Ok(make_date_object(
+        y,
+        m,
+        d,
+        h,
+        mi,
+        s,
+        Value::Str("UTC".to_string()),
+    ))
+}
 
-    let mut fields = HashMap::new();
-    fields.insert("year".to_string(), val_int(y));
-    fields.insert("month".to_string(), val_int(m));
-    fields.insert("day".to_string(), val_int(d));
-    fields.insert("hour".to_string(), val_int(h));
-    fields.insert("minute".to_string(), val_int(mi));
-    fields.insert("second".to_string(), val_real(s));
-    fields.insert("timezone".to_string(), Value::Str("UTC".to_string()));
-    Ok(Value::Object {
-        class_name: "DateObject".to_string(),
-        fields,
-    })
+/// Extract the timezone designator stored on a `DateObject` (defaults to UTC).
+fn date_object_timezone(v: &Value) -> Value {
+    if let Value::Object { fields, .. } = v
+        && let Some(tz) = fields.get("timezone")
+    {
+        return tz.clone();
+    }
+    Value::Str("UTC".to_string())
+}
+
+/// `DateObject ± Quantity[...]` (and `DateObject ± number`): shift the absolute
+/// instant while preserving the fixed-offset timezone designator.
+///
+/// Exposed as `DateObjectPlus` and wired to `Plus` via an upvalue so that it
+/// fires regardless of which module owns the `Plus` builtin.
+pub fn builtin_date_object_plus(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(obj) = args.iter().find(|a| is_date_object(a)) else {
+        // Not an object sum: hand back a canonical `Plus` call.
+        return Ok(Value::Call {
+            head: "Plus".to_string(),
+            args: args.to_vec(),
+        });
+    };
+    let (y, m, d, h, mi, s) = date_spec_to_datetime(obj)?;
+    let tz = date_object_timezone(obj);
+    let mut secs = date_to_unix_seconds(y, m, d, h, mi, s);
+
+    for a in args {
+        if std::ptr::eq(a, obj) || is_date_object(a) {
+            continue;
+        }
+        match a {
+            Value::Call { head, args: qargs } if head == "Quantity" && qargs.len() == 2 => {
+                let magnitude = match &qargs[0] {
+                    Value::Integer(n) => n.to_f64(),
+                    Value::Real(r) => r.to_f64(),
+                    Value::Rational(r) => r.as_ref().to_f64(),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Number".to_string(),
+                            got: other.type_name().to_string(),
+                        });
+                    }
+                };
+                let unit = match &qargs[1] {
+                    Value::Str(u) | Value::Symbol(u) => u.clone(),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".to_string(),
+                            got: other.type_name().to_string(),
+                        });
+                    }
+                };
+                secs += magnitude * unit_to_seconds(&unit)?;
+            }
+            other => {
+                secs += super::to_f64(other).ok_or_else(|| EvalError::TypeError {
+                    expected: "Quantity or Number".to_string(),
+                    got: other.type_name().to_string(),
+                })?;
+            }
+        }
+    }
+
+    let (ny, nm, nd, nh, nmi, ns) = unix_seconds_to_datetime(secs);
+    Ok(make_date_object(ny, nm, nd, nh, nmi, ns, tz))
 }
 
 /// `DateList[]` or `DateList[date]` or `DateList[datespec]`
@@ -737,23 +1172,30 @@ pub fn builtin_day_short_name(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(DAY_SHORT_NAMES[dow as usize].to_string()))
 }
 
-/// `DayCount[date1, date2]` or `DayCount[]`
-/// Number of days between two dates.
+/// Whole days from 1900-01-01 (the `DateValue`/`DayCount` origin), floor
+/// semantics so pre-1900 and fractional instants decompose consistently.
+fn days_since_1900(unix_seconds: f64) -> i64 {
+    ((unix_seconds + ABSOLUTE_TIME_EPOCH_1900) / 86400.0).floor() as i64
+}
+
+/// `DayCount[]`, `DayCount[date]`, or `DayCount[date1, date2]`.
+///
+/// Absolute day number (days since 1900-01-01) or the signed whole-day span
+/// between two dates.
 pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
         0 => {
-            // Absolute day count; floor semantics so pre-1970 stays correct.
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap();
-            Ok(val_int((now.as_secs() as i64).div_euclid(86400)))
+                .unwrap()
+                .as_secs_f64();
+            Ok(val_int(days_since_1900(now)))
         }
         1 => {
             // Days since 1900-01-01.
             let dt = date_spec_to_datetime(&args[0])?;
             let secs = date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5);
-            let base = date_to_unix_seconds(1900, 1, 1, 0, 0, 0.0);
-            Ok(val_int(((secs - base) / 86400.0).round() as i64))
+            Ok(val_int(days_since_1900(secs)))
         }
         2 => {
             let dt1 = date_spec_to_datetime(&args[0])?;
@@ -958,6 +1400,13 @@ pub fn builtin_day_plus(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
+    if is_date_object(&args[0]) {
+        let quantity = Value::Call {
+            head: "Quantity".to_string(),
+            args: vec![val_real(days * 86400.0), Value::Str("Seconds".to_string())],
+        };
+        return builtin_date_object_plus(&[args[0].clone(), quantity]);
+    }
     let input_len = match &args[0] {
         Value::List(elems) => elems.len(),
         _ => 6,
@@ -1185,38 +1634,63 @@ fn timezone_offset(v: &Value) -> Option<f64> {
     }
 }
 
-/// TimeZoneConvert[date, tz] — reinterpret a UTC date in time zone `tz`.
-pub fn builtin_time_zone_convert(args: &[Value]) -> Result<Value, EvalError> {
+/// Read `$TimeZone` (hours from UTC), defaulting to UTC when unset.
+fn env_timezone_offset(env: &Env) -> f64 {
+    env.get("$TimeZone")
+        .and_then(|v| super::to_f64(&v))
+        .unwrap_or(0.0)
+}
+
+/// `TimeZoneConvert[date]` or `TimeZoneConvert[date, tz]`.
+///
+/// Reinterpret `date` (implicitly UTC for a list spec) in time zone `tz`,
+/// using fixed UTC offsets. The one-argument form uses `$TimeZone`.
+pub fn builtin_time_zone_convert(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let uneval = || Value::Call {
         head: "TimeZoneConvert".to_string(),
         args: args.to_vec(),
     };
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 2 {
         return Ok(uneval());
     }
     let Ok(dt) = date_spec_to_datetime(&args[0]) else {
         return Ok(uneval());
     };
-    let Some(off) = timezone_offset(&args[1]) else {
-        return Ok(uneval());
+    let (off, tz_value) = match args.get(1) {
+        Some(tz) => match timezone_offset(tz) {
+            Some(off) => (off, tz.clone()),
+            None => return Ok(uneval()),
+        },
+        None => {
+            let off = env_timezone_offset(env);
+            (off, val_real(off))
+        }
     };
     let secs = date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5) + off * 3600.0;
     let shifted = unix_seconds_to_datetime(secs);
+    if is_date_object(&args[0]) {
+        return Ok(make_date_object(
+            shifted.0, shifted.1, shifted.2, shifted.3, shifted.4, shifted.5, tz_value,
+        ));
+    }
     Ok(datetime_to_datelist(shifted, datelist_len(&args[0]).max(6)))
 }
 
 pub fn register(env: &crate::env::Env) {
-    use super::register_builtin;
+    use super::{register_builtin, register_builtin_env};
     register_builtin(env, "JulianDate", builtin_julian_date);
     register_builtin(env, "FromJulianDate", builtin_from_julian_date);
     register_builtin(env, "DayRange", builtin_day_range);
     register_builtin(env, "DayRound", builtin_day_round);
-    register_builtin(env, "TimeZoneConvert", builtin_time_zone_convert);
+    register_builtin_env(env, "TimeZoneConvert", builtin_time_zone_convert);
     register_builtin(env, "AbsoluteTime", builtin_absolute_time);
+    register_builtin(env, "FromAbsoluteTime", builtin_from_absolute_time);
     register_builtin(env, "Now", builtin_now);
     register_builtin(env, "Today", builtin_today);
     register_builtin(env, "DateString", builtin_date_string);
-    register_builtin(env, "DateList", builtin_date_list);
+    register_builtin(env, "FromDateString", builtin_from_date_string);
+    // `DateList` is owned by `timeseries` (registered later, and it delegates
+    // back here for non-series values).
     register_builtin(env, "DateObject", builtin_date_object);
     register_builtin(env, "DatePlus", builtin_date_plus);
     register_builtin(env, "DayPlus", builtin_day_plus);
@@ -1228,6 +1702,50 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "MonthName", builtin_month_name);
     register_builtin(env, "DaysInMonth", builtin_days_in_month);
     register_builtin(env, "LeapYearQ", builtin_leap_year_q);
+    // `DateObject + Quantity[...]` is dispatched through an upvalue so it works
+    // regardless of which module (this one or `units`) owns the `Plus` builtin.
+    register_builtin(env, "DateObjectPlus", builtin_date_object_plus);
+    env.add_upvalue("DateObject", date_object_plus_upvalue());
+}
+
+/// `HoldPattern[Plus[___, _DateObject, ___]] :> DateObjectPlus[a, d, b]`.
+///
+/// The sequences are named so the rule can reconstruct the original sum for the
+/// helper without re-triggering this upvalue.
+fn date_object_plus_upvalue() -> Value {
+    let seq_a = Expr::BlankNullSequence {
+        name: Some("a".to_string()),
+        type_constraint: None,
+    };
+    let dated = Expr::NamedBlank {
+        name: "d".to_string(),
+        type_constraint: Some("DateObject".to_string()),
+    };
+    let seq_b = Expr::BlankNullSequence {
+        name: Some("b".to_string()),
+        type_constraint: None,
+    };
+    let plus = Expr::Call {
+        head: Box::new(Expr::Symbol("Plus".to_string())),
+        args: vec![seq_a, dated, seq_b],
+    };
+    let lhs = Expr::Call {
+        head: Box::new(Expr::Symbol("HoldPattern".to_string())),
+        args: vec![plus],
+    };
+    let rhs = Expr::Call {
+        head: Box::new(Expr::Symbol("DateObjectPlus".to_string())),
+        args: vec![
+            Expr::Symbol("a".to_string()),
+            Expr::Symbol("d".to_string()),
+            Expr::Symbol("b".to_string()),
+        ],
+    };
+    Value::Rule {
+        lhs: Box::new(Value::Pattern(lhs)),
+        rhs: Box::new(Value::Pattern(rhs)),
+        delayed: true,
+    }
 }
 
 // ── Tests ──
@@ -1388,33 +1906,92 @@ mod tests {
         }
     }
 
+    fn quantity_magnitude(v: &Value) -> f64 {
+        match v {
+            Value::Call { head, args } if head == "Quantity" && args.len() == 2 => {
+                super::super::to_f64(&args[0]).unwrap()
+            }
+            other => panic!("expected Quantity, got {other:?}"),
+        }
+    }
+
+    fn quantity_unit(v: &Value) -> String {
+        match v {
+            Value::Call { head, args } if head == "Quantity" && args.len() == 2 => match &args[1] {
+                Value::Str(u) => u.clone(),
+                other => panic!("expected unit string, got {other:?}"),
+            },
+            other => panic!("expected Quantity, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_builtin_date_difference() {
         let d1 = Value::List(vec![val_int(2024), val_int(1), val_int(1)]);
         let d2 = Value::List(vec![val_int(2024), val_int(1), val_int(11)]);
         let result = builtin_date_difference(&[d1, d2]).unwrap();
-        match result {
-            Value::Real(r) => {
-                let diff = r.to_f64();
-                // 10 days in seconds = 864000
-                assert!((diff - 864000.0).abs() < 1.0);
-            }
-            _ => panic!("Expected Real"),
-        }
+        // Default granularity is days, returned as a Quantity.
+        assert_eq!(quantity_unit(&result), "Days");
+        assert!((quantity_magnitude(&result) - 10.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_builtin_date_difference_with_unit() {
         let d1 = Value::List(vec![val_int(2024), val_int(1), val_int(1)]);
         let d2 = Value::List(vec![val_int(2024), val_int(1), val_int(11)]);
-        let result = builtin_date_difference(&[d1, d2, Value::Str("Days".to_string())]).unwrap();
-        match result {
-            Value::Real(r) => {
-                let diff = r.to_f64();
-                assert!((diff - 10.0).abs() < 0.01);
-            }
-            _ => panic!("Expected Real"),
+        let result =
+            builtin_date_difference(&[d1.clone(), d2.clone(), Value::Str("Days".to_string())])
+                .unwrap();
+        assert_eq!(result, quantity_value(10.0, "Days"));
+
+        // Seconds granularity covers the same span.
+        let secs =
+            builtin_date_difference(&[d1.clone(), d2.clone(), Value::Str("Seconds".to_string())])
+                .unwrap();
+        assert_eq!(secs, quantity_value(864_000.0, "Seconds"));
+
+        // Calendar months, counting complete months.
+        let m = builtin_date_difference(&[d1, d2, Value::Str("Months".to_string())]).unwrap();
+        assert_eq!(m, quantity_value(0.0, "Months"));
+    }
+
+    #[test]
+    fn test_date_difference_all_granularities() {
+        let d1 = Value::List(vec![val_int(2024), val_int(1), val_int(1)]);
+        let d2 = Value::List(vec![val_int(2024), val_int(1), val_int(2)]);
+        for (unit, expected) in [
+            ("Hours", 24.0),
+            ("Minutes", 1440.0),
+            ("Seconds", 86400.0),
+            ("Days", 1.0),
+        ] {
+            let out =
+                builtin_date_difference(&[d1.clone(), d2.clone(), Value::Str(unit.to_string())])
+                    .unwrap();
+            assert_eq!(quantity_unit(&out), unit);
+            assert!(
+                (quantity_magnitude(&out) - expected).abs() < 1e-9,
+                "{unit}: {} != {expected}",
+                quantity_magnitude(&out)
+            );
         }
+
+        // Multi-granularity decomposition.
+        let d3 = Value::List(vec![val_int(2024), val_int(1), val_int(2)]);
+        let out = builtin_date_difference(&[
+            d1,
+            d3,
+            Value::List(vec![
+                Value::Str("Hours".to_string()),
+                Value::Str("Minutes".to_string()),
+            ]),
+        ])
+        .unwrap();
+        let Value::List(parts) = out else {
+            panic!("expected list of quantities")
+        };
+        assert_eq!(parts.len(), 2);
+        assert_eq!(quantity_unit(&parts[0]), "Hours");
     }
 
     #[test]
@@ -1606,7 +2183,7 @@ mod tests {
         // ...and AbsoluteTime accepts the object.
         assert_eq!(
             builtin_absolute_time(&[obj]).unwrap(),
-            val_real(date_to_unix_seconds(2024, 2, 29, 12, 30, 15.0))
+            val_real(date_to_unix_seconds(2024, 2, 29, 12, 30, 15.0) + ABSOLUTE_TIME_EPOCH_1900)
         );
     }
 
@@ -1684,6 +2261,8 @@ mod tests {
 
     #[test]
     fn test_absolute_time_negative_and_roundtrip() {
+        // AbsoluteTime is seconds since 1900-01-01: one second before the Unix
+        // epoch is 2208988799.
         let out = builtin_absolute_time(&[Value::List(vec![
             val_int(1969),
             val_int(12),
@@ -1693,11 +2272,57 @@ mod tests {
             val_int(59),
         ])])
         .unwrap();
-        assert_eq!(out, val_real(-1.0));
+        assert_eq!(out, val_real(ABSOLUTE_TIME_EPOCH_1900 - 1.0));
 
         // Leap-day round-trip.
         let secs = date_to_unix_seconds(1968, 2, 29, 6, 0, 0.0);
         assert_eq!(unix_seconds_to_datetime(secs), (1968, 2, 29, 6, 0, 0.0));
+    }
+
+    #[test]
+    fn test_absolute_time_from_absolute_time_roundtrip() {
+        for date in [
+            vec![val_int(1900), val_int(1), val_int(1)],
+            vec![val_int(1970), val_int(1), val_int(1)],
+            vec![
+                val_int(2024),
+                val_int(2),
+                val_int(29),
+                val_int(12),
+                val_int(30),
+                val_int(15),
+            ],
+            vec![val_int(-44), val_int(3), val_int(15)],
+            vec![
+                val_int(1969),
+                val_int(12),
+                val_int(31),
+                val_int(23),
+                val_int(59),
+                val_int(59),
+            ],
+        ] {
+            let abs = builtin_absolute_time(&[Value::List(date.clone())]).unwrap();
+            let Value::Real(r) = &abs else {
+                panic!("expected Real")
+            };
+            let back = builtin_from_absolute_time(&[abs.clone()]).unwrap();
+            let Value::List(comps) = back else {
+                panic!("expected list")
+            };
+            assert_eq!(
+                (comps[0].clone(), comps[1].clone(), comps[2].clone()),
+                (date[0].clone(), date[1].clone(), date[2].clone()),
+                "roundtrip failed for {date:?} ({})",
+                r.to_f64()
+            );
+        }
+        // 1900-01-01 is absolute time 0.
+        assert_eq!(
+            builtin_absolute_time(&[Value::List(vec![val_int(1900), val_int(1), val_int(1)])])
+                .unwrap(),
+            val_real(0.0)
+        );
     }
 
     #[test]
@@ -1765,18 +2390,329 @@ mod tests {
 
     #[test]
     fn test_time_zone_convert() {
-        let out = builtin_time_zone_convert(&[
-            Value::List(vec![
+        let env = Env::new();
+        let out = builtin_time_zone_convert(
+            &[
+                Value::List(vec![
+                    val_int(2024),
+                    val_int(1),
+                    val_int(1),
+                    val_int(12),
+                    val_int(0),
+                    val_int(0),
+                ]),
+                Value::Str("Asia/Tokyo".to_string()),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(out.to_string(), "{2024, 1, 1, 21, 0, 0}");
+
+        // Numeric fixed offset.
+        let out = builtin_time_zone_convert(
+            &[
+                Value::List(vec![
+                    val_int(2024),
+                    val_int(1),
+                    val_int(1),
+                    val_int(0),
+                    val_int(0),
+                    val_int(0),
+                ]),
+                val_real(-5.0),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(out.to_string(), "{2023, 12, 31, 19, 0, 0}");
+    }
+
+    #[test]
+    fn test_time_zone_convert_uses_dollar_time_zone() {
+        let env = Env::new();
+        env.set("$TimeZone".to_string(), val_real(3.0));
+        let out = builtin_time_zone_convert(
+            &[Value::List(vec![
                 val_int(2024),
                 val_int(1),
                 val_int(1),
-                val_int(12),
+                val_int(10),
                 val_int(0),
                 val_int(0),
-            ]),
-            Value::Str("Asia/Tokyo".to_string()),
+            ])],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(out.to_string(), "{2024, 1, 1, 13, 0, 0}");
+    }
+
+    #[test]
+    fn test_time_zone_convert_preserves_date_object() {
+        let env = Env::new();
+        let obj = builtin_date_object(&[Value::List(vec![
+            val_int(2024),
+            val_int(1),
+            val_int(1),
+            val_int(12),
+            val_int(0),
+            val_int(0),
+        ])])
+        .unwrap();
+        let out =
+            builtin_time_zone_convert(&[obj, Value::Str("Asia/Tokyo".to_string())], &env).unwrap();
+        assert!(is_date_object(&out));
+        let (y, m, d, h, ..) = date_spec_to_datetime(&out).unwrap();
+        assert_eq!((y, m, d, h), (2024, 1, 1, 21));
+    }
+
+    // ── DateObject arithmetic ──
+
+    fn date_obj(y: i64, m: i64, d: i64) -> Value {
+        builtin_date_object(&[Value::List(vec![val_int(y), val_int(m), val_int(d)])]).unwrap()
+    }
+
+    fn qty(n: f64, unit: &str) -> Value {
+        Value::Call {
+            head: "Quantity".to_string(),
+            args: vec![val_real(n), Value::Str(unit.to_string())],
+        }
+    }
+
+    fn ymd(v: &Value) -> (i64, i64, i64) {
+        let (y, m, d, _, _, _) = date_spec_to_datetime(v).unwrap();
+        (y, m, d)
+    }
+
+    #[test]
+    fn test_date_object_plus_quantity_days() {
+        let out = builtin_date_object_plus(&[date_obj(2024, 1, 15), qty(10.0, "Days")]).unwrap();
+        assert!(is_date_object(&out));
+        assert_eq!(ymd(&out), (2024, 1, 25));
+    }
+
+    #[test]
+    fn test_date_object_minus_quantity_and_year_rollover() {
+        // 2023-12-25 + 10 days -> 2024-01-04.
+        let out = builtin_date_object_plus(&[date_obj(2023, 12, 25), qty(10.0, "Days")]).unwrap();
+        assert_eq!(ymd(&out), (2024, 1, 4));
+
+        // Subtract a month worth of seconds.
+        let out = builtin_date_object_plus(&[date_obj(2024, 3, 1), qty(-1.0, "Days")]).unwrap();
+        assert_eq!(ymd(&out), (2024, 2, 29));
+    }
+
+    #[test]
+    fn test_date_object_plus_preserves_timezone() {
+        let obj = date_obj(2024, 1, 15);
+        let out = builtin_date_object_plus(&[obj, qty(1.0, "Days")]).unwrap();
+        let Value::Object { fields, .. } = &out else {
+            panic!("expected DateObject")
+        };
+        assert!(matches!(fields.get("timezone"), Some(Value::Str(s)) if s == "UTC"));
+    }
+
+    #[test]
+    fn test_date_object_plus_upvalue_fires() {
+        // Register into a fresh env and verify the upvalue rewrites a Plus call.
+        let env = Env::new();
+        register(&env);
+        let plus = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![date_obj(2024, 1, 15), qty(5.0, "Days")],
+        };
+        let rules = Value::List(env.all_upvalues());
+        let out = crate::eval::rules::apply_rules_once_pub(&plus, &rules, &env)
+            .unwrap()
+            .expect("upvalue should fire");
+        assert!(is_date_object(&out));
+        assert_eq!(ymd(&out), (2024, 1, 20));
+    }
+
+    #[test]
+    fn test_upvalue_does_not_match_plain_plus() {
+        let env = Env::new();
+        register(&env);
+        let plus = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![val_int(1), val_int(2)],
+        };
+        let rules = Value::List(env.all_upvalues());
+        assert!(
+            crate::eval::rules::apply_rules_once_pub(&plus, &rules, &env)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_date_plus_preserves_date_object() {
+        let out = builtin_date_plus(&[
+            date_obj(2024, 1, 15),
+            Value::List(vec![val_int(10), Value::Str("Days".to_string())]),
         ])
         .unwrap();
-        assert_eq!(out.to_string(), "{2024, 1, 1, 21, 0, 0}");
+        assert!(is_date_object(&out));
+        assert_eq!(ymd(&out), (2024, 1, 25));
+
+        let out = builtin_day_plus(&[date_obj(2024, 1, 15), val_int(-1)]).unwrap();
+        assert!(is_date_object(&out));
+        assert_eq!(ymd(&out), (2024, 1, 14));
+    }
+
+    // ── DateString / FromDateString ──
+
+    #[test]
+    fn test_date_string_list_format() {
+        let date = Value::List(vec![val_int(2024), val_int(1), val_int(15)]);
+        let fmt = Value::List(vec![
+            Value::Str("Year".to_string()),
+            Value::Str("-".to_string()),
+            Value::Str("Month".to_string()),
+            Value::Str("-".to_string()),
+            Value::Str("Day".to_string()),
+        ]);
+        let out = builtin_date_string(&[fmt, date]).unwrap();
+        assert_eq!(out, Value::Str("2024-01-15".to_string()));
+    }
+
+    #[test]
+    fn test_date_string_tokens_and_negative_year() {
+        let date = Value::List(vec![val_int(-44), val_int(3), val_int(15)]);
+        assert_eq!(
+            builtin_date_string(&[Value::Str("ISODate".to_string()), date.clone()]).unwrap(),
+            Value::Str("-0044-03-15".to_string())
+        );
+        assert_eq!(
+            builtin_date_string(&[Value::List(vec![Value::Str("Year".to_string())]), date])
+                .unwrap(),
+            Value::Str("-0044".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_date_string_iso() {
+        let out =
+            builtin_from_date_string(&[Value::Str("2024-02-29T12:30:15".to_string())]).unwrap();
+        assert!(is_date_object(&out));
+        let (y, m, d, h, mi, s) = date_spec_to_datetime(&out).unwrap();
+        assert_eq!((y, m, d, h, mi, s), (2024, 2, 29, 12, 30, 15.0));
+
+        let out = builtin_from_date_string(&[Value::Str("-0044-03-15".to_string())]).unwrap();
+        assert_eq!(ymd(&out), (-44, 3, 15));
+    }
+
+    #[test]
+    fn test_from_date_string_invalid() {
+        assert!(builtin_from_date_string(&[Value::Str("not-a-date".to_string())]).is_err());
+    }
+
+    // ── JulianDate / negative years ──
+
+    #[test]
+    fn test_julian_date_negative_year_roundtrip() {
+        let date = Value::List(vec![val_int(-44), val_int(3), val_int(15)]);
+        let jd = builtin_julian_date(&[date.clone()]).unwrap();
+        let back = builtin_from_julian_date(&[jd]).unwrap();
+        let (y, m, d, _, _, _) = date_spec_to_datetime(&back).unwrap();
+        assert_eq!((y, m, d), (-44, 3, 15));
+    }
+
+    #[test]
+    fn test_julian_date_j2000() {
+        // J2000.0 is 2000-01-01T12:00:00 UTC.
+        let jd = builtin_julian_date(&[Value::List(vec![
+            val_int(2000),
+            val_int(1),
+            val_int(1),
+            val_int(12),
+            val_int(0),
+            val_int(0),
+        ])])
+        .unwrap();
+        let f = super::super::to_f64(&jd).unwrap();
+        assert!((f - 2451545.0).abs() < 1e-9);
+    }
+
+    // ── DayCount / DayRange ──
+
+    #[test]
+    fn test_day_count_absolute_and_span() {
+        let d = |y, m, day| Value::List(vec![val_int(y), val_int(m), val_int(day)]);
+        assert_eq!(builtin_day_count(&[d(1900, 1, 1)]).unwrap(), val_int(0));
+        assert_eq!(
+            builtin_day_count(&[d(1970, 1, 1)]).unwrap(),
+            val_int(25_567)
+        );
+        assert_eq!(
+            builtin_day_count(&[d(2024, 1, 1), d(2024, 1, 11)]).unwrap(),
+            val_int(10)
+        );
+        // Pre-1900 uses floor semantics.
+        assert_eq!(builtin_day_count(&[d(1899, 12, 31)]).unwrap(), val_int(-1));
+    }
+
+    #[test]
+    fn test_day_range_step_and_reverse() {
+        let r = builtin_day_range(&[
+            Value::List(vec![val_int(2024), val_int(1), val_int(1)]),
+            Value::List(vec![val_int(2024), val_int(1), val_int(7)]),
+            val_int(3),
+        ])
+        .unwrap();
+        let Value::List(items) = r else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 3); // Jan 1, 4, 7
+
+        let r = builtin_day_range(&[
+            Value::List(vec![val_int(2024), val_int(1), val_int(3)]),
+            Value::List(vec![val_int(2024), val_int(1), val_int(1)]),
+            val_int(-1),
+        ])
+        .unwrap();
+        let Value::List(items) = r else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn test_day_range_filters_weekday() {
+        // Mondays in Jan 2024: 1, 8, 15, 22, 29.
+        let r = builtin_day_range(&[
+            Value::List(vec![val_int(2024), val_int(1), val_int(1)]),
+            Value::List(vec![val_int(2024), val_int(1), val_int(31)]),
+            val_int(1),
+            Value::Symbol("Monday".to_string()),
+        ])
+        .unwrap();
+        let Value::List(items) = r else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 5);
+        assert_eq!(ymd(&items[0]), (2024, 1, 1));
+    }
+
+    // ── DateObject consistency with DateList ──
+
+    #[test]
+    fn test_date_object_and_date_list_agree() {
+        let list = Value::List(vec![
+            val_int(2024),
+            val_int(6),
+            val_int(15),
+            val_int(8),
+            val_int(45),
+            val_int(30),
+        ]);
+        let obj = builtin_date_object(&[list.clone()]).unwrap();
+        let dl = builtin_date_list(&[obj.clone()]).unwrap();
+        assert_eq!(dl.to_string(), "{2024, 6, 15, 8, 45, 30.0}");
+
+        // AbsoluteTime agrees across the two representations.
+        assert_eq!(
+            builtin_absolute_time(&[obj]).unwrap(),
+            builtin_absolute_time(&[list]).unwrap()
+        );
     }
 }

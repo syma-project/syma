@@ -962,6 +962,30 @@ fn expr_is_one(e: &Expr) -> bool {
     expr_int(e) == Some(1)
 }
 
+/// Integer value of a constant expression, folding literal `Plus`/`Times`
+/// spellings such as `Times[-1, 1]` (from `-1`) or `Times[-1, 2]` (from `-2`).
+fn const_int(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Integer(n) => n.to_i64(),
+        Expr::Real(r) if r.is_integer() => Some(r.to_f64() as i64),
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(h) if h == "Times") => {
+            let mut acc: i64 = 1;
+            for a in args {
+                acc = acc.checked_mul(const_int(a)?)?;
+            }
+            Some(acc)
+        }
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(h) if h == "Plus") => {
+            let mut acc: i64 = 0;
+            for a in args {
+                acc = acc.checked_add(const_int(a)?)?;
+            }
+            Some(acc)
+        }
+        _ => None,
+    }
+}
+
 /// Recognise `expr` as `k^p` for a non-negative integer power `p`.
 fn as_power_of(expr: &Expr, k: &str) -> Option<i64> {
     let p = match expr {
@@ -1064,6 +1088,525 @@ fn faulhaber(p: i64, x: &Expr) -> Option<Expr> {
     }
 }
 
+/// Does `e` mention the iterator symbol `k` anywhere? Mirrors
+/// `dsolve::contains_symbol`, handling the node kinds a summand can contain.
+fn contains_sym(e: &Expr, k: &str) -> bool {
+    match e {
+        Expr::Symbol(s) => s == k,
+        Expr::List(items) => items.iter().any(|i| contains_sym(i, k)),
+        Expr::Call { head, args } => {
+            contains_sym(head, k) || args.iter().any(|a| contains_sym(a, k))
+        }
+        Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs } => {
+            contains_sym(lhs, k) || contains_sym(rhs, k)
+        }
+        _ => false,
+    }
+}
+
+/// Product of `factors`, dropping multiplicative ones.
+fn times_of(mut factors: Vec<Expr>) -> Expr {
+    factors.retain(|f| !expr_is_one(f));
+    match factors.len() {
+        0 => int_expr(1),
+        1 => factors.pop().expect("len checked"),
+        _ => call_expr("Times", factors),
+    }
+}
+
+/// `num / den`, folding trivial `1`s.
+fn div_of(num: Expr, den: Expr) -> Expr {
+    if expr_is_one(&den) {
+        num
+    } else if expr_is_one(&num) {
+        call_expr("Divide", vec![int_expr(1), den])
+    } else {
+        call_expr("Divide", vec![num, den])
+    }
+}
+
+/// Split `expr` into `(constant, core)` where `constant` is free of the
+/// iterator `k` and `core` collects the `k`-dependent factors. Pulling scale
+/// factors out (`Sum[c f[k]]`, `Sum[f[k]/c]`) lets the recognisers below match a
+/// normalised core.
+fn split_coeff(expr: &Expr, k: &str) -> (Expr, Expr) {
+    match expr {
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(h) if h == "Times") => {
+            let mut coeffs = Vec::new();
+            let mut bodies = Vec::new();
+            for a in args {
+                let (c, b) = split_coeff(a, k);
+                if !expr_is_one(&c) {
+                    coeffs.push(c);
+                }
+                if !expr_is_one(&b) {
+                    bodies.push(b);
+                }
+            }
+            (times_of(coeffs), times_of(bodies))
+        }
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide") && args.len() == 2 =>
+        {
+            let (cn, bn) = split_coeff(&args[0], k);
+            let (cd, bd) = split_coeff(&args[1], k);
+            (div_of(cn, cd), div_of(bn, bd))
+        }
+        _ if !contains_sym(expr, k) => (expr.clone(), int_expr(1)),
+        _ => (int_expr(1), expr.clone()),
+    }
+}
+
+/// If `e` is `k` or `k + a` (either order), return `a`.
+fn linear_offset(e: &Expr, k: &str) -> Option<i64> {
+    match e {
+        Expr::Symbol(s) if s == k => Some(0),
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Plus") && args.len() == 2 =>
+        {
+            if matches!(&args[0], Expr::Symbol(s) if s == k) {
+                const_int(&args[1])
+            } else if matches!(&args[1], Expr::Symbol(s) if s == k) {
+                const_int(&args[0])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// If `e` is `c k + b` for integer `c > 0` and integer `b`, return `(c, b)`.
+fn linear_cb(e: &Expr, k: &str) -> Option<(i64, i64)> {
+    match e {
+        Expr::Symbol(s) if s == k => Some((1, 0)),
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Plus") && args.len() == 2 =>
+        {
+            if let Some((c, b)) = linear_cb(&args[0], k).filter(|(c, _)| *c > 0) {
+                return Some((c, b + const_int(&args[1])?));
+            }
+            if let Some((c, b)) = linear_cb(&args[1], k).filter(|(c, _)| *c > 0) {
+                return Some((c, b + const_int(&args[0])?));
+            }
+            None
+        }
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Times") && args.len() == 2 =>
+        {
+            if let Some(c) = const_int(&args[0])
+                && matches!(&args[1], Expr::Symbol(s) if s == k)
+            {
+                return Some((c, 0));
+            }
+            if let Some(c) = const_int(&args[1])
+                && matches!(&args[0], Expr::Symbol(s) if s == k)
+            {
+                return Some((c, 0));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Exact integer value of `v`, without truncating rationals (`to_integer`
+/// truncates, which would misclassify `5/2` as `2`).
+fn exact_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Integer(n) => n.to_i64(),
+        Value::Rational(r) if *r.denom() == 1 => r.numer().to_i64(),
+        _ => None,
+    }
+}
+
+/// Is the numeric value `v` strictly greater than one?
+fn num_gt_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.to_i64().is_none_or(|x| x > 1),
+        Value::Rational(r) => r.to_f64() > 1.0,
+        Value::Real(f) => f.to_f64() > 1.0,
+        _ => false,
+    }
+}
+
+/// Is the value `v` a (real) number?
+fn is_number(v: &Value) -> bool {
+    matches!(v, Value::Integer(_) | Value::Rational(_) | Value::Real(_))
+}
+
+/// Is the value `v` a non-zero (real) number?
+fn is_nonzero_number(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => !n.is_zero(),
+        Value::Rational(r) => !r.is_zero(),
+        Value::Real(f) => !f.is_zero(),
+        _ => false,
+    }
+}
+
+/// Exactly `Zeta[p]` for even `p = 2n <= 20`, as `Pi^p * (num/den)`.
+/// `Zeta[2n] = |B_{2n}| 2^{2n-1} Pi^{2n} / (2n)!`.
+fn zeta_even_exact(p: i64) -> Option<Expr> {
+    let (num, den) = match p {
+        2 => (1, 6),
+        4 => (1, 90),
+        6 => (1, 945),
+        8 => (1, 9450),
+        10 => (1, 93555),
+        12 => (691, 638_512_875),
+        14 => (2, 18_243_225),
+        16 => (3617, 325_641_566_250),
+        18 => (43867, 38_979_295_480_125),
+        20 => (174611, 1_531_329_465_290_625),
+        _ => return None,
+    };
+    let pi_pow = call_expr("Power", vec![Expr::Symbol("Pi".to_string()), int_expr(p)]);
+    Some(call_expr(
+        "Divide",
+        vec![
+            call_expr("Times", vec![int_expr(num), pi_pow]),
+            int_expr(den),
+        ],
+    ))
+}
+
+/// Multiply a closed form by an already-factored constant and evaluate it.
+fn finish_scaled(coeff: &Expr, core: &Expr, env: &Env) -> Result<Value, EvalError> {
+    if expr_is_one(coeff) {
+        crate::eval::eval(core, env)
+    } else {
+        crate::eval::eval(&call_expr("Times", vec![coeff.clone(), core.clone()]), env)
+    }
+}
+
+/// Multiply an already-evaluated (possibly symbolic) value by a constant.
+fn scale_value(coeff: &Expr, v: Value, env: &Env) -> Result<Value, EvalError> {
+    if expr_is_one(coeff) {
+        Ok(v)
+    } else {
+        let cv = crate::eval::eval(coeff, env)?;
+        super::arithmetic::mul_values_public(&cv, &v)
+    }
+}
+
+/// Closed forms for `sum_{j=lo}^{inf} body`, or `None` when unrecognised.
+fn inf_closed_form(body: &Expr, k: &str, lo: i64, env: &Env) -> Result<Option<Value>, EvalError> {
+    if let Some(v) = try_alt_harmonic(body, k, lo, env)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = try_pseries(body, k, lo, env)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = try_factorial_series(body, k, lo, env)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = try_telescoping(body, k, lo, env)? {
+        return Ok(Some(v));
+    }
+    Ok(None)
+}
+
+/// Recognise `body` as `(c k + b)^(-p)` for `c > 0` and a non-zero number `p`,
+/// returning `(c, b, p)`. Accepts `Power[u, -p]` and `Divide[const, u^p]` /
+/// `Divide[const, u]`.
+fn as_neg_power(body: &Expr, k: &str, env: &Env) -> Result<Option<(i64, i64, Expr)>, EvalError> {
+    if let Expr::Call { head, args } = body
+        && matches!(head.as_ref(), Expr::Symbol(h) if h == "Power")
+        && args.len() == 2
+        && let Some((c, b)) = linear_cb(&args[0], k)
+    {
+        let p_expr = call_expr("Times", vec![int_expr(-1), args[1].clone()]);
+        let pv = crate::eval::eval(&p_expr, env)?;
+        if is_nonzero_number(&pv) {
+            return Ok(Some((c, b, p_expr)));
+        }
+    }
+    if let Expr::Call { head, args } = body
+        && matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide")
+        && args.len() == 2
+        && !contains_sym(&args[0], k)
+    {
+        if let Expr::Call { head: dh, args: da } = &args[1]
+            && matches!(dh.as_ref(), Expr::Symbol(h) if h == "Power")
+            && da.len() == 2
+            && let Some((c, b)) = linear_cb(&da[0], k)
+        {
+            let pv = crate::eval::eval(&da[1], env)?;
+            if is_nonzero_number(&pv) {
+                return Ok(Some((c, b, da[1].clone())));
+            }
+        }
+        if let Some((c, b)) = linear_cb(&args[1], k) {
+            return Ok(Some((c, b, int_expr(1))));
+        }
+    }
+    Ok(None)
+}
+
+/// `sum 1/(c k + b)^p` — harmonic divergence, `Zeta[p]`, its even closed forms
+/// and, for `c > 1`, a `HurwitzZeta` reduction.
+fn try_pseries(body: &Expr, k: &str, lo: i64, env: &Env) -> Result<Option<Value>, EvalError> {
+    let Some((c, b, p_expr)) = as_neg_power(body, k, env)? else {
+        return Ok(None);
+    };
+    let pv = crate::eval::eval(&p_expr, env)?;
+    if !is_number(&pv) {
+        return Ok(None);
+    }
+    let start = lo + b;
+    // `1/0^p` contributes an infinity; `p <= 1` diverges.
+    if start <= 0 || !num_gt_one(&pv) {
+        return Ok(Some(Value::Symbol("Infinity".to_string())));
+    }
+    if c != 1 {
+        // sum_k (c k + b)^(-p) = c^(-p) * HurwitzZeta[p, lo + b/c].
+        let shift = call_expr(
+            "Plus",
+            vec![
+                int_expr(lo),
+                call_expr("Divide", vec![int_expr(b), int_expr(c)]),
+            ],
+        );
+        let expr = call_expr(
+            "Divide",
+            vec![
+                call_expr("HurwitzZeta", vec![p_expr.clone(), shift]),
+                call_expr("Power", vec![int_expr(c), p_expr.clone()]),
+            ],
+        );
+        return Ok(Some(crate::eval::eval(&expr, env)?));
+    }
+    let base = if let Some(n) = exact_int(&pv) {
+        if n >= 2 && n % 2 == 0 {
+            match zeta_even_exact(n) {
+                Some(e) => crate::eval::eval(&e, env)?,
+                None => Value::Call {
+                    head: "Zeta".to_string(),
+                    args: vec![pv.clone()],
+                },
+            }
+        } else {
+            Value::Call {
+                head: "Zeta".to_string(),
+                args: vec![pv.clone()],
+            }
+        }
+    } else {
+        Value::Call {
+            head: "Zeta".to_string(),
+            args: vec![pv.clone()],
+        }
+    };
+    if start == 1 {
+        return Ok(Some(base));
+    }
+    // start >= 2: subtract the finite head sum_{j=1}^{start-1} j^(-p).
+    let summand = call_expr(
+        "Power",
+        vec![
+            Expr::Symbol(k.to_string()),
+            call_expr("Times", vec![int_expr(-1), p_expr]),
+        ],
+    );
+    let spec = Expr::List(vec![
+        Expr::Symbol(k.to_string()),
+        int_expr(1),
+        int_expr(start - 1),
+    ]);
+    let partial = crate::eval::eval(&call_expr("Sum", vec![summand, spec]), env)?;
+    Ok(Some(super::arithmetic::sub_values_public(&base, &partial)?))
+}
+
+/// `sum (-1)^(k+c)/(k+a)` = `Log[2]` (up to a phase and a finite head).
+fn try_alt_harmonic(body: &Expr, k: &str, lo: i64, env: &Env) -> Result<Option<Value>, EvalError> {
+    let Expr::Call { head, args } = body else {
+        return Ok(None);
+    };
+    if !matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide") || args.len() != 2 {
+        return Ok(None);
+    }
+    let Expr::Call { head: nh, args: na } = &args[0] else {
+        return Ok(None);
+    };
+    if !matches!(nh.as_ref(), Expr::Symbol(h) if h == "Power") || na.len() != 2 {
+        return Ok(None);
+    }
+    if crate::eval::eval(&na[0], env)? != Value::Integer(Integer::from(-1)) {
+        return Ok(None);
+    }
+    let Some(c) = linear_offset(&na[1], k) else {
+        return Ok(None);
+    };
+    let Some(a) = linear_offset(&args[1], k) else {
+        return Ok(None);
+    };
+    let j0 = lo + a;
+    if j0 <= 0 {
+        return Ok(Some(Value::Symbol("Infinity".to_string())));
+    }
+    // sum_{j=j0}^inf (-1)^j/j = -Log[2] - sum_{j=1}^{j0-1} (-1)^j/j
+    let mut inner = call_expr(
+        "Times",
+        vec![int_expr(-1), call_expr("Log", vec![int_expr(2)])],
+    );
+    if j0 > 1 {
+        let summand = call_expr(
+            "Divide",
+            vec![
+                call_expr("Power", vec![int_expr(-1), Expr::Symbol(k.to_string())]),
+                Expr::Symbol(k.to_string()),
+            ],
+        );
+        let spec = Expr::List(vec![
+            Expr::Symbol(k.to_string()),
+            int_expr(1),
+            int_expr(j0 - 1),
+        ]);
+        let head_sum = call_expr("Sum", vec![summand, spec]);
+        inner = call_expr(
+            "Plus",
+            vec![inner, call_expr("Times", vec![int_expr(-1), head_sum])],
+        );
+    }
+    let phase = call_expr("Power", vec![int_expr(-1), int_expr(c - a)]);
+    Ok(Some(crate::eval::eval(
+        &call_expr("Times", vec![phase, inner]),
+        env,
+    )?))
+}
+
+/// `sum c^k/k!` = `E^c` (up to a finite head and shift phase).
+fn try_factorial_series(
+    body: &Expr,
+    k: &str,
+    lo: i64,
+    env: &Env,
+) -> Result<Option<Value>, EvalError> {
+    let Expr::Call { head, args } = body else {
+        return Ok(None);
+    };
+    if !matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide") || args.len() != 2 {
+        return Ok(None);
+    }
+    let g: &Expr = match &args[1] {
+        Expr::Call { head: dh, args: da }
+            if matches!(dh.as_ref(), Expr::Symbol(s) if s == "Factorial") && da.len() == 1 =>
+        {
+            &da[0]
+        }
+        Expr::Call { head: dh, args: da }
+            if matches!(dh.as_ref(), Expr::Symbol(s) if s == "Power")
+                && da.len() == 2
+                && expr_int(&da[1]) == Some(-1) =>
+        {
+            match &da[0] {
+                Expr::Call { head: fh, args: fa }
+                    if matches!(fh.as_ref(), Expr::Symbol(s) if s == "Factorial")
+                        && fa.len() == 1 =>
+                {
+                    &fa[0]
+                }
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let Some(a) = linear_offset(g, k) else {
+        return Ok(None);
+    };
+    let c = match &args[0] {
+        e if expr_is_one(e) => int_expr(1),
+        Expr::Call { head: nh, args: na }
+            if matches!(nh.as_ref(), Expr::Symbol(s) if s == "Power")
+                && na.len() == 2
+                && linear_offset(&na[1], k) == Some(0)
+                && !contains_sym(&na[0], k) =>
+        {
+            na[0].clone()
+        }
+        _ => return Ok(None),
+    };
+    let m = lo + a;
+    let e_pow = call_expr("Power", vec![Expr::Symbol("E".to_string()), c.clone()]);
+    let mut full = if m <= 0 {
+        e_pow
+    } else {
+        let summand = call_expr(
+            "Divide",
+            vec![
+                call_expr("Power", vec![c.clone(), Expr::Symbol(k.to_string())]),
+                call_expr("Factorial", vec![Expr::Symbol(k.to_string())]),
+            ],
+        );
+        let spec = Expr::List(vec![
+            Expr::Symbol(k.to_string()),
+            int_expr(0),
+            int_expr(m - 1),
+        ]);
+        let partial = call_expr("Sum", vec![summand, spec]);
+        call_expr(
+            "Plus",
+            vec![e_pow, call_expr("Times", vec![int_expr(-1), partial])],
+        )
+    };
+    if a != 0 {
+        full = call_expr(
+            "Times",
+            vec![call_expr("Power", vec![c, int_expr(-a)]), full],
+        );
+    }
+    Ok(Some(crate::eval::eval(&full, env)?))
+}
+
+/// `sum 1/((k+p)(k+q))` (integers `p < q`) via a telescoping harmonic pair.
+fn try_telescoping(body: &Expr, k: &str, lo: i64, env: &Env) -> Result<Option<Value>, EvalError> {
+    let Expr::Call { head, args } = body else {
+        return Ok(None);
+    };
+    if !matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide")
+        || args.len() != 2
+        || contains_sym(&args[0], k)
+    {
+        return Ok(None);
+    }
+    let Expr::Call { head: dh, args: da } = &args[1] else {
+        return Ok(None);
+    };
+    if !matches!(dh.as_ref(), Expr::Symbol(s) if s == "Times") || da.len() != 2 {
+        return Ok(None);
+    }
+    let (Some(x), Some(y)) = (linear_offset(&da[0], k), linear_offset(&da[1], k)) else {
+        return Ok(None);
+    };
+    let (p, q) = if x < y { (x, y) } else { (y, x) };
+    let d = q - p;
+    if d <= 0 {
+        return Ok(None);
+    }
+    let m = lo + p;
+    if m <= 0 {
+        return Ok(Some(Value::Symbol("Infinity".to_string())));
+    }
+    // (1/d) * (H_{m+d-1} - H_{m-1})
+    let h1 = call_expr("HarmonicNumber", vec![int_expr(m + d - 1)]);
+    let h2 = call_expr("HarmonicNumber", vec![int_expr(m - 1)]);
+    let e = call_expr(
+        "Divide",
+        vec![
+            call_expr(
+                "Times",
+                vec![
+                    args[0].clone(),
+                    call_expr("Plus", vec![h1, call_expr("Times", vec![int_expr(-1), h2])]),
+                ],
+            ),
+            int_expr(d),
+        ],
+    );
+    Ok(Some(crate::eval::eval(&e, env)?))
+}
+
 fn unevaluated_term(is_product: bool, expr: &Expr, k: &str, lo: &Expr, hi: &Expr) -> Value {
     let head = if is_product { "Product" } else { "Sum" };
     Value::Call {
@@ -1153,8 +1696,13 @@ fn try_symbolic(
     }
 
     if !is_product {
+        // Factor any constant scale part out of the summand so `c f[k]`,
+        // `f[k]/c` and shift variants reduce to a recognised core.
+        let (coeff, body) = split_coeff(expr, &k);
+        let core: &Expr = &body;
+
         // Faulhaber: sum k^p = S_p(hi) - S_p(lo - 1).
-        if let Some(p) = as_power_of(expr, &k)
+        if let Some(p) = as_power_of(core, &k)
             && let Some(s_hi) = faulhaber(p, &hi_expr)
         {
             let e = if lo == 1 {
@@ -1167,17 +1715,18 @@ fn try_symbolic(
             } else {
                 s_hi
             };
-            return Ok(Some(crate::eval::eval(&e, env)?));
+            return Ok(Some(finish_scaled(&coeff, &e, env)?));
         }
         // Geometric: sum r^k (finite, or infinite when convergent).
-        if let Some(r) = as_geometric(expr, &k) {
+        if let Some(r) = as_geometric(core, &k) {
             if inf {
                 let num = call_expr("Power", vec![r.clone(), int_expr(lo)]);
                 let den = call_expr(
                     "Plus",
                     vec![int_expr(1), call_expr("Times", vec![int_expr(-1), r])],
                 );
-                return Ok(Some(crate::eval::eval(
+                return Ok(Some(finish_scaled(
+                    &coeff,
                     &call_expr("Divide", vec![num, den]),
                     env,
                 )?));
@@ -1202,10 +1751,16 @@ fn try_symbolic(
                 ],
             );
             let den = call_expr("Plus", vec![r, int_expr(-1)]);
-            return Ok(Some(crate::eval::eval(
+            return Ok(Some(finish_scaled(
+                &coeff,
                 &call_expr("Divide", vec![num, den]),
                 env,
             )?));
+        }
+        // Infinite special series: p-series, alternating harmonic, factorial
+        // and telescoping (with the constant factor reattached).
+        if inf && let Some(v) = inf_closed_form(core, &k, lo, env)? {
+            return Ok(Some(scale_value(&coeff, v, env)?));
         }
     }
 
@@ -3699,6 +4254,187 @@ mod tests {
         let env = Env::new();
         crate::builtins::register_builtins(&env);
         env
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = test_env();
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap_or_else(|e| panic!("parse {input}: {e:?}"));
+        crate::eval::eval_program(&ast, &env).unwrap_or_else(|e| panic!("eval {input}: {e:?}"))
+    }
+
+    /// Assert `input` evaluates to `expected`. Falls back to requiring the
+    /// simplified difference to vanish when the two are only equal up to
+    /// automatic simplification.
+    fn sum_eq(input: &str, expected: &str) {
+        let lhs = eval_str(input);
+        let rhs = eval_str(expected);
+        if lhs == rhs {
+            return;
+        }
+        let diff = eval_str(&format!("Simplify[({input}) - ({expected})]"));
+        let s = format!("{diff}");
+        let stripped: String = s.chars().filter(|c| !" {},".contains(*c)).collect();
+        assert!(
+            !stripped.is_empty() && stripped.chars().all(|c| c == '0'),
+            "`{input}` should equal `{expected}`, got residual `{s}`"
+        );
+    }
+
+    // ── Infinite Sum closed forms ──
+
+    #[test]
+    fn test_sum_inf_pseries_even() {
+        sum_eq("Sum[1/k^2, {k, 1, Infinity}]", "Pi^2/6");
+        sum_eq("Sum[1/k^4, {k, 1, Infinity}]", "Pi^4/90");
+        sum_eq("Sum[1/k^6, {k, 1, Infinity}]", "Pi^6/945");
+    }
+
+    #[test]
+    fn test_sum_inf_pseries_odd_is_zeta() {
+        assert_eq!(
+            eval_str("Sum[1/k^3, {k, 1, Infinity}]"),
+            Value::Call {
+                head: "Zeta".to_string(),
+                args: vec![int(3)],
+            }
+        );
+        // Finite head `k` from 2: Zeta[3] - 1 (kept symbolic).
+        assert_eq!(
+            eval_str("Sum[1/k^3, {k, 2, Infinity}]"),
+            Value::Call {
+                head: "Plus".to_string(),
+                args: vec![
+                    Value::Call {
+                        head: "Zeta".to_string(),
+                        args: vec![int(3)],
+                    },
+                    int(-1),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_sum_inf_pseries_rational() {
+        assert_eq!(
+            eval_str("Sum[1/k^(5/2), {k, 1, Infinity}]"),
+            Value::Call {
+                head: "Zeta".to_string(),
+                args: vec![Value::Rational(Box::new(rug::Rational::from((5, 2))))],
+            }
+        );
+    }
+
+    #[test]
+    fn test_sum_inf_harmonic_diverges() {
+        assert_eq!(
+            eval_str("Sum[1/k, {k, 1, Infinity}]"),
+            Value::Symbol("Infinity".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sum_inf_alternating_harmonic() {
+        sum_eq("Sum[(-1)^(k+1)/k, {k, 1, Infinity}]", "Log[2]");
+    }
+
+    #[test]
+    fn test_sum_inf_factorial() {
+        sum_eq("Sum[1/k!, {k, 0, Infinity}]", "E");
+        sum_eq("Sum[x^k/k!, {k, 0, Infinity}]", "E^x");
+        // From k = 1: E - 1.
+        sum_eq("Sum[1/k!, {k, 1, Infinity}]", "E - 1");
+    }
+
+    #[test]
+    fn test_sum_inf_telescoping() {
+        sum_eq("Sum[1/(k (k + 1)), {k, 1, Infinity}]", "1");
+        sum_eq("Sum[1/(k (k + 2)), {k, 1, Infinity}]", "3/4");
+        sum_eq("Sum[1/(k (k - 1)), {k, 2, Infinity}]", "1");
+        sum_eq("Sum[1/((k - 2) (k + 1)), {k, 3, Infinity}]", "11/18");
+        // A factor is zero at `k = 1`, so the sum diverges.
+        assert_eq!(
+            eval_str("Sum[1/(k (k - 1)), {k, 1, Infinity}]"),
+            Value::Symbol("Infinity".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sum_inf_geometric() {
+        sum_eq("Sum[r^k, {k, 0, Infinity}]", "1/(1 - r)");
+        sum_eq("Sum[a r^k, {k, 0, Infinity}]", "a/(1 - r)");
+        sum_eq("Sum[1/2^k, {k, 1, Infinity}]", "1");
+        sum_eq("Sum[r^k, {k, 2, Infinity}]", "r^2/(1 - r)");
+    }
+
+    #[test]
+    fn test_sum_inf_scale_and_shift() {
+        sum_eq("Sum[2/k^2, {k, 1, Infinity}]", "Pi^2/3");
+        sum_eq("Sum[c/k^2, {k, 1, Infinity}]", "c Pi^2/6");
+        sum_eq("Sum[1/k^2/2, {k, 1, Infinity}]", "Pi^2/12");
+        // Shifted index: sum_{k>=1} 1/(k+1)^2 == Zeta[2] - 1.
+        sum_eq("Sum[1/(k + 1)^2, {k, 1, Infinity}]", "Pi^2/6 - 1");
+        sum_eq("Sum[1/(k + 1), {k, 0, Infinity}]", "Infinity");
+        sum_eq("Sum[1/(k - 1)^2, {k, 2, Infinity}]", "Pi^2/6");
+        assert_eq!(
+            eval_str("Sum[1/(k - 1)^2, {k, 0, Infinity}]"),
+            Value::Symbol("Infinity".to_string())
+        );
+    }
+
+    /// Numeric comparison with tolerance (for results that reduce to
+    /// `HurwitzZeta`/reals rather than exact closed forms).
+    fn sum_n_eq(input: &str, expected: &str) {
+        let d = eval_str(&format!("N[({input}) - ({expected})]"));
+        let r = match d {
+            Value::Real(f) => f.to_f64(),
+            Value::Integer(n) => n.to_f64(),
+            other => panic!("`{input}` vs `{expected}`: non-numeric residual {other}"),
+        };
+        assert!(r.abs() < 1e-8, "`{input}` != `{expected}` (residual {r})");
+    }
+
+    #[test]
+    fn test_sum_inf_scaled_argument() {
+        sum_n_eq("Sum[1/(2 k + 1)^2, {k, 1, Infinity}]", "Pi^2/8 - 1");
+        sum_n_eq("Sum[1/(2 k)^2, {k, 1, Infinity}]", "Pi^2/24");
+        sum_n_eq("Sum[1/(2 k + 1)^3, {k, 1, Infinity}]", "7 Zeta[3]/8 - 1");
+    }
+
+    #[test]
+    fn test_sum_inf_positive_power_diverges() {
+        // `sum k^s` with `s > 0` diverges; `s = 3/2` is not Faulhaber-handled.
+        assert_eq!(
+            eval_str("Sum[k^(3/2), {k, 1, Infinity}]"),
+            Value::Symbol("Infinity".to_string())
+        );
+        assert_eq!(
+            eval_str("Sum[Power[k, 1/2], {k, 1, Infinity}]"),
+            Value::Symbol("Infinity".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sum_inf_unrecognised_stays_symbolic() {
+        assert_eq!(
+            eval_str("Sum[Sin[k]/k^2, {k, 1, Infinity}]"),
+            eval_str("Sum[Sin[k]/k^2, {k, 1, Infinity}]")
+        );
+        // Guard against silently wrong values: must not have collapsed.
+        let v = eval_str("Sum[Sin[k]/k^2, {k, 1, Infinity}]");
+        assert!(matches!(v, Value::Call { ref head, .. } if head == "Sum"));
+    }
+
+    #[test]
+    fn test_sum_finite_unchanged() {
+        assert_eq!(eval_str("Sum[k, {k, 1, 10}]"), int(55));
+        assert_eq!(eval_str("Sum[k^2, {k, 1, 4}]"), int(30));
+        sum_eq("Sum[k^3, {k, 1, 5}]", "225");
+        // Finite symbolic upper bound still uses Faulhaber.
+        sum_eq("Sum[k^2, {k, 1, n}]", "n (n + 1) (2 n + 1)/6");
+        // Finite geometric with a scale factor.
+        sum_eq("Sum[2 * 3^k, {k, 0, 3}]", "80");
     }
 
     // ── Map tests ──

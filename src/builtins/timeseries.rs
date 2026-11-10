@@ -263,14 +263,24 @@ pub fn builtin_moving_median(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(items.windows(n).map(median_value).collect()))
 }
 
-/// MovingMap[f, series, n] — map `f` over every length-`n` window.
+/// MovingMap[f, series, n] / [f, series, n, align] — map `f` over every
+/// length-`n` window. `align` (`Right` default, `Left`, `Center`, or a 1-based
+/// element index) selects which window element supplies the result's time.
 pub fn builtin_moving_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
+    if args.len() != 3 && args.len() != 4 {
         return uneval("MovingMap", args);
     }
     let n = match args[2].to_integer() {
         Some(n) if n > 0 => n as usize,
         _ => return uneval("MovingMap", args),
+    };
+    let align = if args.len() == 4 {
+        match Align::from_value(&args[3]) {
+            Some(a) => a,
+            None => return uneval("MovingMap", args),
+        }
+    } else {
+        Align::Right
     };
     let head = as_series(&args[1])
         .map(|(h, _)| h.to_string())
@@ -285,9 +295,7 @@ pub fn builtin_moving_map(args: &[Value], env: &Env) -> Result<Value, EvalError>
     for window in pairs.windows(n) {
         let vals: Vec<Value> = window.iter().filter_map(pair_value).cloned().collect();
         let r = apply_function(&args[0], &[Value::List(vals)], env)?;
-        let t = window
-            .last()
-            .and_then(pair_time)
+        let t = pair_time(&window[align.index(n)])
             .cloned()
             .unwrap_or(Value::Null);
         out.push(Value::List(vec![t, r]));
@@ -392,6 +400,539 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
     super::association::builtin_values(args)
 }
 
+// ── Alignment ───────────────────────────────────────────────────────────────
+
+/// Which element of a sliding window a moving result is anchored to.
+#[derive(Clone, Copy)]
+enum Align {
+    /// Anchor to the window's last element (Wolfram default).
+    Right,
+    /// Anchor to the window's first element.
+    Left,
+    /// Anchor to the window's middle element.
+    Center,
+    /// Anchor to a 1-based element index, clamped to the window.
+    Index(usize),
+}
+
+impl Align {
+    fn from_value(v: &Value) -> Option<Align> {
+        match v {
+            Value::Symbol(s) => match s.as_str() {
+                "Right" => Some(Align::Right),
+                "Left" => Some(Align::Left),
+                "Center" => Some(Align::Center),
+                _ => None,
+            },
+            Value::Integer(k) if *k >= 1 => Some(Align::Index(k.to_usize().unwrap_or(1))),
+            _ => None,
+        }
+    }
+
+    fn index(self, len: usize) -> usize {
+        match self {
+            Align::Right => len - 1,
+            Align::Left => 0,
+            Align::Center => len / 2,
+            Align::Index(k) => (k - 1).min(len - 1),
+        }
+    }
+}
+
+// ── Threading / mapping ─────────────────────────────────────────────────────
+
+/// TimeSeriesThread[f, {ts1, ts2, ...}] — combine series pointwise. Only times
+/// present in every series are kept, and `f` is applied to the sequence of
+/// values at each such time.
+pub fn builtin_time_series_thread(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesThread", args);
+    }
+    let Value::List(sers) = &args[1] else {
+        return uneval("TimeSeriesThread", args);
+    };
+    if sers.is_empty() {
+        return uneval("TimeSeriesThread", args);
+    }
+    let head = as_series(&sers[0])
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| "TimeSeries".to_string());
+    let mut all: Vec<Vec<Value>> = Vec::with_capacity(sers.len());
+    for s in sers {
+        match pairs_from_data(s) {
+            Some(pairs) => all.push(pairs),
+            None => return uneval("TimeSeriesThread", args),
+        }
+    }
+    let mut out = Vec::new();
+    for p in &all[0] {
+        let Some(t) = pair_time(p).cloned() else {
+            continue;
+        };
+        let mut vals = Vec::with_capacity(all.len());
+        let mut present = true;
+        for other in &all {
+            match other.iter().find(|q| pair_time(q) == Some(&t)) {
+                Some(q) => vals.push(pair_value(q).cloned().unwrap_or(Value::Null)),
+                None => {
+                    present = false;
+                    break;
+                }
+            }
+        }
+        if present {
+            let r = apply_function(&args[0], &vals, env)?;
+            out.push(Value::List(vec![t, r]));
+        }
+    }
+    out.sort_by(time_cmp);
+    Ok(make_series(&head, out))
+}
+
+/// TimeSeriesMap[f, series] — apply `f` to each value, keeping the times.
+pub fn builtin_time_series_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesMap", args);
+    }
+    let head = as_series(&args[1])
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| "TimeSeries".to_string());
+    let Some(pairs) = pairs_from_data(&args[1]) else {
+        return uneval("TimeSeriesMap", args);
+    };
+    let mut out = Vec::with_capacity(pairs.len());
+    for p in &pairs {
+        let Some(t) = pair_time(p).cloned() else {
+            continue;
+        };
+        let v = pair_value(p).cloned().unwrap_or(Value::Null);
+        let r = apply_function(&args[0], &[v], env)?;
+        out.push(Value::List(vec![t, r]));
+    }
+    Ok(make_series(&head, out))
+}
+
+// ── Mutation-style edits ────────────────────────────────────────────────────
+
+/// Order two pairs by their numeric time (non-numeric times compare equal).
+fn time_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (time_f64(a), time_f64(b)) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// TimeSeriesInsert[series, {t, v}] — insert or overwrite the point at time `t`.
+pub fn builtin_time_series_insert(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesInsert", args);
+    }
+    let Some((head, pairs)) = as_series(&args[0]) else {
+        return uneval("TimeSeriesInsert", args);
+    };
+    let Some(point) = pair_from(&args[1]) else {
+        return uneval("TimeSeriesInsert", args);
+    };
+    let head = head.to_string();
+    let Some(t) = pair_time(&point).cloned() else {
+        return uneval("TimeSeriesInsert", args);
+    };
+    let mut out: Vec<Value> = pairs.clone();
+    if let Some(pos) = out.iter().position(|p| pair_time(p) == Some(&t)) {
+        out[pos] = point;
+    } else {
+        out.push(point);
+        out.sort_by(time_cmp);
+    }
+    Ok(make_series(&head, out))
+}
+
+/// TimeSeriesDelete[series, t] (or a list of times) — drop points at time `t`.
+pub fn builtin_time_series_delete(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesDelete", args);
+    }
+    let Some((head, pairs)) = as_series(&args[0]) else {
+        return uneval("TimeSeriesDelete", args);
+    };
+    let targets: Vec<&Value> = match &args[1] {
+        Value::List(ts) => ts.iter().collect(),
+        other => vec![other],
+    };
+    let head = head.to_string();
+    let out = pairs
+        .iter()
+        .filter(|p| !targets.iter().any(|t| pair_time(p) == Some(*t)))
+        .cloned()
+        .collect();
+    Ok(make_series(&head, out))
+}
+
+/// TimeSeriesShift[series, dt] — translate every time by `dt`.
+pub fn builtin_time_series_shift(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesShift", args);
+    }
+    let Some((head, pairs)) = as_series(&args[0]) else {
+        return uneval("TimeSeriesShift", args);
+    };
+    let Some(dt) = super::to_f64(&args[1]) else {
+        return uneval("TimeSeriesShift", args);
+    };
+    let times: Vec<f64> = pairs.iter().filter_map(time_f64).collect();
+    if times.len() != pairs.len() {
+        return uneval("TimeSeriesShift", args);
+    }
+    let head = head.to_string();
+    let out = pairs
+        .iter()
+        .zip(times)
+        .map(|(p, t)| {
+            Value::List(vec![
+                num(t + dt),
+                pair_value(p).cloned().unwrap_or(Value::Null),
+            ])
+        })
+        .collect();
+    Ok(make_series(&head, out))
+}
+
+/// TimeSeriesRescale[series, {tmin, tmax}] — linearly map the time range onto
+/// `[tmin, tmax]`.
+pub fn builtin_time_series_rescale(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return uneval("TimeSeriesRescale", args);
+    }
+    let Some((head, pairs)) = as_series(&args[0]) else {
+        return uneval("TimeSeriesRescale", args);
+    };
+    let Value::List(bounds) = &args[1] else {
+        return uneval("TimeSeriesRescale", args);
+    };
+    if bounds.len() != 2 {
+        return uneval("TimeSeriesRescale", args);
+    }
+    let (Some(lo), Some(hi)) = (super::to_f64(&bounds[0]), super::to_f64(&bounds[1])) else {
+        return uneval("TimeSeriesRescale", args);
+    };
+    let times: Vec<f64> = pairs.iter().filter_map(time_f64).collect();
+    if times.len() != pairs.len() || times.is_empty() {
+        return uneval("TimeSeriesRescale", args);
+    }
+    let tmin = times.iter().copied().fold(f64::INFINITY, f64::min);
+    let tmax = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let head = head.to_string();
+    let out = pairs
+        .iter()
+        .zip(times)
+        .map(|(p, t)| {
+            let nt = if (tmax - tmin).abs() < f64::EPSILON {
+                lo
+            } else {
+                lo + (t - tmin) / (tmax - tmin) * (hi - lo)
+            };
+            Value::List(vec![num(nt), pair_value(p).cloned().unwrap_or(Value::Null)])
+        })
+        .collect();
+    Ok(make_series(&head, out))
+}
+
+// ── Correlation lists ───────────────────────────────────────────────────────
+
+/// Autocorrelations of `values` for lags `0..=kmax`, normalized by the sum of
+/// squared deviations (so lag 0 is 1).
+fn autocorrelations(values: &[f64], kmax: usize) -> Vec<f64> {
+    let n = values.len();
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let denom: f64 = values.iter().map(|x| (x - mean) * (x - mean)).sum();
+    (0..=kmax)
+        .map(|l| {
+            if l == 0 {
+                1.0
+            } else if denom == 0.0 {
+                0.0
+            } else {
+                (0..n - l)
+                    .map(|i| (values[i] - mean) * (values[i + l] - mean))
+                    .sum::<f64>()
+                    / denom
+            }
+        })
+        .collect()
+}
+
+/// Partial autocorrelations via the Durbin–Levinson recursion.
+fn partial_autocorrelations(values: &[f64], kmax: usize) -> Vec<f64> {
+    let r = autocorrelations(values, kmax);
+    let mut prev = vec![0.0f64; kmax + 1];
+    let mut out = vec![1.0f64];
+    for k in 1..=kmax {
+        let mut numer = r[k];
+        let mut denom = 1.0;
+        for j in 1..k {
+            numer -= prev[j] * r[k - j];
+            denom -= prev[j] * r[j];
+        }
+        let phikk = if denom.abs() < f64::EPSILON {
+            0.0
+        } else {
+            numer / denom
+        };
+        out.push(phikk);
+        let mut phi = vec![0.0f64; kmax + 1];
+        for j in 1..k {
+            phi[j] = prev[j] - phikk * prev[k - j];
+        }
+        phi[k] = phikk;
+        prev = phi;
+    }
+    out
+}
+
+/// Parse a series (or list) into its numeric value sequence.
+fn series_values(v: &Value) -> Option<Vec<f64>> {
+    let pairs = pairs_from_data(v)?;
+    pairs
+        .iter()
+        .map(|p| pair_value(p).and_then(super::to_f64))
+        .collect()
+}
+
+fn parse_kmax(v: Option<&Value>, n: usize) -> Option<usize> {
+    match v {
+        None => Some(n.saturating_sub(1)),
+        Some(x) => x.to_integer().and_then(|k| {
+            if k < 0 {
+                None
+            } else {
+                Some((k as usize).min(n.saturating_sub(1)))
+            }
+        }),
+    }
+}
+
+/// AutocorrelationList[series] / [series, kmax] — lag-`0..kmax` autocorrelations.
+pub fn builtin_autocorrelation_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return uneval("AutocorrelationList", args);
+    }
+    let Some(values) = series_values(&args[0]) else {
+        return uneval("AutocorrelationList", args);
+    };
+    if values.len() < 2 {
+        return uneval("AutocorrelationList", args);
+    }
+    let Some(kmax) = parse_kmax(args.get(1), values.len()) else {
+        return uneval("AutocorrelationList", args);
+    };
+    Ok(Value::List(
+        autocorrelations(&values, kmax)
+            .into_iter()
+            .map(num)
+            .collect(),
+    ))
+}
+
+/// PartialCorrelationList[series] / [series, kmax] — partial autocorrelations.
+pub fn builtin_partial_correlation_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return uneval("PartialCorrelationList", args);
+    }
+    let Some(values) = series_values(&args[0]) else {
+        return uneval("PartialCorrelationList", args);
+    };
+    if values.len() < 2 {
+        return uneval("PartialCorrelationList", args);
+    }
+    let Some(kmax) = parse_kmax(args.get(1), values.len()) else {
+        return uneval("PartialCorrelationList", args);
+    };
+    Ok(Value::List(
+        partial_autocorrelations(&values, kmax)
+            .into_iter()
+            .map(num)
+            .collect(),
+    ))
+}
+
+// ── Linear processes ────────────────────────────────────────────────────────
+
+/// A coefficient argument is a list of numbers, or a single number.
+fn coef_list(v: &Value) -> Option<Vec<f64>> {
+    match v {
+        Value::List(items) => items.iter().map(super::to_f64).collect(),
+        other => super::to_f64(other).map(|x| vec![x]),
+    }
+}
+
+/// Draw one standard-normal variate via the Box–Muller transform.
+fn std_normal(rng: &mut fastrand::Rng) -> f64 {
+    let u1 = rng.f64().max(f64::MIN_POSITIVE);
+    let u2 = rng.f64();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// Build a `TimeSeries` of `values` sampled at times `1..=n`.
+fn sample_series(values: Vec<f64>) -> Value {
+    let pairs = values
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| Value::List(vec![int(i as i64 + 1), num(x)]))
+        .collect();
+    make_series("TimeSeries", pairs)
+}
+
+/// Parse the `(variance, n)` tail shared by the process samplers.
+fn parse_process_tail(args: &[Value]) -> Option<(f64, usize)> {
+    let v = super::to_f64(&args[args.len() - 2]).filter(|v| *v >= 0.0)?;
+    let n = args[args.len() - 1]
+        .to_integer()
+        .filter(|n| *n > 0)
+        .map(|n| n as usize)?;
+    Some((v, n))
+}
+
+/// ARProcess[{a1, ..., ap}, variance, n] — sample an AR(p) process.
+pub fn builtin_ar_process(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return uneval("ARProcess", args);
+    }
+    let Some(a) = coef_list(&args[0]) else {
+        return uneval("ARProcess", args);
+    };
+    let Some((v, n)) = parse_process_tail(args) else {
+        return uneval("ARProcess", args);
+    };
+    let sd = v.sqrt();
+    let values = super::random::with_rng(|rng| {
+        let mut xs = vec![0.0f64; n];
+        for t in 0..n {
+            let mut val = sd * std_normal(rng);
+            for (j, &aj) in a.iter().enumerate() {
+                if t > j {
+                    val += aj * xs[t - 1 - j];
+                }
+            }
+            xs[t] = val;
+        }
+        xs
+    });
+    Ok(sample_series(values))
+}
+
+/// MAProcess[{b1, ..., bq}, variance, n] — sample an MA(q) process.
+pub fn builtin_ma_process(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return uneval("MAProcess", args);
+    }
+    let Some(b) = coef_list(&args[0]) else {
+        return uneval("MAProcess", args);
+    };
+    let Some((v, n)) = parse_process_tail(args) else {
+        return uneval("MAProcess", args);
+    };
+    let sd = v.sqrt();
+    let values = super::random::with_rng(|rng| {
+        let e: Vec<f64> = (0..n).map(|_| sd * std_normal(rng)).collect();
+        let mut xs = vec![0.0f64; n];
+        for t in 0..n {
+            let mut val = e[t];
+            for (j, &bj) in b.iter().enumerate() {
+                if t > j {
+                    val += bj * e[t - 1 - j];
+                }
+            }
+            xs[t] = val;
+        }
+        xs
+    });
+    Ok(sample_series(values))
+}
+
+/// ARMAProcess[{a1, ...}, {b1, ...}, variance, n] — sample an ARMA(p, q).
+pub fn builtin_arma_process(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 4 {
+        return uneval("ARMAProcess", args);
+    }
+    let (Some(a), Some(b)) = (coef_list(&args[0]), coef_list(&args[1])) else {
+        return uneval("ARMAProcess", args);
+    };
+    let Some((v, n)) = parse_process_tail(args) else {
+        return uneval("ARMAProcess", args);
+    };
+    let sd = v.sqrt();
+    let values = super::random::with_rng(|rng| {
+        let mut es = vec![0.0f64; n];
+        let mut xs = vec![0.0f64; n];
+        for t in 0..n {
+            let et = sd * std_normal(rng);
+            es[t] = et;
+            let mut val = et;
+            for (j, &aj) in a.iter().enumerate() {
+                if t > j {
+                    val += aj * xs[t - 1 - j];
+                }
+            }
+            for (j, &bj) in b.iter().enumerate() {
+                if t > j {
+                    val += bj * es[t - 1 - j];
+                }
+            }
+            xs[t] = val;
+        }
+        xs
+    });
+    Ok(sample_series(values))
+}
+
+// ── Statistics / accessor wrappers ──────────────────────────────────────────
+
+/// Mean[series] — arithmetic mean of the values; otherwise the list/distribution
+/// implementation.
+pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1
+        && is_series(&args[0])
+        && let Some(pairs) = pairs_from_data(&args[0])
+    {
+        let vals: Vec<Value> = pairs.iter().filter_map(pair_value).cloned().collect();
+        if vals.is_empty() {
+            return uneval("Mean", args);
+        }
+        return super::statistics::builtin_mean(&[Value::List(vals)]);
+    }
+    super::statistics::builtin_mean(args)
+}
+
+/// Variance[series] — sample variance of the values; otherwise the
+/// list/distribution implementation.
+pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1
+        && is_series(&args[0])
+        && let Some(pairs) = pairs_from_data(&args[0])
+    {
+        let vals: Vec<Value> = pairs.iter().filter_map(pair_value).cloned().collect();
+        if vals.is_empty() {
+            return uneval("Variance", args);
+        }
+        return super::statistics::builtin_variance(&[Value::List(vals)]);
+    }
+    super::statistics::builtin_variance(args)
+}
+
+/// DateList[series] — the times of a series; otherwise the calendar
+/// implementation.
+pub fn builtin_date_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1
+        && is_series(&args[0])
+        && let Some(pairs) = pairs_from_data(&args[0])
+    {
+        return Ok(Value::List(
+            pairs.iter().filter_map(pair_time).cloned().collect(),
+        ));
+    }
+    super::calendar::builtin_date_list(args)
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -404,12 +945,30 @@ pub fn register(env: &Env) {
     register_builtin(env, "MovingMedian", builtin_moving_median);
     register_builtin(env, "TimeSeriesWindow", builtin_time_series_window);
     register_builtin(env, "TimeSeriesResample", builtin_time_series_resample);
-    // `Normal`/`Values` are also association accessors; these registrations
-    // run last so the series-aware wrappers take precedence, while still
-    // delegating non-series arguments.
+    register_builtin(env, "TimeSeriesInsert", builtin_time_series_insert);
+    register_builtin(env, "TimeSeriesDelete", builtin_time_series_delete);
+    register_builtin(env, "TimeSeriesShift", builtin_time_series_shift);
+    register_builtin(env, "TimeSeriesRescale", builtin_time_series_rescale);
+    register_builtin(env, "AutocorrelationList", builtin_autocorrelation_list);
+    register_builtin(
+        env,
+        "PartialCorrelationList",
+        builtin_partial_correlation_list,
+    );
+    register_builtin(env, "ARProcess", builtin_ar_process);
+    register_builtin(env, "MAProcess", builtin_ma_process);
+    register_builtin(env, "ARMAProcess", builtin_arma_process);
+    // `Normal`/`Values`/`Mean`/`Variance`/`DateList` overlap other modules;
+    // these registrations run last so the series-aware wrappers take
+    // precedence, while still delegating non-series arguments.
     register_builtin(env, "Normal", builtin_normal);
     register_builtin(env, "Values", builtin_values);
+    register_builtin(env, "Mean", builtin_mean);
+    register_builtin(env, "Variance", builtin_variance);
+    register_builtin(env, "DateList", builtin_date_list);
     register_builtin_env(env, "MovingMap", builtin_moving_map);
+    register_builtin_env(env, "TimeSeriesThread", builtin_time_series_thread);
+    register_builtin_env(env, "TimeSeriesMap", builtin_time_series_map);
 }
 
 #[cfg(test)]
@@ -736,5 +1295,252 @@ mod tests {
     fn test_moving_median_inapplicable() {
         let v = builtin_moving_median(&[Value::Symbol("z".to_string()), iv(2)]).unwrap();
         assert!(matches!(&v, Value::Call { head, .. } if head == "MovingMedian"));
+    }
+
+    // ── Threading / mapping ──
+
+    fn head_of(v: &Value) -> &str {
+        match v {
+            Value::Call { head, .. } => head.as_str(),
+            _ => "<atom>",
+        }
+    }
+
+    #[test]
+    fn test_thread_combines_shared_times() {
+        let v = eval_str(
+            "TimeSeriesThread[Plus, {TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], \
+             TimeSeries[{{2, 10}, {3, 20}}]}]",
+        );
+        assert_eq!(pairs_of(&v), vec![(2.0, 12.0), (3.0, 23.0)]);
+    }
+
+    #[test]
+    fn test_thread_single_series_applies_f() {
+        let v = eval_str("TimeSeriesThread[Sin, {TimeSeries[{{1, 0}, {2, 0}}]}]");
+        let ps = pairs_of(&v);
+        assert_eq!(ps.len(), 2);
+        approx(ps[0].1, 0.0);
+    }
+
+    #[test]
+    fn test_thread_inapplicable() {
+        let v = eval_str("TimeSeriesThread[Plus, 5]");
+        assert_eq!(head_of(&v), "TimeSeriesThread");
+    }
+
+    #[test]
+    fn test_map_applies_to_values() {
+        let v = eval_str("TimeSeriesMap[Sqrt, TimeSeries[{1, 4, 9}]]");
+        let ps = pairs_of(&v);
+        assert_eq!(ps, vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    }
+
+    #[test]
+    fn test_map_inapplicable() {
+        let v = eval_str("TimeSeriesMap[Sqrt, 5]");
+        assert_eq!(head_of(&v), "TimeSeriesMap");
+    }
+
+    // ── Mutation-style edits ──
+
+    #[test]
+    fn test_insert_new_point_keeps_order() {
+        let v = eval_str("TimeSeriesInsert[TimeSeries[{{1, 1}, {3, 3}}], {2, 2}]");
+        assert_eq!(pairs_of(&v), vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    }
+
+    #[test]
+    fn test_insert_overwrites_existing() {
+        let v = eval_str("TimeSeriesInsert[TimeSeries[{{1, 1}, {2, 2}}], {2, 9}]");
+        assert_eq!(pairs_of(&v), vec![(1.0, 1.0), (2.0, 9.0)]);
+    }
+
+    #[test]
+    fn test_insert_inapplicable() {
+        let v = builtin_time_series_insert(&[iv(5), pair(1, 1)]).unwrap();
+        assert_eq!(head_of(&v), "TimeSeriesInsert");
+    }
+
+    #[test]
+    fn test_delete_point() {
+        let v = eval_str("TimeSeriesDelete[TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], 2]");
+        assert_eq!(pairs_of(&v), vec![(1.0, 1.0), (3.0, 3.0)]);
+    }
+
+    #[test]
+    fn test_delete_list_of_times() {
+        let v = eval_str("TimeSeriesDelete[TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], {1, 3}]");
+        assert_eq!(pairs_of(&v), vec![(2.0, 2.0)]);
+    }
+
+    #[test]
+    fn test_shift_times() {
+        let v = eval_str("TimeSeriesShift[TimeSeries[{{1, 10}, {2, 20}}], 5]");
+        assert_eq!(pairs_of(&v), vec![(6.0, 10.0), (7.0, 20.0)]);
+    }
+
+    #[test]
+    fn test_rescale_times() {
+        let v = eval_str("TimeSeriesRescale[TimeSeries[{{1, 10}, {3, 30}}], {0, 100}]");
+        assert_eq!(pairs_of(&v), vec![(0.0, 10.0), (100.0, 30.0)]);
+    }
+
+    #[test]
+    fn test_rescale_constant_times() {
+        let v = eval_str("TimeSeriesRescale[TimeSeries[{{2, 10}, {2, 20}}], {0, 100}]");
+        assert_eq!(pairs_of(&v), vec![(0.0, 10.0), (0.0, 20.0)]);
+    }
+
+    // ── MovingMap alignment ──
+
+    #[test]
+    fn test_moving_map_align_variants() {
+        let r = eval_str("MovingMap[Mean, TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], 2, Right]");
+        assert_eq!(
+            pairs_of(&r).iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![2.0, 3.0]
+        );
+        let l = eval_str("MovingMap[Mean, TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], 2, Left]");
+        assert_eq!(
+            pairs_of(&l).iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![1.0, 2.0]
+        );
+        let c =
+            eval_str("MovingMap[Mean, TimeSeries[{{1, 1}, {2, 2}, {3, 3}, {4, 4}}], 3, Center]");
+        assert_eq!(
+            pairs_of(&c).iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn test_moving_map_alignment_default_right() {
+        let v = eval_str("MovingMap[Mean, TimeSeries[{{1, 1}, {2, 2}, {3, 3}}], 2]");
+        assert_eq!(
+            pairs_of(&v).iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn test_moving_map_bad_alignment() {
+        let v = eval_str("MovingMap[Mean, TimeSeries[{1, 2, 3}], 2, Middle]");
+        assert_eq!(head_of(&v), "MovingMap");
+    }
+
+    // ── Correlation lists ──
+
+    #[test]
+    fn test_autocorrelation_list() {
+        let v = eval_str("AutocorrelationList[TimeSeries[{1, 2, 3, 4, 5}], 2]");
+        let Value::List(items) = v else {
+            panic!("expected list");
+        };
+        approx(as_f(&items[0]), 1.0);
+        approx(as_f(&items[1]), 0.4);
+        approx(as_f(&items[2]), -0.1);
+    }
+
+    #[test]
+    fn test_autocorrelation_list_default_lag() {
+        let v = eval_str("AutocorrelationList[TimeSeries[{1, 2, 3, 4, 5}]]");
+        let Value::List(items) = v else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 5);
+        approx(as_f(&items[4]), -0.4);
+    }
+
+    #[test]
+    fn test_partial_correlation_list() {
+        let v = eval_str("PartialCorrelationList[TimeSeries[{1, 2, 3, 4, 5}], 2]");
+        let Value::List(items) = v else {
+            panic!("expected list");
+        };
+        approx(as_f(&items[0]), 1.0);
+        approx(as_f(&items[1]), 0.4);
+        approx(as_f(&items[2]), -0.30952380952380953);
+    }
+
+    #[test]
+    fn test_correlation_inapplicable() {
+        let v = builtin_autocorrelation_list(&[iv(5)]).unwrap();
+        assert_eq!(head_of(&v), "AutocorrelationList");
+    }
+
+    // ── Linear processes ──
+
+    #[test]
+    fn test_ar_process_zero_noise() {
+        let v = eval_str("ARProcess[{1}, 0, 3]");
+        let ps = pairs_of(&v);
+        assert_eq!(ps, vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    }
+
+    #[test]
+    fn test_ar_process_deterministic() {
+        let a = eval_str("SeedRandom[42]; ARProcess[{0.5}, 1, 5]");
+        let b = eval_str("SeedRandom[42]; ARProcess[{0.5}, 1, 5]");
+        assert_eq!(pairs_of(&a), pairs_of(&b));
+    }
+
+    #[test]
+    fn test_ma_matches_ar_with_zero_coeff() {
+        let a = eval_str("MAProcess[{0}, 1, 4]");
+        let b = eval_str("ARProcess[{0}, 1, 4]");
+        assert_eq!(pairs_of(&a), pairs_of(&b));
+    }
+
+    #[test]
+    fn test_arma_matches_ma_with_zero_ar() {
+        let a = eval_str("ARMAProcess[{0}, {0}, 1, 4]");
+        let b = eval_str("MAProcess[{0}, 1, 4]");
+        assert_eq!(pairs_of(&a), pairs_of(&b));
+    }
+
+    #[test]
+    fn test_process_unevaluated_without_n() {
+        assert_eq!(head_of(&eval_str("ARProcess[{0.5}, 1]")), "ARProcess");
+        assert_eq!(head_of(&eval_str("MAProcess[{0.5}, 1]")), "MAProcess");
+        assert_eq!(
+            head_of(&eval_str("ARMAProcess[{0.5}, {0.2}, 1]")),
+            "ARMAProcess"
+        );
+    }
+
+    // ── Statistics / accessors ──
+
+    #[test]
+    fn test_mean_on_series() {
+        let v = eval_str("Mean[TimeSeries[{1, 2, 3, 4, 5}]]");
+        approx(as_f(&v), 3.0);
+    }
+
+    #[test]
+    fn test_variance_on_series() {
+        let v = eval_str("Variance[TimeSeries[{1, 2, 3, 4, 5}]]");
+        approx(as_f(&v), 2.5);
+    }
+
+    #[test]
+    fn test_mean_variance_still_lists() {
+        approx(as_f(&eval_str("Mean[{1, 2, 3, 4}]")), 2.5);
+        approx(as_f(&eval_str("Variance[{1, 2, 3}]")), 1.0);
+    }
+
+    #[test]
+    fn test_datelist_accessor() {
+        let v = eval_str("DateList[TimeSeries[{{1, 10}, {2, 20}}]]");
+        match v {
+            Value::List(items) => assert_eq!(items, vec![iv(1), iv(2)]),
+            other => panic!("expected list, got {other}"),
+        }
+    }
+
+    #[test]
+    fn test_mean_inapplicable_empty_series() {
+        let v = builtin_mean(&[make_series("TimeSeries", vec![])]).unwrap();
+        assert_eq!(head_of(&v), "Mean");
     }
 }

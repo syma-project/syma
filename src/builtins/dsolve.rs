@@ -3,11 +3,17 @@
 //! Gap-fill module. Supported (common) cases:
 //!
 //! * `DSolve[eqn, y[x], x]` / `DSolve[eqn, y, x]` for
+//!   * linear constant-coefficient ODEs of any order `1..=6`
+//!     `sum_k a_k y^(k) = f(x)` — homogeneous solutions come from the
+//!     characteristic roots (rational roots, plus quadratic factors giving
+//!     real/complex/irrational roots), and `f(x)` may be a polynomial,
+//!     exponential, or sine/cosine (and their products) via undetermined
+//!     coefficients; first-order forcing outside that family falls back to an
+//!     integrating factor,
 //!   * first-order linear `y' + p(x) y = q(x)` (incl. `y' = f(x)`),
 //!   * first-order separable `y' = g(y) h(x)` when `g` is a monomial `c y^n`,
-//!   * second-order linear constant-coefficient ODEs `a y'' + b y' + c y = r`
-//!     (with constant forcing `r`),
-//!   * initial conditions (value and first-derivative) for the above.
+//!   * initial/boundary conditions (value and derivative of any order) used to
+//!     resolve the `C[i]` constants.
 //! * `DSolveValue` returns the solution expression / function directly.
 //! * `RSolve`/`RSolveValue` for first-order constant-coefficient recurrences
 //!   (and delegates higher-order recurrences to the `discrete` module).
@@ -32,6 +38,9 @@ use crate::env::Env;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
+
+/// Highest derivative order the linear solver will look for.
+const MAX_DERIV: usize = 6;
 
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
@@ -147,13 +156,23 @@ fn func_at(head_name: &str, x: &str) -> Expr {
     }
 }
 
-/// Unwrap a (possibly held) argument to its underlying [`Expr`].
-fn as_expr(v: &Value) -> Expr {
+/// Structural → [`Expr`], keeping rationals as exact fractions (the generic
+/// `value_to_expr` renders `Value::Rational` as an un-reducible symbol).
+fn expr_from_value(v: &Value) -> Expr {
     match v {
         Value::Pattern(e) => e.clone(),
-        Value::Hold(b) | Value::HoldComplete(b) => as_expr(b),
+        Value::Hold(b) | Value::HoldComplete(b) => expr_from_value(b),
+        Value::Rational(r) => div(
+            Expr::Integer(r.numer().clone()),
+            Expr::Integer(r.denom().clone()),
+        ),
         other => crate::eval::table::value_to_expr(other),
     }
+}
+
+/// Unwrap a (possibly held) argument to its underlying [`Expr`].
+fn as_expr(v: &Value) -> Expr {
+    expr_from_value(v)
 }
 
 /// Unwrap a held argument into a structural [`Value`] (no pattern wrappers).
@@ -394,7 +413,7 @@ fn value_of_solution(sol: Solved, env: &Env) -> Value {
     let Solved { target, sol } = sol;
     if target.func_form {
         let simplified = eval_value(&sol, env);
-        let body = crate::eval::table::value_to_expr(&simplified);
+        let body = expr_from_value(&simplified);
         make_pure_function(&target.var, &body)
     } else {
         eval_value(&sol, env)
@@ -424,24 +443,25 @@ fn solve_ode(args: &[Value], env: &Env) -> Option<Solved> {
     let (lhs, rhs) = eq_pair(&eqn)?;
 
     let y = func_at(&target.name, &target.var);
-    let d1 = deriv_at(&target.name, &target.var, 1);
-    let d2 = deriv_at(&target.name, &target.var, 2);
 
-    let mark = |e: &Expr| {
-        subst(
-            &subst(&subst(e, &y, &sym("Y")), &d1, &sym("D1")),
-            &d2,
-            &sym("D2"),
-        )
-    };
+    // Substitute the dependent function and every derivative order with
+    // markers (`Y`, `D1`, `D2`, ...) so coefficient extraction can treat them
+    // as ordinary symbols.
+    let mut marked_e = sub(lhs, rhs);
+    marked_e = subst(&marked_e, &y, &sym("Y"));
+    for k in 1..=MAX_DERIV {
+        let dk = deriv_at(&target.name, &target.var, k as i64);
+        marked_e = subst(&marked_e, &dk, &marker_sym(k));
+    }
+    let marked = expand(&marked_e, env);
 
-    // Substitute function / derivative terms with markers so coefficient
-    // extraction (which treats markers as ordinary symbols) can work.
-    let marked = expand(&mark(&sub(lhs, rhs)), env);
-
-    let has_d2 = contains_symbol(&marked, "D2");
-
-    let sol = if has_d2 {
+    // General constant-coefficient linear solver first (covers orders 1..=N);
+    // fall back to the variable-coefficient / separable routines.
+    let sol = if let Some(sol) =
+        solve_linear_const_coeff(&marked, &target.name, &target.var, &ics, env)
+    {
+        sol
+    } else if contains_symbol(&marked, "D2") {
         solve_second_order(&marked, &target.name, &target.var, &ics, env)?
     } else {
         solve_first_order(&marked, &target.name, &target.var, &ics, env)?
@@ -771,13 +791,7 @@ fn solve_second_order_ic(
     env: &Env,
 ) -> Option<Expr> {
     let eval_at = |e: &Expr| eval_expr(&subst(e, &sym(x), x0), env);
-    let derivative = |e: &Expr| {
-        let v = eval_value(e, env);
-        match crate::builtins::symbolic::builtin_d(&[v, Value::Symbol(x.to_string())], env) {
-            Ok(d) => as_expr(&d),
-            Err(_) => e.clone(),
-        }
-    };
+    let derivative = |e: &Expr| struct_deriv(e, x, env);
 
     let u1 = eval_at(f1);
     let u2 = eval_at(f2);
@@ -842,6 +856,1019 @@ fn particular_constant(
         ]),
         env,
     )
+}
+
+// ── General constant-coefficient linear ODEs ─────────────────────────────────
+
+/// Marker symbol for derivative order `k` (`Y` for order 0).
+fn marker_sym(k: usize) -> Expr {
+    if k == 0 {
+        sym("Y")
+    } else {
+        sym(&format!("D{k}"))
+    }
+}
+
+/// Does `e` mention any linearisation marker?
+fn marker_present(e: &Expr) -> bool {
+    contains_symbol(e, "Y") || (1..=MAX_DERIV).any(|k| contains_symbol(e, &format!("D{k}")))
+}
+
+/// Set every marker to 0 except (optionally) one, which is set to 1.
+fn zero_markers(e: &Expr, except: Option<usize>) -> Expr {
+    let mut r = e.clone();
+    for k in 0..=MAX_DERIV {
+        let val = if except == Some(k) { int(1) } else { int(0) };
+        r = subst(&r, &marker_sym(k), &val);
+    }
+    r
+}
+
+/// Exact rational (`n/d`, always normalised with `d > 0`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Rat {
+    n: i128,
+    d: i128,
+}
+
+impl Rat {
+    fn new(n: i128, d: i128) -> Rat {
+        let mut r = Rat { n, d };
+        if r.d < 0 {
+            r.n = -r.n;
+            r.d = -r.d;
+        }
+        let g = gcd_i128(r.n.abs(), r.d);
+        if g > 1 {
+            r.n /= g;
+            r.d /= g;
+        }
+        r
+    }
+    fn zero() -> Rat {
+        Rat { n: 0, d: 1 }
+    }
+    fn one() -> Rat {
+        Rat { n: 1, d: 1 }
+    }
+    fn is_zero(self) -> bool {
+        self.n == 0
+    }
+    fn neg(self) -> Rat {
+        Rat::new(-self.n, self.d)
+    }
+    fn abs(self) -> Rat {
+        Rat::new(self.n.abs(), self.d)
+    }
+    fn add(self, o: Rat) -> Rat {
+        Rat::new(self.n * o.d + o.n * self.d, self.d * o.d)
+    }
+    fn sub(self, o: Rat) -> Rat {
+        self.add(o.neg())
+    }
+    fn mul(self, o: Rat) -> Rat {
+        Rat::new(self.n * o.n, self.d * o.d)
+    }
+    fn div(self, o: Rat) -> Rat {
+        Rat::new(self.n * o.d, self.d * o.n)
+    }
+    fn to_expr(self) -> Expr {
+        if self.d == 1 {
+            Expr::Integer(Integer::from(self.n))
+        } else {
+            div(
+                Expr::Integer(Integer::from(self.n)),
+                Expr::Integer(Integer::from(self.d)),
+            )
+        }
+    }
+}
+
+fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    if a == 0 { 1 } else { a.abs() }
+}
+
+fn lcm_i128(a: i128, b: i128) -> i128 {
+    a / gcd_i128(a, b) * b
+}
+
+/// Parse an integer-valued expression (integer literal or decimal string).
+fn as_int_expr(e: &Expr) -> Option<i128> {
+    match e {
+        Expr::Integer(n) => n.to_i128(),
+        Expr::Symbol(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Convert a constant expression to an exact rational.
+fn parse_decimal_rat(s: &str) -> Option<Rat> {
+    let s = s.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(t) => (true, t),
+        None => (false, s),
+    };
+    let (int_part, frac) = s.split_once('.').unwrap_or((s, ""));
+    if int_part.is_empty() && frac.is_empty() {
+        return None;
+    }
+    let mut n: i128 = 0;
+    for c in int_part.chars() {
+        n = n * 10 + c.to_digit(10)? as i128;
+    }
+    let mut d: i128 = 1;
+    for c in frac.chars() {
+        n = n * 10 + c.to_digit(10)? as i128;
+        d *= 10;
+    }
+    let r = Rat::new(n, d);
+    Some(if neg { r.neg() } else { r })
+}
+
+fn expr_to_rat(e: &Expr) -> Option<Rat> {
+    match e {
+        Expr::Integer(n) => Some(Rat::new(n.to_i128()?, 1)),
+        Expr::Real(r) => parse_decimal_rat(&format!("{}", r.to_f64())),
+        Expr::Symbol(s) => {
+            if let Some((a, b)) = s.split_once('/') {
+                Some(Rat::new(a.trim().parse().ok()?, b.trim().parse().ok()?))
+            } else {
+                Some(Rat::new(s.trim().parse().ok()?, 1))
+            }
+        }
+        Expr::Call { head, args } => {
+            let Expr::Symbol(h) = head.as_ref() else {
+                return None;
+            };
+            match h.as_str() {
+                "Rational" if args.len() == 2 => {
+                    Some(Rat::new(as_int_expr(&args[0])?, as_int_expr(&args[1])?))
+                }
+                "Times" => {
+                    let mut r = Rat::one();
+                    for a in args {
+                        r = r.mul(expr_to_rat(a)?);
+                    }
+                    Some(r)
+                }
+                "Power" if args.len() == 2 => {
+                    let base = expr_to_rat(&args[0])?;
+                    let p = as_int_expr(&args[1])?;
+                    let mut acc = Rat::one();
+                    for _ in 0..p.unsigned_abs() {
+                        acc = acc.mul(base);
+                    }
+                    if p < 0 {
+                        Some(Rat::one().div(acc))
+                    } else {
+                        Some(acc)
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn poly_trim(p: Vec<Rat>) -> Vec<Rat> {
+    match p.iter().position(|c| !c.is_zero()) {
+        Some(i) => p[i..].to_vec(),
+        None => vec![Rat::zero()],
+    }
+}
+
+fn poly_eval(p: &[Rat], r: Rat) -> Rat {
+    let mut acc = Rat::zero();
+    for c in p {
+        acc = acc.mul(r).add(*c);
+    }
+    acc
+}
+
+fn poly_divmod(p: &[Rat], q: &[Rat]) -> (Vec<Rat>, Vec<Rat>) {
+    let q = poly_trim(q.to_vec());
+    let mut rem = poly_trim(p.to_vec());
+    if q.len() == 1 && q[0].is_zero() {
+        return (vec![Rat::zero()], rem);
+    }
+    if rem.len() < q.len() || (rem.len() == 1 && rem[0].is_zero()) {
+        return (vec![Rat::zero()], rem);
+    }
+    let mut quot = vec![Rat::zero(); rem.len() - q.len() + 1];
+    while rem.len() >= q.len() && !(rem.len() == 1 && rem[0].is_zero()) {
+        let deg = rem.len() - q.len();
+        let factor = rem[0].div(q[0]);
+        quot[deg] = factor;
+        for i in 0..q.len() {
+            rem[i] = rem[i].sub(factor.mul(q[i]));
+        }
+        rem = poly_trim(rem);
+    }
+    (poly_trim(quot), rem)
+}
+
+fn divisors(n: i128) -> Vec<i128> {
+    let n = n.abs();
+    let mut out = vec![];
+    let mut i = 1;
+    while i * i <= n {
+        if n % i == 0 {
+            out.push(i);
+            if i != n / i {
+                out.push(n / i);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn rational_root_candidates(p: &[Rat]) -> Vec<Rat> {
+    let p = poly_trim(p.to_vec());
+    if p.len() <= 1 {
+        return vec![];
+    }
+    let lead = p[0];
+    let constant = p[p.len() - 1];
+    if constant.is_zero() || lead.is_zero() {
+        return vec![];
+    }
+    let mut dens: i128 = 1;
+    for c in &p {
+        dens = lcm_i128(dens, c.d);
+    }
+    let ci = (constant.n * (dens / constant.d)).abs();
+    let li = (lead.n * (dens / lead.d)).abs();
+    let mut cands = vec![];
+    for pn in divisors(ci) {
+        for qd in divisors(li) {
+            let r = Rat::new(pn, qd);
+            cands.push(r);
+            cands.push(r.neg());
+        }
+    }
+    cands
+}
+
+fn root_mult(p: &[Rat], r: Rat) -> usize {
+    let mut q = poly_trim(p.to_vec());
+    let mut m = 0;
+    while q.len() > 1 && poly_eval(&q, r).is_zero() {
+        let (qq, _) = poly_divmod(&q, &[Rat::one(), r.neg()]);
+        q = qq;
+        m += 1;
+    }
+    m
+}
+
+fn quad_mult(p: &[Rat], k: Rat, w: Rat) -> usize {
+    let q = vec![Rat::one(), k.mul(Rat::new(-2, 1)), k.mul(k).add(w.mul(w))];
+    let mut cur = poly_trim(p.to_vec());
+    let mut m = 0;
+    loop {
+        if cur.len() < 3 {
+            break;
+        }
+        let (qq, rem) = poly_divmod(&cur, &q);
+        if rem.len() == 1 && rem[0].is_zero() {
+            cur = qq;
+            m += 1;
+        } else {
+            break;
+        }
+    }
+    m
+}
+
+fn exp_lin(r: Rat, x: &str, env: &Env) -> Expr {
+    eval_expr(&pow(sym("E"), times(vec![r.to_expr(), sym(x)])), env)
+}
+
+/// Basis of the solution space of `sum_k p[k] D^k y = 0` (p descending).
+fn char_basis(p: &[Rat], x: &str, env: &Env) -> Option<Vec<Expr>> {
+    let mut p = poly_trim(p.to_vec());
+    if p.len() <= 1 {
+        return Some(vec![]);
+    }
+    let mut basis: Vec<Expr> = vec![];
+
+    let mut m0 = 0;
+    while p.len() > 1 && p[p.len() - 1].is_zero() {
+        p.pop();
+        m0 += 1;
+    }
+    for j in 0..m0 {
+        basis.push(pow(sym(x), int(j as i64)));
+    }
+
+    loop {
+        if p.len() <= 1 {
+            break;
+        }
+        if p.len() == 2 {
+            let r = Rat::zero().sub(p[1].div(p[0]));
+            basis.push(exp_lin(r, x, env));
+            break;
+        }
+        if p.len() == 3 {
+            let (a, b, c) = (p[0], p[1], p[2]);
+            let disc = b.mul(b).sub(Rat::new(4, 1).mul(a).mul(c));
+            if disc.is_zero() {
+                let r = Rat::zero().sub(b.div(Rat::new(2, 1).mul(a)));
+                basis.push(exp_lin(r, x, env));
+                basis.push(eval_expr(&times(vec![sym(x), exp_lin(r, x, env)]), env));
+            } else if disc.n > 0 {
+                let sq = call("Sqrt", vec![disc.to_expr()]);
+                let two_a = times(vec![int(2), a.to_expr()]);
+                let r1 = div(plus(vec![neg(b.to_expr()), sq.clone()]), two_a.clone());
+                let r2 = div(sub(neg(b.to_expr()), sq), two_a);
+                basis.push(eval_expr(&call("Exp", vec![times(vec![r1, sym(x)])]), env));
+                basis.push(eval_expr(&call("Exp", vec![times(vec![r2, sym(x)])]), env));
+            } else {
+                let alpha = div(neg(b.to_expr()), times(vec![int(2), a.to_expr()]));
+                let beta = div(
+                    call("Sqrt", vec![disc.neg().to_expr()]),
+                    times(vec![int(2), a.to_expr()]),
+                );
+                let expo = pow(sym("E"), times(vec![alpha, sym(x)]));
+                basis.push(eval_expr(
+                    &times(vec![
+                        expo.clone(),
+                        call("Cos", vec![times(vec![beta.clone(), sym(x)])]),
+                    ]),
+                    env,
+                ));
+                basis.push(eval_expr(
+                    &times(vec![expo, call("Sin", vec![times(vec![beta, sym(x)])])]),
+                    env,
+                ));
+            }
+            break;
+        }
+        let cands = rational_root_candidates(&p);
+        let mut found = false;
+        for r in cands {
+            if poly_eval(&p, r).is_zero() {
+                let mut count = 0;
+                loop {
+                    if p.len() <= 1 || !poly_eval(&p, r).is_zero() {
+                        break;
+                    }
+                    let (qq, rem) = poly_divmod(&p, &[Rat::one(), r.neg()]);
+                    if !(rem.len() == 1 && rem[0].is_zero()) {
+                        break;
+                    }
+                    p = qq;
+                    count += 1;
+                }
+                for j in 0..count {
+                    let base = exp_lin(r, x, env);
+                    let term = if j == 0 {
+                        base
+                    } else {
+                        eval_expr(&times(vec![pow(sym(x), int(j as i64)), base]), env)
+                    };
+                    basis.push(term);
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(basis)
+}
+
+/// Characteristic polynomial (descending) from ascending coefficient list.
+fn char_rat(c_asc: &[Expr]) -> Option<Vec<Rat>> {
+    let mut v = Vec::with_capacity(c_asc.len());
+    for ck in c_asc.iter().rev() {
+        v.push(expr_to_rat(ck)?);
+    }
+    Some(v)
+}
+
+/// Structural derivative of the simple closed forms the solvers build
+/// (sums/products/powers of `x`, `Exp`, `Sin`, `Cos`). Unlike the `D` builtin
+/// this consistently evaluates products with numeric coefficients.
+fn struct_deriv(e: &Expr, x: &str, env: &Env) -> Expr {
+    if e == &sym(x) {
+        return int(1);
+    }
+    if !contains_symbol(e, x) {
+        return int(0);
+    }
+    if let Expr::Call { head, args } = e
+        && let Expr::Symbol(h) = head.as_ref()
+    {
+        match h.as_str() {
+            "Plus" => {
+                let terms = args.iter().map(|a| struct_deriv(a, x, env)).collect();
+                return eval_expr(&plus(terms), env);
+            }
+            "Times" => {
+                let mut acc = int(0);
+                for i in 0..args.len() {
+                    let di = struct_deriv(&args[i], x, env);
+                    if is_zero(&di, env) {
+                        continue;
+                    }
+                    let mut factors: Vec<Expr> = Vec::with_capacity(args.len());
+                    for (j, a) in args.iter().enumerate() {
+                        if j != i {
+                            factors.push(a.clone());
+                        }
+                    }
+                    factors.push(di);
+                    acc = plus(vec![acc, times(factors)]);
+                }
+                return eval_expr(&acc, env);
+            }
+            "Power" if args.len() == 2 => {
+                if let Expr::Integer(n) = &args[1] {
+                    let du = struct_deriv(&args[0], x, env);
+                    let term = times(vec![
+                        Expr::Integer(n.clone()),
+                        pow(args[0].clone(), Expr::Integer(n.clone() - 1)),
+                        du,
+                    ]);
+                    return eval_expr(&term, env);
+                }
+                if matches!(&args[0], Expr::Symbol(s) if s == "E") {
+                    let du = struct_deriv(&args[1], x, env);
+                    return eval_expr(&times(vec![e.clone(), du]), env);
+                }
+            }
+            "Exp" if args.len() == 1 => {
+                let du = struct_deriv(&args[0], x, env);
+                return eval_expr(&times(vec![e.clone(), du]), env);
+            }
+            "Sin" if args.len() == 1 => {
+                let du = struct_deriv(&args[0], x, env);
+                return eval_expr(&times(vec![call("Cos", vec![args[0].clone()]), du]), env);
+            }
+            "Cos" if args.len() == 1 => {
+                let du = struct_deriv(&args[0], x, env);
+                return eval_expr(
+                    &neg(times(vec![call("Sin", vec![args[0].clone()]), du])),
+                    env,
+                );
+            }
+            _ => {}
+        }
+    }
+    eval_expr(&call("D", vec![e.clone(), sym(x)]), env)
+}
+
+fn deriv_expr(e: &Expr, x: &str, env: &Env) -> Expr {
+    struct_deriv(e, x, env)
+}
+
+/// If `base` is a constant multiple of `E`, its rational coefficient.
+fn e_base_coeff(base: &Expr) -> Option<Rat> {
+    if let Expr::Call { head, args } = base
+        && matches!(head.as_ref(), Expr::Symbol(s) if s == "Times")
+    {
+        let mut cp = Rat::one();
+        let mut has_e = false;
+        for f in args {
+            if matches!(f, Expr::Symbol(s) if s == "E") {
+                has_e = true;
+            } else {
+                cp = cp.mul(expr_to_rat(f)?);
+            }
+        }
+        if has_e {
+            return Some(cp);
+        }
+    }
+    None
+}
+
+/// Rewrite `(c E)^u` as `c E^u` so the parser sees a plain exponential.
+#[allow(clippy::only_used_in_recursion)]
+fn normalize_exp(e: &Expr, x: &str, env: &Env) -> Expr {
+    if let Expr::Call { head, args } = e
+        && let Expr::Symbol(h) = head.as_ref()
+    {
+        if h == "Power"
+            && args.len() == 2
+            && let Some(cp) = e_base_coeff(&args[0])
+        {
+            let base = pow(sym("E"), normalize_exp(&args[1], x, env));
+            return eval_expr(&times(vec![cp.to_expr(), base]), env);
+        }
+        if h == "Exp" && args.len() == 1 {
+            return eval_expr(&pow(sym("E"), normalize_exp(&args[0], x, env)), env);
+        }
+        return Expr::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| normalize_exp(a, x, env)).collect(),
+        };
+    }
+    e.clone()
+}
+
+/// Push negative integer powers of a `Times` onto its factors:
+/// `(a b)^-1` → `a^-1 b^-1`, which lets `Simplify` cancel common factors.
+fn expand_neg_powers(e: &Expr, env: &Env) -> Expr {
+    if let Expr::Call { head, args } = e
+        && let Expr::Symbol(h) = head.as_ref()
+    {
+        if h == "Power" && args.len() == 2 {
+            let base = expand_neg_powers(&args[0], env);
+            let exp = args[1].clone();
+            if let (Expr::Call { head: bh, args: ba }, Expr::Integer(n)) = (&base, &exp)
+                && matches!(bh.as_ref(), Expr::Symbol(s) if s == "Times")
+                && n.is_negative()
+            {
+                let factors = ba
+                    .iter()
+                    .map(|b| call("Power", vec![b.clone(), Expr::Integer(n.clone())]))
+                    .collect();
+                return eval_expr(&times(factors), env);
+            }
+            return Expr::Call {
+                head: head.clone(),
+                args: vec![base, expand_neg_powers(&exp, env)],
+            };
+        }
+        return Expr::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| expand_neg_powers(a, env)).collect(),
+        };
+    }
+    e.clone()
+}
+
+fn nth_deriv(e: &Expr, order: usize, x: &str, env: &Env) -> Expr {
+    let mut cur = e.clone();
+    for _ in 0..order {
+        cur = deriv_expr(&cur, x, env);
+    }
+    cur
+}
+
+/// Apply `sum_k coeffs[k] D^k` to `y`.
+fn apply_operator(y: &Expr, coeffs: &[Expr], x: &str, env: &Env) -> Expr {
+    let n = coeffs.len() - 1;
+    let mut acc = int(0);
+    let mut cur = y.clone();
+    for (k, ck) in coeffs.iter().enumerate() {
+        if !is_zero(ck, env) {
+            acc = plus(vec![acc, times(vec![ck.clone(), cur.clone()])]);
+        }
+        if k < n {
+            cur = deriv_expr(&cur, x, env);
+        }
+    }
+    eval_expr(&acc, env)
+}
+
+/// A single forcing term `poly(x) * E^(k x) * {cos,sin}(w x)`.
+struct TermSpec {
+    k: Rat,
+    w: Option<Rat>,
+    deg: usize,
+}
+
+fn parse_linear_arg(e: &Expr, x: &str) -> Option<Rat> {
+    if e == &sym(x) {
+        return Some(Rat::one());
+    }
+    if let Expr::Call { head, args } = e
+        && matches!(head.as_ref(), Expr::Symbol(s) if s == "Times")
+    {
+        let mut c = Rat::one();
+        let mut found = 0;
+        for a in args {
+            if a == &sym(x) {
+                found += 1;
+            } else {
+                c = c.mul(expr_to_rat(a)?);
+            }
+        }
+        if found == 1 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn parse_forcing_term(term: &Expr, x: &str) -> Option<TermSpec> {
+    let mut k = Rat::zero();
+    let mut w: Option<Rat> = None;
+    let mut deg = 0usize;
+    let factors = match term {
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Times") => {
+            args.clone()
+        }
+        other => vec![other.clone()],
+    };
+    for f in factors {
+        if expr_to_rat(&f).is_some() {
+            continue;
+        }
+        match &f {
+            Expr::Symbol(s) if s == x => deg = deg.max(1),
+            // A bare `E` is the constant exp(1); absorb it.
+            Expr::Symbol(s) if s == "E" => {}
+            Expr::Call { head, args }
+                if args.len() == 2 && matches!(head.as_ref(), Expr::Symbol(s) if s == "Power") =>
+            {
+                match &args[0] {
+                    Expr::Symbol(b) if b == x => {
+                        let p = as_int_expr(&args[1])?;
+                        if p < 0 {
+                            return None;
+                        }
+                        deg = deg.max(p as usize);
+                    }
+                    Expr::Symbol(b) if b == "E" => {
+                        k = k.add(parse_linear_arg(&args[1], x)?);
+                    }
+                    // `(-E)^x` etc: a constant multiple of `E` raised to a power.
+                    Expr::Call { head: bh, args: ba } if matches!(bh.as_ref(), Expr::Symbol(s) if s == "Times") =>
+                    {
+                        let mut has_e = false;
+                        for bf in ba {
+                            if matches!(bf, Expr::Symbol(s) if s == "E") {
+                                has_e = true;
+                            } else if expr_to_rat(bf).is_none() {
+                                return None;
+                            }
+                        }
+                        if !has_e {
+                            return None;
+                        }
+                        k = k.add(parse_linear_arg(&args[1], x)?);
+                    }
+                    _ => return None,
+                }
+            }
+            Expr::Call { head, args }
+                if args.len() == 1 && matches!(head.as_ref(), Expr::Symbol(s) if s == "Exp") =>
+            {
+                k = k.add(parse_linear_arg(&args[0], x)?);
+            }
+            Expr::Call { head, args }
+                if args.len() == 1
+                    && matches!(head.as_ref(), Expr::Symbol(s) if s == "Cos" || s == "Sin") =>
+            {
+                let ww = parse_linear_arg(&args[0], x)?.abs();
+                match w {
+                    Some(prev) if prev != ww => return None,
+                    _ => w = Some(ww),
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(TermSpec { k, w, deg })
+}
+
+fn expr_is_zero(e: &Expr, env: &Env) -> bool {
+    match eval_value(e, env) {
+        Value::Integer(n) => n.is_zero(),
+        Value::Rational(r) => r.is_zero(),
+        _ => false,
+    }
+}
+
+/// Exact Gaussian elimination with symbolic (non-numeric) entries.
+#[allow(clippy::needless_range_loop)]
+fn solve_symbolic_linear(mut a: Vec<Vec<Expr>>, rhs: Vec<Expr>, env: &Env) -> Option<Vec<Expr>> {
+    let n = rhs.len();
+    if n == 0 {
+        return Some(vec![]);
+    }
+    for (row, b) in a.iter_mut().zip(rhs) {
+        row.push(b);
+    }
+    for col in 0..n {
+        let mut pivot = None;
+        for r in col..n {
+            if !expr_is_zero(&a[r][col], env) {
+                pivot = Some(r);
+                break;
+            }
+        }
+        let pr = pivot?;
+        a.swap(col, pr);
+        let pv = a[col][col].clone();
+        for c in col..=n {
+            a[col][c] = eval_expr(&div(a[col][c].clone(), pv.clone()), env);
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let factor = a[r][col].clone();
+            if expr_is_zero(&factor, env) {
+                continue;
+            }
+            for c in col..=n {
+                a[r][c] = eval_expr(
+                    &sub(
+                        a[r][c].clone(),
+                        times(vec![factor.clone(), a[col][c].clone()]),
+                    ),
+                    env,
+                );
+            }
+        }
+    }
+    Some(
+        (0..n)
+            .map(|r| {
+                let raw = expand_neg_powers(&a[r][n], env);
+                let t = together(&raw, env);
+                let s = eval_expr(&call("Simplify", vec![t]), env);
+                if contains_symbol(&s, "Simplify") {
+                    raw
+                } else {
+                    s
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Solve a square linear system `M a = b` represented by `u` symbols.
+fn solve_linear_system(residual: &Expr, u: &[String], x: &str, env: &Env) -> Option<Vec<Expr>> {
+    let n = u.len();
+    let mut mat = Vec::with_capacity(n);
+    let mut rhs = Vec::with_capacity(n);
+    for i in 0..n {
+        let val = eval_expr(&subst(residual, &sym(x), &int(i as i64)), env);
+        let val = expand(&val, env);
+        let base = {
+            let mut t = val.clone();
+            for uj in u {
+                t = subst(&t, &sym(uj), &int(0));
+            }
+            eval_expr(&t, env)
+        };
+        let mut row = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut w = val.clone();
+            for (t, uk) in u.iter().enumerate() {
+                w = subst(&w, &sym(uk), &int(if t == j { 1 } else { 0 }));
+            }
+            row.push(eval_expr(&sub(w, base.clone()), env));
+        }
+        rhs.push(eval_expr(&neg(base), env));
+        mat.push(row);
+    }
+    solve_symbolic_linear(mat, rhs, env)
+}
+
+/// Particular solution by undetermined coefficients.
+fn undetermined(
+    forcing: &Expr,
+    charp: &[Rat],
+    coeffs: &[Expr],
+    x: &str,
+    env: &Env,
+) -> Option<Expr> {
+    let forcing = expand(forcing, env);
+    let terms = match &forcing {
+        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Plus") => {
+            args.clone()
+        }
+        other => vec![other.clone()],
+    };
+    let mut basis: Vec<Expr> = vec![];
+    for term in &terms {
+        let spec = parse_forcing_term(term, x)?;
+        let s = match spec.w {
+            None => root_mult(charp, spec.k),
+            Some(w) => quad_mult(charp, spec.k, w),
+        };
+        for j in s..=(spec.deg + s) {
+            let xj = pow(sym(x), int(j as i64));
+            let ex = exp_lin(spec.k, x, env);
+            let base = eval_expr(&times(vec![xj, ex]), env);
+            match spec.w {
+                None => push_unique(&mut basis, base),
+                Some(w) => {
+                    let wx = times(vec![w.to_expr(), sym(x)]);
+                    push_unique(
+                        &mut basis,
+                        eval_expr(
+                            &times(vec![base.clone(), call("Cos", vec![wx.clone()])]),
+                            env,
+                        ),
+                    );
+                    push_unique(
+                        &mut basis,
+                        eval_expr(&times(vec![base, call("Sin", vec![wx])]), env),
+                    );
+                }
+            }
+        }
+    }
+    if basis.is_empty() {
+        return Some(int(0));
+    }
+    let u: Vec<String> = (0..basis.len()).map(|i| format!("u${i}")).collect();
+    let mut yp = int(0);
+    for (i, b) in basis.iter().enumerate() {
+        yp = plus(vec![yp, times(vec![sym(&u[i]), b.clone()])]);
+    }
+    let yp = expand(&yp, env);
+    let residual = expand(&sub(apply_operator(&yp, coeffs, x, env), forcing), env);
+    let sol = solve_linear_system(&residual, &u, x, env)?;
+    let mut out = int(0);
+    for (i, b) in basis.iter().enumerate() {
+        out = plus(vec![out, times(vec![sol[i].clone(), b.clone()])]);
+    }
+    let out = expand_neg_powers(&eval_expr(&out, env), env);
+    let out = together(&out, env);
+    let simplified = eval_expr(&call("Simplify", vec![out.clone()]), env);
+    if contains_symbol(&simplified, "Simplify") {
+        Some(out)
+    } else {
+        Some(simplified)
+    }
+}
+
+fn push_unique(basis: &mut Vec<Expr>, f: Expr) {
+    if !basis.contains(&f) {
+        basis.push(f);
+    }
+}
+
+/// Integrating-factor solution for first-order `c1 y' + c0 y = f`.
+fn first_order_integrating_factor(c: &[Expr], forcing: &Expr, x: &str, env: &Env) -> Option<Expr> {
+    if is_zero(&c[1], env) {
+        return None;
+    }
+    let p = together(&div(c[0].clone(), c[1].clone()), env);
+    let q = together(&div(forcing.clone(), c[1].clone()), env);
+    let big_p = integrate(&p, x, env);
+    let mu = call("Exp", vec![big_p.clone()]);
+    let inner = plus(vec![integrate(&times(vec![q, mu]), x, env), c_const(1)]);
+    Some(eval_expr(
+        &times(vec![call("Exp", vec![neg(big_p)]), inner]),
+        env,
+    ))
+}
+
+fn parse_ic_order(cond: &Expr, name: &str) -> Option<(usize, Expr, Expr)> {
+    let (lhs, rhs) = eq_pair(cond)?;
+    if let Some(x0) = call_arg(&lhs, name) {
+        return Some((0, x0, rhs));
+    }
+    let Expr::Call { head, args } = &lhs else {
+        return None;
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::Call { head: dh, args: da } = head.as_ref() else {
+        return None;
+    };
+    if da.len() != 1 || !matches!(&da[0], Expr::Symbol(s) if s == name) {
+        return None;
+    }
+    let Expr::Call {
+        head: order_node,
+        args: dfa,
+    } = dh.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(order_node.as_ref(), Expr::Symbol(s) if s == "Derivative") || dfa.len() != 1 {
+        return None;
+    }
+    let Expr::Integer(order) = &dfa[0] else {
+        return None;
+    };
+    Some((order.to_usize()?, args[0].clone(), rhs))
+}
+
+/// Attach `C[1]..C[n]` to `basis` and resolve them from initial conditions.
+fn apply_general_ics(
+    basis: &[Expr],
+    yp: &Expr,
+    name: &str,
+    x: &str,
+    ics: &[Expr],
+    env: &Env,
+) -> Option<Expr> {
+    let mut general = yp.clone();
+    for (i, b) in basis.iter().enumerate() {
+        general = plus(vec![general, times(vec![c_const(i as i64 + 1), b.clone()])]);
+    }
+    let general = eval_expr(&general, env);
+    if ics.is_empty() || basis.is_empty() {
+        return Some(general);
+    }
+    let n = basis.len();
+    let mut conds: Vec<(usize, Expr, Expr)> = Vec::new();
+    for c in ics {
+        if let Some(t) = parse_ic_order(c, name) {
+            conds.push(t);
+        }
+    }
+    if conds.len() < n {
+        return Some(general);
+    }
+    conds.truncate(n);
+    let mut mat = Vec::with_capacity(n);
+    let mut rhs = Vec::with_capacity(n);
+    for (order, x0, value) in &conds {
+        let mut row = Vec::with_capacity(n);
+        for b in basis {
+            let db = nth_deriv(b, *order, x, env);
+            row.push(eval_expr(&subst(&db, &sym(x), x0), env));
+        }
+        let dyp = nth_deriv(yp, *order, x, env);
+        let yp0 = eval_expr(&subst(&dyp, &sym(x), x0), env);
+        rhs.push(eval_expr(&sub(value.clone(), yp0), env));
+        mat.push(row);
+    }
+    let Some(items) = solve_symbolic_linear(mat, rhs, env) else {
+        return Some(general);
+    };
+    let mut out = general;
+    for (i, ci) in items.iter().enumerate() {
+        out = subst(&out, &c_const(i as i64 + 1), ci);
+    }
+    let out = expand_neg_powers(&eval_expr(&out, env), env);
+    let out = together(&out, env);
+    let simplified = eval_expr(&call("Simplify", vec![out.clone()]), env);
+    if contains_symbol(&simplified, "Simplify") {
+        Some(out)
+    } else {
+        Some(simplified)
+    }
+}
+
+/// Solve a constant-coefficient linear ODE of any order `1..=MAX_DERIV`.
+fn solve_linear_const_coeff(
+    e: &Expr,
+    name: &str,
+    x: &str,
+    ics: &[Expr],
+    env: &Env,
+) -> Option<Expr> {
+    let mut n = 0usize;
+    for k in 1..=MAX_DERIV {
+        if contains_symbol(e, &format!("D{k}")) {
+            n = k;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let mut c = vec![int(0); n + 1];
+    for (k, ck) in c.iter_mut().enumerate() {
+        let base = zero_markers(e, None);
+        let only = zero_markers(e, Some(k));
+        *ck = eval_expr(&together(&sub(only, base), env), env);
+        if marker_present(ck) || !free_of(ck, x) {
+            return None;
+        }
+    }
+    // Subtract each linear term with a *flat* negation. A nested
+    // `Times[-1, sum]` makes `Together` collapse `-E^x` to `-E`.
+    let mut flat = e.clone();
+    for (k, ck) in c.iter().enumerate() {
+        if !is_zero(ck, env) {
+            flat = plus(vec![flat, times(vec![ck.clone(), int(-1), marker_sym(k)])]);
+        }
+    }
+    let residual = together(&flat, env);
+    if marker_present(&residual) {
+        return None;
+    }
+    let forcing = eval_expr(&neg(residual), env);
+    let forcing = normalize_exp(&forcing, x, env);
+
+    let charp = char_rat(&c)?;
+    let basis = char_basis(&charp, x, env)?;
+
+    let yp = if is_zero(&forcing, env) {
+        int(0)
+    } else if let Some(y) = undetermined(&forcing, &charp, &c, x, env) {
+        y
+    } else if n == 1 {
+        first_order_integrating_factor(&c, &forcing, x, env)?
+    } else {
+        return None;
+    };
+
+    apply_general_ics(&basis, &yp, name, x, ics, env)
 }
 
 // ── RSolve / RSolveValue ─────────────────────────────────────────────────────
@@ -1197,14 +2224,14 @@ mod tests {
     fn test_dsolve_first_order_linear_homogeneous() {
         let out = shows("DSolve[y'[x] == y[x], y[x], x]");
         assert!(out.contains("C[1]"), "got {out}");
-        assert!(out.contains("E^x") || out.contains("Exp[x]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
     }
 
     #[test]
     fn test_dsolve_value_first_order() {
         let out = shows("DSolveValue[y'[x] == y[x], y[x], x]");
         assert!(out.contains("C[1]"), "got {out}");
-        assert!(out.contains("E^x") || out.contains("Exp[x]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
     }
 
     #[test]
@@ -1229,7 +2256,7 @@ mod tests {
     fn test_dsolve_first_order_with_ic() {
         let out = shows("DSolveValue[{y'[x] == y[x], y[0] == 5}, y[x], x]");
         assert!(out.contains('5'), "got {out}");
-        assert!(out.contains("E^x") || out.contains("Exp[x]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
         assert!(!out.contains("C[1]"), "constant should be resolved: {out}");
     }
 
@@ -1245,7 +2272,7 @@ mod tests {
     fn test_dsolve_second_order_exp() {
         let out = shows("DSolveValue[y''[x] - y[x] == 0, y[x], x]");
         assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
-        assert!(out.contains("E^x") || out.contains("Exp[x]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
     }
 
     #[test]
@@ -1253,7 +2280,7 @@ mod tests {
         let out = shows("DSolveValue[y''[x] - 2 y'[x] + y[x] == 0, y[x], x]");
         assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
         // Repeated root solution: (C[1] + C[2] x) E^x
-        assert!(out.contains("E^x") || out.contains("Exp[x]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
         assert!(out.contains("C[2]") && out.contains("x"), "got {out}");
     }
 
@@ -1364,6 +2391,184 @@ mod tests {
     fn test_dsolve_second_order_variable_coeff_unevaluated() {
         let out = shows("DSolve[y''[x] + x y[x] == 0, y[x], x]");
         assert!(out.starts_with("DSolve["), "got {out}");
+    }
+
+    // ── General constant-coefficient solvers ─────────────────────────────────
+
+    #[test]
+    fn test_dsolve_output_shape_matches_wl() {
+        let out = shows("DSolve[y''[x] + y[x] == 0, y[x], x]");
+        assert!(out.starts_with("{{y[x] ->"), "got {out}");
+        assert!(out.ends_with("}}"), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_second_order_distinct_roots() {
+        let out = shows("DSolveValue[y''[x] - 3 y'[x] + 2 y[x] == 0, y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_first_order_poly_forcing() {
+        let out = shows("DSolveValue[y'[x] + 2 y[x] == x^2 + 1, y[x], x]");
+        assert!(out.contains("C[1]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+        assert!(
+            out.contains("x^2") || out.contains("Power[x, 2]"),
+            "got {out}"
+        );
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_first_order_exp_forcing() {
+        let out = shows("DSolveValue[y'[x] + y[x] == Exp[2 x], y[x], x]");
+        assert!(out.contains("C[1]"), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_third_order_homogeneous() {
+        // (r - 1)^2 (r + 1): roots 1 (double), -1.
+        let out = shows("DSolveValue[y'''[x] - y''[x] - y'[x] + y[x] == 0, y[x], x]");
+        assert!(
+            out.contains("C[1]") && out.contains("C[2]") && out.contains("C[3]"),
+            "got {out}"
+        );
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_polynomial() {
+        // y'' + y = x^2  ->  yp = x^2 - 2.
+        let out = shows("DSolveValue[y''[x] + y[x] == x^2, y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(
+            out.contains("x^2") || out.contains("Power[x, 2]"),
+            "got {out}"
+        );
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_exp() {
+        let out = shows("DSolveValue[y''[x] + y[x] == Exp[x], y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_trig_resonance() {
+        // y'' + y = Sin[x]  ->  yp = -x Cos[x]/2.
+        let out = shows("DSolveValue[y''[x] + y[x] == Sin[x], y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(out.contains("Cos[") && out.contains("Sin["), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_trig_nonresonant() {
+        let out = shows("DSolveValue[y''[x] + 4 y[x] == Sin[x], y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(out.contains("Sin["), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_first_order_with_ic_poly() {
+        let out = shows("DSolveValue[{y'[x] + 2 y[x] == x^2 + 1, y[0] == 0}, y[x], x]");
+        assert!(!out.contains("C[1]"), "constant should be resolved: {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_second_order_poly_with_ics() {
+        // y'' + y = x^2, y(0) = 0, y'(0) = 1  ->  2 Cos[x] + Sin[x] + x^2 - 2.
+        let out = shows("DSolveValue[{y''[x] + y[x] == x^2, y[0] == 0, y'[0] == 1}, y[x], x]");
+        assert!(!out.contains("C[1]") && !out.contains("C[2]"), "got {out}");
+        assert!(out.contains("Cos[x]"), "got {out}");
+        assert!(out.contains("Sin[x]"), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_third_order_with_ics() {
+        let out = shows(
+            "DSolveValue[{y'''[x] - y''[x] - y'[x] + y[x] == 0, y[0] == 1, y'[0] == 0, y''[0] == 0}, y[x], x]",
+        );
+        assert!(
+            !out.contains("C[1]") && !out.contains("C[2]") && !out.contains("C[3]"),
+            "got {out}"
+        );
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_exp_negative_e() {
+        let out = shows("DSolveValue[y''[x] + y[x] == -E^x, y[x], x]");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_exp_resonant() {
+        let out = shows("DSolveValue[y''[x] - 3 y'[x] + 2 y[x] == Exp[3 x], y[x], x]");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+        assert!(out.contains("Power[E") || out.contains("Exp["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_nonhomogeneous_exp_double_resonance() {
+        // Characteristic (r + 1)^2 with forcing E^-x -> x^2 E^-x / 2.
+        let out = shows("DSolveValue[y''[x] + 2 y'[x] + y[x] == Exp[-x], y[x], x]");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+        assert!(
+            out.contains("x^2") || out.contains("Power[x, 2]"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn test_dsolve_first_order_variable_coeff() {
+        let out = shows("DSolveValue[y'[x] + x y[x] == 0, y[x], x]");
+        assert!(out.contains("C[1]"), "got {out}");
+        assert!(!out.starts_with("DSolveValue["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_zero_rhs_unevaluated_never_wrong() {
+        // Fourth-order with an irreducible quartic char. poly is left unevaluated.
+        let out = shows("DSolve[y''''[x] + y[x] == 0, y[x], x]");
+        assert!(
+            out.starts_with("DSolve[") || out.contains("C[1]"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn test_dsolve_unsupported_forcing_unevaluated() {
+        let out = shows("DSolve[y''[x] + y[x] == Tan[x], y[x], x]");
+        assert!(out.starts_with("DSolve["), "got {out}");
+    }
+
+    #[test]
+    fn test_dsolve_value_returns_expression_not_rules() {
+        let out = shows("DSolveValue[y''[x] + y[x] == 0, y[x], x]");
+        assert!(!out.starts_with("{{"), "got {out}");
+        assert!(out.contains("C[1]") && out.contains("C[2]"), "got {out}");
+        assert!(
+            out.contains("Cos[x]") && out.contains("Sin[x]"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn test_dsolve_value_unsupported_unevaluated() {
+        let out = shows("DSolveValue[y''[x] + y[x] == Log[x], y[x], x]");
+        assert!(out.starts_with("DSolveValue["), "got {out}");
     }
 
     #[test]

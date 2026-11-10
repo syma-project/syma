@@ -1748,33 +1748,34 @@ pub fn builtin_minors(args: &[Value]) -> Result<Value, EvalError> {
 /// Register all LinearAlgebra builtins in the environment.
 pub fn register(env: &crate::env::Env) {
     use super::register_builtin;
-    register_builtin(env, "Dimensions", builtin_dimensions);
-    register_builtin(env, "Dot", builtin_dot);
+    // `Dimensions`, `Transpose`, `ArrayFlatten`, `KroneckerProduct` and
+    // `Minors` are already registered eagerly elsewhere (the `Dimensions`
+    // Dataset-aware dispatcher, the central table, `linalgmore`); re-registering
+    // them here would shadow those once LinearAlgebra loads.
+    // `Dot`/`Tr`/`IdentityMatrix`/`DiagonalMatrix` are (re)installed by
+    // `tensor::register` at the end of this function.
     register_builtin(env, "MatrixMultiply", builtin_matrix_multiply);
-    register_builtin(env, "IdentityMatrix", builtin_identity_matrix);
     register_builtin(env, "Det", builtin_det);
     register_builtin(env, "Inverse", builtin_inverse);
-    register_builtin(env, "Transpose", builtin_linalg_transpose);
-    register_builtin(env, "Tr", builtin_tr);
     register_builtin(env, "Norm", builtin_norm);
     register_builtin(env, "Cross", builtin_cross);
     register_builtin(env, "LinearSolve", builtin_linear_solve);
     register_builtin(env, "MatrixPower", builtin_matrix_power);
     register_builtin(env, "Eigenvalues", builtin_eigenvalues);
     register_builtin(env, "Eigenvectors", builtin_eigenvectors);
-    register_builtin(env, "ArrayFlatten", builtin_array_flatten);
     register_builtin(env, "ZeroMatrix", builtin_zero_matrix);
-    register_builtin(env, "DiagonalMatrix", builtin_diagonal_matrix);
     register_builtin(env, "UnitVector", builtin_unit_vector);
     register_builtin(env, "RowReduce", builtin_row_reduce);
     register_builtin(env, "MatrixRank", builtin_matrix_rank);
     register_builtin(env, "NullSpace", builtin_null_space);
     register_builtin(env, "Row", builtin_row);
     register_builtin(env, "Column", builtin_column);
-    register_builtin(env, "KroneckerProduct", builtin_kronecker_product);
     register_builtin(env, "VectorAngle", builtin_vector_angle);
     register_builtin(env, "PseudoInverse", builtin_pseudo_inverse);
-    register_builtin(env, "Minors", builtin_minors);
+    // `tensor` upgrades Dot/Tr/IdentityMatrix/DiagonalMatrix/KroneckerProduct to
+    // handle higher-rank tensors; re-install them after this package's versions
+    // so they are not shadowed once LinearAlgebra loads lazily.
+    super::tensor::register(env);
 }
 
 /// Symbol names exported by the LinearAlgebra package.

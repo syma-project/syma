@@ -78,6 +78,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Sequence" => vec!["HoldAll", "Locked", "ReadProtected", "SequenceHold"],
         // -- Scoping/conditionals (HoldAll so body is not pre-evaluated) --
         "With" | "Module" | "Block" => vec!["HoldAll", "Locked", "ReadProtected"],
+        // Held so the body's random draws happen inside the localized RNG state.
+        "BlockRandom" => vec!["HoldAll", "Locked", "ReadProtected"],
         "If" => vec!["HoldAll", "Locked", "ReadProtected"],
         // -- Calculus --
         // `D` and `Integrate` evaluate their arguments (so nested/partial

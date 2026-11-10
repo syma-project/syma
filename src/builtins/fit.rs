@@ -21,14 +21,17 @@ pub fn register(env: &Env) {
     super::register_builtin_env(env, "MinValue", builtin_min_value);
     super::register_builtin_env(env, "MaxValue", builtin_max_value);
     super::register_builtin_env(env, "NonlinearModelFit", builtin_nonlinear_model_fit);
+    super::register_builtin_env(env, "LinearModelFit", builtin_linear_model_fit);
     super::register_builtin_env(env, "FunctionInterpolation", builtin_function_interpolation);
     // Internal head used by `Interpolation`/`FunctionInterpolation` result
     // objects so that symbolic points (e.g. `Pi/2`) resolve numerically.
     super::register_builtin_env(env, "FitInterpolationFunction", builtin_fit_interp_eval);
+    super::register_builtin_env(env, "FitInterpFunc2D", builtin_fit_interp_2d_eval);
     // `FittedModel` is the callable fit object returned by `NonlinearModelFit`;
     // `FitResiduals`/`Property` expose and dispatch its properties.
     super::register_builtin_env(env, "FittedModel", builtin_fitted_model);
     super::register_builtin_env(env, "FitResiduals", builtin_fit_residuals);
+    super::register_builtin_env(env, "DesignMatrix", builtin_design_matrix);
     super::register_builtin_env(env, "Property", builtin_property);
 
     // These builtins must see their arguments unevaluated (basis functions,
@@ -40,6 +43,7 @@ pub fn register(env: &Env) {
         "MinValue",
         "MaxValue",
         "NonlinearModelFit",
+        "LinearModelFit",
         "FunctionInterpolation",
     ] {
         env.set_attributes(name, vec!["HoldAll".to_string()]);
@@ -290,16 +294,182 @@ fn least_squares_f64(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     solve_linear_f64(jtj, jtr)
 }
 
+/// Scale each row of `a` and entry of `b` by `sqrt(w_i)`, turning a weighted
+/// least-squares problem into an ordinary one.
+fn scale_by_weights(a: &[Vec<f64>], b: &[f64], w: &[f64]) -> Option<(Vec<Vec<f64>>, Vec<f64>)> {
+    if w.len() != a.len() || b.len() != a.len() {
+        return None;
+    }
+    let mut aa = Vec::with_capacity(a.len());
+    let mut bb = Vec::with_capacity(b.len());
+    for i in 0..a.len() {
+        let s = w[i].max(0.0).sqrt();
+        aa.push(a[i].iter().map(|x| x * s).collect());
+        bb.push(b[i] * s);
+    }
+    Some((aa, bb))
+}
+
+/// Weighted least-squares solution of `a x ≈ b` with weights `w` (as the
+/// objective `Σ w_i (a_i·x - b_i)²`).
+fn weighted_least_squares_f64(a: &[Vec<f64>], b: &[f64], w: &[f64]) -> Option<Vec<f64>> {
+    let (aa, bb) = scale_by_weights(a, b, w)?;
+    least_squares_f64(&aa, &bb)
+}
+
+/// Construct a `name -> value` rule.
+fn rule(name: &str, value: Value) -> Value {
+    Value::Rule {
+        lhs: Box::new(Value::Symbol(name.to_string())),
+        rhs: Box::new(value),
+        delayed: false,
+    }
+}
+
+/// Find the RHS of a `name -> …` option in an option list (or a bare rule).
+fn find_option(v: &Value, name: &str) -> Option<Value> {
+    match v {
+        Value::Rule { lhs, rhs, .. } => match lhs.as_ref() {
+            Value::Symbol(s) if s == name => Some((**rhs).clone()),
+            _ => None,
+        },
+        Value::List(items) => items.iter().find_map(|it| find_option(it, name)),
+        _ => None,
+    }
+}
+
+/// Parse a `Weights -> {…}` option into one weight per data point.
+///
+/// Returns `None` when the option is present but malformed, `Some(None)` when
+/// absent (or `Automatic`), and `Some(Some(w))` for an explicit list.
+#[allow(clippy::option_option)]
+fn parse_weights_option(opts: &Value, n: usize, env: &Env) -> Option<Option<Vec<f64>>> {
+    let raw = match find_option(opts, "Weights") {
+        Some(r) => r,
+        None => return Some(None),
+    };
+    let mut raw = deep_unwrap(&raw);
+    if as_list(&raw).is_none() {
+        // The option RHS is held unevaluated; resolve a bound symbol if needed.
+        if let Ok(v) = crate::eval::eval(&crate::eval::table::value_to_expr(&raw), env) {
+            raw = v;
+        }
+    }
+    if matches!(&raw, Value::Symbol(s) if s == "Automatic") {
+        return Some(None);
+    }
+    let items = as_list(&raw)?;
+    if items.len() != n {
+        return None;
+    }
+    let vals = items
+        .iter()
+        .map(super::to_f64)
+        .collect::<Option<Vec<f64>>>()?;
+    Some(Some(vals))
+}
+
+/// Maximum slot index appearing in `expr` (`#` counts as 1).
+fn count_slots(expr: &Expr) -> usize {
+    match expr {
+        Expr::Slot(None) => 1,
+        Expr::Slot(Some(n)) => *n,
+        Expr::List(items) => items.iter().map(count_slots).max().unwrap_or(0),
+        Expr::Call { head, args } => args
+            .iter()
+            .map(count_slots)
+            .chain(std::iter::once(count_slots(head)))
+            .max()
+            .unwrap_or(0),
+        Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs } => {
+            count_slots(lhs).max(count_slots(rhs))
+        }
+        Expr::Pure { body } | Expr::Function { body, .. } => count_slots(body),
+        _ => 0,
+    }
+}
+
+/// Like [`crate::pattern::unwrap_expr_to_value`] but also converts rule and
+/// pure-function nodes (which the generic unwrapper leaves as `Pattern`s).
+fn deep_unwrap_expr(expr: &Expr) -> Value {
+    match expr {
+        Expr::Symbol(s) => Value::Symbol(s.clone()),
+        Expr::Integer(n) => Value::Integer(n.clone()),
+        Expr::Real(r) => Value::Real(r.clone()),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::Str(s) => Value::Str(s.clone()),
+        Expr::Null => Value::Null,
+        Expr::List(items) => Value::List(items.iter().map(deep_unwrap_expr).collect()),
+        Expr::Call { head, args } => {
+            let h = deep_unwrap_expr(head);
+            let a: Vec<Value> = args.iter().map(deep_unwrap_expr).collect();
+            match h {
+                Value::Symbol(name) => Value::Call {
+                    head: name,
+                    args: a,
+                },
+                other => Value::Call {
+                    head: other.to_string(),
+                    args: a,
+                },
+            }
+        }
+        Expr::Rule { lhs, rhs } => Value::Rule {
+            lhs: Box::new(deep_unwrap_expr(lhs)),
+            rhs: Box::new(deep_unwrap_expr(rhs)),
+            delayed: false,
+        },
+        Expr::RuleDelayed { lhs, rhs } => Value::Rule {
+            lhs: Box::new(deep_unwrap_expr(lhs)),
+            rhs: Box::new(deep_unwrap_expr(rhs)),
+            delayed: true,
+        },
+        Expr::Pure { body } => Value::PureFunction {
+            body: body.as_ref().clone(),
+            slot_count: count_slots(body),
+            params: vec![],
+            env: None,
+        },
+        Expr::Function { params, body } => Value::PureFunction {
+            body: body.as_ref().clone(),
+            slot_count: count_slots(body),
+            params: params.clone(),
+            env: None,
+        },
+        other => Value::Pattern(other.clone()),
+    }
+}
+
+/// Recover an unevaluated argument, converting nested rule/pure-function nodes.
+fn arg_to_uneval_deep(v: &Value) -> Value {
+    match v {
+        Value::Pattern(e) => deep_unwrap_expr(e),
+        Value::Hold(b) | Value::HoldComplete(b) => (**b).clone(),
+        other => other.clone(),
+    }
+}
+
+/// Combine trailing option arguments into a single option list.
+fn collect_options(args: &[Value]) -> Value {
+    let items: Vec<Value> = args.iter().map(arg_to_uneval_deep).collect();
+    match items.len() {
+        0 => Value::List(vec![]),
+        1 => items.into_iter().next().unwrap_or(Value::List(vec![])),
+        _ => Value::List(items),
+    }
+}
+
 // ── Fit ─────────────────────────────────────────────────────────────────────
 
 /// Fit[data, funcs, vars] — least-squares fit of data with the linear basis `funcs`.
 pub fn builtin_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
+    if args.len() < 3 {
         return Ok(unevaluated("Fit", args));
     }
     let data = arg_to_value(&args[0], env)?;
     let funcs_v = arg_to_uneval(&args[1]);
     let vars_v = arg_to_uneval(&args[2]);
+    let opts = collect_options(&args[3..]);
 
     let funcs = match as_list(&funcs_v) {
         Some(f) => f.clone(),
@@ -320,6 +490,11 @@ pub fn builtin_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         return Ok(int(0));
     }
 
+    let weights = match parse_weights_option(&opts, coords.len(), env) {
+        Some(w) => w,
+        None => return Ok(unevaluated("Fit", args)),
+    };
+
     let mut matrix = vec![vec![0.0f64; funcs.len()]; coords.len()];
     for (i, point) in coords.iter().enumerate() {
         for (j, func) in funcs.iter().enumerate() {
@@ -331,7 +506,11 @@ pub fn builtin_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         }
     }
 
-    let coeffs = match least_squares_f64(&matrix, &ys) {
+    let coeffs = match &weights {
+        Some(w) => weighted_least_squares_f64(&matrix, &ys, w),
+        None => least_squares_f64(&matrix, &ys),
+    };
+    let coeffs = match coeffs {
         Some(c) => c,
         None => return Ok(unevaluated("Fit", args)),
     };
@@ -377,6 +556,7 @@ fn gauss_newton(
     coords: &[Vec<f64>],
     ys: &[f64],
     p0: &[f64],
+    weights: &[f64],
     env: &Env,
 ) -> (f64, Vec<f64>) {
     let np = params.len();
@@ -385,11 +565,13 @@ fn gauss_newton(
     let mut best = p.clone();
 
     for _ in 0..300 {
+        // Weighted residuals `sqrt(w_i) (model(x_i) - y_i)`.
         let mut r = vec![0.0f64; coords.len()];
         let mut valid = true;
         for i in 0..coords.len() {
+            let sw = weights[i].max(0.0).sqrt();
             match eval_model(model, params, &p, vars, &coords[i], env) {
-                Some(v) => r[i] = v - ys[i],
+                Some(v) => r[i] = sw * (v - ys[i]),
                 None => {
                     valid = false;
                     break;
@@ -408,7 +590,7 @@ fn gauss_newton(
             break;
         }
 
-        // Finite-difference Jacobian.
+        // Finite-difference Jacobian (weighted rows).
         let mut jac = vec![vec![0.0f64; np]; coords.len()];
         for k in 0..np {
             let h = 1e-6 * (1.0 + p[k].abs());
@@ -417,9 +599,10 @@ fn gauss_newton(
             let mut pm = p.clone();
             pm[k] -= h;
             for i in 0..coords.len() {
+                let sw = weights[i].max(0.0).sqrt();
                 let vp = eval_model(model, params, &pp, vars, &coords[i], env).unwrap_or(0.0);
                 let vm = eval_model(model, params, &pm, vars, &coords[i], env).unwrap_or(0.0);
-                jac[i][k] = (vp - vm) / (2.0 * h);
+                jac[i][k] = sw * (vp - vm) / (2.0 * h);
             }
         }
 
@@ -444,6 +627,7 @@ struct NonlinearFit {
     best: Vec<f64>,
     vars: Vec<String>,
     residuals: Vec<f64>,
+    ys: Vec<f64>,
 }
 
 /// Shared core for `FindFit`/`NonlinearModelFit`: parse the data and model, run
@@ -454,6 +638,7 @@ fn nonlinear_fit_core(
     model: &Value,
     params_v: &Value,
     vars_v: &Value,
+    opts: Option<&Value>,
     env: &Env,
 ) -> Option<NonlinearFit> {
     let params = match collect_symbols(params_v) {
@@ -466,12 +651,25 @@ fn nonlinear_fit_core(
         return None;
     }
 
+    let weights = match opts {
+        Some(o) => parse_weights_option(o, coords.len(), env)?,
+        None => None,
+    };
+    let ones;
+    let weights: &[f64] = match &weights {
+        Some(w) => w,
+        None => {
+            ones = vec![1.0f64; coords.len()];
+            &ones
+        }
+    };
+
     let np = params.len();
     let starts: Vec<Vec<f64>> = vec![vec![1.0; np], vec![0.5; np], vec![2.0; np], vec![0.25; np]];
     let mut best_ss = f64::INFINITY;
     let mut best = vec![1.0; np];
     for start in &starts {
-        let (ss, p) = gauss_newton(model, &params, &vars, &coords, &ys, start, env);
+        let (ss, p) = gauss_newton(model, &params, &vars, &coords, &ys, start, weights, env);
         if ss < best_ss {
             best_ss = ss;
             best = p;
@@ -489,20 +687,22 @@ fn nonlinear_fit_core(
         best,
         vars,
         residuals,
+        ys,
     })
 }
 
 /// FindFit[data, model, params, vars] — nonlinear least-squares fit.
 pub fn builtin_find_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 4 {
+    if args.len() < 4 {
         return Ok(unevaluated("FindFit", args));
     }
     let data = arg_to_value(&args[0], env)?;
     let model = arg_to_uneval(&args[1]);
     let params_v = arg_to_uneval(&args[2]);
     let vars_v = arg_to_uneval(&args[3]);
+    let opts = collect_options(&args[4..]);
 
-    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, env) {
+    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, Some(&opts), env) {
         Some(f) => f,
         None => return Ok(unevaluated("FindFit", args)),
     };
@@ -542,6 +742,44 @@ fn collect_free_symbols(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Build a `FittedModel[...]` pure-function object from fit components.
+///
+/// Fixed arguments are `rules`, `residuals`, `model`, `vars` and `meta`; the
+/// object's slot receives the property/evaluation request.
+fn make_fitted_model(
+    model: Value,
+    params: &[String],
+    vals: &[f64],
+    vars: &[String],
+    residuals: &[f64],
+    meta: Value,
+) -> Value {
+    let rules: Vec<Value> = params
+        .iter()
+        .zip(vals.iter())
+        .map(|(name, val)| rule(name, super::real(*val)))
+        .collect();
+    let residuals = Value::List(residuals.iter().map(|r| super::real(*r)).collect());
+    let vars = Value::List(vars.iter().map(|s| Value::Symbol(s.clone())).collect());
+
+    Value::PureFunction {
+        body: Expr::Call {
+            head: Box::new(Expr::Symbol("FittedModel".to_string())),
+            args: vec![
+                crate::eval::table::value_to_expr(&Value::List(rules)),
+                crate::eval::table::value_to_expr(&residuals),
+                crate::eval::table::value_to_expr(&model),
+                crate::eval::table::value_to_expr(&vars),
+                crate::eval::table::value_to_expr(&meta),
+                Expr::Slot(Some(1)),
+            ],
+        },
+        slot_count: 1,
+        params: vec![],
+        env: None,
+    }
+}
+
 /// NonlinearModelFit[data, model, params, vars] — nonlinear least-squares fit
 /// returning a callable fit object.
 ///
@@ -550,13 +788,13 @@ fn collect_free_symbols(v: &Value, out: &mut Vec<String>) {
 /// `fit["BestFitParameters"]`, `fit["FitResiduals"]`, `fit["Fit"]`,
 /// `fit[Property["..."]]` and `fit[FitResiduals]`.
 pub fn builtin_nonlinear_model_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 3 || args.len() > 4 {
+    if args.len() < 3 {
         return Ok(unevaluated("NonlinearModelFit", args));
     }
     let data = arg_to_value(&args[0], env)?;
     let model = arg_to_uneval(&args[1]);
     let params_v = arg_to_uneval(&args[2]);
-    let vars_v = if args.len() == 4 {
+    let vars_v = if args.len() >= 4 {
         arg_to_uneval(&args[3])
     } else {
         // Infer the variables as the free symbols of the model minus parameters.
@@ -567,40 +805,133 @@ pub fn builtin_nonlinear_model_fit(args: &[Value], env: &Env) -> Result<Value, E
         }
         Value::List(free.into_iter().map(Value::Symbol).collect())
     };
+    let opts = if args.len() >= 5 {
+        collect_options(&args[4..])
+    } else {
+        Value::List(vec![])
+    };
 
-    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, env) {
+    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, Some(&opts), env) {
         Some(f) => f,
         None => return Ok(unevaluated("NonlinearModelFit", args)),
     };
 
-    let rules: Vec<Value> = fit
-        .params
-        .iter()
-        .zip(fit.best.iter())
-        .map(|(name, val)| Value::Rule {
-            lhs: Box::new(Value::Symbol(name.clone())),
-            rhs: Box::new(super::real(*val)),
-            delayed: false,
-        })
-        .collect();
-    let residuals = Value::List(fit.residuals.iter().map(|r| super::real(*r)).collect());
-    let vars = Value::List(fit.vars.iter().map(|s| Value::Symbol(s.clone())).collect());
+    let response = Value::List(fit.ys.iter().map(|y| super::real(*y)).collect());
+    let meta = Value::List(vec![
+        rule("Response", response),
+        rule("NumParams", int(fit.params.len() as i64)),
+    ]);
+    Ok(make_fitted_model(
+        model,
+        &fit.params,
+        &fit.best,
+        &fit.vars,
+        &fit.residuals,
+        meta,
+    ))
+}
 
-    Ok(Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("FittedModel".to_string())),
-            args: vec![
-                crate::eval::table::value_to_expr(&Value::List(rules)),
-                crate::eval::table::value_to_expr(&residuals),
-                crate::eval::table::value_to_expr(&model),
-                crate::eval::table::value_to_expr(&vars),
-                Expr::Slot(Some(1)),
-            ],
-        },
-        slot_count: 1,
-        params: vec![],
-        env: None,
-    })
+/// LinearModelFit[data, funcs, vars] — least-squares fit with a linear basis,
+/// returning a callable fit object that exposes fit statistics.
+pub fn builtin_linear_model_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 3 {
+        return Ok(unevaluated("LinearModelFit", args));
+    }
+    let data = arg_to_value(&args[0], env)?;
+    let funcs_v = arg_to_uneval_deep(&args[1]);
+    let vars_v = arg_to_uneval_deep(&args[2]);
+    let opts = collect_options(&args[3..]);
+
+    let funcs = match as_list(&funcs_v) {
+        Some(f) if !f.is_empty() => f.clone(),
+        _ => return Ok(unevaluated("LinearModelFit", args)),
+    };
+    let vars = match collect_symbols(&vars_v) {
+        Some(v) => v,
+        None => return Ok(unevaluated("LinearModelFit", args)),
+    };
+    let (coords, ys) = match parse_points(&data, vars.len()) {
+        Some(p) => p,
+        None => return Ok(unevaluated("LinearModelFit", args)),
+    };
+    if coords.is_empty() {
+        return Ok(unevaluated("LinearModelFit", args));
+    }
+    let weights = match parse_weights_option(&opts, coords.len(), env) {
+        Some(w) => w,
+        None => return Ok(unevaluated("LinearModelFit", args)),
+    };
+
+    let mut matrix = vec![vec![0.0f64; funcs.len()]; coords.len()];
+    for (i, point) in coords.iter().enumerate() {
+        for (j, func) in funcs.iter().enumerate() {
+            let mut sub = func.clone();
+            for (name, c) in vars.iter().zip(point.iter()) {
+                sub = substitute(&sub, name, &super::real(*c));
+            }
+            matrix[i][j] = eval_scalar(&sub, env).unwrap_or(0.0);
+        }
+    }
+
+    let coeffs = match &weights {
+        Some(w) => weighted_least_squares_f64(&matrix, &ys, w),
+        None => least_squares_f64(&matrix, &ys),
+    };
+    let coeffs = match coeffs {
+        Some(c) => c,
+        None => return Ok(unevaluated("LinearModelFit", args)),
+    };
+
+    let params: Vec<String> = (0..funcs.len()).map(|j| format!("c{}", j + 1)).collect();
+    let mut terms = Vec::with_capacity(funcs.len());
+    for (name, f) in params.iter().zip(funcs.iter()) {
+        terms.push(super::arithmetic::mul_values_public(
+            &Value::Symbol(name.clone()),
+            f,
+        )?);
+    }
+    let model = super::arithmetic::builtin_plus(&terms)?;
+
+    let mut residuals = Vec::with_capacity(coords.len());
+    for (i, point) in coords.iter().enumerate() {
+        let mut m = substitute_params(&model, &params, &coeffs);
+        for (name, c) in vars.iter().zip(point.iter()) {
+            m = substitute(&m, name, &super::real(*c));
+        }
+        match eval_scalar(&m, env) {
+            Some(v) => residuals.push(ys[i] - v),
+            None => return Ok(unevaluated("LinearModelFit", args)),
+        }
+    }
+
+    let design = Value::List(
+        matrix
+            .iter()
+            .map(|row| Value::List(row.iter().map(|x| super::real(*x)).collect()))
+            .collect(),
+    );
+    let mut meta_items = vec![
+        rule("DesignMatrix", design),
+        rule(
+            "Response",
+            Value::List(ys.iter().map(|y| super::real(*y)).collect()),
+        ),
+        rule("NumParams", int(funcs.len() as i64)),
+    ];
+    if let Some(w) = &weights {
+        meta_items.push(rule(
+            "Weights",
+            Value::List(w.iter().map(|x| super::real(*x)).collect()),
+        ));
+    }
+    Ok(make_fitted_model(
+        model,
+        &params,
+        &coeffs,
+        &vars,
+        &residuals,
+        Value::List(meta_items),
+    ))
 }
 
 /// Extract the property name from a `FittedModel` request argument.
@@ -679,42 +1010,113 @@ fn expr_substitute(expr: &Expr, name: &str, repl: &Expr) -> Expr {
     }
 }
 
-/// FittedModel[rules, residuals, model, vars, request] — dispatch a fit object.
+/// Parse a list of real numbers.
+fn parse_real_list(v: &Value) -> Option<Vec<f64>> {
+    as_list(v)?.iter().map(super::to_f64).collect()
+}
+
+/// Extract `(ssres, sstot, n, p)` from the residuals and fit metadata.
+fn fit_stats(residuals: &Value, meta: &Value) -> Option<(f64, f64, usize, usize)> {
+    let r = parse_real_list(residuals)?;
+    let ys = parse_real_list(&find_option(meta, "Response")?)?;
+    let n = r.len();
+    if n == 0 || ys.len() != n {
+        return None;
+    }
+    let p = super::to_f64(&find_option(meta, "NumParams")?)? as usize;
+    let ssres: f64 = r.iter().map(|x| x * x).sum();
+    let ybar = ys.iter().sum::<f64>() / (n as f64);
+    let sstot: f64 = ys.iter().map(|y| (y - ybar) * (y - ybar)).sum();
+    Some((ssres, sstot, n, p))
+}
+
+/// `Indeterminate` as a value.
+fn indeterminate() -> Value {
+    Value::Symbol("Indeterminate".to_string())
+}
+
+/// EstimatedVariance = SSres / (n - p).
+fn estimated_variance(residuals: &Value, meta: &Value) -> Option<Value> {
+    let (ssres, _, n, p) = fit_stats(residuals, meta)?;
+    Some(if n > p {
+        super::real(ssres / ((n - p) as f64))
+    } else if ssres.abs() < 1e-12 {
+        super::real(0.0)
+    } else {
+        indeterminate()
+    })
+}
+
+/// RSquared = 1 - SSres / SStot.
+fn r_squared(residuals: &Value, meta: &Value) -> Option<Value> {
+    let (ssres, sstot, _, _) = fit_stats(residuals, meta)?;
+    Some(if sstot.abs() < 1e-15 {
+        indeterminate()
+    } else {
+        super::real(1.0 - ssres / sstot)
+    })
+}
+
+/// AdjustedRSquared, accounting for the number of parameters.
+fn adjusted_r_squared(residuals: &Value, meta: &Value) -> Option<Value> {
+    let (ssres, sstot, n, p) = fit_stats(residuals, meta)?;
+    if n <= p || sstot.abs() < 1e-15 {
+        return Some(indeterminate());
+    }
+    let r2 = 1.0 - ssres / sstot;
+    Some(super::real(
+        1.0 - (1.0 - r2) * ((n - 1) as f64) / ((n - p) as f64),
+    ))
+}
+
+/// FittedModel[rules, residuals, model, vars, meta, request] — dispatch a fit object.
 fn builtin_fitted_model(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 5 {
+    if args.len() != 6 {
         return Ok(unevaluated("FittedModel", args));
     }
     // The evaluator wraps rule components and symbolic args in `Pattern`; strip
     // those so numeric parsing and substitution see plain values.
     let rules_v = deep_unwrap(&args[0]);
-    let residuals = &args[1];
+    let residuals = deep_unwrap(&args[1]);
     let model = deep_unwrap(&args[2]);
     let vars_v = deep_unwrap(&args[3]);
-    let request = deep_unwrap(&args[4]);
+    let meta = deep_unwrap(&args[4]);
+    let request = deep_unwrap(&args[5]);
 
     let (param_names, param_vals) = extract_param_rules(&rules_v);
     let vars = var_names(&vars_v);
     let model = &model;
 
     if let Some(prop) = property_name(&request) {
-        return Ok(match prop.as_str() {
-            "BestFitParameters" | "ParameterRules" => rules_v.clone(),
-            "FitResiduals" | "Residuals" => residuals.clone(),
-            "Fit" | "BestFit" => substitute_params(model, &param_names, &param_vals),
+        let computed: Option<Value> = match prop.as_str() {
+            "BestFitParameters" | "ParameterRules" => Some(rules_v.clone()),
+            "FitResiduals" | "Residuals" => Some(residuals.clone()),
+            "Fit" | "BestFit" => Some(substitute_params(model, &param_names, &param_vals)),
             "FitFunction" => {
                 let m = substitute_params(model, &param_names, &param_vals);
                 let mut body = crate::eval::table::value_to_expr(&m);
                 for (i, name) in vars.iter().enumerate() {
                     body = expr_substitute(&body, name, &Expr::Slot(Some(i + 1)));
                 }
-                Value::PureFunction {
+                Some(Value::PureFunction {
                     body,
                     slot_count: vars.len(),
                     params: vec![],
                     env: None,
-                }
+                })
             }
-            _ => return Ok(unevaluated("FittedModel", args)),
+            "DesignMatrix" => find_option(&meta, "DesignMatrix"),
+            "Response" => find_option(&meta, "Response"),
+            "Weights" => find_option(&meta, "Weights"),
+            "NumberOfParameters" => find_option(&meta, "NumParams"),
+            "EstimatedVariance" => estimated_variance(&residuals, &meta),
+            "RSquared" => r_squared(&residuals, &meta),
+            "AdjustedRSquared" => adjusted_r_squared(&residuals, &meta),
+            _ => None,
+        };
+        return Ok(match computed {
+            Some(v) => v,
+            None => unevaluated("FittedModel", args),
         });
     }
 
@@ -757,6 +1159,20 @@ pub fn builtin_fit_residuals(args: &[Value], env: &Env) -> Result<Value, EvalErr
         return Ok(v);
     }
     Ok(unevaluated("FitResiduals", args))
+}
+
+/// DesignMatrix[fit] — design matrix of a (linear) model fit object.
+pub fn builtin_design_matrix(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("DesignMatrix", args));
+    }
+    if let Ok(v) =
+        crate::eval::apply_function(&args[0], &[Value::Str("DesignMatrix".to_string())], env)
+        && !matches!(&v, Value::Call { head, .. } if head == "FittedModel")
+    {
+        return Ok(v);
+    }
+    Ok(unevaluated("DesignMatrix", args))
 }
 
 /// Property[obj, name] — access a property of an object; `Property[name]` stays
@@ -1031,56 +1447,253 @@ pub fn builtin_linear_optimization(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Interpolation ───────────────────────────────────────────────────────────
 
-/// Parse interpolation data into sorted, strictly increasing sample points.
-fn parse_interp_points(data: &Value) -> Option<(Vec<f64>, Vec<f64>)> {
-    let data = deep_unwrap(data);
-    let items = as_list(&data)?;
-    let mut pts = Vec::with_capacity(items.len());
-    for it in items {
-        let (x, y) = match it {
-            Value::Rule { lhs, rhs, .. } => (first_coord(lhs)?, super::to_f64(rhs)?),
-            Value::List(inner) if inner.len() >= 2 => {
-                (super::to_f64(&inner[0])?, super::to_f64(inner.last()?)?)
-            }
-            _ => return None,
-        };
-        pts.push((x, y));
-    }
+/// Which dimension the interpolation data lives in.
+enum InterpData {
+    OneD(Vec<f64>, Vec<f64>),
+    TwoD(TwoD),
+}
+
+/// 2D interpolation data (either a tensor grid or scattered points).
+enum TwoD {
+    Grid {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        /// `z[i][j] = f(xs[i], ys[j])`.
+        z: Vec<Vec<f64>>,
+    },
+    Scatter(Vec<(f64, f64, f64)>),
+}
+
+/// Group scattered triples into a grid when they form a full tensor product.
+fn build_two_d(mut pts: Vec<(f64, f64, f64)>) -> Option<TwoD> {
     if pts.is_empty() {
         return None;
     }
-    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pts.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
     let mut xs: Vec<f64> = Vec::new();
     let mut ys: Vec<f64> = Vec::new();
-    for (x, y) in pts {
-        if let Some(last) = xs.last()
-            && (*last - x).abs() < 1e-12
-        {
-            continue;
+    for (x, y, _) in &pts {
+        if !xs.iter().any(|v| (*v - *x).abs() < 1e-12) {
+            xs.push(*x);
         }
-        xs.push(x);
-        ys.push(y);
+        if !ys.iter().any(|v| (*v - *y).abs() < 1e-12) {
+            ys.push(*y);
+        }
     }
-    Some((xs, ys))
+
+    if xs.len().saturating_mul(ys.len()) == pts.len() {
+        let mut z = vec![vec![0.0f64; ys.len()]; xs.len()];
+        let mut filled = vec![vec![false; ys.len()]; xs.len()];
+        let mut ok = true;
+        for (x, y, v) in &pts {
+            let i = xs.iter().position(|t| (t - x).abs() < 1e-9);
+            let j = ys.iter().position(|t| (t - y).abs() < 1e-9);
+            match (i, j) {
+                (Some(i), Some(j)) if !filled[i][j] => {
+                    z[i][j] = *v;
+                    filled[i][j] = true;
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            return Some(TwoD::Grid { xs, ys, z });
+        }
+    }
+    Some(TwoD::Scatter(pts))
 }
 
-fn parse_interp_order(arg: &Value) -> Option<i64> {
-    match arg {
-        Value::Integer(n) => Some(n.to_i64().unwrap_or(3)),
-        Value::Rule { lhs, rhs, .. } => match lhs.as_ref() {
-            Value::Symbol(s) if s == "InterpolationOrder" => match rhs.as_ref() {
-                Value::Integer(n) => Some(n.to_i64().unwrap_or(3)),
-                _ => None,
-            },
-            _ => None,
+/// Parse 1D or 2D interpolation data into sorted sample points.
+fn parse_interp_data(data: &Value) -> Option<InterpData> {
+    let data = deep_unwrap(data);
+    let items = as_list(&data)?;
+    if items.is_empty() {
+        return None;
+    }
+    let dim = match &items[0] {
+        Value::Rule { lhs, .. } => match lhs.as_ref() {
+            Value::List(v) if v.len() >= 2 => 2,
+            _ => 1,
         },
-        Value::List(items) => items.iter().find_map(parse_interp_order),
+        Value::List(inner) if inner.len() >= 3 => 2,
+        _ => 1,
+    };
+
+    if dim == 1 {
+        let mut pts = Vec::with_capacity(items.len());
+        for it in items {
+            let (x, y) = match it {
+                Value::Rule { lhs, rhs, .. } => (first_coord(lhs)?, super::to_f64(rhs)?),
+                Value::List(inner) if inner.len() == 2 => {
+                    (super::to_f64(&inner[0])?, super::to_f64(&inner[1])?)
+                }
+                _ => return None,
+            };
+            pts.push((x, y));
+        }
+        pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut xs: Vec<f64> = Vec::new();
+        let mut ys: Vec<f64> = Vec::new();
+        for (x, y) in pts {
+            if xs
+                .last()
+                .is_some_and(|last: &f64| (*last - x).abs() < 1e-12)
+            {
+                continue;
+            }
+            xs.push(x);
+            ys.push(y);
+        }
+        if xs.is_empty() {
+            return None;
+        }
+        Some(InterpData::OneD(xs, ys))
+    } else {
+        let mut pts = Vec::with_capacity(items.len());
+        for it in items {
+            let (x, y, z) = match it {
+                Value::Rule { lhs, rhs, .. } => match lhs.as_ref() {
+                    Value::List(v) if v.len() >= 2 => (
+                        super::to_f64(&v[0])?,
+                        super::to_f64(&v[1])?,
+                        super::to_f64(rhs)?,
+                    ),
+                    _ => return None,
+                },
+                Value::List(inner) if inner.len() >= 3 => (
+                    super::to_f64(&inner[0])?,
+                    super::to_f64(&inner[1])?,
+                    super::to_f64(inner.last()?)?,
+                ),
+                _ => return None,
+            };
+            pts.push((x, y, z));
+        }
+        Some(InterpData::TwoD(build_two_d(pts)?))
+    }
+}
+
+/// How to handle evaluation outside the interpolation domain.
+enum Extrap {
+    Automatic,
+    Indeterminate,
+    Handler(Expr),
+}
+
+/// Options controlling an interpolant.
+struct InterpOptions {
+    order: i64,
+    periodic: bool,
+    extrap: Extrap,
+}
+
+impl Default for InterpOptions {
+    fn default() -> Self {
+        InterpOptions {
+            order: 3,
+            periodic: false,
+            extrap: Extrap::Automatic,
+        }
+    }
+}
+
+/// Interpret an `ExtrapolationHandler` RHS.
+fn parse_interp_handler(rhs: &Value) -> Extrap {
+    match rhs {
+        Value::Symbol(s) if s == "Automatic" => Extrap::Automatic,
+        Value::Symbol(s) if s == "Indeterminate" => Extrap::Indeterminate,
+        Value::PureFunction { body, .. } => Extrap::Handler(body.clone()),
+        Value::Symbol(s) => Extrap::Handler(Expr::Call {
+            head: Box::new(Expr::Symbol(s.clone())),
+            args: vec![Expr::Slot(Some(1))],
+        }),
+        Value::Builtin(s, _) => Extrap::Handler(Expr::Call {
+            head: Box::new(Expr::Symbol(s.clone())),
+            args: vec![Expr::Slot(Some(1))],
+        }),
+        _ => Extrap::Automatic,
+    }
+}
+
+fn truthy(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Symbol(s) if s == "True" => Some(true),
+        Value::Symbol(s) if s == "False" => Some(false),
         _ => None,
     }
 }
 
-/// Build `{{x, y, dy}, …}` rows (cubic Hermite form) for the interpolant.
-fn build_hermite_rows(xs: &[f64], ys: &[f64], order: i64) -> Value {
+/// Parse `InterpolationOrder` / `PeriodicInterpolation` / `ExtrapolationHandler`.
+fn parse_interp_options(arg: &Value) -> InterpOptions {
+    fn walk(v: &Value, o: &mut InterpOptions) {
+        match v {
+            Value::Rule { lhs, rhs, .. } => {
+                if let Value::Symbol(name) = lhs.as_ref() {
+                    match name.as_str() {
+                        "InterpolationOrder" => {
+                            if let Value::Integer(n) = rhs.as_ref() {
+                                o.order = n.to_i64().unwrap_or(3);
+                            }
+                        }
+                        "PeriodicInterpolation" => {
+                            if let Some(b) = truthy(rhs) {
+                                o.periodic = b;
+                            }
+                        }
+                        "ExtrapolationHandler" => o.extrap = parse_interp_handler(rhs),
+                        _ => {}
+                    }
+                }
+            }
+            Value::List(items) => {
+                for it in items {
+                    walk(it, o);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut o = InterpOptions::default();
+    walk(arg, &mut o);
+    o
+}
+
+/// The `{periodic, extrapolation, order}` metadata carried by an interpolant.
+fn interp_meta_expr(o: &InterpOptions) -> Expr {
+    let extrap = match &o.extrap {
+        Extrap::Automatic => Expr::Symbol("Automatic".to_string()),
+        Extrap::Indeterminate => Expr::Symbol("Indeterminate".to_string()),
+        Extrap::Handler(e) => e.clone(),
+    };
+    Expr::List(vec![
+        Expr::Bool(o.periodic),
+        extrap,
+        Expr::Integer(Integer::from(o.order)),
+    ])
+}
+
+fn meta_list_get(meta: &Value, i: usize) -> Option<&Value> {
+    match meta {
+        Value::List(items) => items.get(i),
+        _ => None,
+    }
+}
+
+fn real_list(v: &[f64]) -> Value {
+    Value::List(v.iter().map(|x| super::real(*x)).collect())
+}
+
+/// Build `{{x, y, dy}, …}` rows (Hermite form) for the interpolant.
+fn build_hermite_rows(xs: &[f64], ys: &[f64], order: i64, periodic: bool) -> Value {
     let n = xs.len();
     let mut rows: Vec<Value> = Vec::new();
     if n == 1 {
@@ -1108,8 +1721,16 @@ fn build_hermite_rows(xs: &[f64], ys: &[f64], order: i64) -> Value {
             ]));
         }
     } else {
+        let period = xs[n - 1] - xs[0];
         for i in 0..n {
-            let s = if i == 0 {
+            let s = if periodic && period > 0.0 {
+                // Wrap the neighbours so the slope matches across the seam.
+                let ip = if i == 0 { n - 1 } else { i - 1 };
+                let inx = if i == n - 1 { 0 } else { i + 1 };
+                let xp = if ip == n - 1 { xs[ip] - period } else { xs[ip] };
+                let xn = if inx == 0 { xs[inx] + period } else { xs[inx] };
+                (ys[inx] - ys[ip]) / (xn - xp)
+            } else if i == 0 {
                 (ys[1] - ys[0]) / (xs[1] - xs[0])
             } else if i == n - 1 {
                 (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2])
@@ -1126,54 +1747,293 @@ fn build_hermite_rows(xs: &[f64], ys: &[f64], order: i64) -> Value {
     Value::List(rows)
 }
 
-/// Interpolation[data] (and `Interpolation[data, InterpolationOrder -> n]`).
+/// Interpolation[data] (and options such as `InterpolationOrder -> n`,
+/// `PeriodicInterpolation -> True`, `ExtrapolationHandler -> …`).
 ///
 /// The result is a callable value; `Interpolation[data][x]` evaluates `x`.
 pub fn builtin_interpolation(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() {
         return Ok(unevaluated("Interpolation", args));
     }
     let data = arg_to_value(&args[0], env)?;
-    let (xs, ys) = match parse_interp_points(&data) {
+    let opts = parse_interp_options(&collect_options(&args[1..]));
+    let parsed = match parse_interp_data(&data) {
         Some(p) => p,
         None => return Ok(unevaluated("Interpolation", args)),
     };
-    if xs.is_empty() {
-        return Ok(unevaluated("Interpolation", args));
-    }
-    let order = if args.len() == 2 {
-        parse_interp_order(&arg_to_uneval(&args[1])).unwrap_or(3)
-    } else {
-        3
-    };
+    let meta = interp_meta_expr(&opts);
 
-    Ok(Value::PureFunction {
-        body: Expr::Call {
+    let body = match parsed {
+        InterpData::OneD(xs, ys) => Expr::Call {
             head: Box::new(Expr::Symbol("FitInterpolationFunction".to_string())),
             args: vec![
-                crate::eval::table::value_to_expr(&build_hermite_rows(&xs, &ys, order)),
+                crate::eval::table::value_to_expr(&build_hermite_rows(
+                    &xs,
+                    &ys,
+                    opts.order,
+                    opts.periodic,
+                )),
+                meta,
                 Expr::Slot(Some(1)),
             ],
         },
+        InterpData::TwoD(td) => Expr::Call {
+            head: Box::new(Expr::Symbol("FitInterpFunc2D".to_string())),
+            args: vec![
+                crate::eval::table::value_to_expr(&two_d_value(&td)),
+                meta,
+                Expr::Slot(Some(1)),
+            ],
+        },
+    };
+
+    Ok(Value::PureFunction {
+        body,
         slot_count: 1,
         params: vec![],
         env: None,
     })
 }
 
-/// FitInterpolationFunction[rows, t] — evaluate a Hermite interpolant, resolving
-/// the point numerically (handles symbolic constants such as `Pi/2`).
+/// Serialize 2D interpolation data for embedding in an expression.
+fn two_d_value(td: &TwoD) -> Value {
+    match td {
+        TwoD::Grid { xs, ys, z } => Value::List(vec![
+            Value::Str("Grid".to_string()),
+            real_list(xs),
+            real_list(ys),
+            Value::List(z.iter().map(|row| real_list(row)).collect()),
+        ]),
+        TwoD::Scatter(pts) => Value::List(vec![
+            Value::Str("Scatter".to_string()),
+            Value::List(
+                pts.iter()
+                    .map(|(x, y, z)| {
+                        Value::List(vec![super::real(*x), super::real(*y), super::real(*z)])
+                    })
+                    .collect(),
+            ),
+        ]),
+    }
+}
+
+/// Domain bounds of a 1D interpolant as `(xlo, xhi)`.
+fn rows_domain(data: &Value) -> Option<(f64, f64)> {
+    let rows = as_list(data)?;
+    let xa = match rows.first()? {
+        Value::List(c) if c.len() == 3 => super::to_f64(&c[0])?,
+        _ => return None,
+    };
+    let xb = match rows.last()? {
+        Value::List(c) if c.len() == 3 => super::to_f64(&c[0])?,
+        _ => return None,
+    };
+    Some((xa, xb))
+}
+
+/// FitInterpolationFunction[rows, meta, t] — evaluate a Hermite interpolant,
+/// resolving the point numerically (handles symbolic constants such as `Pi/2`).
 pub fn builtin_fit_interp_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() != 3 {
         return Ok(unevaluated("FitInterpolationFunction", args));
     }
-    let t = match eval_scalar(&args[1], env) {
+    let mut t = match eval_scalar(&args[2], env) {
         Some(t) => t,
         None => return Ok(unevaluated("FitInterpolationFunction", args)),
     };
+    let meta = deep_unwrap(&args[1]);
+    let periodic = matches!(meta_list_get(&meta, 0), Some(Value::Bool(true)));
+    let (lo, hi) = match rows_domain(&args[0]) {
+        Some(d) => d,
+        None => return Ok(unevaluated("FitInterpolationFunction", args)),
+    };
+    if periodic && hi > lo {
+        t = lo + (t - lo).rem_euclid(hi - lo);
+    } else if t < lo || t > hi {
+        match meta_list_get(&meta, 1) {
+            Some(Value::Symbol(s)) if s == "Automatic" => {}
+            Some(Value::Symbol(s)) if s == "Indeterminate" => return Ok(indeterminate()),
+            Some(v) => return Ok(v.clone()),
+            None => {}
+        }
+    }
     match hermite_eval(&args[0], t) {
         Some(v) => Ok(super::real(v)),
         None => Ok(unevaluated("FitInterpolationFunction", args)),
+    }
+}
+
+/// Domain bounds `(xlo, xhi, ylo, yhi)` of 2D interpolation data.
+fn two_d_domain(data: &Value) -> Option<(f64, f64, f64, f64)> {
+    let items = as_list(data)?;
+    match items.first()? {
+        Value::Str(s) if s == "Grid" => {
+            let xs = parse_real_list(items.get(1)?)?;
+            let ys = parse_real_list(items.get(2)?)?;
+            Some((*xs.first()?, *xs.last()?, *ys.first()?, *ys.last()?))
+        }
+        Value::Str(s) if s == "Scatter" => {
+            let pts = as_list(items.get(1)?)?;
+            let (mut xlo, mut xhi, mut ylo, mut yhi) = (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            );
+            let mut any = false;
+            for p in pts {
+                if let Value::List(c) = p {
+                    let x = super::to_f64(&c[0])?;
+                    let y = super::to_f64(&c[1])?;
+                    xlo = xlo.min(x);
+                    xhi = xhi.max(x);
+                    ylo = ylo.min(y);
+                    yhi = yhi.max(y);
+                    any = true;
+                }
+            }
+            if any {
+                Some((xlo, xhi, ylo, yhi))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Barycentric interpolation over the three nearest scattered points.
+fn scatter_eval(pts: &[(f64, f64, f64)], x: f64, y: f64) -> Option<f64> {
+    if pts.is_empty() {
+        return None;
+    }
+    let dist2 = |p: &(f64, f64, f64)| (p.0 - x) * (p.0 - x) + (p.1 - y) * (p.1 - y);
+    let mut idx: Vec<usize> = (0..pts.len()).collect();
+    idx.sort_by(|&a, &b| {
+        dist2(&pts[a])
+            .partial_cmp(&dist2(&pts[b]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if pts.len() >= 3 {
+        let (x1, y1, z1) = pts[idx[0]];
+        let (x2, y2, z2) = pts[idx[1]];
+        let (x3, y3, z3) = pts[idx[2]];
+        let det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
+        if det.abs() > 1e-12 {
+            let l1 = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / det;
+            let l2 = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / det;
+            let l3 = 1.0 - l1 - l2;
+            return Some(l1 * z1 + l2 * z2 + l3 * z3);
+        }
+    }
+    // Inverse-distance fallback (exact at nodes).
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for p in pts {
+        let d2 = dist2(p);
+        if d2 < 1e-24 {
+            return Some(p.2);
+        }
+        let w = 1.0 / d2;
+        num += w * p.2;
+        den += w;
+    }
+    if den > 0.0 { Some(num / den) } else { None }
+}
+
+/// Evaluate 2D interpolation data (grid via successive 1D interpolation).
+fn two_d_eval(data: &Value, x: f64, y: f64, order: i64, periodic: bool) -> Option<f64> {
+    let items = as_list(data)?;
+    match items.first()? {
+        Value::Str(s) if s == "Grid" => {
+            let xs = parse_real_list(items.get(1)?)?;
+            let ys = parse_real_list(items.get(2)?)?;
+            let zrows = as_list(items.get(3)?)?;
+            let mut z: Vec<Vec<f64>> = Vec::with_capacity(zrows.len());
+            for row in zrows {
+                z.push(parse_real_list(row)?);
+            }
+            if z.len() != xs.len() {
+                return None;
+            }
+            if xs.len() >= 2 && ys.len() >= 2 {
+                let mut g = Vec::with_capacity(ys.len());
+                for j in 0..ys.len() {
+                    let col: Vec<f64> = (0..xs.len()).map(|i| z[i][j]).collect();
+                    let rows = build_hermite_rows(&xs, &col, order, periodic);
+                    g.push(hermite_eval(&rows, x)?);
+                }
+                let rows = build_hermite_rows(&ys, &g, order, periodic);
+                hermite_eval(&rows, y)
+            } else if ys.len() == 1 {
+                let col: Vec<f64> = (0..xs.len()).map(|i| z[i][0]).collect();
+                let rows = build_hermite_rows(&xs, &col, order, periodic);
+                hermite_eval(&rows, x)
+            } else if xs.len() == 1 {
+                let rows = build_hermite_rows(&ys, &z[0], order, periodic);
+                hermite_eval(&rows, y)
+            } else {
+                None
+            }
+        }
+        Value::Str(s) if s == "Scatter" => {
+            let ptsv = as_list(items.get(1)?)?;
+            let mut pts = Vec::with_capacity(ptsv.len());
+            for p in ptsv {
+                if let Value::List(c) = p {
+                    pts.push((
+                        super::to_f64(&c[0])?,
+                        super::to_f64(&c[1])?,
+                        super::to_f64(&c[2])?,
+                    ));
+                }
+            }
+            scatter_eval(&pts, x, y)
+        }
+        _ => None,
+    }
+}
+
+/// FitInterpFunc2D[data, meta, {x, y}] — evaluate a 2D interpolant.
+pub fn builtin_fit_interp_2d_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Ok(unevaluated("FitInterpFunc2D", args));
+    }
+    let request = deep_unwrap(&args[2]);
+    let (mut x, mut y) = match &request {
+        Value::List(v) if v.len() == 2 => {
+            match (eval_scalar(&v[0], env), eval_scalar(&v[1], env)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return Ok(unevaluated("FitInterpFunc2D", args)),
+            }
+        }
+        _ => return Ok(unevaluated("FitInterpFunc2D", args)),
+    };
+    let data = deep_unwrap(&args[0]);
+    let meta = deep_unwrap(&args[1]);
+    let periodic = matches!(meta_list_get(&meta, 0), Some(Value::Bool(true)));
+    let order = meta_list_get(&meta, 2)
+        .and_then(super::to_f64)
+        .map(|v| v as i64)
+        .unwrap_or(3);
+    let (xlo, xhi, ylo, yhi) = match two_d_domain(&data) {
+        Some(d) => d,
+        None => return Ok(unevaluated("FitInterpFunc2D", args)),
+    };
+    if periodic && xhi > xlo && yhi > ylo {
+        x = xlo + (x - xlo).rem_euclid(xhi - xlo);
+        y = ylo + (y - ylo).rem_euclid(yhi - ylo);
+    } else if x < xlo || x > xhi || y < ylo || y > yhi {
+        match meta_list_get(&meta, 1) {
+            Some(Value::Symbol(s)) if s == "Automatic" => {}
+            Some(Value::Symbol(s)) if s == "Indeterminate" => return Ok(indeterminate()),
+            Some(v) => return Ok(v.clone()),
+            None => {}
+        }
+    }
+    match two_d_eval(&data, x, y, order, periodic) {
+        Some(v) => Ok(super::real(v)),
+        None => Ok(unevaluated("FitInterpFunc2D", args)),
     }
 }
 
@@ -1229,7 +2089,7 @@ fn hermite_eval(data: &Value, t: f64) -> Option<f64> {
 /// `FunctionInterpolation[expr, {x, xmin, xmax}, InterpolationOrder -> n]`
 /// selects the interpolation order.
 pub fn builtin_function_interpolation(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 || args.len() > 3 {
+    if args.len() < 2 {
         return Ok(unevaluated("FunctionInterpolation", args));
     }
     let expr = deep_unwrap(&arg_to_uneval(&args[0]));
@@ -1264,17 +2124,19 @@ pub fn builtin_function_interpolation(args: &[Value], env: &Env) -> Result<Value
         }
     }
 
-    let order = if args.len() == 3 {
-        parse_interp_order(&arg_to_uneval(&args[2])).unwrap_or(3)
-    } else {
-        3
-    };
+    let opts = parse_interp_options(&collect_options(&args[2..]));
 
     Ok(Value::PureFunction {
         body: Expr::Call {
             head: Box::new(Expr::Symbol("FitInterpolationFunction".to_string())),
             args: vec![
-                crate::eval::table::value_to_expr(&build_hermite_rows(&xs, &ys, order)),
+                crate::eval::table::value_to_expr(&build_hermite_rows(
+                    &xs,
+                    &ys,
+                    opts.order,
+                    opts.periodic,
+                )),
+                interp_meta_expr(&opts),
                 Expr::Slot(Some(1)),
             ],
         },
@@ -1850,5 +2712,207 @@ mod tests {
         // The variable list may be omitted and is inferred from the model.
         let v = num("NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}][4]");
         assert_close(v, 9.0);
+    }
+
+    // ── Weighted fits ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fit_weights_option() {
+        // Emphasizing the last point shifts the slope away from the unweighted
+        // least-squares value of 2.
+        let v = num(
+            "CoefficientList[Fit[{{0, 0}, {1, 1}, {2, 4}}, {1, x}, x, Weights -> {1, 1, 10}], x][[2]]",
+        );
+        assert_close(v, 111.0 / 51.0);
+        let u = num("CoefficientList[Fit[{{0, 0}, {1, 1}, {2, 4}}, {1, x}, x], x][[2]]");
+        assert_close(u, 2.0);
+    }
+
+    #[test]
+    fn test_fit_weights_invalid_unevaluated() {
+        let v = eval_str("Fit[{{0, 0}, {1, 1}}, {1, x}, x, Weights -> {1, 2, 3}]");
+        assert!(matches!(v, Value::Call { .. }));
+    }
+
+    #[test]
+    fn test_fit_weights_bound_variable() {
+        let v = num(
+            "w = {1, 1, 10}; CoefficientList[Fit[{{0, 0}, {1, 1}, {2, 4}}, {1, x}, x, Weights -> w], x][[2]]",
+        );
+        assert_close(v, 111.0 / 51.0);
+    }
+
+    #[test]
+    fn test_find_fit_weights_option() {
+        // Emphasizing the last point drags the linear fit toward it.
+        let a = num(
+            "a /. FindFit[{{0, 1}, {1, 2}, {2, 4}}, a x + b, {a, b}, x, Weights -> {1, 1, 100}]",
+        );
+        let b = num(
+            "b /. FindFit[{{0, 1}, {1, 2}, {2, 4}}, a x + b, {a, b}, x, Weights -> {1, 1, 100}]",
+        );
+        assert_close(a, 801.0 / 501.0);
+        assert_close(b, 401.0 / 501.0);
+    }
+
+    // ── LinearModelFit ──────────────────────────────────────────────────────
+
+    const LINEAR_MODEL: &str = "LinearModelFit[{{0, 1}, {1, 3}, {2, 5}, {3, 7}}, {1, x}, x]";
+
+    #[test]
+    fn test_linear_model_fit_eval() {
+        let v = num(&format!("({LINEAR_MODEL})[4]"));
+        assert_close(v, 9.0);
+    }
+
+    #[test]
+    fn test_linear_model_fit_best_fit_parameters() {
+        let a = num(&format!("c1 /. ({LINEAR_MODEL})[\"BestFitParameters\"]"));
+        let b = num(&format!("c2 /. ({LINEAR_MODEL})[\"BestFitParameters\"]"));
+        assert_close(a, 1.0);
+        assert_close(b, 2.0);
+    }
+
+    #[test]
+    fn test_linear_model_fit_residuals() {
+        let res = eval_str(&format!("({LINEAR_MODEL})[\"FitResiduals\"]"));
+        let items = match res {
+            Value::List(items) => items,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(items.len(), 4);
+        for it in &items {
+            assert_close(to_f64(it).unwrap(), 0.0);
+        }
+        let via_builtin = eval_str(&format!("FitResiduals[{LINEAR_MODEL}]"));
+        assert!(matches!(via_builtin, Value::List(_)));
+    }
+
+    #[test]
+    fn test_linear_model_fit_statistics() {
+        assert_close(num(&format!("({LINEAR_MODEL})[\"RSquared\"]")), 1.0);
+        assert_close(num(&format!("({LINEAR_MODEL})[\"AdjustedRSquared\"]")), 1.0);
+        assert_close(
+            num(&format!("({LINEAR_MODEL})[\"EstimatedVariance\"]")),
+            0.0,
+        );
+        assert_close(
+            num(&format!("({LINEAR_MODEL})[\"NumberOfParameters\"]")),
+            2.0,
+        );
+    }
+
+    #[test]
+    fn test_linear_model_fit_design_matrix() {
+        let dm = eval_str(&format!("DesignMatrix[{LINEAR_MODEL}]"));
+        let rows = match dm {
+            Value::List(rows) => rows,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 4);
+        let expected = [[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0]];
+        for (row, exp) in rows.iter().zip(expected.iter()) {
+            let cells = match row {
+                Value::List(cells) => cells,
+                other => panic!("expected row, got {other:?}"),
+            };
+            assert_eq!(cells.len(), 2);
+            assert_close(to_f64(&cells[0]).unwrap(), exp[0]);
+            assert_close(to_f64(&cells[1]).unwrap(), exp[1]);
+        }
+    }
+
+    #[test]
+    fn test_linear_model_fit_weights() {
+        let b = num(
+            "c2 /. (LinearModelFit[{{0, 0}, {1, 1}, {2, 4}}, {1, x}, x, Weights -> {1, 1, 10}][\"BestFitParameters\"])",
+        );
+        assert_close(b, 111.0 / 51.0);
+    }
+
+    #[test]
+    fn test_linear_model_fit_inapplicable() {
+        let v = eval_str("LinearModelFit[{{x, y}}, {1, x}, x]");
+        assert!(matches!(v, Value::Call { .. }));
+    }
+
+    // ── Interpolation options / domains ─────────────────────────────────────
+
+    #[test]
+    fn test_interpolation_order_option_nontrivial() {
+        // Order 1 must genuinely be linear on non-collinear data.
+        let v = num("Interpolation[{{0, 0}, {1, 1}, {2, 0}}, InterpolationOrder -> 1][0.5]");
+        assert_close(v, 0.5);
+        let d = num("Interpolation[{{0, 0}, {1, 1}, {2, 0}}][0.5]");
+        assert!(d > 0.5);
+    }
+
+    #[test]
+    fn test_interpolation_default_extrapolation() {
+        // Extrapolation continues the nearest polynomial piece.
+        let v = num("Interpolation[{{0, 0}, {1, 1}, {2, 4}}][3]");
+        assert_close(v, 5.0);
+    }
+
+    #[test]
+    fn test_interpolation_extrapolation_handler_indeterminate() {
+        let v = eval_str(
+            "Interpolation[{{0, 0}, {1, 1}, {2, 4}}, ExtrapolationHandler -> Indeterminate][3]",
+        );
+        assert_eq!(v, Value::Symbol("Indeterminate".to_string()));
+    }
+
+    #[test]
+    fn test_interpolation_extrapolation_handler_function() {
+        let v = num("Interpolation[{{0, 0}, {1, 1}, {2, 4}}, ExtrapolationHandler -> (#^2 &)][3]");
+        assert_close(v, 9.0);
+        // Inside the domain the interpolant is still used.
+        let w =
+            num("Interpolation[{{0, 0}, {1, 1}, {2, 4}}, ExtrapolationHandler -> (#^2 &)][1.5]");
+        assert_close(w, 2.375);
+    }
+
+    #[test]
+    fn test_interpolation_periodic() {
+        let v = num(
+            "Interpolation[{{0, 0}, {1, 1}, {2, 0}}, PeriodicInterpolation -> True, InterpolationOrder -> 1][3]",
+        );
+        assert_close(v, 1.0);
+        let w = num(
+            "Interpolation[{{0, 0}, {1, 1}, {2, 0}}, PeriodicInterpolation -> True, InterpolationOrder -> 1][-1]",
+        );
+        assert_close(w, 1.0);
+    }
+
+    #[test]
+    fn test_interpolation_2d_grid() {
+        let v = num(
+            "Interpolation[Flatten[Table[{i, j, i + j}, {i, 0, 3}, {j, 0, 3}], 1]][{1.5, 2.5}]",
+        );
+        assert_close(v, 4.0);
+        let q = num(
+            "Interpolation[Flatten[Table[{i, j, i^2 + j^2}, {i, 0, 4}, {j, 0, 4}], 1]][{1.5, 2.5}]",
+        );
+        assert_close(q, 8.5);
+    }
+
+    #[test]
+    fn test_interpolation_2d_scatter() {
+        let v = num("Interpolation[{{0, 0, 0}, {1, 0, 1}, {0, 1, 1}}][{0.5, 0.5}]");
+        assert_close(v, 1.0);
+    }
+
+    #[test]
+    fn test_interpolation_2d_periodic() {
+        let v = num(
+            "Interpolation[Flatten[Table[{i, j, i}, {i, 0, 2}, {j, 0, 1}], 1], PeriodicInterpolation -> True, InterpolationOrder -> 1][{3, 0.5}]",
+        );
+        assert_close(v, 1.0);
+    }
+
+    #[test]
+    fn test_interpolation_inapplicable() {
+        let v = eval_str("Interpolation[x]");
+        assert!(matches!(v, Value::Call { .. }));
     }
 }

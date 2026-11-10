@@ -1603,9 +1603,48 @@ pub fn builtin_generalized_trinomial_q(args: &[Value]) -> Result<Value, EvalErro
 
 /// LinearPairQ[expr, x] — expr has exactly two terms, both linear in x
 pub fn builtin_linear_pair_q(args: &[Value]) -> Result<Value, EvalError> {
+    // Rubi's 3-arg form: LinearPairQ[u, v, x] — u and v are linear in x,
+    // u != x, and u/v is constant in x (i.e. u and v are proportional).
+    if args.len() == 3 {
+        let var = match &args[2] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Ok(Value::Bool(false)),
+        };
+        let (u, v) = (&args[0], &args[1]);
+        if !is_linear_in(u, &var) || !is_linear_in(v, &var) {
+            return Ok(Value::Bool(false));
+        }
+        if u.struct_eq(&Value::Symbol(var.clone())) {
+            return Ok(Value::Bool(false));
+        }
+        let zero = Value::Integer(Integer::from(0));
+        let cu = crate::builtins::symbolic::extract_polynomial_coeffs(u, &var);
+        let cv = crate::builtins::symbolic::extract_polynomial_coeffs(v, &var);
+        let c0u = cu.first().cloned().unwrap_or_else(|| zero.clone());
+        let c1u = cu.get(1).cloned().unwrap_or_else(|| zero.clone());
+        let c0v = cv.first().cloned().unwrap_or_else(|| zero.clone());
+        let c1v = cv.get(1).cloned().unwrap_or_else(|| zero.clone());
+        // Proportionality: c0u*c1v - c1u*c0v == 0.
+        let det = Value::Call {
+            head: "Plus".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![c0u, c1v],
+                },
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![Value::Integer(Integer::from(-1)), c1u, c0v],
+                },
+            ],
+        };
+        let simplified =
+            crate::builtins::symbolic::builtin_simplify(&[det]).unwrap_or_else(|_| zero.clone());
+        return Ok(Value::Bool(is_zero(&simplified)));
+    }
     if args.len() != 2 {
         return Err(EvalError::Error(
-            "LinearPairQ requires exactly 2 arguments".to_string(),
+            "LinearPairQ requires 2 or 3 arguments".to_string(),
         ));
     }
     let var = match &args[1] {

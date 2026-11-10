@@ -86,6 +86,18 @@ fn limits() {
     eq("Limit[Exp[x], x -> -Infinity]", "0");
     eq("Limit[Log[x], x -> Infinity]", "Infinity");
     eq("Limit[(x^2 - 1)/(x - 1), x -> 1]", "2");
+    // Exponential / logarithmic dominance over polynomials.
+    eq("Limit[Exp[x]/x, x -> Infinity]", "Infinity");
+    eq("Limit[Log[x]/x, x -> Infinity]", "0");
+    eq("Limit[x^2/Exp[x], x -> Infinity]", "0");
+    eq("Limit[x^n/E^x, x -> Infinity]", "0");
+    eq("Limit[E^x/x^n, x -> Infinity]", "Infinity");
+    // (c + w)^v family and iterated L'Hôpital.
+    eq("Limit[(1 + a/x)^x, x -> Infinity]", "E^a");
+    eq("Limit[(Cos[x] - 1)/x^2, x -> 0]", "-1/2");
+    // One-sided limits.
+    eq("Limit[1/x, x -> 0, Direction -> 1]", "Infinity");
+    eq("Limit[1/x, x -> 0, Direction -> -1]", "-Infinity");
 }
 
 // ── series ──
@@ -94,6 +106,10 @@ fn series_coeffs() {
     eq("SeriesCoefficient[Exp[x], {x, 0, 3}]", "1/6");
     eq("SeriesCoefficient[Sin[x], {x, 0, 5}]", "1/120");
     eq("SeriesCoefficient[1/(1 - x), {x, 0, n}]", "1");
+    eq("SeriesCoefficient[Sin[x]/x, {x, 0, 2}]", "-1/6");
+    eq("SeriesCoefficient[Sin[x]/x, {x, 0, 4}]", "1/120");
+    eq("SeriesCoefficient[Exp[x], {x, 0, 5}]", "1/120");
+    eq("SeriesCoefficient[1/(1 - x), {x, 0, 5}]", "1");
 }
 
 // ── sums / products ──
@@ -121,6 +137,9 @@ fn solve_basic() {
 #[test]
 fn simplify_basic() {
     eq("Simplify[Sin[x]^2 + Cos[x]^2]", "1");
+    eq("Simplify[Cos[x]^2 - Sin[x]^2]", "Cos[2 x]");
+    eq("Simplify[2 Sin[x] Cos[x]]", "Sin[2 x]");
+    eq("Simplify[1 - Sin[x]^2]", "Cos[x]^2");
     eq("FullSimplify[(x^2 - 1)/(x - 1)]", "x + 1");
     eq("Simplify[(x^2 + 2 x + 1)/(x + 1)]", "x + 1");
     eq("Simplify[Cos[2 x] - (Cos[x]^2 - Sin[x]^2)]", "0");
@@ -133,8 +152,16 @@ fn simplify_basic() {
 #[test]
 fn refine_assumptions() {
     eq("Simplify[Sqrt[x^2], Assumptions -> x > 0]", "x");
+    eq("Simplify[Sqrt[x^2], Assumptions -> x < 0]", "-x");
+    eq("FullSimplify[Sqrt[x^2], x > 0]", "x");
+    eq("Assuming[x > 0, Simplify[Sqrt[x^2]]]", "x");
+    eq("Assuming[x < 0, FullSimplify[Abs[x]]]", "-x");
     eq("Refine[Sqrt[x^2], x > 0]", "x");
+    eq("Refine[Sqrt[x^2], x < 0]", "-x");
     eq("Refine[Abs[x], x > 0]", "x");
+    eq("Refine[Log[Exp[x]], Element[x, Reals]]", "x");
+    // Without assumptions these must not collapse.
+    eq("Simplify[Sqrt[x^2]]", "Sqrt[x^2]");
 }
 
 // ── special functions (exact values) ──

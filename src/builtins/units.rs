@@ -17,10 +17,12 @@
 use super::arithmetic;
 use crate::ast::Expr;
 use crate::env::{Env, SubValue};
+use crate::messages;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
 use rug::Rational;
+use rug::ops::Pow;
 use std::collections::BTreeMap;
 
 // ── Small value helpers ──────────────────────────────────────────────────────
@@ -408,6 +410,199 @@ const UNITS: &[UnitDef] = &[
         dims: &[("LengthUnit", 3)],
         factor: 1e-3,
     },
+    // ── More lengths ─────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Furlong",
+        dims: &[("LengthUnit", 1)],
+        factor: 201.168,
+    },
+    UnitDef {
+        name: "Fathom",
+        dims: &[("LengthUnit", 1)],
+        factor: 1.8288,
+    },
+    UnitDef {
+        name: "Mil",
+        dims: &[("LengthUnit", 1)],
+        factor: 2.54e-5,
+    },
+    // ── Area ─────────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Are",
+        dims: &[("LengthUnit", 2)],
+        factor: 100.0,
+    },
+    UnitDef {
+        name: "Hectare",
+        dims: &[("LengthUnit", 2)],
+        factor: 1e4,
+    },
+    UnitDef {
+        name: "Acre",
+        dims: &[("LengthUnit", 2)],
+        factor: 4_046.856_422_4,
+    },
+    UnitDef {
+        name: "Barn",
+        dims: &[("LengthUnit", 2)],
+        factor: 1e-28,
+    },
+    // ── Volume ───────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Teaspoon",
+        dims: &[("LengthUnit", 3)],
+        factor: 4.928_921_593_75e-6,
+    },
+    UnitDef {
+        name: "Tablespoon",
+        dims: &[("LengthUnit", 3)],
+        factor: 1.478_676_478_125e-5,
+    },
+    UnitDef {
+        name: "FluidOunce",
+        dims: &[("LengthUnit", 3)],
+        factor: 2.957_352_956_25e-5,
+    },
+    UnitDef {
+        name: "Cup",
+        dims: &[("LengthUnit", 3)],
+        factor: 2.365_882_365e-4,
+    },
+    UnitDef {
+        name: "Pint",
+        dims: &[("LengthUnit", 3)],
+        factor: 4.731_764_73e-4,
+    },
+    UnitDef {
+        name: "Quart",
+        dims: &[("LengthUnit", 3)],
+        factor: 9.463_529_46e-4,
+    },
+    UnitDef {
+        name: "Gallon",
+        dims: &[("LengthUnit", 3)],
+        factor: 3.785_411_784e-3,
+    },
+    UnitDef {
+        name: "Barrel",
+        dims: &[("LengthUnit", 3)],
+        factor: 0.158_987_294_928,
+    },
+    // ── Force ────────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Dyne",
+        dims: &[("LengthUnit", 1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1e-5,
+    },
+    UnitDef {
+        name: "KilogramForce",
+        dims: &[("LengthUnit", 1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 9.806_65,
+    },
+    UnitDef {
+        name: "PoundForce",
+        dims: &[("LengthUnit", 1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 4.448_221_615_260_5,
+    },
+    // ── Energy ───────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Erg",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1e-7,
+    },
+    UnitDef {
+        name: "Calorie",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 4.184,
+    },
+    UnitDef {
+        name: "BTU",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1_055.055_852_62,
+    },
+    UnitDef {
+        name: "FootPound",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1.355_817_948_331_4,
+    },
+    UnitDef {
+        name: "WattHour",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 3600.0,
+    },
+    UnitDef {
+        name: "ElectronVolt",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1.602_176_634e-19,
+    },
+    // ── Power ────────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "MetricHorsePower",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -3)],
+        factor: 735.498_75,
+    },
+    UnitDef {
+        name: "HorsePower",
+        dims: &[("LengthUnit", 2), ("MassUnit", 1), ("TimeUnit", -3)],
+        factor: 745.699_871_582_270_2,
+    },
+    // ── Pressure ─────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "Bar",
+        dims: &[("LengthUnit", -1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 1e5,
+    },
+    UnitDef {
+        name: "Atmosphere",
+        dims: &[("LengthUnit", -1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 101_325.0,
+    },
+    UnitDef {
+        name: "Torr",
+        dims: &[("LengthUnit", -1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 133.322_368_421_052_6,
+    },
+    UnitDef {
+        name: "MillimeterMercury",
+        dims: &[("LengthUnit", -1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 133.322_387_415,
+    },
+    UnitDef {
+        name: "Psi",
+        dims: &[("LengthUnit", -1), ("MassUnit", 1), ("TimeUnit", -2)],
+        factor: 6_894.757_293_168_361,
+    },
+    // ── Speed ────────────────────────────────────────────────────────────────
+    UnitDef {
+        name: "FootPerSecond",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 0.3048,
+    },
+    UnitDef {
+        name: "MilePerHour",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 0.44704,
+    },
+    UnitDef {
+        name: "KilometerPerHour",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 1.0 / 3.6,
+    },
+    UnitDef {
+        name: "Knot",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 1852.0 / 3600.0,
+    },
+    UnitDef {
+        name: "SpeedOfLight",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 299_792_458.0,
+    },
+    UnitDef {
+        name: "Mach",
+        dims: &[("LengthUnit", 1), ("TimeUnit", -1)],
+        factor: 340.29,
+    },
 ];
 
 /// Preferred derived units used by `UnitSimplify`.
@@ -432,6 +627,7 @@ const DERIVED_UNITS: &[&str] = &[
     "Sievert",
     "Katal",
     "Liter",
+    "KilometerPerHour",
 ];
 
 /// Alternate spellings (lower-cased) mapped to a canonical unit name.
@@ -486,6 +682,49 @@ const ALIASES: &[(&str, &str)] = &[
     ("webers", "Weber"),
     ("teslas", "Tesla"),
     ("henries", "Henry"),
+    ("furlongs", "Furlong"),
+    ("fathoms", "Fathom"),
+    ("mils", "Mil"),
+    ("ares", "Are"),
+    ("hectares", "Hectare"),
+    ("acres", "Acre"),
+    ("barns", "Barn"),
+    ("gallons", "Gallon"),
+    ("quarts", "Quart"),
+    ("pints", "Pint"),
+    ("cups", "Cup"),
+    ("fluidounces", "FluidOunce"),
+    ("tablespoons", "Tablespoon"),
+    ("teaspoons", "Teaspoon"),
+    ("barrels", "Barrel"),
+    ("dynes", "Dyne"),
+    ("kilogramforce", "KilogramForce"),
+    ("kilogramsforce", "KilogramForce"),
+    ("poundforce", "PoundForce"),
+    ("poundsforce", "PoundForce"),
+    ("ergs", "Erg"),
+    ("calories", "Calorie"),
+    ("btu", "BTU"),
+    ("footpounds", "FootPound"),
+    ("watthours", "WattHour"),
+    ("electronvolts", "ElectronVolt"),
+    ("horsepower", "HorsePower"),
+    ("metrichorsepower", "MetricHorsePower"),
+    ("bar", "Bar"),
+    ("bars", "Bar"),
+    ("atmosphere", "Atmosphere"),
+    ("atmospheres", "Atmosphere"),
+    ("atm", "Atmosphere"),
+    ("torr", "Torr"),
+    ("psi", "Psi"),
+    ("mmhg", "MillimeterMercury"),
+    ("millimetermercury", "MillimeterMercury"),
+    ("knots", "Knot"),
+    ("speedoflight", "SpeedOfLight"),
+    ("mach", "Mach"),
+    ("milesperhour", "MilePerHour"),
+    ("kilometersperhour", "KilometerPerHour"),
+    ("feetpersecond", "FootPerSecond"),
 ];
 
 /// SI-style prefixes (prefix spelling, factor).
@@ -513,6 +752,143 @@ struct Resolved {
     name: String,
     dims: Vec<(String, i64)>,
     factor: f64,
+    /// Exact multiplicative factor to SI base units, when it is a rational
+    /// (e.g. `Mile → 201168/125` metres). Used so that conversions with exact
+    /// ratios stay exact instead of falling back to floating point.
+    exact: Option<Rational>,
+}
+
+/// Exact rational factors to SI base units for units whose ratio is a rational
+/// number (written `num/den`). Units absent here fall back to their `f64`
+/// factor (e.g. `Degree`, whose factor is π/180).
+const EXACT_FACTORS: &[(&str, &str)] = &[
+    ("Meter", "1"),
+    ("Second", "1"),
+    ("Kilogram", "1"),
+    ("Ampere", "1"),
+    ("Kelvin", "1"),
+    ("Mole", "1"),
+    ("Candela", "1"),
+    ("Radian", "1"),
+    ("Steradian", "1"),
+    ("Bit", "1"),
+    ("USDollar", "1"),
+    ("Gram", "1/1000"),
+    ("Tonne", "1000"),
+    ("Hertz", "1"),
+    ("Newton", "1"),
+    ("Pascal", "1"),
+    ("Joule", "1"),
+    ("Watt", "1"),
+    ("Coulomb", "1"),
+    ("Volt", "1"),
+    ("Ohm", "1"),
+    ("Siemens", "1"),
+    ("Farad", "1"),
+    ("Weber", "1"),
+    ("Tesla", "1"),
+    ("Henry", "1"),
+    ("Lumen", "1"),
+    ("Lux", "1"),
+    ("Becquerel", "1"),
+    ("Gray", "1"),
+    ("Sievert", "1"),
+    ("Katal", "1"),
+    ("Angstrom", "1/10000000000"),
+    ("Inch", "127/5000"),
+    ("Foot", "381/1250"),
+    ("Yard", "1143/1250"),
+    ("Mile", "201168/125"),
+    ("NauticalMile", "1852"),
+    ("AstronomicalUnit", "149597870700"),
+    ("Minute", "60"),
+    ("Hour", "3600"),
+    ("Day", "86400"),
+    ("Week", "604800"),
+    ("Year", "31536000"),
+    ("Pound", "45359237/100000000"),
+    ("Ounce", "45359237/1600000000"),
+    ("Stone", "317514659/50000000"),
+    ("Celsius", "1"),
+    ("Rankine", "5/9"),
+    ("Fahrenheit", "5/9"),
+    ("Percent", "1/100"),
+    ("PartsPerMillion", "1/1000000"),
+    ("Dozen", "12"),
+    ("Score", "20"),
+    ("Liter", "1/1000"),
+    ("WattHour", "3600"),
+    ("Calorie", "523/125"),
+    ("ElectronVolt", "801088317/5000000000000000000000000000"),
+    ("Erg", "1/10000000"),
+    ("BTU", "52752792631/50000000"),
+    ("FootPound", "3389544870828501/2500000000000000"),
+    ("HorsePower", "74569987158227022/100000000000000"),
+    ("MetricHorsePower", "14709975/20000"),
+    ("Bar", "100000"),
+    ("Atmosphere", "101325"),
+    ("Torr", "20265/152"),
+    ("Psi", "6894757293168361/1000000000000"),
+    ("MillimeterMercury", "133322387415/1000000000"),
+    ("PoundForce", "8896443230521/2000000000000"),
+    ("KilogramForce", "196133/20000"),
+    ("Dyne", "1/100000"),
+    ("Barn", "1/10000000000000000000000000000"),
+    ("Hectare", "10000"),
+    ("Are", "100"),
+    ("Acre", "40468564224/10000000"),
+    ("Gallon", "473176473/125000000000"),
+    ("Quart", "473176473/500000000000"),
+    ("Pint", "473176473/1000000000000"),
+    ("Cup", "473176473/2000000000000"),
+    ("FluidOunce", "473176473/16000000000000"),
+    ("Tablespoon", "473176473/32000000000000"),
+    ("Teaspoon", "473176473/96000000000000"),
+    ("Barrel", "19873411866/125000000000"),
+    ("Furlong", "25146/125"),
+    ("Fathom", "1143/625"),
+    ("Mil", "127/5000000"),
+    ("Knot", "463/900"),
+    ("MilePerHour", "1397/3125"),
+    ("KilometerPerHour", "5/18"),
+    ("FootPerSecond", "381/1250"),
+    ("SpeedOfLight", "299792458"),
+    ("Mach", "34029/100"),
+];
+
+/// Exact factor for an SI prefix (all prefixes are powers of ten).
+const PREFIX_EXACT: &[(&str, &str)] = &[
+    ("Yotta", "1000000000000000000000000"),
+    ("Zetta", "1000000000000000000000"),
+    ("Exa", "1000000000000000000"),
+    ("Peta", "1000000000000000"),
+    ("Tera", "1000000000000"),
+    ("Giga", "1000000000"),
+    ("Mega", "1000000"),
+    ("Kilo", "1000"),
+    ("Hecto", "100"),
+    ("Deca", "10"),
+    ("Deci", "1/10"),
+    ("Centi", "1/100"),
+    ("Milli", "1/1000"),
+    ("Micro", "1/1000000"),
+    ("Nano", "1/1000000000"),
+    ("Pico", "1/1000000000000"),
+    ("Femto", "1/1000000000000000"),
+];
+
+fn exact_factor(name: &str) -> Option<Rational> {
+    EXACT_FACTORS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .and_then(|(_, s)| s.parse::<Rational>().ok())
+}
+
+fn prefix_exact(prefix: &str) -> Option<Rational> {
+    PREFIX_EXACT
+        .iter()
+        .find(|(p, _)| *p == prefix)
+        .and_then(|(_, s)| s.parse::<Rational>().ok())
 }
 
 fn resolve_from_table(lname: &str) -> Option<Resolved> {
@@ -526,6 +902,7 @@ fn resolve_from_table(lname: &str) -> Option<Resolved> {
                     .map(|(d, e)| (d.to_string(), *e as i64))
                     .collect(),
                 factor: def.factor,
+                exact: exact_factor(def.name),
             });
         }
     }
@@ -561,10 +938,15 @@ fn resolve_name(name: &str) -> Option<Resolved> {
             && !rest.is_empty()
             && let Some(base) = resolve_base(rest)
         {
+            let exact = match (base.exact, prefix_exact(prefix)) {
+                (Some(b), Some(p)) => Some(b * p),
+                _ => None,
+            };
             return Some(Resolved {
                 name: format!("{}{}", capitalize(prefix), base.name),
                 dims: base.dims,
                 factor: base.factor * factor,
+                exact,
             });
         }
     }
@@ -682,9 +1064,19 @@ fn unit_from_dims(dims: &[(String, i64)]) -> UnitExpr {
     UnitExpr { factors }
 }
 
-fn dims_factor(ue: &UnitExpr) -> (Vec<(String, i64)>, f64) {
+/// Dimensional signature plus conversion factors for a unit expression.
+struct DimInfo {
+    dims: Vec<(String, i64)>,
+    factor: f64,
+    /// Exact conversion factor to SI base units when every unit involved has an
+    /// exact rational factor.
+    exact: Option<Rational>,
+}
+
+fn dim_info(ue: &UnitExpr) -> DimInfo {
     let mut dims: BTreeMap<String, i64> = BTreeMap::new();
     let mut factor = 1.0f64;
+    let mut exact: Option<Rational> = Some(Rational::from(1));
     for (name, exp) in &ue.factors {
         match resolve_name(name) {
             Some(r) => {
@@ -692,6 +1084,18 @@ fn dims_factor(ue: &UnitExpr) -> (Vec<(String, i64)>, f64) {
                     *dims.entry(d).or_insert(0) += e * exp;
                 }
                 factor *= r.factor.powi(*exp as i32);
+                exact = match (exact, r.exact) {
+                    (Some(acc), Some(e)) => {
+                        let p: Rational = if *exp >= 0 {
+                            e.pow(*exp as i32)
+                        } else {
+                            let pos: Rational = e.pow((-*exp) as i32);
+                            pos.recip()
+                        };
+                        Some(acc * p)
+                    }
+                    _ => None,
+                };
             }
             None => {
                 *dims.entry(format!("{name}Unit")).or_insert(0) += *exp;
@@ -700,7 +1104,16 @@ fn dims_factor(ue: &UnitExpr) -> (Vec<(String, i64)>, f64) {
     }
     let mut out: Vec<(String, i64)> = dims.into_iter().filter(|(_, e)| *e != 0).collect();
     out.sort();
-    (out, factor)
+    DimInfo {
+        dims: out,
+        factor,
+        exact,
+    }
+}
+
+fn dims_factor(ue: &UnitExpr) -> (Vec<(String, i64)>, f64) {
+    let info = dim_info(ue);
+    (info.dims, info.factor)
 }
 
 /// Parse a unit expression value into a `UnitExpr`.
@@ -798,17 +1211,27 @@ fn scale_mag(mag: &Value, ratio: f64) -> Result<Value, EvalError> {
     arithmetic::mul_values(mag, &rf(ratio))
 }
 
+/// Multiply a magnitude by an exact rational factor, preserving exact integers
+/// and rationals.
+fn scale_mag_exact(mag: &Value, ratio: &Rational) -> Result<Value, EvalError> {
+    let (num, den) = ratio.clone().into_numer_denom();
+    arithmetic::mul_values(mag, &crate::value::rational_value(num, den))
+}
+
 /// Convert `mag` from unit `src` to unit `dst`; `None` if dimensions differ.
 fn to_unit(mag: &Value, src: &UnitExpr, dst: &UnitExpr) -> Option<Value> {
-    let (src_dims, src_factor) = dims_factor(src);
-    let (dst_dims, dst_factor) = dims_factor(dst);
-    if src_dims != dst_dims {
+    let src_info = dim_info(src);
+    let dst_info = dim_info(dst);
+    if src_info.dims != dst_info.dims {
         return None;
     }
     if src == dst {
         return Some(mag.clone());
     }
-    scale_mag(mag, src_factor / dst_factor).ok()
+    if let (Some(s), Some(d)) = (&src_info.exact, &dst_info.exact) {
+        return scale_mag_exact(mag, &(s.clone() / d.clone())).ok();
+    }
+    scale_mag(mag, src_info.factor / dst_info.factor).ok()
 }
 
 // ── Affine temperature scales ────────────────────────────────────────────────
@@ -893,10 +1316,36 @@ pub fn builtin_quantity_q(args: &[Value]) -> Result<Value, EvalError> {
             "QuantityQ requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Bool(is_quantity(&args[0])))
+    let is_q = is_quantity(&args[0]) || quantity_distribution_parts(&args[0]).is_some();
+    Ok(Value::Bool(is_q))
+}
+
+/// If the first argument is a list, thread the builtin over its elements.
+fn map_first_arg(
+    args: &[Value],
+    f: fn(&[Value]) -> Result<Value, EvalError>,
+) -> Option<Result<Value, EvalError>> {
+    if args.is_empty() {
+        return None;
+    }
+    let Value::List(items) = &args[0] else {
+        return None;
+    };
+    let mapped: Result<Vec<Value>, _> = items
+        .iter()
+        .map(|item| {
+            let mut a = args.to_vec();
+            a[0] = item.clone();
+            f(&a)
+        })
+        .collect();
+    Some(mapped.map(Value::List))
 }
 
 pub fn builtin_quantity_magnitude(args: &[Value]) -> Result<Value, EvalError> {
+    if let Some(r) = map_first_arg(args, builtin_quantity_magnitude) {
+        return r;
+    }
     match args.len() {
         1 => {
             if let Some((mag, _)) = quantity_parts(&args[0]) {
@@ -926,6 +1375,9 @@ pub fn builtin_quantity_magnitude(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_quantity_unit(args: &[Value]) -> Result<Value, EvalError> {
+    if let Some(r) = map_first_arg(args, builtin_quantity_unit) {
+        return r;
+    }
     match args.len() {
         1 => {
             if let Some((_, unit)) = quantity_parts(&args[0]) {
@@ -975,9 +1427,13 @@ pub fn builtin_unit_convert(args: &[Value]) -> Result<Value, EvalError> {
                 };
                 return Ok(make_quantity(converted, &kelvin));
             }
-            let (dims, factor) = dims_factor(&src);
-            let converted = scale_mag(mag, factor)?;
-            Ok(make_quantity(converted, &unit_from_dims(&dims)))
+            let info = dim_info(&src);
+            let converted = if let Some(exact) = &info.exact {
+                scale_mag_exact(mag, exact)?
+            } else {
+                scale_mag(mag, info.factor)?
+            };
+            Ok(make_quantity(converted, &unit_from_dims(&info.dims)))
         }
         2 => {
             let Some((mag, unit)) = quantity_parts(&args[0]) else {
@@ -1032,13 +1488,22 @@ pub fn builtin_unit_simplify(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
+/// Recursively flatten nested lists into `out`.
+fn flatten_values<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+    match v {
+        Value::List(items) => {
+            for item in items {
+                flatten_values(item, out);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
 pub fn builtin_compatible_unit_q(args: &[Value]) -> Result<Value, EvalError> {
     let mut items: Vec<&Value> = Vec::new();
     for a in args {
-        match a {
-            Value::List(inner) => items.extend(inner.iter()),
-            other => items.push(other),
-        }
+        flatten_values(a, &mut items);
     }
     if items.is_empty() {
         return Ok(Value::Bool(false));
@@ -1145,11 +1610,36 @@ fn combine_quantities(qs: &[Value]) -> Result<Vec<Value>, EvalError> {
     Ok(vec![make_quantity(sum, &base_ue)])
 }
 
+/// Dimensional signature of a quantity's unit, if it is a quantity.
+fn unit_dims_of(v: &Value) -> Option<Vec<(String, i64)>> {
+    let (_, unit) = quantity_parts(v)?;
+    Some(dim_info(&parse_unit(unit)?).dims)
+}
+
 pub fn q_plus(args: &[Value]) -> Result<Value, EvalError> {
     let qs: Vec<Value> = args.iter().filter(|a| is_quantity(a)).cloned().collect();
     let others: Vec<Value> = args.iter().filter(|a| !is_quantity(a)).cloned().collect();
     if qs.is_empty() {
         return arithmetic::builtin_plus(args);
+    }
+    // Emit a WL-style message when quantities carry incompatible dimensions;
+    // the sum then stays unevaluated.
+    if qs.len() >= 2
+        && let Some(first_dims) = unit_dims_of(&qs[0])
+    {
+        for other in &qs[1..] {
+            if let Some(dims) = unit_dims_of(other)
+                && dims != first_dims
+            {
+                let unit_str = |v: &Value| {
+                    quantity_parts(v)
+                        .map(|(_, u)| format!("{u}"))
+                        .unwrap_or_default()
+                };
+                messages::emit("Quantity::compat", &[unit_str(&qs[0]), unit_str(other)]);
+                break;
+            }
+        }
     }
     let other_sum = arithmetic::builtin_plus(&others)?;
     let mut terms = combine_quantities(&qs)?;
@@ -1205,6 +1695,45 @@ pub fn q_divide(args: &[Value]) -> Result<Value, EvalError> {
     Ok(make_quantity(mag, &unit0.div(&unit1)))
 }
 
+/// Normalise a `Power` exponent to an exact rational. Accepts integers,
+/// rationals, and dimensionless quantities. A dimensionful quantity exponent
+/// (or a non-numeric exponent) yields `None`.
+fn exponent_rational(v: &Value) -> Option<Rational> {
+    match v {
+        Value::Integer(n) => Some(Rational::from(n.clone())),
+        Value::Rational(r) => Some(r.as_ref().clone()),
+        Value::Real(f) => f.to_rational(),
+        _ => {
+            let (mag, unit) = quantity_parts(v)?;
+            let ue = parse_unit(unit)?;
+            if !dim_info(&ue).dims.is_empty() {
+                return None;
+            }
+            exponent_rational(mag)
+        }
+    }
+}
+
+/// Raise every unit exponent by the rational `exp`, requiring the result to
+/// have integer exponents (so `Meter^2 ^ (1/2) → Meter`).
+fn pow_unit_rational(ue: &UnitExpr, exp: &Rational) -> Option<UnitExpr> {
+    let numer = exp.numer().clone();
+    let denom = exp.denom().clone();
+    let mut factors: BTreeMap<String, i64> = BTreeMap::new();
+    for (name, e) in &ue.factors {
+        let scaled = Integer::from(*e) * numer.clone();
+        if scaled.clone() % denom.clone() != 0 {
+            return None;
+        }
+        let v = scaled / denom.clone();
+        let v = i64::try_from(v).ok()?;
+        if v != 0 {
+            factors.insert(name.clone(), v);
+        }
+    }
+    Some(UnitExpr { factors })
+}
+
 pub fn q_power(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 || !is_quantity(&args[0]) {
         return arithmetic::builtin_power(args);
@@ -1212,14 +1741,20 @@ pub fn q_power(args: &[Value]) -> Result<Value, EvalError> {
     let Some((mag, unit)) = quantity_parts(&args[0]) else {
         return arithmetic::builtin_power(args);
     };
-    let Some(exp) = value_as_i64(&args[1]) else {
-        return Ok(unevaluated("Power", args));
-    };
     let Some(ue) = parse_unit(unit) else {
         return arithmetic::builtin_power(args);
     };
-    let new_mag = arithmetic::builtin_power(&[mag.clone(), args[1].clone()])?;
-    Ok(make_quantity(new_mag, &ue.pow(exp)))
+    // A dimensionful exponent is incompatible with a unit base.
+    let Some(exp) = exponent_rational(&args[1]) else {
+        return Ok(unevaluated("Power", args));
+    };
+    let Some(new_unit) = pow_unit_rational(&ue, &exp) else {
+        return Ok(unevaluated("Power", args));
+    };
+    let (num, den) = exp.into_numer_denom();
+    let exp_value = crate::value::rational_value(num, den);
+    let new_mag = arithmetic::builtin_power(&[mag.clone(), exp_value])?;
+    Ok(make_quantity(new_mag, &new_unit))
 }
 
 pub fn q_minus(args: &[Value]) -> Result<Value, EvalError> {
@@ -2572,6 +3107,10 @@ fn apply_call(head: &str, names: &[&str]) -> Expr {
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
     use super::register_builtin;
+    messages::set_template(
+        "Quantity::compat",
+        "`1` and `2` are not compatible units; the result is left unevaluated.",
+    );
     register_builtin(env, "Quantity", builtin_quantity);
     register_builtin(env, "QuantityQ", builtin_quantity_q);
     register_builtin(env, "QuantityMagnitude", builtin_quantity_magnitude);
@@ -3141,13 +3680,341 @@ mod tests {
         assert_eq!(unit_of(&converted), s("Meter"));
 
         // Unknown spec stays unevaluated.
-        let bad = builtin_interpreter(&[s("Furlong"), int(1)]).unwrap();
+        let bad = builtin_interpreter(&[s("Smoot"), int(1)]).unwrap();
         assert_eq!(
             bad,
             Value::Call {
                 head: "Interpreter".to_string(),
-                args: vec![s("Furlong"), int(1)]
+                args: vec![s("Smoot"), int(1)]
             }
         );
+    }
+
+    // ── Deepened units / dimensions coverage ────────────────────────────────
+
+    #[allow(dead_code)]
+    fn times_unit(a: &str, b: &str) -> Value {
+        Value::Call {
+            head: "Times".to_string(),
+            args: vec![s(a), s(b)],
+        }
+    }
+
+    fn divide_unit(a: &str, b: &str) -> Value {
+        Value::Call {
+            head: "Divide".to_string(),
+            args: vec![s(a), s(b)],
+        }
+    }
+
+    fn power_unit(a: &str, n: i64) -> Value {
+        Value::Call {
+            head: "Power".to_string(),
+            args: vec![s(a), int(n)],
+        }
+    }
+
+    fn q_unit(mag: i64, unit: Value) -> Value {
+        builtin_quantity(&[int(mag), unit]).unwrap()
+    }
+
+    fn rat(n: i64, d: i64) -> Value {
+        crate::value::rational_value(Integer::from(n), Integer::from(d))
+    }
+
+    #[test]
+    fn test_unit_dimensions_of_powers_and_compound() {
+        // Length^3 via Power.
+        let dims = builtin_unit_dimensions(&[power_unit("Meter", 3)]).unwrap();
+        assert_eq!(
+            dims,
+            Value::List(vec![Value::List(vec![s("LengthUnit"), int(3)])])
+        );
+
+        // Kilogram Meter / Second^2 has the Newton dimensions.
+        let compound = Value::Call {
+            head: "Times".to_string(),
+            args: vec![s("Kilogram"), s("Meter"), power_unit("Second", -2)],
+        };
+        let dims = builtin_unit_dimensions(&[compound]).unwrap();
+        assert_eq!(
+            dims,
+            Value::List(vec![
+                Value::List(vec![s("LengthUnit"), int(1)]),
+                Value::List(vec![s("MassUnit"), int(1)]),
+                Value::List(vec![s("TimeUnit"), int(-2)]),
+            ])
+        );
+
+        // Dimensionless scalar yields the empty dimension set.
+        assert_eq!(
+            builtin_unit_dimensions(&[int(7)]).unwrap(),
+            Value::List(vec![])
+        );
+
+        // List threads.
+        let list = builtin_unit_dimensions(&[Value::List(vec![s("Meter"), s("Second")])]).unwrap();
+        assert_eq!(
+            list,
+            Value::List(vec![
+                Value::List(vec![Value::List(vec![s("LengthUnit"), int(1)])]),
+                Value::List(vec![Value::List(vec![s("TimeUnit"), int(1)])]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_incompatible_addition_is_unevaluated_with_message() {
+        let (result, msgs) =
+            crate::messages::with_buffer(|| q_plus(&[q(2, "Meter"), q(3, "Second")]).unwrap());
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Plus".to_string(),
+                args: vec![q(2, "Meter"), q(3, "Second")]
+            }
+        );
+        assert_eq!(msgs.len(), 1, "expected one compatibility message");
+        assert!(msgs[0].starts_with("Quantity::compat"), "got: {}", msgs[0]);
+
+        // A scalar term is still folded alongside the incompatible sum.
+        let with_scalar = q_plus(&[q(1, "Meter"), q(1, "Second"), int(2), int(3)]).unwrap();
+        assert_eq!(
+            with_scalar,
+            Value::Call {
+                head: "Plus".to_string(),
+                args: vec![q(1, "Meter"), q(1, "Second"), int(5)]
+            }
+        );
+    }
+
+    #[test]
+    fn test_compatible_addition_is_exact() {
+        // 1 m + 1 ft = 1 + 381/1250 m, exactly.
+        let sum = q_plus(&[q(1, "Meter"), q(1, "Foot")]).unwrap();
+        assert_eq!(mag_of(&sum), rat(1631, 1250));
+        assert_eq!(unit_of(&sum), s("Meter"));
+    }
+
+    #[test]
+    fn test_power_with_dimensionless_quantity_exponent() {
+        let base = q(3, "Meter");
+        let exp = q(2, "Percent"); // dimensionless quantity, magnitude 2
+        let out = q_power(&[base, exp]).unwrap();
+        assert_eq!(mag_of(&out), int(9));
+        assert_eq!(unit_of(&out), power_unit("Meter", 2));
+
+        // Half power of Meter^2 → Meter (the magnitude is left for the evaluator).
+        let squared = q_unit(4, power_unit("Meter", 2));
+        let rooted = q_power(&[squared, rat(1, 2)]).unwrap();
+        assert_eq!(unit_of(&rooted), s("Meter"));
+        assert_eq!(
+            mag_of(&rooted),
+            Value::Call {
+                head: "Power".to_string(),
+                args: vec![int(4), rat(1, 2)]
+            }
+        );
+
+        // Dimensionful exponent stays unevaluated.
+        let bad = q_power(&[q(2, "Meter"), q(2, "Second")]).unwrap();
+        assert_eq!(
+            bad,
+            Value::Call {
+                head: "Power".to_string(),
+                args: vec![q(2, "Meter"), q(2, "Second")]
+            }
+        );
+    }
+
+    #[test]
+    fn test_unit_convert_compound_units() {
+        // 1 Meter/Second → Kilometer/Hour = 3.6 exactly.
+        let speed = q_unit(1, divide_unit("Meter", "Second"));
+        let out = builtin_unit_convert(&[speed, s("KilometerPerHour")]).unwrap();
+        assert_eq!(mag_of(&out), rat(18, 5));
+        assert_eq!(unit_of(&out), s("KilometerPerHour"));
+
+        // Kilogram Meter / Second^2 → Newton, and back.
+        let force_unit = Value::Call {
+            head: "Times".to_string(),
+            args: vec![s("Kilogram"), s("Meter"), power_unit("Second", -2)],
+        };
+        let force = q_unit(1, force_unit.clone());
+        let out = builtin_unit_convert(&[force, s("Newton")]).unwrap();
+        assert_eq!(mag_of(&out), int(1));
+        assert_eq!(unit_of(&out), s("Newton"));
+
+        let back = builtin_unit_convert(&[q(2, "Newton"), force_unit.clone()]).unwrap();
+        assert_eq!(mag_of(&back), int(2));
+        let (dims, _) = dims_factor(&parse_unit(&unit_of(&back)).unwrap());
+        assert_eq!(
+            dims,
+            vec![
+                ("LengthUnit".to_string(), 1),
+                ("MassUnit".to_string(), 1),
+                ("TimeUnit".to_string(), -2),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unit_simplify_to_derived_units() {
+        // Kilogram Meter/Second^2 → Newton.
+        let force_unit = Value::Call {
+            head: "Times".to_string(),
+            args: vec![s("Kilogram"), s("Meter"), power_unit("Second", -2)],
+        };
+        let out = builtin_unit_simplify(&[q_unit(3, force_unit)]).unwrap();
+        assert_eq!(mag_of(&out), int(3));
+        assert_eq!(unit_of(&out), s("Newton"));
+
+        // Meter/Second → Kilometer/Hour, scaled exactly.
+        let out = builtin_unit_simplify(&[q_unit(1, divide_unit("Meter", "Second"))]).unwrap();
+        assert_eq!(mag_of(&out), rat(18, 5));
+        assert_eq!(unit_of(&out), s("KilometerPerHour"));
+
+        // Already-simple units are preserved.
+        assert_eq!(
+            builtin_unit_simplify(&[q(5, "Watt")]).unwrap(),
+            q(5, "Watt")
+        );
+    }
+
+    #[test]
+    fn test_exact_imperial_conversions_use_rationals() {
+        let inch = builtin_unit_convert(&[q(1, "Inch"), s("Meter")]).unwrap();
+        assert_eq!(mag_of(&inch), rat(127, 5000));
+        assert_eq!(unit_of(&inch), s("Meter"));
+
+        let mile = builtin_unit_convert(&[q(1, "Mile"), s("Meter")]).unwrap();
+        assert_eq!(mag_of(&mile), rat(201168, 125));
+
+        // 9 Rankine → 5 Kelvin, exactly (offset-free scale).
+        let kelvin = builtin_unit_convert(&[q(9, "Rankine"), s("Kelvin")]).unwrap();
+        assert_eq!(mag_of(&kelvin), int(5));
+        assert_eq!(unit_of(&kelvin), s("Kelvin"));
+    }
+
+    #[test]
+    fn test_more_si_and_imperial_units() {
+        // Energy: 1 Calorie = 4.184 J exactly.
+        let joules = builtin_unit_convert(&[q(1, "Calorie"), s("Joule")]).unwrap();
+        assert_eq!(mag_of(&joules), rat(523, 125));
+
+        // Pressure: 1 Atmosphere = 101325 Pa exactly.
+        let pascals = builtin_unit_convert(&[q(1, "Atmosphere"), s("Pascal")]).unwrap();
+        assert_eq!(mag_of(&pascals), int(101_325));
+
+        // Speed: 1 Knot = 463/900 m/s exactly.
+        let speed = builtin_unit_convert(&[q(1, "Knot"), divide_unit("Meter", "Second")]).unwrap();
+        assert_eq!(mag_of(&speed), rat(463, 900));
+        assert_eq!(unit_of(&speed), divide_unit("Meter", "Second"));
+
+        // Volume: 1 Gallon ≈ 3.785411784 L exactly as a rational.
+        let liters = builtin_unit_convert(&[q(1, "Gallon"), s("Liter")]).unwrap();
+        assert_eq!(mag_of(&liters), rat(473176473, 125000000));
+
+        // Area: 1 Hectare = 10000 m^2.
+        let area = builtin_unit_convert(&[q(1, "Hectare"), power_unit("Meter", 2)]).unwrap();
+        assert_eq!(mag_of(&area), int(10_000));
+        assert_eq!(unit_of(&area), power_unit("Meter", 2));
+
+        // Power: horsepower converts to Watts (~745.7).
+        let watts = builtin_unit_convert(&[q(1, "HorsePower"), s("Watt")]).unwrap();
+        assert!(approx(&mag_of(&watts), 745.699_871_582_270_2));
+
+        // 60 MilePerHour = 26.8224 m/s exactly.
+        let mph =
+            builtin_unit_convert(&[q(60, "MilePerHour"), divide_unit("Meter", "Second")]).unwrap();
+        assert_eq!(mag_of(&mph), rat(16764, 625));
+    }
+
+    #[test]
+    fn test_quantity_magnitude_and_unit_thread_lists() {
+        let list = Value::List(vec![q(1, "Meter"), q(2, "Meter")]);
+        assert_eq!(
+            builtin_quantity_magnitude(&[list.clone()]).unwrap(),
+            Value::List(vec![int(1), int(2)])
+        );
+        assert_eq!(
+            builtin_quantity_unit(&[list.clone()]).unwrap(),
+            Value::List(vec![s("Meter"), s("Meter")])
+        );
+        // Two-argument form threads and converts each element.
+        let converted = builtin_quantity_magnitude(&[list, s("CentiMeter")]).unwrap();
+        assert_eq!(converted, Value::List(vec![int(100), int(200)]));
+    }
+
+    #[test]
+    fn test_quantity_q_includes_distributions() {
+        assert_eq!(
+            builtin_quantity_q(&[q(1, "Meter")]).unwrap(),
+            Value::Bool(true)
+        );
+        let dist = Value::Call {
+            head: "QuantityDistribution".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "NormalDistribution".to_string(),
+                    args: vec![int(0), int(1)],
+                },
+                s("Meter"),
+            ],
+        };
+        assert_eq!(builtin_quantity_q(&[dist]).unwrap(), Value::Bool(true));
+        assert_eq!(builtin_quantity_q(&[int(3)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_compatible_unit_q_lists_and_scalars() {
+        // Nested list is flattened.
+        assert_eq!(
+            builtin_compatible_unit_q(&[Value::List(vec![
+                Value::List(vec![s("Meter"), s("Foot")]),
+                s("Inch"),
+            ])])
+            .unwrap(),
+            Value::Bool(true)
+        );
+        // Dimensionless scalar and Percent are compatible.
+        assert_eq!(
+            builtin_compatible_unit_q(&[int(1), s("Percent")]).unwrap(),
+            Value::Bool(true)
+        );
+        // Mixed dimensions are not.
+        assert_eq!(
+            builtin_compatible_unit_q(&[s("Meter"), s("Kilogram")]).unwrap(),
+            Value::Bool(false)
+        );
+        // Empty argument list is false.
+        assert_eq!(builtin_compatible_unit_q(&[]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_temperature_affine_roundtrips() {
+        // Fahrenheit ↔ Celsius ↔ Kelvin all round-trip through the affine path.
+        let c = builtin_unit_convert(&[q(100, "Fahrenheit"), s("Celsius")]).unwrap();
+        assert!(approx(&mag_of(&c), 37.777_777_777_777_78));
+
+        let f = builtin_unit_convert(&[q(0, "Celsius"), s("Fahrenheit")]).unwrap();
+        assert!(approx(&mag_of(&f), 32.0));
+
+        let k = builtin_unit_convert(&[q(0, "Kelvin"), s("Celsius")]).unwrap();
+        assert!(approx(&mag_of(&k), -273.15));
+
+        // Kelvin → Rankine is offset-free and stays exact.
+        let r = builtin_unit_convert(&[q(9, "Kelvin"), s("Rankine")]).unwrap();
+        assert_eq!(mag_of(&r), rat(81, 5));
+    }
+
+    #[test]
+    fn test_add_compound_compatible_quantities() {
+        // 2 m/s + 1 km/h = 2 + 5/18 m/s.
+        let lhs = q_unit(2, divide_unit("Meter", "Second"));
+        let rhs = q_unit(1, s("KilometerPerHour"));
+        let sum = q_plus(&[lhs, rhs]).unwrap();
+        assert_eq!(mag_of(&sum), rat(41, 18));
+        assert_eq!(unit_of(&sum), divide_unit("Meter", "Second"));
     }
 }

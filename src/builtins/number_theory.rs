@@ -121,32 +121,156 @@ pub fn trial_prime_check(n: &Integer) -> bool {
 
 // ── FactorInteger ─────────────────────────────────────────────────────────
 
-/// Returns a sorted list of {prime, exponent} pairs.
-pub fn factor_integer(n: &Integer) -> Vec<(Integer, u32)> {
-    let mut n = n.clone();
-    if n < 0 {
-        n = -n;
+/// Trial division is used below this bound before the cofactor is handed to
+/// Pollard's rho. Keeping the bound modest lets the O(1)-ish small-prime work
+/// finish quickly while still stripping the bulk of easy factors.
+const TRIAL_BOUND: u64 = 1000;
+
+/// Strip all prime factors `<= TRIAL_BOUND` from `n`, appending `(p, e)`
+/// pairs to `factors`, and return the remaining cofactor.
+fn strip_small_factors(mut n: Integer, factors: &mut Vec<(Integer, u32)>) -> Integer {
+    let mut d: u64 = 2;
+    while d <= TRIAL_BOUND {
+        let di = Integer::from(d);
+        if di.clone() * di.clone() > n {
+            break;
+        }
+        if (n.clone() % &di).is_zero() {
+            let mut e = 0u32;
+            while (n.clone() % &di).is_zero() {
+                n /= di.clone();
+                e += 1;
+            }
+            factors.push((di, e));
+        }
+        d = if d == 2 { 3 } else { d + 2 };
     }
+    n
+}
+
+/// Pollard's rho (Brent's cycle-detecting variant) for a composite, odd `n`
+/// that has no small factors. Always returns a non-trivial divisor.
+fn pollard_rho(n: &Integer) -> Integer {
+    if (n.clone() % 2u32).is_zero() {
+        return Integer::from(2);
+    }
+    // Deterministic constants `c` are tried in turn; a fixed `c` can cycle
+    // without exposing a factor (e.g. Fermat numbers with `c = 1`).
+    let mut c = Integer::from(1);
+    loop {
+        let g = pollard_brent(n, &c);
+        if g != 1 && g != *n {
+            return g;
+        }
+        c += 1;
+    }
+}
+
+/// One Brent iteration for `f(x) = x^2 + c (mod n)`. Returns a divisor of `n`
+/// (possibly `n` itself if the sequence collapsed, prompting a new `c`).
+fn pollard_brent(n: &Integer, c: &Integer) -> Integer {
+    let f = |x: &Integer| -> Integer {
+        let mut v = x.clone();
+        v *= x.clone();
+        v += c.clone();
+        v %= n;
+        v
+    };
+    let one = Integer::from(1);
+    let mut y = Integer::from(2);
+    let mut r: u64 = 1;
+    let mut q = Integer::from(1);
+    let mut g = Integer::from(1);
+    let mut x = Integer::from(0);
+    let mut ys = Integer::from(0);
+    while g == one {
+        x = y.clone();
+        for _ in 0..r {
+            y = f(&y);
+        }
+        let mut k: u64 = 0;
+        while k < r && g == one {
+            ys = y.clone();
+            let lim = std::cmp::min(128, r - k);
+            for _ in 0..lim {
+                y = f(&y);
+                let mut diff = x.clone() - &y;
+                if diff.is_negative() {
+                    diff = -diff;
+                }
+                q = (q * &diff) % n;
+            }
+            g = q.clone().gcd(n);
+            k += 128;
+        }
+        r = r.saturating_mul(2);
+    }
+    if g == *n {
+        // The block product overshot; recover a factor step by step.
+        loop {
+            ys = f(&ys);
+            let mut diff = x.clone() - &ys;
+            if diff.is_negative() {
+                diff = -diff;
+            }
+            g = diff.gcd(n);
+            if g != one {
+                break;
+            }
+        }
+    }
+    g
+}
+
+/// Returns a sorted list of `{prime, exponent}` pairs.
+///
+/// Trial division handles small factors; large cofactors are split with
+/// Miller–Rabin (via [`is_prime_int`]) plus Pollard's rho, so the cost no
+/// longer grows like `sqrt(n)` for big semiprimes.
+pub fn factor_integer(n: &Integer) -> Vec<(Integer, u32)> {
+    let n = n.clone().abs();
     let mut factors: Vec<(Integer, u32)> = Vec::new();
     if n <= 1 {
         return factors;
     }
-    let mut d = Integer::from(2);
-    while d.clone() * d.clone() <= n {
-        if (n.clone() % d.clone()).is_zero() {
-            let mut exp = 0u32;
-            while (n.clone() % d.clone()).is_zero() {
-                n /= d.clone();
-                exp += 1;
-            }
-            factors.push((d.clone(), exp));
+    let cofactor = strip_small_factors(n, &mut factors);
+    let mut stack = vec![cofactor];
+    while let Some(m) = stack.pop() {
+        if m <= 1 {
+            continue;
         }
-        d += Integer::from(1);
+        if is_prime_int(&m) {
+            factors.push((m, 1));
+            continue;
+        }
+        let d = pollard_rho(&m);
+        stack.push(m.clone() / d.clone());
+        stack.push(d);
     }
-    if n > 1 {
-        factors.push((n, 1));
+    factors.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut merged: Vec<(Integer, u32)> = Vec::with_capacity(factors.len());
+    for (p, e) in factors {
+        match merged.last_mut() {
+            Some(last) if last.0 == p => last.1 += e,
+            _ => merged.push((p, e)),
+        }
     }
-    factors
+    merged
+}
+
+/// If `n_abs > 1` is a perfect power `a^b` with `b >= 2`, return `(a, b)`
+/// with the largest such `b`. Otherwise return `None`.
+fn perfect_power_repr(n_abs: &Integer) -> Option<(Integer, u32)> {
+    if *n_abs <= 1 {
+        return None;
+    }
+    let factors = factor_integer(n_abs);
+    let g = factors.iter().map(|(_, e)| *e).reduce(gcd_u32)?;
+    if g < 2 {
+        return None;
+    }
+    let base: Integer = factors.iter().map(|(p, e)| p.clone().pow(*e / g)).product();
+    Some((base, g))
 }
 
 pub fn builtin_factor_integer(args: &[Value]) -> Result<Value, EvalError> {
@@ -179,22 +303,23 @@ pub fn builtin_factor_integer(args: &[Value]) -> Result<Value, EvalError> {
 // ── Divisors ──────────────────────────────────────────────────────────────
 
 /// All positive divisors of the non-negative integer `n_abs`, ascending.
-/// Returns an empty vector for zero.
+/// Returns an empty vector for zero. Divisors are built from the prime
+/// factorization, so this is fast even when `n_abs` has a large prime factor.
 fn positive_divisors(n_abs: &Integer) -> Vec<Integer> {
-    let mut divs: Vec<Integer> = Vec::new();
     if n_abs.is_zero() {
-        return divs;
+        return Vec::new();
     }
-    let mut d = Integer::from(1);
-    while d.clone() * d.clone() <= *n_abs {
-        if (n_abs.clone() % d.clone()).is_zero() {
-            divs.push(d.clone());
-            let other = n_abs.clone() / d.clone();
-            if other != d {
-                divs.push(other);
+    let mut divs = vec![Integer::from(1)];
+    for (p, e) in factor_integer(n_abs) {
+        let mut next = Vec::with_capacity(divs.len() * (e as usize + 1));
+        let mut pe = Integer::from(1);
+        for _ in 0..=e {
+            for d in &divs {
+                next.push(d.clone() * &pe);
             }
+            pe *= &p;
         }
-        d += Integer::from(1);
+        divs = next;
     }
     divs.sort();
     divs
@@ -543,14 +668,17 @@ pub fn builtin_divisible(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_coprime_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "CoprimeQ requires at least 2 arguments".to_string(),
-        ));
+    // Accept both `CoprimeQ[a, b, ...]` and a single list `CoprimeQ[{a, b, ...}]`.
+    let flat: Vec<&Value> = match args {
+        [Value::List(items)] => items.iter().collect(),
+        _ => args.iter().collect(),
+    };
+    if flat.len() < 2 {
+        return Ok(Value::Symbol("True".to_string()));
     }
-    for i in 0..args.len() {
-        for j in (i + 1)..args.len() {
-            match (&args[i], &args[j]) {
+    for i in 0..flat.len() {
+        for j in (i + 1)..flat.len() {
+            match (flat[i], flat[j]) {
                 (Value::Integer(a), Value::Integer(b)) => {
                     let g = gcd_int(a.clone().abs(), b.clone().abs());
                     if g != 1 {
@@ -560,7 +688,7 @@ pub fn builtin_coprime_q(args: &[Value]) -> Result<Value, EvalError> {
                 _ => {
                     return Err(EvalError::TypeError {
                         expected: "Integer".to_string(),
-                        got: args[i].type_name().to_string(),
+                        got: flat[i].type_name().to_string(),
                     });
                 }
             }
@@ -1066,7 +1194,64 @@ pub fn builtin_multiplicative_order(args: &[Value]) -> Result<Value, EvalError> 
     }
 }
 
-// ── PrimitiveRoot ─────────────────────────────────────────────────────
+// ── PrimitiveRoot / PrimitiveRootList ─────────────────────────────────
+
+/// Euler's totient `φ(n)` for `n >= 1`, via the prime factorization.
+fn euler_phi_int(n: &Integer) -> Integer {
+    let mut phi = n.clone();
+    for (p, _) in factor_integer(n) {
+        phi = phi.clone() / p.clone() * (p.clone() - Integer::from(1));
+    }
+    phi
+}
+
+/// Smallest primitive root modulo `n`, or `None` when the multiplicative
+/// group `(Z/nZ)*` is not cyclic.
+fn smallest_primitive_root(n: &Integer) -> Option<Integer> {
+    if *n == 1 {
+        return Some(Integer::from(1));
+    }
+    if *n == 2 {
+        return Some(Integer::from(1));
+    }
+    let phi = euler_phi_int(n);
+    // Distinct prime factors of φ; a generator must miss 1 when raised to
+    // φ/p for every such prime p.
+    let distinct: Vec<Integer> = factor_integer(&phi)
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
+    let mut g = Integer::from(2);
+    while g < *n {
+        if gcd_int(g.clone(), n.clone()) != 1 {
+            g += Integer::from(1);
+            continue;
+        }
+        if distinct
+            .iter()
+            .all(|p| compute_power_mod_int(&g, &(phi.clone() / p.clone()), n) != 1)
+        {
+            return Some(g);
+        }
+        g += Integer::from(1);
+    }
+    None
+}
+
+/// Whether `(Z/nZ)*` is cyclic, i.e. a primitive root exists. This holds for
+/// `n = 1, 2, 4, p^k, 2 p^k` with `p` an odd prime.
+fn has_primitive_root(n: &Integer) -> bool {
+    if *n <= 4 {
+        return *n == 1 || *n == 2 || *n == 4;
+    }
+    let n = n.clone();
+    if (n.clone() % 2u32).is_zero() {
+        let m = n / 2u32;
+        (m.clone() % 2u32) != 0 && factor_integer(&m).len() == 1
+    } else {
+        factor_integer(&n).len() == 1
+    }
+}
 
 pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
@@ -1081,48 +1266,52 @@ pub fn builtin_primitive_root(args: &[Value]) -> Result<Value, EvalError> {
                     "PrimitiveRoot: argument must be > 1".to_string(),
                 ));
             }
-            // Compute φ(n)
-            let phi = {
-                let factors = factor_integer(n);
-                let mut phi = n.clone();
-                for (p, _) in &factors {
-                    phi = phi.clone() / p.clone() * (p.clone() - Integer::from(1));
-                }
-                phi
-            };
-            // Distinct prime factors of φ
-            let phi_factors = factor_integer(&phi);
-            let distinct: Vec<Integer> = phi_factors.iter().map(|(p, _)| p.clone()).collect();
-
-            // Search for smallest primitive root
-            let mut g = Integer::from(2);
-            while g < *n {
-                if gcd_int(g.clone(), n.clone()) != 1 {
-                    g += Integer::from(1);
-                    continue;
-                }
-                let mut is_primitive = true;
-                for p in &distinct {
-                    let exp = phi.clone() / p.clone();
-                    let pow_val = compute_power_mod_int(&g, &exp, n);
-                    if pow_val == 1 {
-                        is_primitive = false;
-                        break;
-                    }
-                }
-                if is_primitive {
-                    return Ok(Value::Integer(g));
-                }
-                g += Integer::from(1);
+            match smallest_primitive_root(n) {
+                Some(g) => Ok(Value::Integer(g)),
+                None => Err(EvalError::Error(
+                    "PrimitiveRoot: no primitive root exists for this modulus".to_string(),
+                )),
             }
-            Err(EvalError::Error(
-                "PrimitiveRoot: no primitive root exists for this modulus".to_string(),
-            ))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
             got: args[0].type_name().to_string(),
         }),
+    }
+}
+
+/// `PrimitiveRootList[n]` — all primitive roots modulo `n`, ascending (empty
+/// when none exist).
+pub fn builtin_primitive_root_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_call("PrimitiveRootList", args));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            if *n == 1 {
+                return Ok(Value::List(vec![Value::Integer(Integer::from(1))]));
+            }
+            if !has_primitive_root(n) {
+                return Ok(Value::List(vec![]));
+            }
+            let g = match smallest_primitive_root(n) {
+                Some(g) => g,
+                None => return Ok(Value::List(vec![])),
+            };
+            let phi = euler_phi_int(n);
+            let mut roots: Vec<Integer> = Vec::new();
+            let mut k = Integer::from(1);
+            while k <= phi {
+                if gcd_int(k.clone(), phi.clone()) == 1 {
+                    roots.push(compute_power_mod_int(&g, &k, n));
+                }
+                k += Integer::from(1);
+            }
+            roots.sort();
+            roots.dedup();
+            Ok(Value::List(roots.into_iter().map(Value::Integer).collect()))
+        }
+        _ => Ok(unevaluated_call("PrimitiveRootList", args)),
     }
 }
 
@@ -1374,14 +1563,9 @@ pub fn builtin_perfect_power_q(args: &[Value]) -> Result<Value, EvalError> {
                     if *n == 1 { "True" } else { "False" }.to_string(),
                 ));
             }
-            let factors = factor_integer(n);
-            if factors.is_empty() {
-                return Ok(Value::Symbol("False".to_string()));
-            }
-            // n is a perfect power if gcd of all exponents >= 2
-            let g = factors.iter().map(|(_, e)| *e).reduce(gcd_u32).unwrap_or(1);
+            let result = perfect_power_repr(&n.clone().abs()).is_some();
             Ok(Value::Symbol(
-                if g >= 2 { "True" } else { "False" }.to_string(),
+                if result { "True" } else { "False" }.to_string(),
             ))
         }
         _ => Err(EvalError::TypeError {
@@ -1778,19 +1962,22 @@ pub fn builtin_continued_fraction(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// Exact continued-fraction expansion of a rational, using floor division so
+/// the result is canonical (all terms after the first are positive, and the
+/// final term is `>= 2` unless the value is an integer). Handles negative
+/// rationals the way Mathematica does.
 fn continued_fraction_rational(r: &Rational, max_terms: usize) -> Vec<Integer> {
     let mut cf = Vec::new();
     let mut num = r.numer().clone();
     let mut den = r.denom().clone();
-    for _ in 0..max_terms {
-        if den.is_zero() {
+    while !den.is_zero() && cf.len() < max_terms {
+        let (a, rem) = num.clone().div_rem_floor(den.clone());
+        cf.push(a);
+        if rem.is_zero() {
             break;
         }
-        let a = num.clone() / den.clone();
-        let remainder = num.clone() - a.clone() * den.clone();
-        cf.push(a);
         num = den;
-        den = remainder;
+        den = rem;
     }
     cf
 }
@@ -1798,12 +1985,15 @@ fn continued_fraction_rational(r: &Rational, max_terms: usize) -> Vec<Integer> {
 fn continued_fraction_real(r: &Float, max_terms: usize) -> Vec<Integer> {
     let mut cf = Vec::new();
     let mut x = r.clone();
+    if x.is_nan() || x.is_infinite() {
+        return cf;
+    }
     for _ in 0..max_terms {
         let prec = x.prec();
-        let a_int = x.clone().floor().to_integer().unwrap_or(Integer::from(0));
+        let a_int = x.clone().floor().to_integer().unwrap_or_default();
         cf.push(a_int.clone());
         let frac = x.clone() - Float::with_val(prec, &a_int);
-        if frac.clone().abs() < Float::with_val(prec, 1e-14_f64) {
+        if frac.is_zero() || frac.clone().abs() < Float::with_val(prec, 1e-14_f64) {
             break;
         }
         x = Float::with_val(prec, 1u32) / frac;
@@ -1830,15 +2020,13 @@ pub fn builtin_from_continued_fraction(args: &[Value]) -> Result<Value, EvalErro
                     "FromContinuedFraction: list must not be empty".to_string(),
                 ));
             }
-            // Use the recurrence: h_{-1}=1, h_0=a_0, h_n = a_n*h_{n-1} + h_{n-2}
-            // Similarly for k (denominators)
-            // Recurrence: h_{-1}=1, h_0=a_0, h_n = a_n*h_{n-1} + h_{n-2}
-            // We iterate through items computing convergents.
+            // Standard convergent recurrence with h_{-1}=1, h_{-2}=0 and
+            // k_{-1}=0, k_{-2}=1; the final h/k reduces automatically via
+            // `Rational`'s sign/denominator normalization.
             let mut h_prev = Integer::from(1); // h_{-1}
-            let mut h_curr = Integer::from(0); // will be set on first iteration
+            let mut h_prev2 = Integer::from(0); // h_{-2}
             let mut k_prev = Integer::from(0); // k_{-1}
-            let mut k_curr = Integer::from(1); // will be set on first iteration
-            let mut first = true;
+            let mut k_prev2 = Integer::from(1); // k_{-2}
             for item in items {
                 let a = match item {
                     Value::Integer(a) => a.clone(),
@@ -1849,27 +2037,17 @@ pub fn builtin_from_continued_fraction(args: &[Value]) -> Result<Value, EvalErro
                         });
                     }
                 };
-                if first {
-                    // h_0 = a_0, k_0 = 1
-                    h_curr = a.clone();
-                    k_curr = Integer::from(1);
-                    first = false;
-                } else {
-                    let h_new = a.clone() * h_curr.clone() + h_prev.clone();
-                    let k_new = a.clone() * k_curr.clone() + k_prev.clone();
-                    h_prev = h_curr;
-                    h_curr = h_new;
-                    k_prev = k_curr;
-                    k_curr = k_new;
-                }
+                let h = a.clone() * h_prev.clone() + h_prev2;
+                let k = a * k_prev.clone() + k_prev2;
+                h_prev2 = h_prev;
+                h_prev = h;
+                k_prev2 = k_prev;
+                k_prev = k;
             }
-            // Return as a Rational (h_curr / k_curr) if denominator is not 1
-            if k_curr == 1 {
-                Ok(Value::Integer(h_curr))
-            } else {
-                let r = Rational::from((h_curr, k_curr));
-                Ok(Value::Rational(Box::new(r)))
+            if k_prev.is_zero() {
+                return Ok(Value::Integer(h_prev));
             }
+            Ok(rat_or_int(Rational::from((h_prev, k_prev))))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
@@ -2233,6 +2411,293 @@ pub fn builtin_farey_sequence(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(out))
 }
 
+// ── Radical ─────────────────────────────────────────────────────────────
+
+/// `Radical[n]` — the product of the distinct prime factors of `n`, carrying
+/// the sign of `n` (`Radical[0] == 0`). Equals the squarefree kernel with its
+/// exponents dropped to one.
+pub fn builtin_radical(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Radical requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::Integer(Integer::from(0)));
+            }
+            let neg = n.is_negative();
+            let mut rad = Integer::from(1);
+            for (p, _) in factor_integer(&n.clone().abs()) {
+                rad *= p;
+            }
+            if neg {
+                rad = -rad;
+            }
+            Ok(Value::Integer(rad))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── PowerModList ────────────────────────────────────────────────────────
+
+/// Modular square roots of `a` modulo an odd prime `p`, via Tonelli–Shanks.
+fn sqrt_mod_prime(a: &Integer, p: &Integer) -> Vec<Integer> {
+    let a = ((a.clone() % p.clone()) + p.clone()) % p.clone();
+    if a.is_zero() {
+        return vec![Integer::from(0)];
+    }
+    if jacobi_symbol(&a, p) != 1 {
+        return Vec::new();
+    }
+    if (p.clone() % 4u32) == 3u32 {
+        let e = (p.clone() + 1u32) / 4u32;
+        let s = compute_power_mod_int(&a, &e, p);
+        return sorted_distinct_pair(s, p.clone());
+    }
+    // Write p - 1 = q * 2^ss with q odd.
+    let mut q = p.clone() - 1u32;
+    let mut ss = 0u32;
+    while (q.clone() % 2u32).is_zero() {
+        q /= 2u32;
+        ss += 1;
+    }
+    let mut z = Integer::from(2);
+    while jacobi_symbol(&z, p) != -1 {
+        z += 1;
+    }
+    let mut m = ss;
+    let mut c = compute_power_mod_int(&z, &q, p);
+    let mut t = compute_power_mod_int(&a, &q, p);
+    let mut r = compute_power_mod_int(&a, &((q.clone() + 1u32) / 2u32), p);
+    while t != 1 {
+        let mut i = 0u32;
+        let mut t2 = t.clone();
+        while t2 != 1 {
+            t2 = (t2.clone() * t2) % p;
+            i += 1;
+        }
+        let b = compute_power_mod_int(&c, &(Integer::from(1) << (m - i - 1)), p);
+        m = i;
+        c = (b.clone() * b.clone()) % p;
+        t = (t.clone() * c.clone()) % p;
+        r = (r.clone() * b) % p;
+    }
+    sorted_distinct_pair(r, p.clone())
+}
+
+fn sorted_distinct_pair(s: Integer, p: Integer) -> Vec<Integer> {
+    let mut out = vec![s.clone(), p - s];
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Roots of `x^r ≡ target (mod m)`, when brute force is not already used.
+fn modular_roots_fallback(target: &Integer, r: u32, m: &Integer) -> Vec<Integer> {
+    if r == 2 && *m > 2 && is_prime_int(m) {
+        return sqrt_mod_prime(target, m);
+    }
+    if let Some(mu) = m.to_usize() {
+        let mut out = Vec::new();
+        let ri = Integer::from(r);
+        for x in 0..mu {
+            let xi = Integer::from(x);
+            if compute_power_mod_int(&xi, &ri, m) == *target {
+                out.push(xi);
+            }
+        }
+        return out;
+    }
+    vec![target.clone()]
+}
+
+/// `PowerModList[a, s/r, m]` — all `x` modulo `m` with `x^r ≡ a^s (mod m)`.
+/// Special cases: `s/r = -1` gives the modular inverse, `s/r = 1/2` the
+/// modular square roots.
+pub fn builtin_power_mod_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Ok(unevaluated_call("PowerModList", args));
+    }
+    let a = match &args[0] {
+        Value::Integer(a) => a.clone(),
+        _ => return Ok(unevaluated_call("PowerModList", args)),
+    };
+    let m = match &args[2] {
+        Value::Integer(m) if m.is_positive() => m.clone(),
+        _ => return Ok(unevaluated_call("PowerModList", args)),
+    };
+    let (s, r) = match &args[1] {
+        Value::Integer(s) => (s.clone(), Integer::from(1)),
+        Value::Rational(q) => {
+            let (mut s, mut r) = (q.numer().clone(), q.denom().clone());
+            if r.is_negative() {
+                s = -s;
+                r = -r;
+            }
+            if r.is_zero() {
+                return Ok(unevaluated_call("PowerModList", args));
+            }
+            (s, r)
+        }
+        _ => return Ok(unevaluated_call("PowerModList", args)),
+    };
+    let r_u32 = match r.to_u32() {
+        Some(v) if v >= 1 => v,
+        _ => return Ok(unevaluated_call("PowerModList", args)),
+    };
+    let a_norm = ((a % &m) + &m) % &m;
+    // target = a^s mod m (s may be negative).
+    let target = if s.is_negative() {
+        let inv = match mod_inverse(&a_norm, &m) {
+            Some(x) => x,
+            None => return Ok(Value::List(vec![])),
+        };
+        compute_power_mod_int(&inv, &(-s.clone()), &m)
+    } else {
+        compute_power_mod_int(&a_norm, &s, &m)
+    };
+    let mut roots: Vec<Integer> = if r_u32 == 1 {
+        vec![target.clone()]
+    } else if let Some(mu) = m.to_u64() {
+        if mu <= 2_000_000 {
+            let ri = Integer::from(r_u32);
+            (0..mu)
+                .map(Integer::from)
+                .filter(|x| compute_power_mod_int(x, &ri, &m) == target)
+                .collect()
+        } else {
+            modular_roots_fallback(&target, r_u32, &m)
+        }
+    } else {
+        modular_roots_fallback(&target, r_u32, &m)
+    };
+    roots.sort();
+    Ok(Value::List(roots.into_iter().map(Value::Integer).collect()))
+}
+
+// ── SquaresR / SumOfSquares ─────────────────────────────────────────────
+
+/// `SquaresR[r, n]` — the number of ways to write `n` as an ordered sum of `r`
+/// signed squares. Exact formulas are provided for `r = 0, 1, 2, 4`.
+pub fn builtin_squares_r(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated_call("SquaresR", args));
+    }
+    let (r, n) = match (&args[0], &args[1]) {
+        (Value::Integer(r), Value::Integer(n)) => (r.clone(), n.clone()),
+        _ => return Ok(unevaluated_call("SquaresR", args)),
+    };
+    if n.is_negative() {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    if n.is_zero() {
+        return Ok(Value::Integer(Integer::from(1)));
+    }
+    match r.to_u32() {
+        Some(0) => Ok(Value::Integer(Integer::from(0))),
+        Some(1) => {
+            let s = n.clone().sqrt();
+            let count = if s.clone() * s.clone() == n { 2 } else { 0 };
+            Ok(Value::Integer(Integer::from(count)))
+        }
+        Some(2) => {
+            // r2(n) = 4 (d1(n) - d3(n)) for the divisor counts by residue mod 4.
+            let (mut d1, mut d3) = (0i64, 0i64);
+            for d in positive_divisors(&n) {
+                match (d.clone() % 4u32).to_u32() {
+                    Some(1) => d1 += 1,
+                    Some(3) => d3 += 1,
+                    _ => {}
+                }
+            }
+            Ok(Value::Integer(Integer::from(4 * (d1 - d3))))
+        }
+        Some(4) => {
+            // r4(n) = 8 * sum of divisors not divisible by 4.
+            let mut sum = Integer::from(0);
+            for d in positive_divisors(&n) {
+                if !(d.clone() % 4u32).is_zero() {
+                    sum += d;
+                }
+            }
+            Ok(Value::Integer(Integer::from(8) * sum))
+        }
+        _ => Ok(unevaluated_call("SquaresR", args)),
+    }
+}
+
+/// `SumOfSquares[n]` — all unordered representations `{a, b}` with
+/// `0 <= b <= a` and `a^2 + b^2 == n` (empty when none).
+pub fn builtin_sum_of_squares(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_call("SumOfSquares", args));
+    }
+    let n = match &args[0] {
+        Value::Integer(n) => n.clone(),
+        _ => return Ok(unevaluated_call("SumOfSquares", args)),
+    };
+    if n.is_negative() {
+        return Ok(Value::List(vec![]));
+    }
+    let mut out = Vec::new();
+    let mut b = Integer::from(0);
+    while Integer::from(2) * b.clone() * b.clone() <= n {
+        let rem = n.clone() - b.clone() * b.clone();
+        let a = rem.clone().sqrt();
+        if a.clone() * a.clone() == rem {
+            out.push(Value::List(vec![
+                Value::Integer(a),
+                Value::Integer(b.clone()),
+            ]));
+        }
+        b += Integer::from(1);
+    }
+    Ok(Value::List(out))
+}
+
+// ── IntegerPart / FractionalPart (exact) ────────────────────────────────
+
+/// `IntegerPart[x]` with exact rational support (truncation toward zero).
+pub fn builtin_integer_part_exact(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_call("IntegerPart", args));
+    }
+    match &args[0] {
+        Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Rational(r) => Ok(Value::Integer(r.clone().trunc().numer().clone())),
+        Value::Real(x) => {
+            let truncated = x.clone().trunc();
+            Ok(Value::Integer(
+                truncated.to_integer().unwrap_or_else(Integer::new),
+            ))
+        }
+        _ => Ok(unevaluated_call("IntegerPart", args)),
+    }
+}
+
+/// `FractionalPart[x]` with exact rational support (`x - IntegerPart[x]`).
+pub fn builtin_fractional_part_exact(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_call("FractionalPart", args));
+    }
+    match &args[0] {
+        Value::Integer(_) => Ok(Value::Integer(Integer::from(0))),
+        Value::Rational(r) => {
+            let value: &Rational = r;
+            let frac = value.clone() - value.clone().trunc();
+            Ok(rat_or_int(frac))
+        }
+        Value::Real(x) => Ok(Value::Real(x.clone().fract())),
+        _ => Ok(unevaluated_call("FractionalPart", args)),
+    }
+}
+
 /// Register the additional number-theory builtins defined in this module.
 pub fn register(env: &Env) {
     super::register_builtin(env, "ExtendedGCD", builtin_extended_gcd);
@@ -2240,6 +2705,14 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "ExpMantissa", builtin_exp_mantissa);
     super::register_builtin(env, "SquareFreePart", builtin_square_free_part);
     super::register_builtin(env, "FareySequence", builtin_farey_sequence);
+    super::register_builtin(env, "Radical", builtin_radical);
+    super::register_builtin(env, "PowerModList", builtin_power_mod_list);
+    super::register_builtin(env, "PrimitiveRootList", builtin_primitive_root_list);
+    super::register_builtin(env, "SquaresR", builtin_squares_r);
+    super::register_builtin(env, "SumOfSquares", builtin_sum_of_squares);
+    // Exact rational forms override the float-only math.rs versions.
+    super::register_builtin(env, "IntegerPart", builtin_integer_part_exact);
+    super::register_builtin(env, "FractionalPart", builtin_fractional_part_exact);
 }
 
 #[cfg(test)]
@@ -3151,5 +3624,234 @@ mod tests {
             eval("ExpMantissa[MantissaExponent[987654321]]"),
             int(987654321)
         );
+    }
+
+    // ── Fast factorization (Pollard rho + Miller–Rabin) ──────────────────
+
+    fn factor_pairs(n: i64) -> Vec<(i64, u32)> {
+        factor_integer(&Integer::from(n))
+            .into_iter()
+            .map(|(p, e)| (p.to_i64().unwrap(), e))
+            .collect()
+    }
+
+    #[test]
+    fn test_factor_small_and_prime_power() {
+        assert!(factor_pairs(1).is_empty());
+        assert_eq!(factor_pairs(-360), vec![(2i64, 3u32), (3, 2), (5, 1)]);
+        let p = Integer::from(1_000_003);
+        let n = p.clone().pow(4u32);
+        assert_eq!(factor_integer(&n), vec![(p, 4)]);
+    }
+
+    #[test]
+    fn test_factor_large_semiprime() {
+        // Trial division alone would need ~10^9 steps for this.
+        let a = Integer::from(1_000_000_007);
+        let b = Integer::from(1_000_000_009);
+        let n = a.clone() * b.clone();
+        assert_eq!(factor_integer(&n), vec![(a, 1), (b, 1)]);
+    }
+
+    #[test]
+    fn test_factor_huge_semiprime_bigint() {
+        // ~94-bit semiprime with two large prime factors.
+        let a = Integer::from(18_446_744_073_709_551_557u64); // largest prime < 2^64
+        let b = Integer::from(1_000_000_007u64);
+        let n = a.clone() * b.clone();
+        assert_eq!(factor_integer(&n), vec![(b, 1), (a, 1)]);
+    }
+
+    #[test]
+    fn test_divisors_via_factorization_large() {
+        // 2 * 3 * 1_000_003 has 8 divisors.
+        let n = Integer::from(6) * Integer::from(1_000_003);
+        assert_eq!(positive_divisors(&n).len(), 8);
+    }
+
+    #[test]
+    fn test_perfect_power_repr() {
+        assert_eq!(perfect_power_repr(&Integer::from(36)), {
+            Some((Integer::from(6), 2))
+        });
+        assert_eq!(perfect_power_repr(&Integer::from(64)), {
+            Some((Integer::from(2), 6))
+        });
+        assert_eq!(perfect_power_repr(&Integer::from(30)), None);
+        assert_eq!(perfect_power_repr(&Integer::from(1)), None);
+    }
+
+    // ── Radical ──
+
+    #[test]
+    fn test_radical() {
+        assert_eq!(builtin_radical(&[int(12)]).unwrap(), int(6));
+        assert_eq!(builtin_radical(&[int(72)]).unwrap(), int(6));
+        assert_eq!(builtin_radical(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_radical(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_radical(&[int(-12)]).unwrap(), int(-6));
+        assert_eq!(builtin_radical(&[int(30)]).unwrap(), int(30));
+    }
+
+    // ── PowerModList ──
+
+    #[test]
+    fn test_power_mod_list() {
+        assert_eq!(
+            builtin_power_mod_list(&[int(3), rat(1, 2), int(11)]).unwrap(),
+            Value::List(vec![int(5), int(6)])
+        );
+        // Modular inverse via -1.
+        assert_eq!(
+            builtin_power_mod_list(&[int(3), int(-1), int(7)]).unwrap(),
+            Value::List(vec![int(5)])
+        );
+        // Integer exponent r = 1 gives the single power.
+        assert_eq!(
+            builtin_power_mod_list(&[int(2), int(3), int(7)]).unwrap(),
+            Value::List(vec![int(1)])
+        );
+        // 2 is a quadratic residue mod 7 (3^2 = 2): roots {3, 4}.
+        assert_eq!(
+            builtin_power_mod_list(&[int(2), rat(1, 2), int(7)]).unwrap(),
+            Value::List(vec![int(3), int(4)])
+        );
+        // 5 is a non-residue mod 7: no square roots.
+        assert_eq!(
+            builtin_power_mod_list(&[int(5), rat(1, 2), int(7)]).unwrap(),
+            Value::List(vec![])
+        );
+    }
+
+    // ── PrimitiveRootList ──
+
+    #[test]
+    fn test_primitive_root_list() {
+        assert_eq!(
+            builtin_primitive_root_list(&[int(7)]).unwrap(),
+            Value::List(vec![int(3), int(5)])
+        );
+        assert_eq!(
+            builtin_primitive_root_list(&[int(9)]).unwrap(),
+            Value::List(vec![int(2), int(5)])
+        );
+        assert_eq!(
+            builtin_primitive_root_list(&[int(8)]).unwrap(),
+            Value::List(vec![])
+        );
+        assert_eq!(
+            builtin_primitive_root_list(&[int(2)]).unwrap(),
+            Value::List(vec![int(1)])
+        );
+        assert_eq!(
+            builtin_primitive_root_list(&[int(1)]).unwrap(),
+            Value::List(vec![int(1)])
+        );
+    }
+
+    // ── SquaresR / SumOfSquares ──
+
+    #[test]
+    fn test_squares_r() {
+        assert_eq!(builtin_squares_r(&[int(2), int(5)]).unwrap(), int(8));
+        assert_eq!(builtin_squares_r(&[int(2), int(1)]).unwrap(), int(4));
+        assert_eq!(builtin_squares_r(&[int(2), int(3)]).unwrap(), int(0));
+        assert_eq!(builtin_squares_r(&[int(4), int(1)]).unwrap(), int(8));
+        assert_eq!(builtin_squares_r(&[int(4), int(2)]).unwrap(), int(24));
+        assert_eq!(builtin_squares_r(&[int(1), int(9)]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_sum_of_squares() {
+        assert_eq!(
+            builtin_sum_of_squares(&[int(25)]).unwrap(),
+            Value::List(vec![
+                Value::List(vec![int(5), int(0)]),
+                Value::List(vec![int(4), int(3)]),
+            ])
+        );
+        assert_eq!(
+            builtin_sum_of_squares(&[int(5)]).unwrap(),
+            Value::List(vec![Value::List(vec![int(2), int(1)])])
+        );
+        assert_eq!(
+            builtin_sum_of_squares(&[int(3)]).unwrap(),
+            Value::List(vec![])
+        );
+    }
+
+    // ── CoprimeQ breadth ──
+
+    #[test]
+    fn test_coprime_q_list_and_flat() {
+        assert_eq!(
+            builtin_coprime_q(&[Value::List(vec![int(8), int(9), int(25)])]).unwrap(),
+            bool_value(true)
+        );
+        assert_eq!(
+            builtin_coprime_q(&[Value::List(vec![int(6), int(10)])]).unwrap(),
+            bool_value(false)
+        );
+        assert_eq!(
+            builtin_coprime_q(&[int(8), int(9), int(25)]).unwrap(),
+            bool_value(true)
+        );
+    }
+
+    // ── ContinuedFraction / FromContinuedFraction hardening ──
+
+    #[test]
+    fn test_continued_fraction_negative() {
+        let r = Rational::from((-7, 5));
+        let cf = builtin_continued_fraction(&[Value::Rational(Box::new(r))]).unwrap();
+        assert_eq!(cf, Value::List(vec![int(-2), int(1), int(1), int(2)]));
+        // Round trip back to the exact rational.
+        assert_eq!(
+            builtin_from_continued_fraction(&[cf]).unwrap(),
+            Value::Rational(Box::new(Rational::from((-7, 5))))
+        );
+    }
+
+    #[test]
+    fn test_from_continued_fraction_zero_first_term() {
+        assert_eq!(
+            builtin_from_continued_fraction(&[Value::List(vec![int(0), int(2)])]).unwrap(),
+            rat(1, 2)
+        );
+    }
+
+    // ── IntegerPart / FractionalPart exactness ──
+
+    #[test]
+    fn test_integer_and_fractional_part_exact() {
+        assert_eq!(builtin_integer_part_exact(&[rat(7, 2)]).unwrap(), int(3));
+        assert_eq!(builtin_integer_part_exact(&[rat(-7, 2)]).unwrap(), int(-3));
+        assert_eq!(builtin_integer_part_exact(&[int(5)]).unwrap(), int(5));
+        assert_eq!(
+            builtin_fractional_part_exact(&[rat(7, 2)]).unwrap(),
+            rat(1, 2)
+        );
+        assert_eq!(
+            builtin_fractional_part_exact(&[rat(-7, 2)]).unwrap(),
+            rat(-1, 2)
+        );
+        assert_eq!(builtin_fractional_part_exact(&[int(5)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_new_number_theory_builtins_registered() {
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        let eval = |input: &str| -> Value {
+            let tokens = crate::lexer::tokenize(input).unwrap();
+            let ast = crate::parser::parse(tokens).unwrap();
+            crate::eval::eval_program(&ast, &env).unwrap()
+        };
+        assert_eq!(eval("Radical[72]"), int(6));
+        assert_eq!(eval("PrimitiveRootList[9]"), eval("{2, 5}"));
+        assert_eq!(eval("PowerModList[3, 1/2, 11]"), eval("{5, 6}"));
+        assert_eq!(eval("SumOfSquares[25]"), eval("{{5, 0}, {4, 3}}"));
+        assert_eq!(eval("IntegerPart[7/2]"), int(3));
+        assert_eq!(eval("FractionalPart[7/2]"), eval("1/2"));
     }
 }

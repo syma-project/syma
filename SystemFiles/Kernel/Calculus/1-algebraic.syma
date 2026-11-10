@@ -1,6 +1,69 @@
 (* Integrate rules: 1 Algebraic functions *)
 (* Source: Rubi-4.16.1.0, 2160 rules from 52 files *)
 
+(* ------------------------------------------------------------------ *)
+(* Rubi pseudo-substitution rules lost when porting.                   *)
+(*                                                                     *)
+(* Upstream Rubi writes substitutions as `ReplaceAll[expr, x -> RHS]`. *)
+(* The port turned the token `x->` into the symbol `xRule`, so the      *)
+(* artifacts `xRulex`, `xRulec`, `xRuled`, `xRuleu`, `xRuleSqrt` (and   *)
+(* bare `xRule`) are really `xRule` juxtaposed with the RHS, and must   *)
+(* reconstruct the rule `x -> RHS`.  The `With` wrappers force the      *)
+(* (held) bound sub-expressions into the constructed rule.  `xsym` is a *)
+(* placeholder that vanishes additively/multiplicatively.               *)
+(* ------------------------------------------------------------------ *)
+xsym /: Plus[xsym, r_] := r;
+xsym /: Times[xsym, r_] := r;
+Rule /: Plus[(l_ -> r_), s_] := With[{lh = l, h = r + s}, lh -> h];
+Rule /: Times[(l_ -> r_), s_] := With[{lh = l, h = r * s}, lh -> h];
+Rule /: Divide[(l_ -> r_), s_] := With[{lh = l, h = r / s}, lh -> h];
+Rule /: Power[(l_ -> r_), e_] := With[{lh = l, h = r^e}, lh -> h];
+(* `xRule - a/b + ...`, `xRule * expr`, `xRule(-...)` : rule `x -> (RHS)`. *)
+xRule = x -> xsym;
+(* `xRulex^E` : rule `x -> x^E`. *)
+xRulex := x -> x;
+(* `xRulec^(-1)*x^(-g)` : rule `x -> c^(-1)*x^(-g)`. *)
+xRulec /: Power[xRulec, e_] := With[{h = Power[c, e], xx = x}, xx -> h];
+(* `xRuled^(-1)*x^(-g)` : rule `x -> d^(-1)*x^(-g)`. *)
+xRuled /: Power[xRuled, e_] := With[{h = Power[d, e], xx = x}, xx -> h];
+(* `xRuleSqrt[x]` : rule `x -> Sqrt[x]`. *)
+xRuleSqrt[t_] := With[{h = Sqrt[t], xx = x}, xx -> h];
+(* `xRuleu` (bare) : rule `x -> u`. *)
+xRuleu := x -> u;
+
+(* Trinity guard used by Rubi ("u = a + b*x^n + c*x^(2n)", a,b,c free of x).
+   `TrinomialQ[u, x]` is provided as a Rust builtin; this is its stricter
+   match counterpart. *)
+TrinomialMatchQ[u_, x_] :=
+    MatchQ[Expand[u],
+        a_ + (b_*x^n_ | x^n_) + (c_*x^m_ | x^m_) /;
+            FreeQ[{a, b, c, n, m}, x] && (EqQ[m, 2*n] || EqQ[n, 2*m])];
+
+(* ------------------------------------------------------------------ *)
+(* Low-degree rational closed forms.  The ported rules for these use     *)
+(* `b_` (not `b_.`), so they fail to match when the coefficient is 1     *)
+(* (e.g. 1 + x^2).  These guarded rules use `b_.` and terminate the      *)
+(* basic rational cases directly.                                        *)
+(* ------------------------------------------------------------------ *)
+Integrate[x_/(a_+b_.*x_^2), x_] := Log[a+b*x^2]/(2*b) /; FreeQ[{a, b}, x];
+
+Integrate[(a_+b_.*x)^(-1), x_] := Log[a+b*x]/b /; FreeQ[{a, b}, x];
+
+Integrate[x_^2/(a_+b_.*x_^2), x_] := x/b - a/b*Integrate[1/(a+b*x^2), x] /;
+    FreeQ[{a, b}, x] && NeQ[a, 0];
+
+Integrate[x_^3/(a_+b_.*x_^4), x_] := Log[a+b*x^4]/(4*b) /; FreeQ[{a, b}, x];
+
+Integrate[x_^2/(a_+b_.*x_^4), x_] := With[{k=(b/a)^(1/4)},
+    1/(a*k^3)*(1/(4*Sqrt[2])*Log[(k^2*x^2-Sqrt[2]*k*x+1)/(k^2*x^2+Sqrt[2]*k*x+1)] +
+        1/(2*Sqrt[2])*(ArcTan[Sqrt[2]*k*x-1]+ArcTan[Sqrt[2]*k*x+1]))] /;
+    FreeQ[{a, b}, x] && GtQ[a, 0] && GtQ[b, 0];
+
+Integrate[(a_+b_.*x_^4)^(-1), x_] := With[{k=(b/a)^(1/4)},
+    1/(a*k)*(1/(4*Sqrt[2])*Log[(k^2*x^2+Sqrt[2]*k*x+1)/(k^2*x^2-Sqrt[2]*k*x+1)] +
+        1/(2*Sqrt[2])*(ArcTan[Sqrt[2]*k*x-1]+ArcTan[Sqrt[2]*k*x+1]))] /;
+    FreeQ[{a, b}, x] && GtQ[a, 0] && GtQ[b, 0];
+
 Integrate[(a_*x_^j_.+b_*x_^n_.)^p_,x_] := (a*x^j+b*x^n)^(p+1)/(b*(n-j)(p+1)*x^(n-1)) /;
 FreeQ[{a,b,j,n,p},x] && Not[IntegerQ[p]] && NeQ[n,j] && EqQ[j*p-n+j+1,0]
 

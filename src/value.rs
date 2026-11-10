@@ -1698,7 +1698,7 @@ fn input_prec(v: &Value) -> u8 {
             "Or" if args.len() >= 2 => PREC_OR,
             "And" if args.len() >= 2 => PREC_AND,
             "Equal" | "Unequal" | "Less" | "Greater" | "LessEqual" | "GreaterEqual"
-                if args.len() == 2 =>
+                if args.len() >= 2 =>
             {
                 PREC_CMP
             }
@@ -1880,25 +1880,41 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     write!(f, " != ")?;
                     write_input_child(&args[1], PREC_CMP, true, f)
                 }
-                "Less" if args.len() == 2 => {
-                    write_input_child(&args[0], PREC_CMP, false, f)?;
-                    write!(f, " < ")?;
-                    write_input_child(&args[1], PREC_CMP, true, f)
+                "Less" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " < ")?;
+                        }
+                        write_input_child(arg, PREC_CMP, i > 0, f)?;
+                    }
+                    Ok(())
                 }
-                "Greater" if args.len() == 2 => {
-                    write_input_child(&args[0], PREC_CMP, false, f)?;
-                    write!(f, " > ")?;
-                    write_input_child(&args[1], PREC_CMP, true, f)
+                "Greater" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " > ")?;
+                        }
+                        write_input_child(arg, PREC_CMP, i > 0, f)?;
+                    }
+                    Ok(())
                 }
-                "LessEqual" if args.len() == 2 => {
-                    write_input_child(&args[0], PREC_CMP, false, f)?;
-                    write!(f, " <= ")?;
-                    write_input_child(&args[1], PREC_CMP, true, f)
+                "LessEqual" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " <= ")?;
+                        }
+                        write_input_child(arg, PREC_CMP, i > 0, f)?;
+                    }
+                    Ok(())
                 }
-                "GreaterEqual" if args.len() == 2 => {
-                    write_input_child(&args[0], PREC_CMP, false, f)?;
-                    write!(f, " >= ")?;
-                    write_input_child(&args[1], PREC_CMP, true, f)
+                "GreaterEqual" if args.len() >= 2 => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " >= ")?;
+                        }
+                        write_input_child(arg, PREC_CMP, i > 0, f)?;
+                    }
+                    Ok(())
                 }
                 "And" if args.len() >= 2 => {
                     for (i, arg) in args.iter().enumerate() {

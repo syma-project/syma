@@ -281,33 +281,13 @@ fn builtin_refine(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 }
 
-fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
+pub fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
     match val {
-        // Sqrt[x_^2] with x>0 → x
-        // Sqrt[x_^2] with Element[x, Reals] → Abs[x]
+        // Sqrt[x_^2] with x>0 → x ; with x<0 → -x ; with Element[x, Reals] → Abs[x].
+        // Sqrt[x^(2k)] with x ≥ 0 → x^k. Sqrt[a b] → Sqrt[a] Sqrt[b] for a,b ≥ 0.
         Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => {
-            if let Value::Call {
-                head: ph,
-                args: pargs,
-            } = &args[0]
-                && ph == "Power"
-                && pargs.len() == 2
-                && let Value::Integer(e) = &pargs[1]
-                && *e == 2
-            {
-                let var = &pargs[0];
-                if implies_positive(var, assum) {
-                    return Ok(var.clone());
-                }
-                if implies_non_negative(var, assum) {
-                    return Ok(var.clone());
-                }
-                if implies_real(var, assum) {
-                    return Ok(Value::Call {
-                        head: "Abs".to_string(),
-                        args: vec![var.clone()],
-                    });
-                }
+            if let Some(refined) = refine_sqrt(&args[0], assum) {
+                return Ok(refined);
             }
             // Recurse into argument
             let refined = refine_expr(&args[0], assum)?;
@@ -416,6 +396,100 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
             }
         }
 
+        // Log[Exp[x]] → x for real x
+        Value::Call { head, args } if head == "Log" && args.len() == 1 => {
+            if let Value::Call { head: eh, args: ea } = &args[0]
+                && eh == "Exp"
+                && ea.len() == 1
+                && implies_real(&ea[0], assum)
+            {
+                return Ok(ea[0].clone());
+            }
+            let refined = refine_expr(&args[0], assum)?;
+            if refined != args[0] {
+                Ok(Value::Call {
+                    head: "Log".to_string(),
+                    args: vec![refined],
+                })
+            } else {
+                Ok(val.clone())
+            }
+        }
+
+        // Exp[Log[x]] → x for positive x
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => {
+            if let Value::Call { head: lh, args: la } = &args[0]
+                && lh == "Log"
+                && la.len() == 1
+                && (implies_positive(&la[0], assum) || implies_non_negative(&la[0], assum))
+            {
+                return Ok(la[0].clone());
+            }
+            let refined = refine_expr(&args[0], assum)?;
+            if refined != args[0] {
+                Ok(Value::Call {
+                    head: "Exp".to_string(),
+                    args: vec![refined],
+                })
+            } else {
+                Ok(val.clone())
+            }
+        }
+
+        // Positivity-aware power rewriting:
+        //   (a b)^n → a^n b^n for integer n and a,b ≥ 0 ;
+        //   (x^a)^b → x^(a b) for x > 0.
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Call {
+                head: bh,
+                args: bargs,
+            } = &args[0]
+                && bh == "Times"
+                && bargs.len() >= 2
+                && matches!(&args[1], Value::Integer(_))
+                && bargs.iter().all(|f| factors_non_negative(f, assum))
+            {
+                let powered: Vec<Value> = bargs
+                    .iter()
+                    .map(|f| Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![f.clone(), args[1].clone()],
+                    })
+                    .collect();
+                return Ok(Value::Call {
+                    head: "Times".to_string(),
+                    args: powered,
+                });
+            }
+            if let Value::Call {
+                head: bh,
+                args: bargs,
+            } = &args[0]
+                && bh == "Power"
+                && bargs.len() == 2
+                && implies_positive(&bargs[0], assum)
+            {
+                let new_exp = Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![bargs[1].clone(), args[1].clone()],
+                };
+                return Ok(Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![bargs[0].clone(), new_exp],
+                });
+            }
+            let refined = refine_expr(&args[0], assum)?;
+            let refined2 = refine_expr(&args[1], assum)?;
+            if refined != args[0] || refined2 != args[1] {
+                Ok(Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![refined, refined2],
+                })
+            } else {
+                Ok(val.clone())
+            }
+        }
+
         // Lists: refine each element
         Value::List(items) => {
             let refined: Result<Vec<Value>, EvalError> =
@@ -449,6 +523,80 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
 
         _ => Ok(val.clone()),
     }
+}
+
+/// True when a factor is provably non-negative under the assumptions.
+fn factors_non_negative(f: &Value, assum: &Value) -> bool {
+    match f {
+        Value::Integer(n) => !n.is_negative(),
+        Value::Rational(r) => !r.is_negative(),
+        Value::Real(r) => !r.is_sign_negative() || r.is_zero(),
+        _ => implies_non_negative(f, assum) || implies_positive(f, assum),
+    }
+}
+
+/// `base^exp`, collapsing an exponent of one.
+fn pow_or_identity(base: &Value, exp: &Integer) -> Value {
+    if *exp == 1 {
+        base.clone()
+    } else {
+        Value::Call {
+            head: "Power".to_string(),
+            args: vec![base.clone(), Value::Integer(exp.clone())],
+        }
+    }
+}
+
+/// Refine `Sqrt[inner]` using sign/realness assumptions. Returns `None` when no
+/// rewrite applies.
+fn refine_sqrt(inner: &Value, assum: &Value) -> Option<Value> {
+    // Sqrt[x^(2k)] with x ≥ 0 → x^k ; with x < 0 → (-x)^k ;
+    // with x real and k == 1 → Abs[x].
+    if let Value::Call { head, args } = inner
+        && head == "Power"
+        && args.len() == 2
+        && let Value::Integer(e) = &args[1]
+        && !e.is_negative()
+        && e.is_even()
+    {
+        let base = &args[0];
+        let half = e.clone() / Integer::from(2);
+        if implies_positive(base, assum) || implies_non_negative(base, assum) {
+            return Some(pow_or_identity(base, &half));
+        }
+        if implies_negative(base, assum) || implies_non_positive(base, assum) {
+            let neg_base = Value::Call {
+                head: "Times".to_string(),
+                args: vec![Value::Integer(Integer::from(-1)), base.clone()],
+            };
+            return Some(pow_or_identity(&neg_base, &half));
+        }
+        if *e == 2 && implies_real(base, assum) {
+            return Some(Value::Call {
+                head: "Abs".to_string(),
+                args: vec![base.clone()],
+            });
+        }
+    }
+    // Sqrt[a b] → Sqrt[a] Sqrt[b] when every factor is ≥ 0.
+    if let Value::Call { head, args } = inner
+        && head == "Times"
+        && args.len() >= 2
+        && args.iter().all(|f| factors_non_negative(f, assum))
+    {
+        let roots: Vec<Value> = args
+            .iter()
+            .map(|f| Value::Call {
+                head: "Sqrt".to_string(),
+                args: vec![f.clone()],
+            })
+            .collect();
+        return Some(Value::Call {
+            head: "Times".to_string(),
+            args: roots,
+        });
+    }
+    None
 }
 
 // ── Assumption extraction helpers ──
@@ -504,6 +652,17 @@ fn condition_implies_negative(var: &Value, cond: &Value) -> bool {
     }
 }
 
+fn condition_implies_non_positive(var: &Value, cond: &Value) -> bool {
+    match cond {
+        // x <= 0  or  0 >= x
+        Value::Call { head, args } if head == "LessEqual" && args.len() == 2 => {
+            is_var(&args[0], var) && matches!(&args[1], Value::Integer(n) if n.is_zero())
+                || is_var(&args[1], var) && matches!(&args[0], Value::Integer(n) if n.is_zero())
+        }
+        _ => condition_implies_negative(var, cond),
+    }
+}
+
 fn condition_implies_real(var: &Value, cond: &Value) -> bool {
     match cond {
         Value::Call { head, args } if head == "Element" && args.len() == 2 => {
@@ -533,6 +692,12 @@ fn implies_negative(var: &Value, assum: &Value) -> bool {
     extract_conditions(assum)
         .iter()
         .any(|c| condition_implies_negative(var, c))
+}
+
+fn implies_non_positive(var: &Value, assum: &Value) -> bool {
+    extract_conditions(assum)
+        .iter()
+        .any(|c| condition_implies_non_positive(var, c))
 }
 
 fn implies_real(var: &Value, assum: &Value) -> bool {
@@ -959,5 +1124,148 @@ mod tests {
         let env = Env::new();
         let result = builtin_refine(&[expr.clone()], &env).unwrap();
         assert_eq!(result, expr);
+    }
+
+    #[test]
+    fn test_refine_sqrt_x2_negative() {
+        // Refine[Sqrt[x^2], x < 0] → -x
+        let expr = Value::Call {
+            head: "Sqrt".to_string(),
+            args: vec![Value::Call {
+                head: "Power".to_string(),
+                args: vec![sym("x"), int(2)],
+            }],
+        };
+        let assum = Value::Call {
+            head: "Less".to_string(),
+            args: vec![sym("x"), int(0)],
+        };
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![int(-1), sym("x")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_refine_log_exp_real() {
+        // Refine[Log[Exp[x]], Element[x, Reals]] → x
+        let expr = Value::Call {
+            head: "Log".to_string(),
+            args: vec![Value::Call {
+                head: "Exp".to_string(),
+                args: vec![sym("x")],
+            }],
+        };
+        let assum = Value::Call {
+            head: "Element".to_string(),
+            args: vec![sym("x"), sym("Reals")],
+        };
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            sym("x")
+        );
+    }
+
+    #[test]
+    fn test_refine_sqrt_split_positive() {
+        // Refine[Sqrt[a b], a > 0 && b > 0] → Sqrt[a] Sqrt[b]
+        let expr = Value::Call {
+            head: "Sqrt".to_string(),
+            args: vec![Value::Call {
+                head: "Times".to_string(),
+                args: vec![sym("a"), sym("b")],
+            }],
+        };
+        let assum = Value::Call {
+            head: "And".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Greater".to_string(),
+                    args: vec![sym("a"), int(0)],
+                },
+                Value::Call {
+                    head: "Greater".to_string(),
+                    args: vec![sym("b"), int(0)],
+                },
+            ],
+        };
+        let expected = Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![sym("a")],
+                },
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![sym("b")],
+                },
+            ],
+        };
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_refine_sqrt_no_overreach() {
+        // Refine[Sqrt[a b]] (no assumption) → Sqrt[a b]
+        let expr = Value::Call {
+            head: "Sqrt".to_string(),
+            args: vec![Value::Call {
+                head: "Times".to_string(),
+                args: vec![sym("a"), sym("b")],
+            }],
+        };
+        assert_eq!(builtin_refine(&[expr.clone()], &Env::new()).unwrap(), expr);
+    }
+
+    #[test]
+    fn test_refine_power_of_product_positive() {
+        // Refine[(x y)^2, x > 0 && y > 0] → x^2 y^2
+        let expr = Value::Call {
+            head: "Power".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![sym("x"), sym("y")],
+                },
+                int(2),
+            ],
+        };
+        let assum = Value::Call {
+            head: "And".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Greater".to_string(),
+                    args: vec![sym("x"), int(0)],
+                },
+                Value::Call {
+                    head: "Greater".to_string(),
+                    args: vec![sym("y"), int(0)],
+                },
+            ],
+        };
+        let expected = Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![sym("x"), int(2)],
+                },
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![sym("y"), int(2)],
+                },
+            ],
+        };
+        assert_eq!(
+            builtin_refine(&[expr, assum], &Env::new()).unwrap(),
+            expected
+        );
     }
 }

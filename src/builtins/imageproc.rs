@@ -622,19 +622,24 @@ pub fn builtin_image_effect(args: &[Value]) -> Result<Value, EvalError> {
     Ok(make_image(out))
 }
 
-/// ColorNegate[image]
+/// ColorNegate[image] / ColorNegate[color]
 ///
-/// Invert every colour channel, preserving alpha.
+/// Invert every colour channel of an image (preserving alpha), or invert a
+/// single RGB color value (delegating to `graphics`). This is the single
+/// dispatcher for the name; `graphics` no longer registers it separately.
 pub fn builtin_color_negate(args: &[Value]) -> Result<Value, EvalError> {
-    let Some(img) = get_image(args, 0) else {
-        return Ok(unevaluated("ColorNegate", args));
-    };
-    if args.len() != 1 {
-        return Ok(unevaluated("ColorNegate", args));
+    if let Some(img) = get_image(args, 0) {
+        if args.len() != 1 {
+            return Ok(unevaluated("ColorNegate", args));
+        }
+        return Ok(make_image(map_color_type(&img, |r, g, b| {
+            (255 - r, 255 - g, 255 - b)
+        })));
     }
-    Ok(make_image(map_color_type(&img, |r, g, b| {
-        (255 - r, 255 - g, 255 - b)
-    })))
+    // Not an image: treat the argument as a color value. Fall back to the
+    // unevaluated form when it is neither.
+    Ok(crate::builtins::graphics::builtin_color_negate(args)
+        .unwrap_or_else(|_| unevaluated("ColorNegate", args)))
 }
 
 /// A bright, well-separated palette colour for index `i`.

@@ -3051,7 +3051,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Lighter", builtin_lighter);
     register_builtin(env, "Darker", builtin_darker);
     register_builtin(env, "Blend", builtin_blend);
-    register_builtin(env, "ColorNegate", builtin_color_negate);
+    // `ColorNegate` is registered eagerly by `imageproc`, whose dispatcher
+    // handles images and delegates colors here.
 
     // Geometry primitives
     register_builtin(env, "Point", builtin_point);
@@ -3074,8 +3075,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Directive", builtin_directive);
     register_builtin(env, "Labeled", builtin_labeled);
     register_builtin(env, "LineLegend", builtin_line_legend);
-    register_builtin(env, "SwatchLegend", builtin_swatch_legend);
-    register_builtin(env, "BarLegend", builtin_bar_legend);
+    // `SwatchLegend`/`BarLegend` are registered by `charting` (which renders
+    // them directly); the stubs in this module stay available for tests.
     register_builtin(env, "Legended", builtin_legended);
 
     // Containers
@@ -3134,8 +3135,6 @@ pub const SYMBOLS: &[&str] = &[
     "Dotted",
     "Labeled",
     "LineLegend",
-    "SwatchLegend",
-    "BarLegend",
     "Legended",
     // Containers
     "GraphicsComplex",

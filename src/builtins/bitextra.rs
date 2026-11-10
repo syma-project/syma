@@ -30,7 +30,7 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "Rationalize", builtin_rationalize);
     super::register_builtin(env, "Convergents", builtin_convergents);
     super::register_builtin(env, "PrevPrime", builtin_prev_prime);
-    super::register_builtin(env, "RandomPrime", builtin_random_prime);
+    // `RandomPrime` is owned by `random` (registered later).
     super::register_builtin(env, "CarmichaelLambda", builtin_carmichael_lambda);
     super::register_builtin(env, "DivisorCount", builtin_divisor_count);
     super::register_builtin(env, "DivisorProduct", builtin_divisor_product);

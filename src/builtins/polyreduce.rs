@@ -366,6 +366,24 @@ fn poly_coeffs_univariate(p: &VPoly, vi: usize) -> Vec<Value> {
     coeffs
 }
 
+/// Coefficients of `p` treated as a polynomial in `vi`, with the monomials in
+/// the other variables folded into the coefficients (so they stay symbolic).
+fn poly_coeffs_in_var(p: &VPoly, vi: usize, vars: &[String]) -> Vec<Value> {
+    let deg = p.0.keys().map(|m| m[vi]).max().unwrap_or(0) as usize;
+    let mut coeffs = vec![int_value(0); deg + 1];
+    for (m, c) in &p.0 {
+        let mut rest = m.clone();
+        rest[vi] = 0;
+        let cv = if rest.iter().all(|&e| e == 0) {
+            c.clone()
+        } else {
+            c_mul(c, &monomial_expr(&rest, vars))
+        };
+        coeffs[m[vi] as usize] = c_add(&coeffs[m[vi] as usize], &cv);
+    }
+    coeffs
+}
+
 fn substitute_poly(p: &VPoly, vi: usize, r: &Value) -> VPoly {
     let mut out = VPoly::default();
     for (m, c) in &p.0 {
@@ -1162,6 +1180,28 @@ fn numeric_f64(v: &Value) -> Option<f64> {
     }
 }
 
+/// Static sign (`-1`, `0`, `1`) of a value that is known to be a non-zero
+/// constant, or `None` when it depends on symbols. Positive constants such as
+/// `Pi`, `E` and `Sqrt[...]` are recognised.
+fn const_sign(v: &Value) -> Option<i32> {
+    if let Some(x) = numeric_f64(v) {
+        return Some(if x == 0.0 {
+            0
+        } else if x > 0.0 {
+            1
+        } else {
+            -1
+        });
+    }
+    match v {
+        Value::Symbol(s) if s == "Pi" || s == "E" => Some(1),
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => {
+            const_sign(&args[0]).filter(|&s| s > 0).map(|_| 1)
+        }
+        _ => None,
+    }
+}
+
 // ── System solving (equations only) ─────────────────────────────────────────
 
 fn linear_solution(polys: &[VPoly], vars: &[String], active: &[usize]) -> Option<Value> {
@@ -1829,6 +1869,275 @@ fn reduce_linear_rel(rels: &[(VPoly, Rel)], vars: &[String], active: &[usize]) -
     Some(and(conds))
 }
 
+// ── Bivariate CAD-lite ──────────────────────────────────────────────────────
+
+/// Positive rational content of a rational-coefficient polynomial.
+fn poly_content(p: &VPoly) -> Option<Rational> {
+    let mut num = Integer::from(0);
+    let mut den = Integer::from(1);
+    for c in p.0.values() {
+        let r = as_rat(c)?;
+        num = num.gcd(r.numer());
+        den = den.lcm(r.denom());
+    }
+    if num.is_zero() {
+        return Some(Rational::from(0));
+    }
+    Some(Rational::from((num, den)))
+}
+
+/// `Sqrt[d]`, pulling a perfect-square rational content out of `d` so that
+/// e.g. `Sqrt[4 - 4 x^2]` becomes `2 Sqrt[1 - x^2]`.
+fn sqrt_simplified(dval: &Value, vars: &[String]) -> Value {
+    let dv = simplify_deep(dval);
+    if is_zero_value(&dv) {
+        return int_value(0);
+    }
+    if let Some(dp) = parse_poly(&dv, vars)
+        && dp.0.values().all(|c| as_rat(c).is_some())
+        && let Some(g) = poly_content(&dp)
+        && g > 0
+        && let Some(sg) = rational_sqrt(&g)
+    {
+        let d0 = dp.scale(&rat_to_value(&(Rational::from(1) / g)));
+        let d0v = simplify_deep(&poly_to_value(&d0, vars));
+        if sg == 1 {
+            return call("Sqrt", vec![d0v]);
+        }
+        return simplify_call("Times", &[rat_to_value(&sg), call("Sqrt", vec![d0v])]);
+    }
+    call("Sqrt", vec![dv])
+}
+
+fn rel_apply(r: Rel, y: &Value, bound: &Value) -> Value {
+    call(rel_head(r), vec![y.clone(), bound.clone()])
+}
+
+/// `lo < y < hi` (or `<=`) as a single chained comparison.
+fn between(lo: &Value, hi: &Value, y: &Value, strict: bool) -> Value {
+    call(
+        if strict { "Less" } else { "LessEqual" },
+        vec![lo.clone(), y.clone(), hi.clone()],
+    )
+}
+
+/// `y < lo || y > hi` (or `<=`).
+fn outside(lo: &Value, hi: &Value, y: &Value, strict: bool) -> Value {
+    let (l, g) = if strict {
+        ("Less", "Greater")
+    } else {
+        ("LessEqual", "GreaterEqual")
+    };
+    or(vec![
+        call(l, vec![y.clone(), lo.clone()]),
+        call(g, vec![y.clone(), hi.clone()]),
+    ])
+}
+
+/// Solve `b*y + c  rel  0` for `y`.
+fn solve_inner_linear(b: &Value, c: &Value, rel: Rel, y: &Value) -> Value {
+    let bound = c_div(&c_neg(c), b);
+    match const_sign(b) {
+        Some(0) => const_rel_value(c, rel),
+        Some(s) => {
+            let r2 = if s < 0 { rel_flip(rel) } else { rel };
+            rel_apply(r2, y, &bound)
+        }
+        None => or(vec![
+            and(vec![
+                call("Greater", vec![b.clone(), int_value(0)]),
+                rel_apply(rel, y, &bound),
+            ]),
+            and(vec![
+                call("Less", vec![b.clone(), int_value(0)]),
+                rel_apply(rel_flip(rel), y, &bound),
+            ]),
+            and(vec![
+                equal(b.clone(), int_value(0)),
+                const_rel_value(c, rel),
+            ]),
+        ]),
+    }
+}
+
+/// Solve a relation `a*y^2 + b*y + c  rel  0` for `y` (or `a*y + b*y...`).
+fn solve_inner_relation(
+    p: &VPoly,
+    rel: Rel,
+    vars: &[String],
+    inner: usize,
+    outer: usize,
+) -> Option<Value> {
+    let y = sym(&vars[inner]);
+    let outer_name = vec![vars[outer].clone()];
+    let coeffs = poly_coeffs_in_var(p, inner, vars);
+    if coeffs.len() > 3 {
+        return None;
+    }
+    let c = coeffs.first().cloned().unwrap_or_else(|| int_value(0));
+    let b = coeffs.get(1).cloned().unwrap_or_else(|| int_value(0));
+    let a = coeffs.get(2).cloned().unwrap_or_else(|| int_value(0));
+
+    if is_zero_value(&a) {
+        return Some(solve_inner_linear(&b, &c, rel, &y));
+    }
+    if rel == Rel::Unequal {
+        return None;
+    }
+    let disc = c_sub(&c_mul(&b, &b), &c_mul(&c_mul(&int_value(4), &a), &c));
+    let sqrt_d = sqrt_simplified(&disc, &outer_name);
+    let two_a = c_mul(&int_value(2), &a);
+    let mk_root = |neg: bool| -> Value {
+        let term = if neg { c_neg(&sqrt_d) } else { sqrt_d.clone() };
+        if let (Some(a_r), Some(b_r)) = (as_rat(&a), as_rat(&b)) {
+            let half_a = Rational::from(2) * a_r;
+            let const_part = (-b_r) / half_a.clone();
+            let sqrt_part = c_mul(&rat_to_value(&(Rational::from(1) / half_a)), &term);
+            c_add(&rat_to_value(&const_part), &sqrt_part)
+        } else {
+            let num = c_add(&c_neg(&b), &term);
+            simplify_call("Divide", &[num, two_a.clone()])
+        }
+    };
+    let r_neg = simplify_deep(&mk_root(true));
+    let r_pos = simplify_deep(&mk_root(false));
+
+    if rel == Rel::Equal {
+        let region = or(vec![
+            equal(y.clone(), r_neg.clone()),
+            equal(y.clone(), r_pos.clone()),
+        ]);
+        let disc_cond = const_rel_value(&disc, Rel::GreaterEqual);
+        return Some(match const_sign(&a) {
+            Some(_) => and(vec![disc_cond, region]),
+            None => {
+                let lin = solve_inner_linear(&b, &c, rel, &y);
+                or(vec![
+                    and(vec![
+                        call("Unequal", vec![a.clone(), int_value(0)]),
+                        disc_cond,
+                        region,
+                    ]),
+                    and(vec![equal(a.clone(), int_value(0)), lin]),
+                ])
+            }
+        });
+    }
+
+    let strict = matches!(rel, Rel::Less | Rel::Greater);
+    let inside = matches!(rel, Rel::Less | Rel::LessEqual);
+    // The discriminant needs to be strictly positive only when the admissible
+    // set lies strictly between the two roots; for an "outside" region the
+    // double-root case `D = 0` is still admissible (`y != r`).
+    let disc_rel_for = |want_inside: bool| {
+        if want_inside && strict {
+            Rel::Greater
+        } else {
+            Rel::GreaterEqual
+        }
+    };
+    let region = |sign_a: i32| -> Value {
+        let (lo, hi) = if sign_a > 0 {
+            (r_neg.clone(), r_pos.clone())
+        } else {
+            (r_pos.clone(), r_neg.clone())
+        };
+        let want_inside = if sign_a > 0 { inside } else { !inside };
+        if want_inside {
+            between(&lo, &hi, &y, strict)
+        } else {
+            outside(&lo, &hi, &y, strict)
+        }
+    };
+    Some(match const_sign(&a) {
+        Some(s) => {
+            let want_inside = if s > 0 { inside } else { !inside };
+            and(vec![
+                const_rel_value(&disc, disc_rel_for(want_inside)),
+                region(s),
+            ])
+        }
+        None => {
+            let lin = solve_inner_linear(&b, &c, rel, &y);
+            or(vec![
+                and(vec![
+                    call("Greater", vec![a.clone(), int_value(0)]),
+                    const_rel_value(&disc, disc_rel_for(inside)),
+                    region(1),
+                ]),
+                and(vec![
+                    call("Less", vec![a.clone(), int_value(0)]),
+                    const_rel_value(&disc, disc_rel_for(!inside)),
+                    region(-1),
+                ]),
+                and(vec![equal(a.clone(), int_value(0)), lin]),
+            ])
+        }
+    })
+}
+
+/// Reduce every relation that constrains only the outer variable.
+fn reduce_outer_relations(v: &Value, inner: &str, outer: &str) -> Value {
+    match v {
+        Value::Call { head, args } if head == "And" => and(args
+            .iter()
+            .map(|a| reduce_outer_relations(a, inner, outer))
+            .collect()),
+        Value::Call { head, args } if head == "Or" => or(args
+            .iter()
+            .map(|a| reduce_outer_relations(a, inner, outer))
+            .collect()),
+        Value::Call { head, args } if args.len() == 2 && rel_from_head(head).is_some() => {
+            let inner_v = [inner.to_string()];
+            let outer_v = [outer.to_string()];
+            let touches_inner = args.iter().any(|a| involves_vars(a, &inner_v));
+            let touches_outer = args.iter().any(|a| involves_vars(a, &outer_v));
+            if touches_outer && !touches_inner {
+                match reduce_univariate(std::slice::from_ref(v), outer) {
+                    Some(r) => r,
+                    None => v.clone(),
+                }
+            } else {
+                v.clone()
+            }
+        }
+        _ => v.clone(),
+    }
+}
+
+/// CAD-lite for two variables: express the last variable through the first
+/// using the (at most quadratic) shape of each relation.
+fn reduce_bivariate(rels: &[(VPoly, Rel)], vars: &[String]) -> Option<Value> {
+    if vars.len() != 2 {
+        return None;
+    }
+    let inner = 1usize;
+    let outer = 0usize;
+    let mut conds: Vec<Value> = Vec::new();
+    for (p, rel) in rels {
+        if p.is_zero() {
+            conds.push(const_rel_value(&int_value(0), *rel));
+            continue;
+        }
+        if !p.involves_var(inner) {
+            let pv = poly_to_value(p, vars);
+            if !involves_vars(&pv, vars) {
+                conds.push(const_rel_value(&pv, *rel));
+            } else {
+                conds.push(call(rel_head(*rel), vec![pv, int_value(0)]));
+            }
+            continue;
+        }
+        conds.push(solve_inner_relation(p, *rel, vars, inner, outer)?);
+    }
+    let combined = and(conds);
+    Some(reduce_outer_relations(
+        &combined,
+        &vars[inner],
+        &vars[outer],
+    ))
+}
+
 // ── Multivariate reduction ──────────────────────────────────────────────────
 
 fn reduce_conjuncts(conjuncts: &[Value], vars: &[String]) -> Option<Value> {
@@ -1889,9 +2198,15 @@ fn reduce_conjuncts(conjuncts: &[Value], vars: &[String]) -> Option<Value> {
     }
     // Fallback: systems that are multilinear in the variables (e.g. `x y == 1`)
     // can be solved by isolating one variable at a time.
-    if let Some(rels) = rels
+    if let Some(rels) = &rels
         && rels.iter().all(|(p, _)| is_multilinear(p, &active))
-        && let Some(v) = reduce_linear_rel(&rels, vars, &active)
+        && let Some(v) = reduce_linear_rel(rels, vars, &active)
+    {
+        return Some(v);
+    }
+    // CAD-lite for two-variable quadratic/known regions.
+    if let Some(rels) = &rels
+        && let Some(v) = reduce_bivariate(rels, vars)
     {
         return Some(v);
     }
@@ -1957,29 +2272,77 @@ fn abs_relation(head: &str, l: &Value, r: &Value) -> Option<Value> {
     };
     let negc = c_neg(&c);
     let mk = |h: &str, a: Value, b: Value| call(h, vec![a, b]);
-    match head.as_str() {
-        "Less" => Some(and(vec![
-            mk("Less", negc, inner.clone()),
-            mk("Less", inner, c),
-        ])),
-        "LessEqual" => Some(and(vec![
-            mk("LessEqual", negc, inner.clone()),
-            mk("LessEqual", inner, c),
-        ])),
-        "Greater" => Some(or(vec![
-            mk("Greater", inner.clone(), c),
-            mk("Less", inner, negc),
-        ])),
-        "GreaterEqual" => Some(or(vec![
-            mk("GreaterEqual", inner.clone(), c),
-            mk("LessEqual", inner, negc),
-        ])),
-        "Equal" => Some(or(vec![
-            mk("Equal", inner.clone(), c),
-            mk("Equal", inner, negc),
-        ])),
-        _ => None,
-    }
+    let sign = const_sign(&c);
+    // Side conditions on the (possibly symbolic) bound `c`.
+    let nonneg = || call("GreaterEqual", vec![c.clone(), int_value(0)]);
+    let positive = || call("Greater", vec![c.clone(), int_value(0)]);
+    let cond = match head.as_str() {
+        "Less" => match sign {
+            Some(s) if s <= 0 => Value::Bool(false),
+            Some(_) => and(vec![mk("Less", negc, inner.clone()), mk("Less", inner, c)]),
+            None => and(vec![
+                positive(),
+                mk("Less", negc, inner.clone()),
+                mk("Less", inner, c),
+            ]),
+        },
+        "LessEqual" => match sign {
+            Some(s) if s < 0 => Value::Bool(false),
+            Some(_) => and(vec![
+                mk("LessEqual", negc, inner.clone()),
+                mk("LessEqual", inner, c),
+            ]),
+            None => and(vec![
+                nonneg(),
+                mk("LessEqual", negc, inner.clone()),
+                mk("LessEqual", inner, c),
+            ]),
+        },
+        "Greater" => match sign {
+            Some(s) if s < 0 => Value::Bool(true),
+            Some(_) => or(vec![
+                mk("Greater", inner.clone(), c),
+                mk("Less", inner, negc),
+            ]),
+            None => and(vec![
+                nonneg(),
+                or(vec![
+                    mk("Greater", inner.clone(), c),
+                    mk("Less", inner, negc),
+                ]),
+            ]),
+        },
+        "GreaterEqual" => match sign {
+            Some(s) if s < 0 => Value::Bool(true),
+            Some(_) => or(vec![
+                mk("GreaterEqual", inner.clone(), c),
+                mk("LessEqual", inner, negc),
+            ]),
+            None => and(vec![
+                nonneg(),
+                or(vec![
+                    mk("GreaterEqual", inner.clone(), c),
+                    mk("LessEqual", inner, negc),
+                ]),
+            ]),
+        },
+        "Equal" => match sign {
+            Some(s) if s < 0 => Value::Bool(false),
+            Some(_) => or(vec![
+                mk("Equal", inner.clone(), c),
+                mk("Equal", inner, negc),
+            ]),
+            None => and(vec![
+                nonneg(),
+                or(vec![
+                    mk("Equal", inner.clone(), c),
+                    mk("Equal", inner, negc),
+                ]),
+            ]),
+        },
+        _ => return None,
+    };
+    Some(cond)
 }
 
 fn abs_split(l: &Value, r: &Value) -> Option<(Value, Value, bool)> {
@@ -1993,14 +2356,12 @@ fn abs_split(l: &Value, r: &Value) -> Option<(Value, Value, bool)> {
             None
         }
     };
-    if let (Some(inner), Some(cv)) = (abs_inner(l), numeric_f64(r))
-        && cv > 0.0
-    {
+    // `Abs[u] rel c` or `c rel Abs[u]`. Any bound is accepted; its sign is
+    // handled by `abs_relation`.
+    if let Some(inner) = abs_inner(l) {
         return Some((inner, r.clone(), false));
     }
-    if let (Some(inner), Some(cv)) = (abs_inner(r), numeric_f64(l))
-        && cv > 0.0
-    {
+    if let Some(inner) = abs_inner(r) {
         return Some((inner, l.clone(), true));
     }
     None
@@ -2982,9 +3343,8 @@ fn resolve_quantifier(exists: bool, vars_expr: &Value, body: &Value) -> Option<V
     let elim = parse_vars(vars_expr)?;
     let mut items: Vec<Value> = Vec::new();
     flatten_conjuncts(body, &mut items);
-    let equations = equations_from(&items)?;
     let mut syms: Vec<String> = Vec::new();
-    for e in &equations {
+    for e in &items {
         collect_symbols(e, &mut syms);
     }
     let mut allvars = elim.clone();
@@ -2993,6 +3353,60 @@ fn resolve_quantifier(exists: bool, vars_expr: &Value, body: &Value) -> Option<V
             allvars.push(s);
         }
     }
+    // Relation-based elimination for a single relation involving one elim var
+    // (`p` must be at most quadratic in that var).
+    if elim.len() == 1
+        && let Some(rels) = parse_relations(&items, &allvars)
+        && let Some(evi) = allvars.iter().position(|v| *v == elim[0])
+    {
+        let involving: Vec<usize> = rels
+            .iter()
+            .enumerate()
+            .filter(|(_, (p, _))| p.involves_var(evi))
+            .map(|(i, _)| i)
+            .collect();
+        if involving.len() == 1 {
+            let idx = involving[0];
+            let (p, rel) = rels[idx].clone();
+            if let Some(cond) = resolve_single_relation(exists, &p, rel, evi, &allvars) {
+                let free: Vec<String> = allvars
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| !elim.contains(v))
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                let mut others: Vec<Value> = Vec::new();
+                let mut ok = true;
+                for (k, (q, r)) in rels.iter().enumerate() {
+                    if k == idx {
+                        continue;
+                    }
+                    if q.involves_var(evi) {
+                        ok = false;
+                        break;
+                    }
+                    if q.is_zero() {
+                        others.push(const_rel_value(&int_value(0), *r));
+                    } else {
+                        others.push(call(
+                            rel_head(*r),
+                            vec![poly_to_value(q, &allvars), int_value(0)],
+                        ));
+                    }
+                }
+                if ok {
+                    let mut all: Vec<Value> = vec![cond];
+                    all.extend(others);
+                    let combined = and(all);
+                    if free.is_empty() {
+                        return Some(combined);
+                    }
+                    return Some(reduce_value(&combined, &free).unwrap_or(combined));
+                }
+            }
+        }
+    }
+    let equations = equations_from(&items)?;
     let mut polys: Vec<VPoly> = Vec::new();
     for e in &equations {
         polys.push(parse_poly(e, &allvars)?);
@@ -3037,6 +3451,149 @@ fn resolve_quantifier(exists: bool, vars_expr: &Value, body: &Value) -> Option<V
             }
         }
         Some(and(conds))
+    }
+}
+
+/// Existential condition for `a x^2 + b x + c  rel  0` (with `disc = b^2-4ac`).
+fn exists_cond(a: &Value, b: &Value, c: &Value, disc: &Value, rel: Rel) -> Value {
+    let lin = || {
+        or(vec![
+            call("Unequal", vec![b.clone(), int_value(0)]),
+            const_rel_value(c, rel),
+        ])
+    };
+    let need_strict = |r: Rel| {
+        if matches!(r, Rel::Less | Rel::Greater) {
+            Rel::Greater
+        } else {
+            Rel::GreaterEqual
+        }
+    };
+    match const_sign(a) {
+        Some(0) => lin(),
+        Some(s) => match rel {
+            Rel::Less | Rel::LessEqual => {
+                if s > 0 {
+                    const_rel_value(disc, need_strict(rel))
+                } else {
+                    Value::Bool(true)
+                }
+            }
+            Rel::Greater | Rel::GreaterEqual => {
+                if s > 0 {
+                    Value::Bool(true)
+                } else {
+                    const_rel_value(disc, need_strict(rel))
+                }
+            }
+            Rel::Equal => const_rel_value(disc, Rel::GreaterEqual),
+            Rel::Unequal => Value::Bool(true),
+        },
+        None => {
+            let linz = lin();
+            let (pos, neg) = match rel {
+                Rel::Less | Rel::LessEqual => {
+                    (const_rel_value(disc, need_strict(rel)), Value::Bool(true))
+                }
+                Rel::Greater | Rel::GreaterEqual => {
+                    (Value::Bool(true), const_rel_value(disc, need_strict(rel)))
+                }
+                Rel::Equal => (
+                    const_rel_value(disc, Rel::GreaterEqual),
+                    const_rel_value(disc, Rel::GreaterEqual),
+                ),
+                Rel::Unequal => (Value::Bool(true), Value::Bool(true)),
+            };
+            or(vec![
+                and(vec![call("Greater", vec![a.clone(), int_value(0)]), pos]),
+                and(vec![call("Less", vec![a.clone(), int_value(0)]), neg]),
+                and(vec![equal(a.clone(), int_value(0)), linz]),
+            ])
+        }
+    }
+}
+
+/// Universal condition for `a x^2 + b x + c  rel  0`.
+fn forall_cond(a: &Value, b: &Value, c: &Value, disc: &Value, rel: Rel) -> Value {
+    let lin = || match const_sign(b) {
+        Some(0) => const_rel_value(c, rel),
+        Some(_) => Value::Bool(false),
+        None => and(vec![
+            equal(b.clone(), int_value(0)),
+            const_rel_value(c, rel),
+        ]),
+    };
+    // A non-constant quadratic stays on one side of 0 for all x iff its
+    // discriminant has the appropriate sign: `D < 0` for a strict relation,
+    // `D <= 0` for a non-strict one.
+    let forall_need = |r: Rel| {
+        if matches!(r, Rel::Less | Rel::Greater) {
+            Rel::Less
+        } else {
+            Rel::LessEqual
+        }
+    };
+    let upward = |rel: Rel| -> Value {
+        match rel {
+            Rel::Less | Rel::LessEqual => Value::Bool(false),
+            Rel::Greater | Rel::GreaterEqual => const_rel_value(disc, forall_need(rel)),
+            Rel::Equal => Value::Bool(false),
+            Rel::Unequal => const_rel_value(disc, Rel::Less),
+        }
+    };
+    let downward = |rel: Rel| -> Value {
+        match rel {
+            Rel::Less | Rel::LessEqual => const_rel_value(disc, forall_need(rel)),
+            Rel::Greater | Rel::GreaterEqual => Value::Bool(false),
+            Rel::Equal => Value::Bool(false),
+            Rel::Unequal => const_rel_value(disc, Rel::Less),
+        }
+    };
+    match const_sign(a) {
+        Some(0) => lin(),
+        Some(s) => {
+            if s > 0 {
+                upward(rel)
+            } else {
+                downward(rel)
+            }
+        }
+        None => {
+            let linz = lin();
+            or(vec![
+                and(vec![
+                    call("Greater", vec![a.clone(), int_value(0)]),
+                    upward(rel),
+                ]),
+                and(vec![
+                    call("Less", vec![a.clone(), int_value(0)]),
+                    downward(rel),
+                ]),
+                and(vec![equal(a.clone(), int_value(0)), linz]),
+            ])
+        }
+    }
+}
+
+fn resolve_single_relation(
+    exists: bool,
+    p: &VPoly,
+    rel: Rel,
+    evi: usize,
+    allvars: &[String],
+) -> Option<Value> {
+    let coeffs = poly_coeffs_in_var(p, evi, allvars);
+    if coeffs.len() > 3 {
+        return None;
+    }
+    let c = coeffs.first().cloned().unwrap_or_else(|| int_value(0));
+    let b = coeffs.get(1).cloned().unwrap_or_else(|| int_value(0));
+    let a = coeffs.get(2).cloned().unwrap_or_else(|| int_value(0));
+    let disc = c_sub(&c_mul(&b, &b), &c_mul(&c_mul(&int_value(4), &a), &c));
+    if exists {
+        Some(exists_cond(&a, &b, &c, &disc, rel))
+    } else {
+        Some(forall_cond(&a, &b, &c, &disc, rel))
     }
 }
 
@@ -3632,5 +4189,177 @@ mod tests {
     fn test_reduce_multilinear_reciprocal() {
         let out = eval_str("Reduce[x y == 1, {x, y}]").to_string();
         assert!(out.contains("Equal[x, Divide[1, y]]"), "got {out}");
+    }
+
+    // ── Added: bivariate CAD-lite, Abs extension, quantifier elimination ──
+
+    #[test]
+    fn test_reduce_bivariate_circle() {
+        let out = eval_str("Reduce[x^2 + y^2 < 1, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains("Less[-1, x]"), "got {out}");
+        assert!(out.contains("Less[x, 1]"), "got {out}");
+        assert!(out.contains("Sqrt"), "got {out}");
+        assert!(out.contains(", y,"), "expected a chained y bound: {out}");
+    }
+
+    #[test]
+    fn test_reduce_bivariate_parabola() {
+        let out = eval_str("Reduce[x^2 < y, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains("Greater") && out.contains('y'), "got {out}");
+        assert!(out.contains("Power[x, 2]"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_bivariate_circle_halfplane() {
+        let out = eval_str("Reduce[{x^2 + y^2 == 1, x > 0}, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains("Equal[y,"), "got {out}");
+        assert!(out.contains("Sqrt"), "got {out}");
+        assert!(
+            out.contains("Greater[x, 0]") || out.contains("Less[0, x]"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn test_reduce_bivariate_quadratic_inner_linear_outer() {
+        // y is quadratic, x is linear: region bounded in y for each x.
+        let out = eval_str("Reduce[y^2 < x, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains("Greater") || out.contains("Less"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_bivariate_unevaluated_when_cubic() {
+        // Cubic in the inner variable is left unevaluated (never wrong).
+        let out = eval_str("Reduce[y^3 + x < 0, {x, y}]").to_string();
+        assert!(out.contains("Reduce"), "expected unevaluated, got {out}");
+    }
+
+    #[test]
+    fn test_reduce_cubic_equation() {
+        let out = eval_str("Reduce[x^3 - 6 x^2 + 11 x - 6 == 0, x]").to_string();
+        assert!(out.contains("Equal[x, 1]"), "got {out}");
+        assert!(out.contains("Equal[x, 2]"), "got {out}");
+        assert!(out.contains("Equal[x, 3]"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_high_degree_inequality() {
+        let out = eval_str("Reduce[x^3 - 6 x^2 + 11 x - 6 < 0, x]").to_string();
+        assert!(out.contains("Less") || out.contains("Greater"), "got {out}");
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+    }
+
+    #[test]
+    fn test_reduce_irrational_bound_inequality() {
+        let out = eval_str("Reduce[x^2 - 2 < 0, x]").to_string();
+        assert!(out.contains("Sqrt"), "got {out}");
+        assert!(out.contains("Less"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_abs_symbolic_bound() {
+        let out = eval_str("Reduce[Abs[x - 2] < a, x]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains('a'), "got {out}");
+        assert!(out.contains("Less") || out.contains("Greater"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_abs_zero_bound() {
+        let out = eval_str("Reduce[Abs[x] <= 0, x]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains('0'), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_abs_linear_scaled() {
+        let out = eval_str("Reduce[Abs[2 x - 3] < 5, x]").to_string();
+        assert!(out.contains("Less[-1, x]"), "got {out}");
+        assert!(out.contains("Less[x, 4]"), "got {out}");
+    }
+
+    #[test]
+    fn test_resolve_exists_quadratic_ineq() {
+        let out = eval_str("Resolve[Exists[x, x^2 < y], y]").to_string();
+        assert!(
+            out.contains("Greater[y, 0]") || out.contains("Less[0, y]"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_forall_quadratic_ineq() {
+        // ForAll[x, x^2 + 1 > 0] is true (discriminant < 0).
+        assert_eq!(
+            eval_str("Resolve[ForAll[x, x^2 + 1 > 0]]"),
+            Value::Bool(true)
+        );
+        // ForAll[x, x^2 > 0] is false (x = 0).
+        assert_eq!(eval_str("Resolve[ForAll[x, x^2 > 0]]"), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_resolve_exists_linear_ineq() {
+        // y != 0.
+        let out = eval_str("Resolve[Exists[x, x y == 1], y]").to_string();
+        assert!(out.contains("Unequal"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_bivariate_exterior_and_degenerate() {
+        let out = eval_str("Reduce[x^2 + y^2 > 1, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains("Sqrt"), "got {out}");
+        // (y - 1)^2 < 0 is unsatisfiable.
+        assert_eq!(
+            eval_str("Reduce[(y - 1)^2 < 0, {x, y}]"),
+            Value::Bool(false)
+        );
+        // (y - 1)^2 > 0 means y != 1 (a double root is still admissible).
+        let out2 = eval_str("Reduce[(y - 1)^2 > 0, {x, y}]").to_string();
+        assert!(!out2.contains("Reduce["), "unreduced: {out2}");
+    }
+
+    #[test]
+    fn test_resolve_forall_directions() {
+        assert_eq!(
+            eval_str("Resolve[ForAll[x, -(x^2) - 1 > 0]]"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_str("Resolve[ForAll[x, -(x^2) - 1 < 0]]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_str("Resolve[ForAll[x, x^2 - 1 < 0]]"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_reduce_bivariate_symbolic_coeff() {
+        // Symbolic leading coefficient triggers a sign case-split.
+        let out = eval_str("Reduce[a y^2 < x, {x, y}]").to_string();
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+        assert!(out.contains('a'), "got {out}");
+        let out2 = eval_str("Reduce[x y < 1, {x, y}]").to_string();
+        assert!(!out2.contains("Reduce["), "unreduced: {out2}");
+        // Symbolic radius parameter.
+        let out3 = eval_str("Reduce[x^2 + y^2 < r, {x, y}]").to_string();
+        assert!(out3.contains('r'), "got {out3}");
+        assert!(out3.contains("Sqrt"), "got {out3}");
+    }
+
+    #[test]
+    fn test_reduce_bivariate_outer_only() {
+        // No relation touches the inner variable: still reduce over the outer.
+        assert_eq!(eval_str("Reduce[x^2 < 0, {x, y}]"), Value::Bool(false));
+        let out = eval_str("Reduce[x^2 < 1, {x, y}]").to_string();
+        assert!(out.contains("Less[-1, x]"), "got {out}");
+        assert!(!out.contains('y'), "y is unconstrained: {out}");
     }
 }

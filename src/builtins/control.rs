@@ -275,10 +275,23 @@ pub fn builtin_check(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         return Ok(unevaluated_values("Check", args));
     }
     let expr = held_expr(&args[0]);
+    // Catch either a hard message-error or any message emitted while evaluating.
+    let mark = crate::messages::mark();
+    let tag_spec = args.get(2).and_then(crate::messages::value_to_spec);
     match eval(&expr, env) {
+        Ok(_) if messages_since_match(mark, tag_spec.as_deref()) => eval(&held_expr(&args[1]), env),
         Ok(v) => Ok(v),
         Err(e) if is_message_error(&e) => eval(&held_expr(&args[1]), env),
         Err(e) => Err(e),
+    }
+}
+
+/// True if a message matching `spec` (or any message) was emitted since `mark`.
+fn messages_since_match(mark: usize, spec: Option<&str>) -> bool {
+    let msgs = crate::messages::messages_since(mark);
+    match spec {
+        None => !msgs.is_empty(),
+        Some(spec) => msgs.iter().any(|m| crate::messages::spec_matches(spec, m)),
     }
 }
 

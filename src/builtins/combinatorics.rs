@@ -1968,20 +1968,11 @@ pub fn builtin_q_binomial(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn register(env: &Env) {
-    super::register_builtin(env, "Binomial", builtin_binomial);
+    // Names already present in the central `PURE_BUILTINS` table are omitted
+    // here to avoid duplicate registrations; only the remaining builtins are
+    // registered directly.
     super::register_builtin(env, "QBinomial", builtin_q_binomial);
-    super::register_builtin(env, "Multinomial", builtin_multinomial);
-    super::register_builtin(env, "Factorial2", builtin_factorial2);
     super::register_builtin(env, "AlternatingFactorial", builtin_alternating_factorial);
-    super::register_builtin(env, "Subfactorial", builtin_subfactorial);
-    super::register_builtin(env, "Permutations", builtin_permutations);
-    super::register_builtin(env, "Subsets", builtin_subsets);
-    super::register_builtin(env, "Tuples", builtin_tuples);
-    super::register_builtin(env, "Arrangements", builtin_arrangements);
-    super::register_builtin(env, "StirlingS2", builtin_stirling_s2);
-    super::register_builtin(env, "StirlingS1", builtin_stirling_s1);
-    super::register_builtin(env, "LucasL", builtin_lucas_l);
-    super::register_builtin(env, "BellB", builtin_bell_b);
     super::register_builtin(env, "BellNumber", builtin_bell_number);
     super::register_builtin(env, "Derangements", builtin_derangements);
     super::register_builtin(env, "EulerE", builtin_euler_e);
@@ -1993,12 +1984,7 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "Signature", builtin_signature);
     super::register_builtin(env, "PermutationOrder", builtin_permutation_order);
     super::register_builtin(env, "GroupOrder", builtin_group_order);
-    super::register_builtin(env, "CatalanNumber", builtin_catalan_number);
-    super::register_builtin(env, "Fibonacci", builtin_fibonacci);
-    super::register_builtin(env, "HarmonicNumber", builtin_harmonic_number);
     super::register_builtin(env, "IntegerPartitions", builtin_integer_partitions);
-    super::register_builtin(env, "PartitionsP", builtin_partitions_p);
-    super::register_builtin(env, "PartitionsQ", builtin_partitions_q);
 }
 
 #[cfg(test)]

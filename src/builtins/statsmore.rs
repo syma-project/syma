@@ -2003,7 +2003,7 @@ pub fn register(env: &Env) {
     // constructors / PDF / CDF from the Statistics package are always available
     // (idempotent; the lazy provider for the Statistics package still works).
     st::register(env);
-    register_builtin(env, "SeedRandom", builtin_seed_random);
+    // `SeedRandom` is owned by `random` (registered later).
     register_builtin(env, "Quartiles", builtin_quartiles);
     register_builtin(env, "CentralMoment", builtin_central_moment);
     register_builtin(env, "Moment", builtin_moment);

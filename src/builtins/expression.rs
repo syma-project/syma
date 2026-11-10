@@ -620,108 +620,8 @@ pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
     )))
 }
 
-// IntegerQ[val] is already implemented in math.rs; adding ExactNumberQ here.
-/// ExactNumberQ[val] — True if val is an exact number (Integer, Rational, or complex with exact parts).
-pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ExactNumberQ expects exactly 1 argument".to_string(),
-        ));
-    }
-    Ok(Value::Bool(matches!(
-        &args[0],
-        Value::Integer(_) | Value::Rational(_)
-    )))
-}
-
-/// VectorQ[list] — True if list is a uniform list of atoms.
-/// VectorQ[list, test] — True if list is a uniform list and all elements pass test.
-pub fn builtin_vector_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(EvalError::Error(
-            "VectorQ expects 1 or 2 arguments".to_string(),
-        ));
-    }
-    let items = match &args[0] {
-        Value::List(items) => items,
-        _ => return Ok(Value::Bool(false)),
-    };
-    if items.is_empty() {
-        return Ok(Value::Bool(true));
-    }
-
-    // All elements must have the same head (be uniform)
-    let first_head = items[0].type_name();
-    let uniform = items.iter().all(|v| v.type_name() == first_head);
-    if !uniform {
-        return Ok(Value::Bool(false));
-    }
-
-    // If a test function is provided, all elements must pass it
-    if args.len() == 2 {
-        let test = &args[1];
-        for item in items {
-            let result = match test {
-                Value::PureFunction { .. } | Value::Function(_) | Value::Builtin(..) => {
-                    let _call = Value::Call {
-                        head: "Apply".to_string(),
-                        args: vec![test.clone(), item.clone()],
-                    };
-                    // Simple invocation
-                    let res = builtin_apply(&[test.clone(), Value::List(vec![item.clone()])], env);
-                    match res {
-                        Ok(v) => v.to_bool(),
-                        Err(_) => false,
-                    }
-                }
-                _ => {
-                    // Symbol as test — evaluate test[val]
-                    let head = match test {
-                        Value::Symbol(s) => s.clone(),
-                        _ => test.to_string(),
-                    };
-                    let _call = Value::Call {
-                        head,
-                        args: vec![item.clone()],
-                    };
-                    // We can't eval here without cycle; fall back to struct_eq
-                    false
-                }
-            };
-            if !result {
-                return Ok(Value::Bool(false));
-            }
-        }
-    }
-    Ok(Value::Bool(true))
-}
-
-/// MatrixQ[list] — True if list is a uniform rectangular matrix of atoms.
-pub fn builtin_matrix_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "MatrixQ expects exactly 1 argument".to_string(),
-        ));
-    }
-    let is_matrix = match &args[0] {
-        Value::List(rows) => {
-            if rows.is_empty() {
-                true
-            } else {
-                match &rows[0] {
-                    Value::List(cols) => {
-                        let row_len = cols.len();
-                        rows.iter()
-                            .all(|row| matches!(row, Value::List(c) if c.len() == row_len))
-                    }
-                    _ => false,
-                }
-            }
-        }
-        _ => false,
-    };
-    Ok(Value::Bool(is_matrix))
-}
+// `ExactNumberQ`, `VectorQ`, `MatrixQ` and `ArrayQ` are owned by `predicates`
+// (registered last), so only the non-duplicated `ScalarQ` remains here.
 
 /// ScalarQ[val] — True if val is not a List or Call (a scalar value).
 pub fn builtin_scalar_q(args: &[Value]) -> Result<Value, EvalError> {
@@ -736,33 +636,6 @@ pub fn builtin_scalar_q(args: &[Value]) -> Result<Value, EvalError> {
     )))
 }
 
-/// ArrayQ[val] — True if val is a uniform n-dimensional array.
-pub fn builtin_array_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(EvalError::Error(
-            "ArrayQ expects exactly 1 argument".to_string(),
-        ));
-    }
-    Ok(Value::Bool(is_array_value(&args[0])))
-}
-
-fn is_array_value(val: &Value) -> bool {
-    match val {
-        Value::List(items) => {
-            if items.is_empty() {
-                return true;
-            }
-            let first_type = items[0].type_name();
-            items.iter().all(|v| v.type_name() == first_type)
-                && (matches!(items[0], Value::List(_))
-                    || items
-                        .iter()
-                        .all(|v| !matches!(v, Value::List(_) | Value::Call { .. })))
-        }
-        _ => false,
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Formula Simplification (beyond basic Simplify)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -775,12 +648,61 @@ fn is_array_value(val: &Value) -> bool {
 /// form it can find. It always seeds the search with `Simplify` so the result
 /// is never weaker than plain simplification.
 pub fn builtin_full_simplify(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "FullSimplify expects exactly 1 argument".to_string(),
+            "FullSimplify expects 1 or 2 arguments".to_string(),
         ));
     }
-    Ok(full_simplify_value(&args[0]))
+    let simplified = full_simplify_value(&args[0]);
+    if args.len() == 2 {
+        let assum = crate::builtins::symbolic::effective_assumptions(Some(&args[1]), &Env::new());
+        if crate::builtins::symbolic::assumptions_present(&assum) {
+            return Ok(refine_full_simplify(&simplified, &assum));
+        }
+    }
+    Ok(simplified)
+}
+
+/// Environment-aware `FullSimplify`: also honours `$Assumptions` (from
+/// `Assuming` or a global setting).
+pub fn builtin_full_simplify_env(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "FullSimplify expects 1 or 2 arguments".to_string(),
+        ));
+    }
+    let simplified = full_simplify_value(&args[0]);
+    let assum = crate::builtins::symbolic::effective_assumptions(args.get(1), env);
+    if !crate::builtins::symbolic::assumptions_present(&assum) {
+        return Ok(simplified);
+    }
+    Ok(refine_full_simplify(&simplified, &assum))
+}
+
+/// Refine under assumptions, then re-run `FullSimplify` so the refinement can
+/// expose further reductions (and vice-versa), keeping the shorter form.
+///
+/// The initial assumption-driven refinement is always kept: `Refine` is the
+/// component that knows about assumptions, and its output can have a larger
+/// leaf count yet still be the intended form (e.g. `Abs[x] -> -x` for `x < 0`).
+fn refine_full_simplify(val: &Value, assum: &Value) -> Value {
+    let refined = crate::builtins::domains::refine_expr(val, assum).unwrap_or_else(|_| val.clone());
+    let mut best = full_simplify_value(&refined);
+    for _ in 0..3 {
+        let refined =
+            crate::builtins::domains::refine_expr(&best, assum).unwrap_or_else(|_| best.clone());
+        let cleaned = full_simplify_value(&refined);
+        let cleaned = crate::builtins::domains::refine_expr(&cleaned, assum).unwrap_or(cleaned);
+        if cleaned == best {
+            break;
+        }
+        if value_complexity(&cleaned) < value_complexity(&best) {
+            best = cleaned;
+        } else {
+            break;
+        }
+    }
+    best
 }
 
 /// Recursively full-simplify `val`, descending into subexpressions first.
@@ -1920,18 +1842,6 @@ fn is_one(val: &Value) -> bool {
     matches!(val, Value::Integer(n) if *n == 1)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper for VectorQ
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn builtin_apply(args: &[Value], _env: &Env) -> Result<Value, EvalError> {
-    // Minimal apply for VectorQ test invocation
-    if args.len() != 2 {
-        return Err(EvalError::Error("Apply requires 2 arguments".to_string()));
-    }
-    Ok(args[1].clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2045,16 +1955,16 @@ mod tests {
 
     #[test]
     fn test_matrix_q_returns_false_not_error() {
+        // The canonical implementation now lives in `predicates`.
+        let env = Env::new();
+        let mq = |v: Value| crate::builtins::predicates::builtin_matrix_q(&[v], &env).unwrap();
         // Regression: a non-matrix previously produced an EvalError.
-        assert_eq!(builtin_matrix_q(&[int(5)]).unwrap(), Value::Bool(false));
-        assert_eq!(
-            builtin_matrix_q(&[list(vec![])]).unwrap(),
-            Value::Bool(true)
-        );
+        assert_eq!(mq(int(5)), Value::Bool(false));
+        assert_eq!(mq(list(vec![])), Value::Bool(true));
         let ragged = list(vec![list(vec![int(1)]), list(vec![int(1), int(2)])]);
-        assert_eq!(builtin_matrix_q(&[ragged]).unwrap(), Value::Bool(false));
+        assert_eq!(mq(ragged), Value::Bool(false));
         let matrix = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
-        assert_eq!(builtin_matrix_q(&[matrix]).unwrap(), Value::Bool(true));
+        assert_eq!(mq(matrix), Value::Bool(true));
     }
 
     #[test]
@@ -2127,6 +2037,35 @@ mod tests {
         assert_eq!(
             eval_str("FullSimplify[2 Sin[u]^2 + 2 Cos[u]^2 + 3]"),
             int(5)
+        );
+    }
+
+    #[test]
+    fn test_full_simplify_with_assumptions() {
+        // With the sign assumption the square root collapses…
+        assert_eq!(
+            eval_str("FullSimplify[Sqrt[x^2], Assumptions -> x > 0]"),
+            eval_str("x")
+        );
+        assert_eq!(eval_str("FullSimplify[Sqrt[x^2], x < 0]"), eval_str("-x"));
+        // …and `Assuming` feeds `$Assumptions` through.
+        assert_eq!(
+            eval_str("Assuming[x > 0, FullSimplify[Sqrt[x^2]]]"),
+            eval_str("x")
+        );
+        // Without an assumption it must NOT over-simplify.
+        assert_eq!(eval_str("FullSimplify[Sqrt[x^2]]"), eval_str("Sqrt[x^2]"));
+    }
+
+    #[test]
+    fn test_full_simplify_double_angle() {
+        assert_eq!(
+            eval_str("FullSimplify[Cos[x]^2 - Sin[x]^2]"),
+            eval_str("Cos[2 x]")
+        );
+        assert_eq!(
+            eval_str("FullSimplify[2 Sin[x] Cos[x]]"),
+            eval_str("Sin[2 x]")
         );
     }
 

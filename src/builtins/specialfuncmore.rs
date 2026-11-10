@@ -26,7 +26,13 @@ fn f64_list(v: &Value) -> Option<Vec<f64>> {
     }
 }
 
+/// Convert a slice of values to `f64`; `None` if any is non-numeric.
+fn vals_to_f64(vs: &[Value]) -> Option<Vec<f64>> {
+    vs.iter().map(super::to_f64).collect()
+}
+
 /// Extract the two sub-lists of a `MeijerG` parameter group.
+#[allow(dead_code)]
 fn two_lists(v: &Value) -> Option<(Vec<f64>, Vec<f64>)> {
     match v {
         Value::List(outer) if outer.len() == 2 => {
@@ -36,6 +42,63 @@ fn two_lists(v: &Value) -> Option<(Vec<f64>, Vec<f64>)> {
         }
         _ => None,
     }
+}
+
+/// Extract the two sub-lists of a `MeijerG` parameter group as raw values, so
+/// that symbolic parameters are preserved for the exact-specialisation table.
+fn two_value_lists(v: &Value) -> Option<(Vec<Value>, Vec<Value>)> {
+    match v {
+        Value::List(outer) if outer.len() == 2 => match (&outer[0], &outer[1]) {
+            (Value::List(up), Value::List(low)) => Some((up.clone(), low.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Build an exact rational value `n/d`.
+fn rational(n: i64, d: i64) -> Value {
+    Value::Rational(Box::new(rug::Rational::from((n, d))))
+}
+
+/// `true` when `v` is the integer `n` (exact or numeric).
+fn is_int(v: &Value, n: i64) -> bool {
+    match v {
+        Value::Integer(k) => *k == n,
+        Value::Real(r) => r.to_f64() == n as f64,
+        _ => false,
+    }
+}
+
+/// `true` when `v` is the rational `n/d` (exact or numeric).
+fn is_rat(v: &Value, n: i64, d: i64) -> bool {
+    match v {
+        Value::Rational(r) => *r.numer() == n && *r.denom() == d,
+        Value::Integer(k) => d != 0 && n % d == 0 && *k == n / d,
+        Value::Real(r) => (r.to_f64() - n as f64 / d as f64).abs() < 1e-12,
+        _ => false,
+    }
+}
+
+/// Structural or numeric equality of two values.
+fn num_eq(x: &Value, y: &Value) -> bool {
+    if x == y {
+        return true;
+    }
+    match (super::to_f64(x), super::to_f64(y)) {
+        (Some(a), Some(b)) => (a - b).abs() < 1e-12,
+        _ => false,
+    }
+}
+
+/// Shortcut for the symbolic simplifier.
+fn sc(head: &str, args: &[Value]) -> Value {
+    crate::builtins::symbolic::simplify_call(head, args)
+}
+
+/// `true` when every value converts to `f64`.
+fn all_numeric(vals: &[&Value]) -> bool {
+    vals.iter().all(|v| super::to_f64(v).is_some())
 }
 
 // ── Scalar special-function kernels ─────────────────────────────────────────
@@ -504,9 +567,160 @@ fn exp_integral_e1(z: f64) -> f64 {
 
 // ── Hypergeometric functions ────────────────────────────────────────────────
 
+/// Exact symbolic specialisations for `_0F_1(b; z)` when at least one argument
+/// is non-numeric. Returns `None` when the numeric path should be used or the
+/// pattern is unrecognised.
+fn hyper_0f1_symbolic(b: &Value, z: &Value) -> Option<Value> {
+    if all_numeric(&[b, z]) {
+        return None;
+    }
+    let bf = super::to_f64(b)?;
+    if bf < 1.0 || (bf - bf.round()).abs() > 1e-12 {
+        return None;
+    }
+    let bi = bf.round() as i64;
+    // Negative argument: 0F1(;b;-w) = Gamma[b] w^{(1-b)/2} BesselJ[b-1, 2 Sqrt[w]].
+    // This picks the Bessel-J form, numerically equal to the I form below.
+    let neg_arg = match z {
+        Value::Call { head, args }
+            if head == "Times" && args.len() == 2 && is_int(&args[0], -1) =>
+        {
+            Some(args[1].clone())
+        }
+        _ => None,
+    };
+    let (arg, head) = match &neg_arg {
+        Some(w) => (w.clone(), "BesselJ"),
+        None => (z.clone(), "BesselI"),
+    };
+    let e = if (1 - bi) % 2 == 0 {
+        int_value((1 - bi) / 2)
+    } else {
+        rational(1 - bi, 2)
+    };
+    let zp = sc("Power", &[arg.clone(), e]);
+    let bessel = Value::Call {
+        head: head.to_string(),
+        args: vec![
+            Value::Integer(rug::Integer::from(bi - 1)),
+            sc(
+                "Times",
+                &[Value::Integer(rug::Integer::from(2)), sqrt_value(&arg)],
+            ),
+        ],
+    };
+    Some(sc("Times", &[sc("Gamma", &[b.clone()]), zp, bessel]))
+}
+
+/// `Sqrt[z]` as a symbolic node.
+fn sqrt_value(z: &Value) -> Value {
+    sc("Sqrt", &[z.clone()])
+}
+
+/// Exact symbolic specialisations for `_1F_1(a; b; z)`.
+fn hyper_1f1_symbolic(a: &Value, b: &Value, z: &Value) -> Option<Value> {
+    if all_numeric(&[a, b, z]) {
+        return None;
+    }
+    // 1F1(a; a; z) = E^z.
+    if num_eq(a, b) {
+        return Some(sc("Exp", &[z.clone()]));
+    }
+    // 1F1(1; 2; z) = (E^z - 1)/z.
+    if is_int(a, 1) && is_int(b, 2) {
+        let num = sc(
+            "Plus",
+            &[
+                sc("Exp", &[z.clone()]),
+                Value::Integer(rug::Integer::from(-1)),
+            ],
+        );
+        return Some(sc("Divide", &[num, z.clone()]));
+    }
+    None
+}
+
+/// Exact symbolic specialisations for `_2F_1(a; b; c; z)`.
+fn hyper_2f1_symbolic(a: &Value, b: &Value, c: &Value, z: &Value) -> Option<Value> {
+    if all_numeric(&[a, b, c, z]) {
+        return None;
+    }
+    // 2F1(1, 1; 2; z) = -Log[1-z]/z.
+    if is_int(a, 1) && is_int(b, 1) && is_int(c, 2) {
+        let log = sc(
+            "Log",
+            &[sc(
+                "Plus",
+                &[
+                    Value::Integer(rug::Integer::from(1)),
+                    sc(
+                        "Times",
+                        &[Value::Integer(rug::Integer::from(-1)), z.clone()],
+                    ),
+                ],
+            )],
+        );
+        return Some(sc(
+            "Times",
+            &[
+                Value::Integer(rug::Integer::from(-1)),
+                log,
+                sc(
+                    "Power",
+                    &[z.clone(), Value::Integer(rug::Integer::from(-1))],
+                ),
+            ],
+        ));
+    }
+    // 2F1(1/2, 1; 3/2; z) = ArcTanh[Sqrt[z]]/Sqrt[z].
+    if is_rat(a, 1, 2) && is_int(b, 1) && is_rat(c, 3, 2) {
+        let sq = sqrt_value(z);
+        return Some(sc(
+            "Times",
+            &[
+                sc("ArcTanh", &[sq.clone()]),
+                sc("Power", &[sq, Value::Integer(rug::Integer::from(-1))]),
+            ],
+        ));
+    }
+    // 2F1(1/2, 1/2; 3/2; z) = ArcSin[Sqrt[z]]/Sqrt[z].
+    if is_rat(a, 1, 2) && is_rat(b, 1, 2) && is_rat(c, 3, 2) {
+        let sq = sqrt_value(z);
+        return Some(sc(
+            "Times",
+            &[
+                sc("ArcSin", &[sq.clone()]),
+                sc("Power", &[sq, Value::Integer(rug::Integer::from(-1))]),
+            ],
+        ));
+    }
+    // 2F1(a, b; b; z) = (1-z)^{-a}.
+    if num_eq(b, c) {
+        let base = sc(
+            "Plus",
+            &[
+                Value::Integer(rug::Integer::from(1)),
+                sc(
+                    "Times",
+                    &[Value::Integer(rug::Integer::from(-1)), z.clone()],
+                ),
+            ],
+        );
+        let neg_a = sc(
+            "Times",
+            &[Value::Integer(rug::Integer::from(-1)), a.clone()],
+        );
+        return Some(sc("Power", &[base, neg_a]));
+    }
+    None
+}
+
 /// Hypergeometric0F1[b, z] — `_0F_1(b; z) = Σ z^k / ((b)_k k!)`.
 pub fn builtin_hypergeometric_0f1(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Hypergeometric0F1", args, 2)?;
+    if let Some(v) = hyper_0f1_symbolic(&args[0], &args[1]) {
+        return Ok(v);
+    }
     let (Some(b), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
         return Ok(unevaluated("Hypergeometric0F1", args));
     };
@@ -524,6 +738,9 @@ pub fn builtin_hypergeometric_0f1(args: &[Value]) -> Result<Value, EvalError> {
 /// Hypergeometric1F1[a, b, z] — Kummer's confluent hypergeometric function.
 pub fn builtin_hypergeometric_1f1(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Hypergeometric1F1", args, 3)?;
+    if let Some(v) = hyper_1f1_symbolic(&args[0], &args[1], &args[2]) {
+        return Ok(v);
+    }
     let (Some(a), Some(b), Some(z)) = (
         super::to_f64(&args[0]),
         super::to_f64(&args[1]),
@@ -548,6 +765,9 @@ pub fn builtin_hypergeometric_1f1(args: &[Value]) -> Result<Value, EvalError> {
 /// Hypergeometric2F1[a, b, c, z] — Gauss hypergeometric function.
 pub fn builtin_hypergeometric_2f1(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Hypergeometric2F1", args, 4)?;
+    if let Some(v) = hyper_2f1_symbolic(&args[0], &args[1], &args[2], &args[3]) {
+        return Ok(v);
+    }
     let (Some(a), Some(b), Some(c), Some(z)) = (
         super::to_f64(&args[0]),
         super::to_f64(&args[1]),
@@ -570,6 +790,21 @@ pub fn builtin_hypergeometric_2f1(args: &[Value]) -> Result<Value, EvalError> {
 /// HypergeometricPFQ[{a1, ...}, {b1, ...}, z] — generalized hypergeometric.
 pub fn builtin_hypergeometric_pfq(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("HypergeometricPFQ", args, 3)?;
+    // Delegate the symbolic `_1F_1`-shaped cases for consistency.
+    if let (Value::List(av), Value::List(bv)) = (&args[0], &args[1])
+        && av.len() == 1
+        && bv.len() == 1
+        && let Some(v) = hyper_1f1_symbolic(&av[0], &bv[0], &args[2])
+    {
+        return Ok(v);
+    }
+    if let (Value::List(av), Value::List(bv)) = (&args[0], &args[1])
+        && av.is_empty()
+        && bv.is_empty()
+        && !all_numeric(&[&args[2]])
+    {
+        return Ok(sc("Exp", &[args[2].clone()]));
+    }
     let (Some(a), Some(b), Some(z)) = (
         f64_list(&args[0]),
         f64_list(&args[1]),
@@ -748,20 +983,433 @@ fn a_series_16_17_1(
     if total.is_finite() { Some(total) } else { None }
 }
 
+/// Exact integer value helper.
+fn int_value(n: i64) -> Value {
+    Value::Integer(rug::Integer::from(n))
+}
+
+/// `Power[base, exp]` with simplifier.
+fn pow_value(base: Value, exp: Value) -> Value {
+    sc("Power", &[base, exp])
+}
+
+/// `-v`.
+fn neg_value(v: &Value) -> Value {
+    sc("Times", &[int_value(-1), v.clone()])
+}
+
+/// `Plus[..]` with simplifier.
+fn plus_value(terms: &[Value]) -> Value {
+    sc("Plus", terms)
+}
+
+/// `Times[..]` with simplifier.
+fn times_value(factors: &[Value]) -> Value {
+    sc("Times", factors)
+}
+
+/// `1 + z`.
+fn one_plus_z(z: &Value) -> Value {
+    plus_value(&[int_value(1), z.clone()])
+}
+
+/// `I_ν(x)` for real `ν`, `x ≥ 0`, by the ascending series.
+fn bessel_i_real(nu: f64, x: f64) -> f64 {
+    if x == 0.0 {
+        return if nu == 0.0 {
+            1.0
+        } else if nu > 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        };
+    }
+    let h = x / 2.0;
+    h.powf(nu) / gamma_fn(nu + 1.0) * hyper_pfq(&[], &[nu + 1.0], h * h)
+}
+
+/// `K_1(x)` for `x > 0` via the DLMF 10.31.1 series.
+fn bessel_k1_real(x: f64) -> f64 {
+    let h = x / 2.0;
+    // I_1(x) = (x/2) Σ (x²/4)^k / (k! (k+1)!).
+    let mut it = h;
+    let mut i1 = h;
+    let mut k = 1u32;
+    loop {
+        it *= (h * h) / (k as f64 * (k as f64 + 1.0));
+        i1 += it;
+        k += 1;
+        if it.abs() < 1e-21 * i1.abs().max(1.0) || k > 800 {
+            break;
+        }
+    }
+    // Σ (x²/4)^k [ψ(k+1)+ψ(k+2)] / (k! (k+1)!).
+    let mut term = 1.0_f64;
+    let mut s = 0.0_f64;
+    let mut m = 0u32;
+    loop {
+        let bracket = digamma_fn(m as f64 + 1.0) + digamma_fn(m as f64 + 2.0);
+        s += term * bracket;
+        m += 1;
+        term *= (h * h) / (m as f64 * (m as f64 + 1.0));
+        if (term * bracket).abs() < 1e-21 * s.abs().max(1e-300) || m > 800 {
+            break;
+        }
+    }
+    1.0 / x + h.ln() * i1 - (x / 4.0) * s
+}
+
+/// `K_ν(x)` for real `ν` and `x > 0`.
+fn bessel_k_real(nu: f64, x: f64) -> f64 {
+    let ni = nu.round();
+    if (nu - ni).abs() < 1e-12 {
+        let n = ni.abs() as u32;
+        if n == 0 {
+            return bessel_k0_c(Cx::new(x, 0.0)).re;
+        }
+        if n == 1 {
+            return bessel_k1_real(x);
+        }
+        let mut km1 = bessel_k0_c(Cx::new(x, 0.0)).re;
+        let mut kk = bessel_k1_real(x);
+        for j in 1..n {
+            let kp = km1 + (2.0 * j as f64 / x) * kk;
+            km1 = kk;
+            kk = kp;
+        }
+        return kk;
+    }
+    (std::f64::consts::PI / 2.0) / (std::f64::consts::PI * nu).sin()
+        * (bessel_i_real(-nu, x) - bessel_i_real(nu, x))
+}
+
+/// Upper incomplete gamma `Γ(a, z) = ∫_z^∞ t^{a-1} e^{-t} dt` for `a ≥ 0`,
+/// `z > 0`.
+fn incomplete_gamma_fn(a: f64, z: f64) -> f64 {
+    if a == 0.0 {
+        return exp_integral_e1(z);
+    }
+    gamma_fn(a) - z.powf(a) / a * confluent_1f1(a, a + 1.0, -z)
+}
+
+/// Recognised small closed forms of the Meijer G-function. Handles the
+/// degenerate parameter configurations (coincident parameters) that the raw
+/// DLMF series mishandles.
+fn meijer_g_closed(
+    a_up: &[f64],
+    a_low: &[f64],
+    b_up: &[f64],
+    b_low: &[f64],
+    z: f64,
+) -> Option<f64> {
+    // G^{2,0}_{1,2}(z | 1; 0, a) = Γ(a, z) — incomplete gamma.
+    if a_up.is_empty()
+        && a_low.len() == 1
+        && a_low[0] == 1.0
+        && b_low.is_empty()
+        && b_up.len() == 2
+        && b_up[0] == 0.0
+        && z > 0.0
+    {
+        let v = incomplete_gamma_fn(b_up[1], z);
+        if v.is_finite() {
+            return Some(v);
+        }
+    }
+    // G^{1,1}_{1,1}(z | a; b) = Γ(1-a+b) z^b (1+z)^{a-1-b}.
+    if a_up.len() == 1 && a_low.is_empty() && b_up.len() == 1 && b_low.is_empty() {
+        let (a, b) = (a_up[0], b_up[0]);
+        let s = 1.0 - a + b;
+        let v = gamma_fn(s) * z.powf(b) * (1.0 + z).powf(a - 1.0 - b);
+        if v.is_finite() {
+            return Some(v);
+        }
+        // Γ has a pole when `1-a+b` is a non-positive integer; the value
+        // (and its parameter limit) is then infinite.
+        if s <= 0.0 && (s - s.round()).abs() < 1e-12 {
+            return Some(f64::INFINITY);
+        }
+    }
+    // G^{1,2}_{2,2}(z | a1, a2; b, c) in terms of a 2F1.
+    if a_up.len() == 2 && a_low.is_empty() && b_up.len() == 1 && b_low.len() == 1 {
+        let (a1, a2, b, c) = (a_up[0], a_up[1], b_up[0], b_low[0]);
+        let v = gamma_fn(1.0 + b - a1) * gamma_fn(1.0 + b - a2) / gamma_fn(1.0 + b - c)
+            * z.powf(b)
+            * hyper_2f1(1.0 + b - a1, 1.0 + b - a2, 1.0 + b - c, -z);
+        if v.is_finite() {
+            return Some(v);
+        }
+    }
+    // Exponentials / Gaussians: G^{1,0}_{0,1}(z|b) = z^b e^{-z}.
+    if a_up.is_empty() && a_low.is_empty() && b_low.is_empty() && b_up.len() == 1 {
+        let v = z.powf(b_up[0]) * (-z).exp();
+        if v.is_finite() {
+            return Some(v);
+        }
+    }
+    // Bessel K: G^{2,0}_{0,2}(z|b1,b2) = 2 z^{(b1+b2)/2} K_{b1-b2}(2 Sqrt[z]).
+    if a_up.is_empty() && a_low.is_empty() && b_low.is_empty() && b_up.len() == 2 && z > 0.0 {
+        let (b1, b2) = (b_up[0], b_up[1]);
+        let v = 2.0 * z.powf((b1 + b2) / 2.0) * bessel_k_real(b1 - b2, 2.0 * z.sqrt());
+        if v.is_finite() {
+            return Some(v);
+        }
+    }
+    // Bessel J: G^{1,0}_{0,2}(z|b1;b2) = Γ(1+b1-b2) z^{(b1+b2)/2} J_{b1-b2}(2 Sqrt[z]).
+    if a_up.is_empty() && a_low.is_empty() && b_up.len() == 1 && b_low.len() == 1 && z > 0.0 {
+        let (b1, b2) = (b_up[0], b_low[0]);
+        let v = gamma_fn(1.0 + b1 - b2)
+            * z.powf((b1 + b2) / 2.0)
+            * bessel_j_real(b1 - b2, 2.0 * z.sqrt());
+        if v.is_finite() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Mellin–Barnes quadrature fallback (DLMF 16.17.1, case (i)). Used only for
+/// parameter configurations the series cannot resolve (coincident parameters)
+/// and which satisfy the straight-contour convergence condition.
+fn meijer_g_quadrature(
+    a_up: &[f64],
+    a_low: &[f64],
+    b_up: &[f64],
+    b_low: &[f64],
+    z: f64,
+) -> Option<f64> {
+    let n = a_up.len();
+    let m = b_up.len();
+    let p = n + a_low.len();
+    let q = m + b_low.len();
+    if m + n == 0 {
+        return Some(1.0);
+    }
+    if p + q >= 2 * (m + n) {
+        return None;
+    }
+    let delta = (2 * (m + n) - p - q) as f64;
+    let amax = a_up.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let bmin = b_up.iter().cloned().fold(f64::INFINITY, f64::min);
+    let mut g0 = if n == 0 {
+        bmin - 0.5
+    } else if m == 0 {
+        amax - 1.5
+    } else {
+        (amax - 1.0 + bmin) / 2.0
+    };
+    // Avoid landing exactly on a pole (resonant/coincident configuration).
+    let on_pole = |g: f64| {
+        b_up.iter().any(|&b| (b - g).abs() < 1e-9)
+            || a_up.iter().any(|&a| (1.0 - a + g).abs() < 1e-9)
+    };
+    if on_pole(g0) {
+        g0 -= 0.1;
+    }
+    let lnz = z.abs().ln();
+    let zang = if z < 0.0 { std::f64::consts::PI } else { 0.0 };
+    let integrand = |t: f64| -> Cx {
+        let mut val = Cx::new(1.0, 0.0);
+        for &b in b_up {
+            val = val.mul(cloggamma(Cx::new(b - g0, -t)).exp());
+        }
+        for &a in a_up {
+            val = val.mul(cloggamma(Cx::new(1.0 - a + g0, t)).exp());
+        }
+        for &b in b_low {
+            val = val.div(cloggamma(Cx::new(1.0 - b + g0, t)).exp());
+        }
+        for &a in a_low {
+            val = val.div(cloggamma(Cx::new(a - g0, -t)).exp());
+        }
+        let re = lnz * g0 - t * zang;
+        let im = lnz * t + g0 * zang;
+        val.mul(Cx::new(re, im).exp())
+    };
+    let tmax = (40.0 / delta).max(15.0);
+    let h = 0.02_f64;
+    // Simpson's rule needs an even number of intervals.
+    let mut steps = (2.0 * tmax / h).ceil() as usize;
+    if steps % 2 == 1 {
+        steps += 1;
+    }
+    let mut acc = 0.0_f64;
+    for i in 0..=steps {
+        let t = -tmax + h * i as f64;
+        let w = if i == 0 || i == steps {
+            1.0
+        } else if i % 2 == 1 {
+            4.0
+        } else {
+            2.0
+        };
+        acc += w * integrand(t).re;
+    }
+    let g = acc * h / 3.0 / (2.0 * std::f64::consts::PI);
+    if g.is_finite() { Some(g) } else { None }
+}
+
+/// Symbolic counterpart of [`meijer_g_closed`] for the recognised small
+/// patterns, preserving exact parameters and the free variable `z`.
+fn meijer_g_symbolic(
+    a_up: &[Value],
+    a_low: &[Value],
+    b_up: &[Value],
+    b_low: &[Value],
+    z: &Value,
+) -> Option<Value> {
+    if a_up.is_empty() && a_low.is_empty() {
+        // G^{1,0}_{0,1}(z|b) = z^b E^{-z}.
+        if b_low.is_empty() && b_up.len() == 1 {
+            return Some(times_value(&[
+                pow_value(z.clone(), b_up[0].clone()),
+                sc("Exp", &[neg_value(z)]),
+            ]));
+        }
+        // G^{2,0}_{0,2}(z|b1,b2) = 2 z^{(b1+b2)/2} K_{b1-b2}(2 Sqrt[z]).
+        if b_low.is_empty() && b_up.len() == 2 {
+            let ord = plus_value(&[b_up[0].clone(), neg_value(&b_up[1])]);
+            let half = times_value(&[
+                rational(1, 2),
+                plus_value(&[b_up[0].clone(), b_up[1].clone()]),
+            ]);
+            let arg = times_value(&[int_value(2), sqrt_value(z)]);
+            return Some(times_value(&[
+                int_value(2),
+                pow_value(z.clone(), half),
+                Value::Call {
+                    head: "BesselK".to_string(),
+                    args: vec![ord, arg],
+                },
+            ]));
+        }
+        // G^{1,0}_{0,2}(z|b;c) = Γ(1+b-c) z^{(b+c)/2} J_{b-c}(2 Sqrt[z]).
+        if b_up.len() == 1 && b_low.len() == 1 {
+            let ord = plus_value(&[b_up[0].clone(), neg_value(&b_low[0])]);
+            let g = sc("Gamma", &[plus_value(&[int_value(1), ord.clone()])]);
+            let half = times_value(&[
+                rational(1, 2),
+                plus_value(&[b_up[0].clone(), b_low[0].clone()]),
+            ]);
+            let arg = times_value(&[int_value(2), sqrt_value(z)]);
+            return Some(times_value(&[
+                g,
+                pow_value(z.clone(), half),
+                Value::Call {
+                    head: "BesselJ".to_string(),
+                    args: vec![ord, arg],
+                },
+            ]));
+        }
+    }
+    // G^{2,0}_{1,2}(z | 1; 0, a) = Γ(a, z) = Γ(a) (1 - P(a, z)), where the
+    // codebase's `GammaRegularized` is the lower regularized P.
+    if a_up.is_empty()
+        && a_low.len() == 1
+        && is_int(&a_low[0], 1)
+        && b_low.is_empty()
+        && b_up.len() == 2
+        && is_int(&b_up[0], 0)
+    {
+        let a = b_up[1].clone();
+        let reg = Value::Call {
+            head: "GammaRegularized".to_string(),
+            args: vec![a.clone(), z.clone()],
+        };
+        let one_minus = plus_value(&[int_value(1), neg_value(&reg)]);
+        return Some(times_value(&[sc("Gamma", &[a]), one_minus]));
+    }
+    // G^{1,1}_{1,1}(z | a; b) = Γ(1-a+b) z^b (1+z)^{a-1-b}.
+    if a_low.is_empty() && a_up.len() == 1 && b_up.len() == 1 && b_low.is_empty() {
+        let (a, b) = (&a_up[0], &b_up[0]);
+        let g = sc(
+            "Gamma",
+            &[plus_value(&[int_value(1), neg_value(a), b.clone()])],
+        );
+        let exp = plus_value(&[a.clone(), neg_value(b), int_value(-1)]);
+        return Some(times_value(&[
+            g,
+            pow_value(z.clone(), b.clone()),
+            pow_value(one_plus_z(z), exp),
+        ]));
+    }
+    // G^{1,2}_{2,2}(z | a1, a2; b, c).
+    if a_low.is_empty() && a_up.len() == 2 && b_up.len() == 1 && b_low.len() == 1 {
+        let (a1, a2, b, c) = (&a_up[0], &a_up[1], &b_up[0], &b_low[0]);
+        let g = times_value(&[
+            sc(
+                "Gamma",
+                &[plus_value(&[int_value(1), b.clone(), neg_value(a1)])],
+            ),
+            sc(
+                "Gamma",
+                &[plus_value(&[int_value(1), b.clone(), neg_value(a2)])],
+            ),
+            sc(
+                "Power",
+                &[
+                    sc(
+                        "Gamma",
+                        &[plus_value(&[int_value(1), b.clone(), neg_value(c)])],
+                    ),
+                    int_value(-1),
+                ],
+            ),
+        ]);
+        let h = Value::Call {
+            head: "Hypergeometric2F1".to_string(),
+            args: vec![
+                plus_value(&[int_value(1), b.clone(), neg_value(a1)]),
+                plus_value(&[int_value(1), b.clone(), neg_value(a2)]),
+                plus_value(&[int_value(1), b.clone(), neg_value(c)]),
+                neg_value(z),
+            ],
+        };
+        return Some(times_value(&[g, pow_value(z.clone(), b.clone()), h]));
+    }
+    None
+}
+
 /// MeijerG[{{...}, {...}}, {{...}, {...}}, z].
 pub fn builtin_meijer_g(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("MeijerG", args, 3)?;
-    let (Some((a_up, a_low)), Some((b_up, b_low)), Some(z)) = (
-        two_lists(&args[0]),
-        two_lists(&args[1]),
-        super::to_f64(&args[2]),
-    ) else {
+    let (Some(a_up_v), Some(b_up_v)) = (two_value_lists(&args[0]), two_value_lists(&args[1]))
+    else {
         return Ok(unevaluated("MeijerG", args));
     };
-    match meijer_g(&a_up, &a_low, &b_up, &b_low, z) {
-        Some(v) if v.is_finite() => Ok(super::real(v)),
-        _ => Ok(unevaluated("MeijerG", args)),
+    let (a_up_c, a_low_c) = a_up_v;
+    let (b_up_c, b_low_c) = b_up_v;
+    #[allow(clippy::type_complexity)]
+    let numeric: Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64)> = (|| {
+        Some((
+            vals_to_f64(&a_up_c)?,
+            vals_to_f64(&a_low_c)?,
+            vals_to_f64(&b_up_c)?,
+            vals_to_f64(&b_low_c)?,
+            super::to_f64(&args[2])?,
+        ))
+    })();
+    if let Some((a_up, a_low, b_up, b_low, z)) = numeric {
+        // Recognised closed forms are exact and may legitimately be infinite
+        // (parameter pole), so return them even when not finite.
+        if let Some(v) = meijer_g_closed(&a_up, &a_low, &b_up, &b_low, z) {
+            return Ok(super::real(v));
+        }
+        let v = meijer_g(&a_up, &a_low, &b_up, &b_low, z)
+            .or_else(|| meijer_g_quadrature(&a_up, &a_low, &b_up, &b_low, z));
+        if let Some(v) = v
+            && v.is_finite()
+        {
+            return Ok(super::real(v));
+        }
+        // Numeric parameters but no finite value: fall through to the exact
+        // symbolic table only if some parameter is symbolic, otherwise stay
+        // unevaluated so the numeric convention is preserved.
     }
+    if let Some(v) = meijer_g_symbolic(&a_up_c, &a_low_c, &b_up_c, &b_low_c, &args[2]) {
+        return Ok(v);
+    }
+    Ok(unevaluated("MeijerG", args))
 }
 
 // ── Zeta family ─────────────────────────────────────────────────────────────
@@ -3378,6 +4026,190 @@ mod tests {
             0.596347362323194,
             1e-9,
         );
+        // U(1, 1, z) = e^z E₁(z): a small-parameter numeric sanity check.
+        let want = 0.5_f64.exp() * 0.5597735947761608;
+        close(
+            &builtin_hypergeometric_u(&[r(1.0), r(1.0), r(0.5)]).unwrap(),
+            want,
+            1e-7,
+        );
+    }
+
+    /// Evaluate `builtin_meijer_g` on a structured argument, expecting a real.
+    fn meijer_num(a_up: &[f64], a_low: &[f64], b_up: &[f64], b_low: &[f64], z: f64) -> f64 {
+        let grp = |up: &[f64], low: &[f64]| {
+            Value::List(vec![
+                Value::List(up.iter().map(|&x| r(x)).collect()),
+                Value::List(low.iter().map(|&x| r(x)).collect()),
+            ])
+        };
+        let v = builtin_meijer_g(&[grp(a_up, a_low), grp(b_up, b_low), r(z)]).unwrap();
+        match v {
+            Value::Real(x) => x.to_f64(),
+            other => panic!("expected Real, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_meijer_g_closed_forms() {
+        // G^{1,0}_{0,1}(z|0) = e^{-z}.
+        for &z in &[0.3_f64, 1.0, 2.5] {
+            assert!((meijer_num(&[], &[], &[0.0], &[], z) - (-z).exp()).abs() < 1e-11);
+        }
+        // G^{1,0}_{0,1}(z|1/2) = sqrt(z) e^{-z}.
+        assert!((meijer_num(&[], &[], &[0.5], &[], 4.0) - 2.0 * (-4.0_f64).exp()).abs() < 1e-11);
+        // G^{1,1}_{1,1}(z|0;0) = 1/(1+z).
+        assert!((meijer_num(&[0.0], &[], &[0.0], &[], 0.5) - 1.0 / 1.5).abs() < 1e-11);
+        // General rational form G^{1,1}_{1,1}(z|a;b) = Γ(1-a+b) z^b (1+z)^{a-1-b}.
+        let want = gamma_fn(1.5) * 0.3_f64.powf(1.0) * 1.3_f64.powf(-1.5);
+        assert!((meijer_num(&[0.5], &[], &[1.0], &[], 0.3) - want).abs() < 1e-11);
+        // G^{1,2}_{2,2}(z|0,0;0,0) = 1/(1+z).
+        assert!((meijer_num(&[0.0, 0.0], &[], &[0.0], &[0.0], 0.3) - 1.0 / 1.3).abs() < 1e-11);
+        // G^{1,2}_{2,2}(z|1,1;1,0) = Log[1+z].
+        assert!((meijer_num(&[1.0, 1.0], &[], &[1.0], &[0.0], 0.3) - 1.3_f64.ln()).abs() < 1e-11);
+        // Resonant G^{1,1}_{1,1}(z|1;0): the Γ(0) parameter pole is infinite.
+        assert!(meijer_num(&[1.0], &[], &[0.0], &[], 0.3).is_infinite());
+    }
+
+    #[test]
+    fn test_meijer_g_bessel_forms() {
+        // G^{1,0}_{0,2}(z|0;0) = J₀(2 Sqrt[z]).
+        let j = meijer_num(&[], &[], &[0.0], &[0.0], 0.09);
+        assert!((j - 0.9120048634972108).abs() < 1e-11, "got {j}");
+        // G^{2,0}_{0,2}(z|0,0) = 2 K₀(2 Sqrt[z]).
+        let k = meijer_num(&[], &[], &[0.0, 0.0], &[], 0.25);
+        assert!((k - 0.8420488764814167).abs() < 1e-10, "got {k}");
+        // G^{2,0}_{0,2}(z|0,1) = 2 z^{1/2} K₁(2 Sqrt[z]) = K₁(1) at z = 1/4.
+        let k1 = meijer_num(&[], &[], &[0.0, 1.0], &[], 0.25);
+        assert!((k1 - 0.6019072301972346).abs() < 1e-10, "got {k1}");
+        // Gaussian: G^{2,0}_{0,2}(z|0,1/2) = Sqrt[Pi] e^{-2 Sqrt[z]}.
+        let g = meijer_num(&[], &[], &[0.0, 0.5], &[], 0.25);
+        assert!(
+            (g - std::f64::consts::PI.sqrt() * (-1.0_f64).exp()).abs() < 1e-10,
+            "got {g}"
+        );
+        // Negative argument for the Bessel-J form (quadrature path): J₀(2i√0.3) = I₀(2√0.3).
+        let jn = meijer_num(&[], &[], &[0.0], &[0.0], -0.3);
+        assert!((jn - 1.3232642326649002).abs() < 1e-9, "got {jn}");
+    }
+
+    #[test]
+    fn test_meijer_g_incomplete_gamma() {
+        // G^{2,0}_{1,2}(z | 1; 0, a) = Γ(a, z); a = 1/2 gives Sqrt[Pi] Erfc[Sqrt[z]].
+        let v = meijer_num(&[], &[1.0], &[0.0, 0.5], &[], 0.3);
+        assert!((v - 0.7773593112498081).abs() < 1e-10, "got {v}");
+        // Γ(2, z) = (1+z) e^{-z}.
+        let v2 = meijer_num(&[], &[1.0], &[0.0, 2.0], &[], 0.3);
+        assert!((v2 - 1.3 * (-0.3_f64).exp()).abs() < 1e-10, "got {v2}");
+    }
+
+    #[test]
+    fn test_meijer_g_symbolic_forms() {
+        // Exact symbolic outputs for a free variable, checked numerically.
+        assert!((n_at("MeijerG[{{}, {}}, {{0}, {}}, z]", 0.5) - (-0.5_f64).exp()).abs() < 1e-10);
+        assert!(
+            (n_at("MeijerG[{{}, {}}, {{0}, {0}}, z]", 0.09) - 0.9120048634972108).abs() < 1e-10
+        );
+        assert!((n_at("MeijerG[{{0}, {}}, {{0}, {}}, z]", 0.5) - 1.0 / 1.5).abs() < 1e-10);
+        assert!((n_at("MeijerG[{{1, 1}, {}}, {{1}, {0}}, z]", 0.3) - 1.3_f64.ln()).abs() < 1e-10);
+        // Bessel relation with the scaled argument: J₀(2 Sqrt[z²/4]) = J₀(z).
+        assert!(
+            (n_at("MeijerG[{{}, {}}, {{0}, {0}}, z^2/4]", 0.6) - 0.9120048634972108).abs() < 1e-10
+        );
+        // Incomplete gamma: Γ(1/2, z) = Sqrt[Pi] Erfc[Sqrt[z]].
+        assert!(
+            (n_at("MeijerG[{{}, {1}}, {{0, 1/2}, {}}, z]", 0.3) - 0.7773593112498081).abs() < 1e-10
+        );
+    }
+
+    #[test]
+    fn test_hypergeometric_symbolic_values() {
+        // 1F1(1;1;z) = E^z.
+        assert!((n_at("Hypergeometric1F1[1, 1, z]", 1.0) - std::f64::consts::E).abs() < 1e-10);
+        // 1F1(1;2;z) = (E^z - 1)/z.
+        assert!(
+            (n_at("Hypergeometric1F1[1, 2, z]", 1.0) - (std::f64::consts::E - 1.0)).abs() < 1e-10
+        );
+        // 2F1(1,1;2;z) = -Log[1-z]/z, at z = -1 gives Log[2].
+        assert!(
+            (n_at("Hypergeometric2F1[1, 1, 2, z]", -1.0) - std::f64::consts::LN_2).abs() < 1e-10
+        );
+        // 2F1(1/2,1;3/2;z) = ArcTanh[Sqrt[z]]/Sqrt[z].
+        let z = 0.25_f64;
+        let want = 0.5 * ((1.0 + z.sqrt()) / (1.0 - z.sqrt())).ln() / z.sqrt();
+        assert!((n_at("Hypergeometric2F1[1/2, 1, 3/2, z]", z) - want).abs() < 1e-10);
+        // 2F1(1/2,1/2;3/2;z) = ArcSin[Sqrt[z]]/Sqrt[z].
+        let want2 = z.sqrt().asin() / z.sqrt();
+        assert!((n_at("Hypergeometric2F1[1/2, 1/2, 3/2, z]", z) - want2).abs() < 1e-10);
+        // 0F1(1;z) = BesselI[0, 2 Sqrt[z]].
+        assert!((n_at("Hypergeometric0F1[1, z]", 0.09) - 1.0920453643173393).abs() < 1e-10);
+        // 0F1(1;-z) = BesselJ[0, 2 Sqrt[z]].
+        assert!((n_at("Hypergeometric0F1[1, -z]", 0.09) - 0.9120048634972108).abs() < 1e-10);
+        // PFQ[{1},{2},z] routes through the confluent specialisation.
+        assert!(
+            (n_at("HypergeometricPFQ[{1}, {2}, z]", 1.0) - (std::f64::consts::E - 1.0)).abs()
+                < 1e-10
+        );
+        // PFQ and 1F1 agree at a negative argument too.
+        let pfq = n_at("HypergeometricPFQ[{1}, {2}, z]", -5.0);
+        let kum = n_at("Hypergeometric1F1[1, 2, z]", -5.0);
+        assert!((pfq - kum).abs() < 1e-12);
+    }
+
+    /// Evaluate `expr` symbolically, substitute `z -> val`, and evaluate the
+    /// result numerically: exercises the exact symbolic specialisations.
+    fn n_at(expr: &str, val: f64) -> f64 {
+        use crate::builtins;
+        use crate::env::Env;
+        use crate::eval::eval_program;
+        use crate::lexer;
+        use crate::parser;
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let tokens = lexer::tokenize(expr).unwrap();
+        let ast = parser::parse(tokens).unwrap();
+        let symbolic = eval_program(&ast, &env).unwrap();
+        let substituted = subst_z(&symbolic, val);
+        let inner = crate::eval::table::value_to_expr(&substituted);
+        let to_num = |v: Value| -> Option<f64> {
+            match v {
+                Value::Real(x) => Some(x.to_f64()),
+                Value::Integer(n) => Some(n.to_f64()),
+                _ => None,
+            }
+        };
+        if let Some(x) = eval_value(&inner, &env).and_then(to_num) {
+            return x;
+        }
+        // Some heads (e.g. `GammaRegularized`) only numericise under `N`.
+        let n_expr = crate::ast::Expr::Call {
+            head: Box::new(crate::ast::Expr::Symbol("N".to_string())),
+            args: vec![inner],
+        };
+        match eval_value(&n_expr, &env).and_then(to_num) {
+            Some(x) => x,
+            None => panic!("{expr} did not evaluate numerically"),
+        }
+    }
+
+    fn eval_value(expr: &crate::ast::Expr, env: &crate::env::Env) -> Option<Value> {
+        crate::eval::eval(expr, env).ok()
+    }
+
+    /// Replace the symbol `z` by a real value throughout a tree, and lower
+    /// exact rationals to values `value_to_expr` understands.
+    fn subst_z(v: &Value, val: f64) -> Value {
+        match v {
+            Value::Symbol(s) if s == "z" => r(val),
+            Value::Rational(q) if *q.denom() == 1 => Value::Integer(q.numer().clone()),
+            Value::Rational(q) => r(q.to_f64()),
+            Value::Call { head, args } => Value::Call {
+                head: head.clone(),
+                args: args.iter().map(|a| subst_z(a, val)).collect(),
+            },
+            Value::List(xs) => Value::List(xs.iter().map(|x| subst_z(x, val)).collect()),
+            other => other.clone(),
+        }
     }
 
     #[test]

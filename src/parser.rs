@@ -1027,10 +1027,10 @@ impl Parser {
     }
 
     fn parse_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_pow_expr()?;
+        let mut left = self.parse_unary_expr()?;
         while self.at_after_newlines(&Token::StarStar) {
             self.advance();
-            let right = self.parse_pow_expr()?;
+            let right = self.parse_unary_expr()?;
             left = Expr::Call {
                 head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
                 args: vec![left, right],
@@ -1170,11 +1170,14 @@ impl Parser {
         Ok(left)
     }
 
+    /// Power binds tighter than unary minus (`-x^2` ≡ `-(x^2)`); the exponent
+    /// is parsed at the unary level so `2^-3` and right-associative `a^b^c`
+    /// both work.
     fn parse_pow_expr(&mut self) -> Result<Expr, ParseError> {
-        let base = self.parse_unary_expr()?;
+        let base = self.parse_postfix_expr()?;
         if self.at_after_newlines(&Token::Caret) {
             self.advance();
-            let exp = self.parse_pow_expr()?; // right-associative
+            let exp = self.parse_unary_expr()?;
             Ok(Expr::Call {
                 head: Box::new(Expr::Symbol("Power".to_string())),
                 args: vec![base, exp],
@@ -1325,7 +1328,7 @@ impl Parser {
                     args: vec![expr],
                 })
             }
-            _ => self.parse_postfix_expr(),
+            _ => self.parse_pow_expr(),
         }
     }
 
@@ -1337,6 +1340,22 @@ impl Parser {
                 // Member access: .ident
                 Token::Dot => {
                     self.advance();
+                    // `p..` → Repeated[p]; `p...` → RepeatedNull[p]. These bind
+                    // at postfix level, so `a.b..` repeats the member access.
+                    if self.at(&Token::Dot) {
+                        self.advance();
+                        let head = if self.at(&Token::Dot) {
+                            self.advance();
+                            "RepeatedNull"
+                        } else {
+                            "Repeated"
+                        };
+                        expr = Expr::Call {
+                            head: Box::new(Expr::Symbol(head.to_string())),
+                            args: vec![expr],
+                        };
+                        continue;
+                    }
                     let member = self.expect_ident()?;
 
                     // Check if followed by [ for method call
@@ -2148,10 +2167,10 @@ impl Parser {
     }
 
     fn parse_pattern_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_pattern_pow()?;
+        let mut left = self.parse_pattern_unary()?;
         while self.at_after_newlines(&Token::StarStar) {
             self.advance();
-            let right = self.parse_pattern_pow()?;
+            let right = self.parse_pattern_unary()?;
             left = Expr::Call {
                 head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
                 args: vec![left, right],
@@ -2281,11 +2300,13 @@ impl Parser {
         Ok(left)
     }
 
+    /// Pattern-level counterpart of [`Self::parse_pow_expr`]: unary minus is
+    /// looser than power, so `-x^2` ≡ `-(x^2)`.
     fn parse_pattern_pow(&mut self) -> Result<Expr, ParseError> {
-        let base = self.parse_pattern_unary()?;
+        let base = self.parse_pattern_postfix()?;
         if self.at_after_newlines(&Token::Caret) {
             self.advance();
-            let exp = self.parse_pattern_pow()?; // right-associative
+            let exp = self.parse_pattern_unary()?;
             Ok(Expr::Call {
                 head: Box::new(Expr::Symbol("Power".to_string())),
                 args: vec![base, exp],
@@ -2326,7 +2347,7 @@ impl Parser {
                     args: vec![expr],
                 })
             }
-            _ => self.parse_pattern_postfix(),
+            _ => self.parse_pattern_pow(),
         }
     }
 
@@ -2337,6 +2358,21 @@ impl Parser {
             match self.peek().clone() {
                 Token::Dot => {
                     self.advance();
+                    // `p..` → Repeated[p]; `p...` → RepeatedNull[p].
+                    if self.at(&Token::Dot) {
+                        self.advance();
+                        let head = if self.at(&Token::Dot) {
+                            self.advance();
+                            "RepeatedNull"
+                        } else {
+                            "Repeated"
+                        };
+                        expr = Expr::Call {
+                            head: Box::new(Expr::Symbol(head.to_string())),
+                            args: vec![expr],
+                        };
+                        continue;
+                    }
                     let member = self.expect_ident()?;
                     if self.at(&Token::LBracket) {
                         self.advance();
@@ -2434,7 +2470,10 @@ impl Parser {
                 }
                 Token::Colon => {
                     self.advance();
-                    let default = Box::new(self.parse_expression()?);
+                    // Parse the RHS below the rule/alternatives levels so
+                    // `x : p :> rhs` becomes `Rule[Pattern[x, p], rhs]` rather
+                    // than `Pattern[x, Rule[p, rhs]]`.
+                    let default = Box::new(self.parse_pattern_comp()?);
                     expr = match expr {
                         // x_:5 → make it optional with default
                         Expr::NamedBlank {
@@ -2467,13 +2506,13 @@ impl Parser {
                             type_constraint,
                             default_value: Some(default),
                         },
-                        _ => {
-                            return Err(ParseError {
-                                message: "Default values can only be applied to blank patterns (x_, _, x_., _.)".to_string(),
-                                token: Some(self.peek().clone()),
-                                span: self.peek_span(),
-                            });
-                        }
+                        // `name : pattern` → Pattern[name, pattern]. This is
+                        // how a bare symbol is named inside a pattern, e.g.
+                        // `StringCases[s, x : DigitCharacter .. :> x]`.
+                        other => Expr::Call {
+                            head: Box::new(Expr::Symbol("Pattern".to_string())),
+                            args: vec![other, *default],
+                        },
                     };
                 }
 

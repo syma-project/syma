@@ -7,13 +7,19 @@ D[c_, x_] := 0 /; FreeQ[c, x]
 D[var_, x_] := 1 /; (var == x) && MatchQ[var, _Symbol]
 
 (* Linearity: D(f + g, x) = D(f, x) + D(g, x) *)
-D[Plus[f_, g_], x_] := Plus[D[f, x], D[g, x]]
-
-(* Product rule: D(f*g, x) = D(f,x)*g + f*D(g,x) *)
-D[Times[f_, g_], x_] := Plus[Times[D[f, x], g], Times[f, D[g, x]]]
+D[Plus[f_, g_], x_] := Plus[D[f, x], D[g, x]] /; UnsameQ[f, 0]
 
 (* Power rule with constant exponent: d(u^n)/dx = n*u^(n-1)*u' *)
-D[Power[u_, n_], x_] := Times[n, Power[u, Plus[n, -1]], D[u, x]]
+(* (before the product rule: a bare power such as x^3 can also match the
+   OneIdentity-expanded `Times[f_, g_]` pattern with f = 1.) The guard skips
+   the synthesized `u^1` fallback (n == 1), which would recurse on bare values. *)
+D[Power[u_, n_], x_] := Times[n, Power[u, Plus[n, -1]], D[u, x]] /; !(n == 1)
+
+(* Product rule: D(f*g, x) = D(f,x)*g + f*D(g,x) *)
+D[Times[f_, g_], x_] := Plus[Times[D[f, x], g], Times[f, D[g, x]]] /; UnsameQ[f, 1] && UnsameQ[g, 1]
+(* Product with an explicit unit factor (e.g. from a normalized Divide). *)
+D[Times[1, p_], x_] := D[p, x]
+D[Times[p_, 1], x_] := D[p, x]
 
 (* Chain rule for unknown heads: D(f(u), x) = D(f(u), u) * D(u, x)
    Guards: avoid infinite recursion when u == x or func_[u] is the same as the original expression *)
@@ -35,3 +41,17 @@ D[Log10[u_], x_] := Times[Power[u, -1], Power[10, Log[10]]^(-1), D[u, x]]
 
 (* Square root *)
 D[Sqrt[u_], x_] := Times[Power[Times[2, Sqrt[u]], -1], D[u, x]]
+
+(* Higher-order and multi-variable forms. These run through the eval loop, so
+   builtin_d (which is shadowed once this file defines D) never sees them. *)
+D[f_, x_, 0] := f
+D[f_, x_, n_Integer] := D[D[f, x], x, n - 1] /; n >= 1
+D[f_, x_, y_] := D[D[f, x], y]
+
+(* Quotient rule and n-ary linearity / product rules. *)
+D[Divide[u_, v_], x_] := Divide[
+    Plus[Times[D[u, x], v], Times[-1, u, D[v, x]]],
+    Power[v, 2]
+]
+D[Plus[f_, g_, r__], x_] := Plus[D[Plus[f, g], x], D[Plus[r], x]]
+D[Times[f_, g_, r__], x_] := Plus[Times[D[Times[f, g], x], r], Times[Times[f, g], D[Times[r], x]]]
