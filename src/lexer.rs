@@ -382,6 +382,14 @@ impl Lexer {
                     Some('n') => s.push('\n'),
                     Some('t') => s.push('\t'),
                     Some('r') => s.push('\r'),
+                    // Backslash at end of line is a line continuation: the
+                    // newline is elided and the string continues.
+                    Some('\n') => {}
+                    Some('\r') => {
+                        if self.peek() == Some('\n') {
+                            self.advance();
+                        }
+                    }
                     Some('\\') => s.push('\\'),
                     Some('"') => s.push('"'),
                     Some(c) => {
@@ -410,6 +418,40 @@ impl Lexer {
         }
     }
 
+    /// Consume an exponent suffix (`e`/`E`, optional sign, at least one digit)
+    /// into `num`. Returns `true` if an exponent was consumed.
+    ///
+    /// A bare trailing `e` is left for the identifier lexer (so `1.2e` lexes as
+    /// `1.2` followed by the symbol `e`, rather than an unparseable `1.2e`).
+    fn read_exponent(&mut self, num: &mut String) -> bool {
+        let marker = match self.peek() {
+            Some(c @ ('e' | 'E')) => c,
+            _ => return false,
+        };
+        let mut off = 1;
+        if matches!(self.peek_ahead(off), Some('+' | '-')) {
+            off += 1;
+        }
+        if !self.peek_ahead(off).is_some_and(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        num.push(marker);
+        self.advance(); // consume e/E
+        if let Some(sign @ ('+' | '-')) = self.peek() {
+            num.push(sign);
+            self.advance();
+        }
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() {
+                num.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        true
+    }
+
     fn read_number(&mut self, first: char) -> Token {
         let mut num_str = String::new();
         num_str.push(first);
@@ -425,7 +467,7 @@ impl Lexer {
         }
 
         // Check for real (decimal point)
-        if self.peek() == Some('.') {
+        let is_real = if self.peek() == Some('.') {
             num_str.push('.');
             self.advance(); // consume '.'
             while let Some(ch) = self.peek() {
@@ -436,45 +478,27 @@ impl Lexer {
                     break;
                 }
             }
+            true
+        } else {
+            false
+        };
 
-            // Check for scientific notation
-            if self.peek() == Some('e') || self.peek() == Some('E') {
-                num_str.push(self.advance().unwrap());
-                if self.peek() == Some('+') || self.peek() == Some('-') {
-                    num_str.push(self.advance().unwrap());
-                }
-                while let Some(ch) = self.peek() {
-                    if ch.is_ascii_digit() {
-                        num_str.push(ch);
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
+        // Scientific notation, e.g. `1.5e-3` or `2e10`.
+        let has_exponent = self.read_exponent(&mut num_str);
+
+        // Check for complex (I suffix), but only when it is not the start of a
+        // longer identifier (to avoid matching e.g. `3In`).
+        if self.peek() == Some('I') {
+            let next = self.peek_ahead(1);
+            if next.is_none_or(|c| !c.is_alphanumeric() && c != '_') {
+                self.advance();
+                return Token::Complex(num_str);
             }
+        }
 
-            // Check for complex (I suffix)
-            if self.peek() == Some('I') {
-                // Check that I is not followed by identifier chars (to avoid matching e.g. 3In)
-                let next = self.peek_ahead(1);
-                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
-                    self.advance();
-                    return Token::Complex(num_str);
-                }
-            }
-
+        if is_real || has_exponent {
             Token::Real(num_str)
         } else {
-            // Check for complex (I suffix on integer)
-            if self.peek() == Some('I') {
-                // Check that I is not followed by identifier chars
-                let next = self.peek_ahead(1);
-                if next.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
-                    self.advance();
-                    return Token::Complex(num_str);
-                }
-            }
-
             Token::Integer(num_str)
         }
     }
@@ -990,6 +1014,8 @@ impl Lexer {
                     } else {
                         // Check for @transform
                         let save_pos = self.pos;
+                        let save_line = self.line;
+                        let save_col = self.col;
                         self.skip_whitespace();
                         let mut ident = String::new();
                         while let Some(c) = self.peek() {
@@ -1005,6 +1031,8 @@ impl Lexer {
                         } else {
                             // Not @transform, restore and push @
                             self.pos = save_pos;
+                            self.line = save_line;
+                            self.col = save_col;
                             push!(Token::At);
                         }
                     }
@@ -1758,5 +1786,56 @@ mod tests {
         // Empty name \[]
         let result = tokenize(r"\[]");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_at_span_not_drifted() {
+        // Regression: the `@transform` lookahead must restore line/col as well
+        // as pos, otherwise the following token's span drifts.
+        let toks = tokenize("f @ x").unwrap();
+        assert_eq!(toks[1].token, Token::At);
+        assert_eq!(toks[1].span, Span { line: 1, col: 3 });
+        assert_eq!(toks[2].token, Token::Ident("x".to_string()));
+        assert_eq!(toks[2].span, Span { line: 1, col: 5 });
+    }
+
+    #[test]
+    fn test_scientific_notation() {
+        assert_eq!(
+            tokens("1e5"),
+            vec![Token::Real("1e5".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            tokens("1e-5"),
+            vec![Token::Real("1e-5".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            tokens("2.5e3"),
+            vec![Token::Real("2.5e3".to_string()), Token::Eof]
+        );
+        // A bare trailing `e` is left as the symbol `e` (not `1.2e`), so the
+        // real literal stays parseable.
+        assert_eq!(
+            tokens("1.2e"),
+            vec![
+                Token::Real("1.2".to_string()),
+                Token::Ident("e".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_string_line_continuation() {
+        // A backslash before a newline elides the newline inside a string.
+        assert_eq!(
+            tokens("\"ab\\\ncd\""),
+            vec![Token::Str("abcd".to_string()), Token::Eof]
+        );
+        // A plain newline inside a string is preserved.
+        assert_eq!(
+            tokens("\"ab\ncd\""),
+            vec![Token::Str("ab\ncd".to_string()), Token::Eof]
+        );
     }
 }

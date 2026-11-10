@@ -69,11 +69,36 @@ pub fn set_template(tag: &'static str, template: &'static str) {
 
 /// Format a message template by substituting positional args.
 /// `` `1` `` → args[0], `` `2` `` → args[1], etc.
+///
+/// Substitution is single-pass so an argument that itself contains `` `2` ``
+/// is not re-substituted by a later placeholder.
 pub fn format_message(template: &str, args: &[String]) -> String {
-    let mut result = template.to_string();
-    for (i, arg) in args.iter().enumerate() {
-        let placeholder = format!("`{}`", i + 1);
-        result = result.replace(&placeholder, arg);
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if ch == '`' {
+            let rest_start = i + ch.len_utf8();
+            if let Some(rel) = template[rest_start..].find('`') {
+                let inner = &template[rest_start..rest_start + rel];
+                if let Ok(n) = inner.parse::<usize>()
+                    && n >= 1
+                    && n <= args.len()
+                {
+                    result.push_str(&args[n - 1]);
+                    // Skip the characters up to and including the closing backtick.
+                    let end = rest_start + rel + ch.len_utf8();
+                    while let Some(&(j, _)) = chars.peek() {
+                        if j < end {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(ch);
     }
     result
 }
@@ -99,9 +124,34 @@ pub fn emit(tag: &str, args: &[String]) {
     });
     if !captured {
         // No buffer active — print to stderr as before
-        if let Some(template) = get_template(tag) {
-            let text = format_message(&template, args);
-            eprintln!("{}: {}", tag, text);
+        match get_template(tag) {
+            Some(template) => eprintln!("{}: {}", tag, format_message(&template, args)),
+            None => eprintln!("{}: {}", tag, args.join(", ")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_message;
+
+    #[test]
+    fn test_format_message_positional() {
+        let out = format_message("arg `1` and `2`", &["a".to_string(), "b".to_string()]);
+        assert_eq!(out, "arg a and b");
+    }
+
+    #[test]
+    fn test_format_message_does_not_resubstitute_args() {
+        // Regression: a naive sequential `.replace` re-substitutes `` `2` ``
+        // appearing inside an earlier argument.
+        let out = format_message("`1` then `2`", &["x `2` y".to_string(), "z".to_string()]);
+        assert_eq!(out, "x `2` y then z");
+    }
+
+    #[test]
+    fn test_format_message_leaves_unknown_placeholder() {
+        let out = format_message("`1` `3`", &["a".to_string()]);
+        assert_eq!(out, "a `3`");
     }
 }

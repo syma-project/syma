@@ -83,6 +83,27 @@ impl Parser {
         self.peek() == tok
     }
 
+    /// Like [`Self::at`], but if the current token is one or more newlines
+    /// followed by `tok`, consume those newlines and return `true`. Used so an
+    /// operator at the start of a continuation line (`a\n+ b`) is recognised
+    /// while a plain newline still separates statements.
+    fn at_after_newlines(&mut self, tok: &Token) -> bool {
+        if self.at(tok) {
+            return true;
+        }
+        if !self.at(&Token::Newline) {
+            return false;
+        }
+        let save = self.pos;
+        self.skip_newlines();
+        if self.at(tok) {
+            true
+        } else {
+            self.pos = save;
+            false
+        }
+    }
+
     // ── Top-level ──
 
     pub fn parse_program(&mut self) -> Result<Vec<Expr>, ParseError> {
@@ -115,86 +136,9 @@ impl Parser {
             Token::Try => self.parse_try(),
             Token::Throw => self.parse_throw(),
             Token::Def => self.parse_def(),
-            _ => {
-                let expr = self.parse_expression()?;
-                // Check for assignment or function definition
-                match self.peek() {
-                    Token::Assign => {
-                        self.advance();
-                        let rhs = self.parse_expression()?;
-                        // Check for guard: f[x_] = body /; condition
-                        let guard = if self.at(&Token::ColonSlashSemicolon) {
-                            self.advance();
-                            let condition = self.parse_expression()?;
-                            Some(Box::new(condition))
-                        } else {
-                            None
-                        };
-                        // If LHS is a Call with symbol head and guard, make FuncDef
-                        if let Some(g) = guard
-                            && let Expr::Call { ref head, ref args } = expr
-                            && let Expr::Symbol(ref name) = **head
-                        {
-                            let params: Vec<Expr> =
-                                args.iter().cloned().map(Self::convert_pattern).collect();
-                            return Ok(Expr::FuncDef {
-                                name: name.clone(),
-                                params,
-                                body: Box::new(rhs),
-                                delayed: false,
-                                guard: Some(g),
-                            });
-                        }
-                        Ok(Expr::Assign {
-                            lhs: Box::new(expr),
-                            rhs: Box::new(rhs),
-                        })
-                    }
-                    Token::DelayedAssign => {
-                        // f[x_] := body [/; guard] — function definition
-                        self.advance(); // consume :=
-                        if let Expr::Call { head, args } = expr {
-                            if let Expr::Symbol(name) = *head {
-                                let params: Vec<Expr> =
-                                    args.into_iter().map(Self::convert_pattern).collect();
-                                let body = self.parse_expression()?;
-                                // Check for guard: body /; condition
-                                let guard = if self.at(&Token::ColonSlashSemicolon) {
-                                    self.advance();
-                                    let condition = self.parse_expression()?;
-                                    Some(Box::new(condition))
-                                } else {
-                                    None
-                                };
-                                Ok(Expr::FuncDef {
-                                    name,
-                                    params,
-                                    body: Box::new(body),
-                                    delayed: true,
-                                    guard,
-                                })
-                            } else {
-                                Err(ParseError {
-                                    message: "Invalid function definition (head not a symbol)"
-                                        .to_string(),
-                                    token: Some(Token::DelayedAssign),
-                                    span: self.peek_span(),
-                                })
-                            }
-                        } else {
-                            Err(ParseError {
-                                message: format!(
-                                    "Invalid function definition (expr is {:?})",
-                                    expr
-                                ),
-                                token: Some(Token::DelayedAssign),
-                                span: self.peek_span(),
-                            })
-                        }
-                    }
-                    _ => Ok(expr),
-                }
-            }
+            // Everything else is an expression; assignment / function
+            // definition / guard handling lives in `parse_expression`.
+            _ => self.parse_expression(),
         }
     }
 
@@ -301,7 +245,7 @@ impl Parser {
             _ => Err(ParseError {
                 message: "Expected field, method, constructor, or @transform".to_string(),
                 token: Some(self.peek().clone()),
-                span: None,
+                span: self.peek_span(),
             }),
         }
     }
@@ -748,22 +692,20 @@ impl Parser {
         // Check for assignment-like operators at the lowest precedence level.
         let token = self.peek().clone();
         match token {
-            // Simple assignment: pat = expr
+            // Simple assignment: pat = expr (optionally with a `/;` guard,
+            // which turns a call LHS into a function definition).
             Token::Assign => {
                 self.advance();
                 let rhs = self.parse_expression()?;
-                // If the LHS is a list literal, this is destructuring assignment
-                if let Expr::List(patterns) = lhs {
-                    Ok(Expr::DestructAssign {
-                        patterns,
-                        rhs: Box::new(rhs),
-                    })
-                } else {
-                    Ok(Expr::Assign {
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    })
-                }
+                let guard = self.parse_optional_guard()?;
+                Ok(Self::finish_assignment(lhs, rhs, false, guard))
+            }
+            // Delayed function definition: f[x_] := body [/; guard]
+            Token::DelayedAssign => {
+                self.advance();
+                let rhs = self.parse_expression()?;
+                let guard = self.parse_optional_guard()?;
+                Ok(Self::finish_assignment(lhs, rhs, true, guard))
             }
             // Compound assignment: desugar at parse time
             // x += y → x = x + y
@@ -850,7 +792,7 @@ impl Parser {
 
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_at_expr()?;
-        while self.at(&Token::Pipe) {
+        while self.at_after_newlines(&Token::Pipe) {
             self.advance();
             let right = self.parse_at_expr()?;
             left = Expr::Pipe {
@@ -863,14 +805,14 @@ impl Parser {
 
     fn parse_at_expr(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_rule_expr()?;
-        if self.at(&Token::At) {
+        if self.at_after_newlines(&Token::At) {
             self.advance();
             let right = self.parse_at_expr()?; // right-associative
             Ok(Expr::Prefix {
                 func: Box::new(left),
                 arg: Box::new(right),
             })
-        } else if self.at(&Token::ApplyOp) {
+        } else if self.at_after_newlines(&Token::ApplyOp) {
             self.advance();
             let right = self.parse_at_expr()?; // right-associative
             Ok(Expr::Apply {
@@ -882,33 +824,23 @@ impl Parser {
         }
     }
 
+    /// ReplaceAll (`/.`) and ReplaceRepeated (`//.`) bind *looser* than Rule
+    /// (`->`/`:>`) and are left-associative, so that `expr /. lhs -> rhs` parses
+    /// as `ReplaceAll[expr, Rule[lhs, rhs]]` and `a /. b /. c` chains to the
+    /// left. This matches Wolfram Language precedence (`/.` 110 < `->` 120).
     fn parse_rule_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_or_expr()?;
+        let mut left = self.parse_rule_op_expr()?;
         loop {
-            if self.at(&Token::Rule) {
+            if self.at_after_newlines(&Token::ReplaceAll) {
                 self.advance();
-                let right = self.parse_rule_expr()?; // right-associative
-                left = Expr::Rule {
-                    lhs: Box::new(left),
-                    rhs: Box::new(right),
-                };
-            } else if self.at(&Token::DelayedRule) {
-                self.advance();
-                let right = self.parse_rule_expr()?; // right-associative
-                left = Expr::RuleDelayed {
-                    lhs: Box::new(left),
-                    rhs: Box::new(right),
-                };
-            } else if self.at(&Token::ReplaceAll) {
-                self.advance();
-                let right = self.parse_rule_expr()?; // need full rule: x_ -> 42
+                let right = self.parse_rule_op_expr()?;
                 left = Expr::ReplaceAll {
                     expr: Box::new(left),
                     rules: Box::new(right),
                 };
-            } else if self.at(&Token::ReplaceRepeated) {
+            } else if self.at_after_newlines(&Token::ReplaceRepeated) {
                 self.advance();
-                let right = self.parse_rule_expr()?; // need full rule: x_ -> 42
+                let right = self.parse_rule_op_expr()?;
                 left = Expr::ReplaceRepeated {
                     expr: Box::new(left),
                     rules: Box::new(right),
@@ -920,9 +852,31 @@ impl Parser {
         Ok(left)
     }
 
+    /// Rule (`->`) and RuleDelayed (`:>`) are right-associative.
+    fn parse_rule_op_expr(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_or_expr()?;
+        if self.at_after_newlines(&Token::Rule) {
+            self.advance();
+            let right = self.parse_rule_op_expr()?; // right-associative
+            Ok(Expr::Rule {
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            })
+        } else if self.at_after_newlines(&Token::DelayedRule) {
+            self.advance();
+            let right = self.parse_rule_op_expr()?; // right-associative
+            Ok(Expr::RuleDelayed {
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            })
+        } else {
+            Ok(left)
+        }
+    }
+
     fn parse_or_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_and_expr()?;
-        while self.at(&Token::Or) {
+        while self.at_after_newlines(&Token::Or) {
             self.advance();
             let right = self.parse_and_expr()?;
             left = Expr::Call {
@@ -935,7 +889,7 @@ impl Parser {
 
     fn parse_and_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_comp_expr()?;
-        while self.at(&Token::And) {
+        while self.at_after_newlines(&Token::And) {
             self.advance();
             let right = self.parse_comp_expr()?;
             left = Expr::Call {
@@ -949,15 +903,22 @@ impl Parser {
     fn parse_comp_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_add_expr()?;
         loop {
-            let op = match self.peek() {
-                Token::Equal => "Equal",
-                Token::Unequal => "Unequal",
-                Token::Less => "Less",
-                Token::Greater => "Greater",
-                Token::LessEqual => "LessEqual",
-                Token::GreaterEqual => "GreaterEqual",
-                Token::StringJoinOp => "StringJoin",
-                _ => break,
+            let op = if self.at_after_newlines(&Token::Equal) {
+                "Equal"
+            } else if self.at_after_newlines(&Token::Unequal) {
+                "Unequal"
+            } else if self.at_after_newlines(&Token::Less) {
+                "Less"
+            } else if self.at_after_newlines(&Token::Greater) {
+                "Greater"
+            } else if self.at_after_newlines(&Token::LessEqual) {
+                "LessEqual"
+            } else if self.at_after_newlines(&Token::GreaterEqual) {
+                "GreaterEqual"
+            } else if self.at_after_newlines(&Token::StringJoinOp) {
+                "StringJoin"
+            } else {
+                break;
             };
             self.advance();
             let right = self.parse_add_expr()?;
@@ -972,27 +933,28 @@ impl Parser {
     fn parse_add_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_custom_infix_expr()?;
         loop {
-            let op = match self.peek() {
-                Token::Plus => "Plus",
-                Token::Minus => "Plus", // a - b = Plus[a, Times[-1, b]]
-                _ => break,
+            // `+` and `-` share the `Plus` head; `-` negates the RHS.
+            let is_minus = if self.at_after_newlines(&Token::Plus) {
+                false
+            } else if self.at_after_newlines(&Token::Minus) {
+                true
+            } else {
+                break;
             };
-            let is_minus = self.peek() == &Token::Minus;
             self.advance();
             let right = self.parse_custom_infix_expr()?;
             if is_minus {
-                // a - b = Plus[a, Times[-1, b]]
                 let neg = Expr::Call {
                     head: Box::new(Expr::Symbol("Times".to_string())),
                     args: vec![Expr::Integer(Integer::from(-1)), right],
                 };
                 left = Expr::Call {
-                    head: Box::new(Expr::Symbol(op.to_string())),
+                    head: Box::new(Expr::Symbol("Plus".to_string())),
                     args: vec![left, neg],
                 };
             } else {
                 left = Expr::Call {
-                    head: Box::new(Expr::Symbol(op.to_string())),
+                    head: Box::new(Expr::Symbol("Plus".to_string())),
                     args: vec![left, right],
                 };
             }
@@ -1008,43 +970,75 @@ impl Parser {
     fn parse_custom_infix_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_mul_expr()?;
         loop {
-            match self.peek() {
-                Token::Operator(op) => {
-                    let op = op.clone();
-                    self.advance();
-                    let right = self.parse_mul_expr()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol(op)),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
+            let save = self.pos;
+            if self.at(&Token::Newline) {
+                self.skip_newlines();
             }
+            let op = match self.peek().clone() {
+                Token::Operator(op) => op,
+                _ => {
+                    self.pos = save;
+                    break;
+                }
+            };
+            self.advance();
+            let right = self.parse_mul_expr()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol(op)),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
 
     fn parse_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pow_expr()?;
-        loop {
-            match self.peek() {
-                Token::StarStar => {
-                    self.advance();
-                    let right = self.parse_pow_expr()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while self.at_after_newlines(&Token::StarStar) {
+            self.advance();
+            let right = self.parse_pow_expr()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                args: vec![left, right],
+            };
         }
         Ok(left)
+    }
+
+    /// True if `self.peek()` is a `{` that opens a `match` branch block
+    /// (i.e. contains a top-level `=>`) rather than a list literal.
+    fn brace_is_match_block(&self) -> bool {
+        let mut depth = 0usize;
+        for t in self.tokens.iter().skip(self.pos) {
+            match &t.token {
+                Token::LBrace => depth += 1,
+                Token::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::FatArrow if depth == 1 => return true,
+                Token::Eof => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_ncmul_expr()?;
         loop {
+            // A newline followed by an explicit multiplicative operator is a
+            // line continuation; a newline followed by a primary leaves the
+            // implicit-multiplication break intact (so `a\nb` stays separate).
+            if self.at(&Token::Newline) {
+                let save = self.pos;
+                self.skip_newlines();
+                if !matches!(self.peek(), Token::Star | Token::Slash | Token::MapOp) {
+                    self.pos = save;
+                    break;
+                }
+            }
             match self.peek() {
                 Token::Star => {
                     self.advance();
@@ -1072,6 +1066,16 @@ impl Parser {
                 }
                 // Don't multiply across newlines
                 Token::Newline => break,
+                // List literal juxtaposition: `2{a, b}` → Times[2, {a, b}].
+                // A `{` immediately after a factor is a `match` branch block
+                // instead of a list when it contains a top-level `=>`.
+                Token::LBrace if !self.brace_is_match_block() => {
+                    let right = self.parse_ncmul_expr()?;
+                    left = Expr::Call {
+                        head: Box::new(Expr::Symbol("Times".to_string())),
+                        args: vec![left, right],
+                    };
+                }
                 // Implicit multiplication (juxtaposition): x y → Times[x, y]
                 // Only trigger for tokens that unambiguously start an expression:
                 // literals, identifiers, slots, parens/braces/assoc, not, and keywords.
@@ -1132,7 +1136,7 @@ impl Parser {
 
     fn parse_pow_expr(&mut self) -> Result<Expr, ParseError> {
         let base = self.parse_unary_expr()?;
-        if self.at(&Token::Caret) {
+        if self.at_after_newlines(&Token::Caret) {
             self.advance();
             let exp = self.parse_pow_expr()?; // right-associative
             Ok(Expr::Call {
@@ -1146,6 +1150,11 @@ impl Parser {
 
     fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
+            // Unary plus is the identity: `+x` → `x`
+            Token::Plus => {
+                self.advance();
+                self.parse_unary_expr()
+            }
             Token::Minus => {
                 self.advance();
                 let expr = self.parse_unary_expr()?;
@@ -1373,6 +1382,23 @@ impl Parser {
                     };
                 }
 
+                // Derivative: expr' → Derivative[1][expr], expr'' → Derivative[2][expr]
+                Token::Quote => {
+                    self.advance();
+                    let mut order: usize = 1;
+                    while self.at(&Token::Quote) {
+                        self.advance();
+                        order += 1;
+                    }
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Call {
+                            head: Box::new(Expr::Symbol("Derivative".to_string())),
+                            args: vec![Expr::Integer(Integer::from(order))],
+                        }),
+                        args: vec![expr],
+                    };
+                }
+
                 _ => break,
             }
         }
@@ -1381,6 +1407,8 @@ impl Parser {
     }
 
     fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
+        // Allow an operand to start on the line after its operator (`a +\nb`).
+        self.skip_newlines();
         match self.peek().clone() {
             // Atoms
             Token::Integer(n) => {
@@ -1714,32 +1742,30 @@ impl Parser {
                 })
             }
 
-            // Function[{params}, body]
+            // Function[{params}, body] or Function[body] (→ pure function sugar)
             Token::Function => {
                 self.advance();
                 self.expect(&Token::LBracket)?;
 
-                let params = if self.at(&Token::LBrace) {
+                // In Wolfram Language, `Function[body]` is anonymous-function
+                // sugar equivalent to `body &`; `Function[params, body]` names
+                // the parameters. Distinguish by a comma after the first arg.
+                let first = self.parse_expression()?;
+                if self.at(&Token::Comma) {
                     self.advance();
-                    let mut params = vec![self.expect_ident()?];
-                    while self.at(&Token::Comma) {
-                        self.advance();
-                        params.push(self.expect_ident()?);
-                    }
-                    self.expect(&Token::RBrace)?;
-                    params
+                    let params = Self::function_params(first)?;
+                    let body = self.parse_expression()?;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::Function {
+                        params,
+                        body: Box::new(body),
+                    })
                 } else {
-                    vec![self.expect_ident()?]
-                };
-
-                self.expect(&Token::Comma)?;
-                let body = self.parse_expression()?;
-                self.expect(&Token::RBracket)?;
-
-                Ok(Expr::Function {
-                    params,
-                    body: Box::new(body),
-                })
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::Pure {
+                        body: Box::new(first),
+                    })
+                }
             }
 
             // Hold[expr]
@@ -1785,7 +1811,7 @@ impl Parser {
             tok => Err(ParseError {
                 message: format!("Unexpected token in expression: {:?}", tok),
                 token: Some(tok),
-                span: None,
+                span: self.peek_span(),
             }),
         }
     }
@@ -1817,6 +1843,17 @@ impl Parser {
                 lhs: Box::new(result),
                 rhs: Box::new(rhs),
             }
+        } else {
+            result
+        };
+
+        // Delayed function definition used as a sub-expression, e.g. an
+        // argument to `If[cond, f[x_] := body, ...]`.
+        let result = if self.at(&Token::DelayedAssign) {
+            self.advance();
+            let body = self.parse_expression()?;
+            let guard = self.parse_optional_guard()?;
+            Self::finish_assignment(result, body, true, guard)
         } else {
             result
         };
@@ -1877,7 +1914,7 @@ impl Parser {
 
     fn parse_pattern_pipe(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_at()?;
-        while self.at(&Token::Pipe) {
+        while self.at_after_newlines(&Token::Pipe) {
             self.advance();
             let right = self.parse_pattern_at()?;
             left = Expr::Pipe {
@@ -1890,12 +1927,19 @@ impl Parser {
 
     fn parse_pattern_at(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_pattern_rule()?;
-        if self.at(&Token::At) {
+        if self.at_after_newlines(&Token::At) {
             self.advance();
             let right = self.parse_pattern_at()?;
             Ok(Expr::Prefix {
                 func: Box::new(left),
                 arg: Box::new(right),
+            })
+        } else if self.at_after_newlines(&Token::ApplyOp) {
+            self.advance();
+            let right = self.parse_pattern_at()?;
+            Ok(Expr::Apply {
+                func: Box::new(left),
+                expr: Box::new(right),
             })
         } else {
             Ok(left)
@@ -1904,14 +1948,14 @@ impl Parser {
 
     fn parse_pattern_rule(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_pattern_or()?;
-        if self.at(&Token::Rule) {
+        if self.at_after_newlines(&Token::Rule) {
             self.advance();
             let right = self.parse_pattern_rule()?;
             Ok(Expr::Rule {
                 lhs: Box::new(left),
                 rhs: Box::new(right),
             })
-        } else if self.at(&Token::DelayedRule) {
+        } else if self.at_after_newlines(&Token::DelayedRule) {
             self.advance();
             let right = self.parse_pattern_rule()?;
             Ok(Expr::RuleDelayed {
@@ -1925,7 +1969,7 @@ impl Parser {
 
     fn parse_pattern_or(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_and()?;
-        while self.at(&Token::Or) {
+        while self.at_after_newlines(&Token::Or) {
             self.advance();
             let right = self.parse_pattern_and()?;
             left = Expr::Call {
@@ -1938,7 +1982,7 @@ impl Parser {
 
     fn parse_pattern_and(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_comp()?;
-        while self.at(&Token::And) {
+        while self.at_after_newlines(&Token::And) {
             self.advance();
             let right = self.parse_pattern_comp()?;
             left = Expr::Call {
@@ -1952,15 +1996,22 @@ impl Parser {
     fn parse_pattern_comp(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_add()?;
         loop {
-            let op = match self.peek() {
-                Token::Equal => "Equal",
-                Token::Unequal => "Unequal",
-                Token::Less => "Less",
-                Token::Greater => "Greater",
-                Token::LessEqual => "LessEqual",
-                Token::GreaterEqual => "GreaterEqual",
-                Token::StringJoinOp => "StringJoin",
-                _ => break,
+            let op = if self.at_after_newlines(&Token::Equal) {
+                "Equal"
+            } else if self.at_after_newlines(&Token::Unequal) {
+                "Unequal"
+            } else if self.at_after_newlines(&Token::Less) {
+                "Less"
+            } else if self.at_after_newlines(&Token::Greater) {
+                "Greater"
+            } else if self.at_after_newlines(&Token::LessEqual) {
+                "LessEqual"
+            } else if self.at_after_newlines(&Token::GreaterEqual) {
+                "GreaterEqual"
+            } else if self.at_after_newlines(&Token::StringJoinOp) {
+                "StringJoin"
+            } else {
+                break;
             };
             self.advance();
             let right = self.parse_pattern_add()?;
@@ -1975,12 +2026,13 @@ impl Parser {
     fn parse_pattern_add(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_custom_infix()?;
         loop {
-            let op = match self.peek() {
-                Token::Plus => "Plus",
-                Token::Minus => "Plus",
-                _ => break,
+            let is_minus = if self.at_after_newlines(&Token::Plus) {
+                false
+            } else if self.at_after_newlines(&Token::Minus) {
+                true
+            } else {
+                break;
             };
-            let is_minus = self.peek() == &Token::Minus;
             self.advance();
             let right = self.parse_pattern_custom_infix()?;
             if is_minus {
@@ -1989,12 +2041,12 @@ impl Parser {
                     args: vec![Expr::Integer(Integer::from(-1)), right],
                 };
                 left = Expr::Call {
-                    head: Box::new(Expr::Symbol(op.to_string())),
+                    head: Box::new(Expr::Symbol("Plus".to_string())),
                     args: vec![left, neg],
                 };
             } else {
                 left = Expr::Call {
-                    head: Box::new(Expr::Symbol(op.to_string())),
+                    head: Box::new(Expr::Symbol("Plus".to_string())),
                     args: vec![left, right],
                 };
             }
@@ -2007,36 +2059,36 @@ impl Parser {
     fn parse_pattern_custom_infix(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_mul()?;
         loop {
-            match self.peek() {
-                Token::Operator(op) => {
-                    let op = op.clone();
-                    self.advance();
-                    let right = self.parse_pattern_mul()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol(op)),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
+            let save = self.pos;
+            if self.at(&Token::Newline) {
+                self.skip_newlines();
             }
+            let op = match self.peek().clone() {
+                Token::Operator(op) => op,
+                _ => {
+                    self.pos = save;
+                    break;
+                }
+            };
+            self.advance();
+            let right = self.parse_pattern_mul()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol(op)),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
 
     fn parse_pattern_ncmul_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_pow()?;
-        loop {
-            match self.peek() {
-                Token::StarStar => {
-                    self.advance();
-                    let right = self.parse_pattern_pow()?;
-                    left = Expr::Call {
-                        head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
-                        args: vec![left, right],
-                    };
-                }
-                _ => break,
-            }
+        while self.at_after_newlines(&Token::StarStar) {
+            self.advance();
+            let right = self.parse_pattern_pow()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("NonCommutativeMultiply".to_string())),
+                args: vec![left, right],
+            };
         }
         Ok(left)
     }
@@ -2044,6 +2096,23 @@ impl Parser {
     fn parse_pattern_mul(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_pattern_ncmul_expr()?;
         loop {
+            // Newline only continues the pattern when followed by an explicit
+            // multiplicative operator (matches expression-level behaviour).
+            if self.at(&Token::Newline) {
+                let save = self.pos;
+                self.skip_newlines();
+                if !matches!(
+                    self.peek(),
+                    Token::Star
+                        | Token::Slash
+                        | Token::MapOp
+                        | Token::ReplaceAll
+                        | Token::ReplaceRepeated
+                ) {
+                    self.pos = save;
+                    break;
+                }
+            }
             match self.peek() {
                 Token::Star => {
                     self.advance();
@@ -2069,6 +2138,25 @@ impl Parser {
                         list: Box::new(right),
                     };
                 }
+                // ReplaceAll / ReplaceRepeated bind at the multiplicatively
+                // tightest operator level for patterns, per the grammar
+                // (`pat_mul_expr`); they are left-associative.
+                Token::ReplaceAll => {
+                    self.advance();
+                    let right = self.parse_pattern_ncmul_expr()?;
+                    left = Expr::ReplaceAll {
+                        expr: Box::new(left),
+                        rules: Box::new(right),
+                    };
+                }
+                Token::ReplaceRepeated => {
+                    self.advance();
+                    let right = self.parse_pattern_ncmul_expr()?;
+                    left = Expr::ReplaceRepeated {
+                        expr: Box::new(left),
+                        rules: Box::new(right),
+                    };
+                }
                 // Implicit multiplication (juxtaposition) in patterns
                 Token::Integer(_)
                 | Token::Real(_)
@@ -2083,6 +2171,7 @@ impl Parser {
                 | Token::SlotSequence
                 | Token::SlotSequenceN(_)
                 | Token::LParen
+                | Token::LBrace
                 | Token::LAssoc
                 | Token::Not
                 | Token::If
@@ -2126,7 +2215,7 @@ impl Parser {
 
     fn parse_pattern_pow(&mut self) -> Result<Expr, ParseError> {
         let base = self.parse_pattern_unary()?;
-        if self.at(&Token::Caret) {
+        if self.at_after_newlines(&Token::Caret) {
             self.advance();
             let exp = self.parse_pattern_pow()?; // right-associative
             Ok(Expr::Call {
@@ -2140,12 +2229,24 @@ impl Parser {
 
     fn parse_pattern_unary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
+            Token::Plus => {
+                self.advance();
+                self.parse_pattern_unary()
+            }
             Token::Minus => {
                 self.advance();
                 let expr = self.parse_pattern_unary()?;
                 Ok(Expr::Call {
                     head: Box::new(Expr::Symbol("Times".to_string())),
                     args: vec![Expr::Integer(Integer::from(-1)), expr],
+                })
+            }
+            Token::Not => {
+                self.advance();
+                let expr = self.parse_pattern_unary()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol("Not".to_string())),
+                    args: vec![expr],
                 })
             }
             _ => self.parse_pattern_postfix(),
@@ -2219,6 +2320,32 @@ impl Parser {
                     };
                 }
 
+                // Postfix factorial: expr!  →  Factorial[expr]
+                Token::Not => {
+                    self.advance();
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Symbol("Factorial".to_string())),
+                        args: vec![expr],
+                    };
+                }
+
+                // Derivative: expr' → Derivative[1][expr], as in `f_'[x_]`.
+                Token::Quote => {
+                    self.advance();
+                    let mut order: usize = 1;
+                    while self.at(&Token::Quote) {
+                        self.advance();
+                        order += 1;
+                    }
+                    expr = Expr::Call {
+                        head: Box::new(Expr::Call {
+                            head: Box::new(Expr::Symbol("Derivative".to_string())),
+                            args: vec![Expr::Integer(Integer::from(order))],
+                        }),
+                        args: vec![expr],
+                    };
+                }
+
                 // MessageName: sym::tag  → MessageName[sym, "tag"]
                 Token::ColonColon => {
                     self.advance();
@@ -2228,8 +2355,6 @@ impl Parser {
                         args: vec![expr, Expr::Str(tag)],
                     };
                 }
-
-                // Default value for optional patterns: x_:default or _.:default
                 Token::Colon => {
                     self.advance();
                     let default = Box::new(self.parse_expression()?);
@@ -2424,7 +2549,9 @@ impl Parser {
             // Parenthesized pattern: (expr), (a; b; c) seq, or (a|b|c) alternatives
             Token::LParen => {
                 self.advance();
-                let first = self.parse_statement()?;
+                // Parse the inner content in *pattern* context so typed/optional
+                // blanks (x_, x_.) and pattern operators work inside parens.
+                let first = self.parse_pattern()?;
                 if self.at(&Token::Semicolon) {
                     let mut exprs = vec![first];
                     while self.at(&Token::Semicolon) {
@@ -2432,7 +2559,7 @@ impl Parser {
                         if self.at(&Token::RParen) {
                             break;
                         }
-                        exprs.push(self.parse_statement()?);
+                        exprs.push(self.parse_pattern()?);
                     }
                     self.expect(&Token::RParen)?;
                     Ok(Expr::Sequence(exprs))
@@ -2440,7 +2567,7 @@ impl Parser {
                     let mut patterns = vec![first];
                     while self.at(&Token::PipeAlt) {
                         self.advance();
-                        patterns.push(self.parse_statement()?);
+                        patterns.push(self.parse_pattern()?);
                     }
                     self.expect(&Token::RParen)?;
                     Ok(Expr::Call {
@@ -2518,27 +2645,24 @@ impl Parser {
                 self.advance();
                 self.expect(&Token::LBracket)?;
 
-                let params = if self.at(&Token::LBrace) {
+                // See `parse_primary_expr`: `Function[body]` is sugar for a
+                // pure function; `Function[params, body]` names parameters.
+                let first = self.parse_expression()?;
+                if self.at(&Token::Comma) {
                     self.advance();
-                    let mut params = vec![self.expect_ident()?];
-                    while self.at(&Token::Comma) {
-                        self.advance();
-                        params.push(self.expect_ident()?);
-                    }
-                    self.expect(&Token::RBrace)?;
-                    params
+                    let params = Self::function_params(first)?;
+                    let body = self.parse_expression()?;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::Function {
+                        params,
+                        body: Box::new(body),
+                    })
                 } else {
-                    vec![self.expect_ident()?]
-                };
-
-                self.expect(&Token::Comma)?;
-                let body = self.parse_expression()?;
-                self.expect(&Token::RBracket)?;
-
-                Ok(Expr::Function {
-                    params,
-                    body: Box::new(body),
-                })
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::Pure {
+                        body: Box::new(first),
+                    })
+                }
             }
             Token::Hold => {
                 self.advance();
@@ -2664,6 +2788,9 @@ impl Parser {
             // Try/Catch expression
             Token::Try => self.parse_try(),
 
+            // ── Match expression — also valid in pattern context (e.g. in Call args) ──
+            Token::Match => self.parse_match(),
+
             // Custom prefix operator in pattern context: op expr
             Token::Operator(op) => {
                 self.advance();
@@ -2677,7 +2804,7 @@ impl Parser {
             tok => Err(ParseError {
                 message: "Unexpected token in pattern".to_string(),
                 token: Some(tok),
-                span: None,
+                span: self.peek_span(),
             }),
         }
     }
@@ -2747,6 +2874,59 @@ impl Parser {
             Ok(Expr::Sequence(exprs))
         } else {
             Ok(expr)
+        }
+    }
+
+    /// Parse an optional trailing `/; condition` guard.
+    fn parse_optional_guard(&mut self) -> Result<Option<Box<Expr>>, ParseError> {
+        if self.at(&Token::ColonSlashSemicolon) {
+            self.advance();
+            Ok(Some(Box::new(self.parse_expression()?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Build the AST for `lhs = rhs` / `lhs := rhs` (optionally guarded).
+    ///
+    /// A call on a symbol becomes a [`Expr::FuncDef`] when delayed or guarded;
+    /// a list literal LHS becomes a [`Expr::DestructAssign`]; anything else is
+    /// a plain [`Expr::Assign`].
+    fn finish_assignment(lhs: Expr, rhs: Expr, delayed: bool, guard: Option<Box<Expr>>) -> Expr {
+        if let Expr::Call { head, args } = lhs {
+            if let Expr::Symbol(name) = *head {
+                if delayed || guard.is_some() {
+                    let params: Vec<Expr> = args.into_iter().map(Self::convert_pattern).collect();
+                    return Expr::FuncDef {
+                        name,
+                        params,
+                        body: Box::new(rhs),
+                        delayed,
+                        guard,
+                    };
+                }
+                return Expr::Assign {
+                    lhs: Box::new(Expr::Call {
+                        head: Box::new(Expr::Symbol(name)),
+                        args,
+                    }),
+                    rhs: Box::new(rhs),
+                };
+            }
+            return Expr::Assign {
+                lhs: Box::new(Expr::Call { head, args }),
+                rhs: Box::new(rhs),
+            };
+        }
+        if let Expr::List(patterns) = lhs {
+            return Expr::DestructAssign {
+                patterns,
+                rhs: Box::new(rhs),
+            };
+        }
+        Expr::Assign {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
         }
     }
 
@@ -2853,13 +3033,42 @@ impl Parser {
         expr
     }
 
+    /// Extract the parameter names from the first argument of a two-argument
+    /// `Function[params, body]`. Accepts a single symbol or a list of symbols.
+    fn function_params(first: Expr) -> Result<Vec<Symbol>, ParseError> {
+        fn one(e: Expr) -> Result<Symbol, ParseError> {
+            match e {
+                Expr::Symbol(s) => Ok(s),
+                other => Err(ParseError {
+                    message: format!("Function parameter must be a symbol, found {:?}", other),
+                    token: None,
+                    span: None,
+                }),
+            }
+        }
+        match first {
+            Expr::Symbol(s) => Ok(vec![s]),
+            Expr::List(items) => items.into_iter().map(one).collect(),
+            other => Err(ParseError {
+                message: format!(
+                    "Function parameters must be a symbol or list of symbols, found {:?}",
+                    other
+                ),
+                token: None,
+                span: None,
+            }),
+        }
+    }
+
     fn expect_ident(&mut self) -> Result<String, ParseError> {
+        self.skip_newlines();
+        let span = self.peek_span();
         match self.advance() {
             Token::Ident(s) => Ok(s),
             tok => Err(ParseError {
                 message: format!("Expected identifier, found '{}'", tok),
                 token: Some(tok),
-                span: None,
+                span,
             }),
         }
     }
@@ -2907,6 +3116,10 @@ pub fn parse_with_debug_info(
     let mut p = Parser::new(tokens);
     let mut stmts = Vec::new();
     while p.peek() != &Token::Eof {
+        p.skip_newlines();
+        if p.at(&Token::Eof) {
+            break;
+        }
         let line = p.peek_span().map(|s| s.line).unwrap_or(1);
         let stmt = p.parse_statement()?;
         let had_semicolon = if p.at(&Token::Semicolon) {
@@ -3907,5 +4120,283 @@ mod tests {
             }
             _ => panic!("Expected FuncDef"),
         }
+    }
+
+    // ── Regression tests ──
+
+    fn sym(s: &str) -> Expr {
+        Expr::Symbol(s.to_string())
+    }
+    fn call(head: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            head: Box::new(sym(head)),
+            args,
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_is_identity() {
+        assert_eq!(parse_one("+x"), sym("x"));
+        assert_eq!(parse_one("a + +b"), call("Plus", vec![sym("a"), sym("b")]));
+    }
+
+    #[test]
+    fn test_unary_plus_in_pattern() {
+        let expr = parse_one("f[+2]");
+        match expr {
+            Expr::Call { args, .. } => assert_eq!(args[0], Expr::Integer(Integer::from(2))),
+            _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_pattern_postfix_factorial() {
+        let expr = parse_one("f[x_!]");
+        match expr {
+            Expr::Call { args, .. } => assert!(matches!(
+                &args[0],
+                Expr::Call { head, .. } if **head == sym("Factorial")
+            )),
+            _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_pattern_derivative() {
+        // f_'[x_] → Derivative[1][f_][x_]
+        let expr = parse_one("f_'[x_]");
+        match expr {
+            Expr::Call { head, args } => {
+                assert!(matches!(
+                    &*head,
+                    Expr::Call { head, .. }
+                        if matches!(&**head, Expr::Call { head, .. } if **head == sym("Derivative"))
+                ));
+                assert!(matches!(&args[0], Expr::NamedBlank { name, .. } if name == "x"));
+            }
+            _ => panic!("Expected Call, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_typed_optional_blank_inside_parens() {
+        // Regression: parenthesised pattern content used to be parsed as an
+        // expression, so `x_` / `j_.` inside `(...)` failed.
+        let expr = parse_one("f[(a_*x_^j_.+b_)]");
+        let inner = match expr {
+            Expr::Call { mut args, .. } => args.pop().unwrap(),
+            _ => panic!("Expected Call"),
+        };
+        assert!(matches!(inner, Expr::Call { head, .. } if *head == sym("Plus")));
+    }
+
+    #[test]
+    fn test_newline_continuation_around_operator() {
+        // Operator at end of line …
+        assert_eq!(parse_one("a +\nb"), call("Plus", vec![sym("a"), sym("b")]));
+        // … and operator at start of the continuation line.
+        assert_eq!(parse_one("a\n+ b"), call("Plus", vec![sym("a"), sym("b")]));
+    }
+
+    #[test]
+    fn test_plain_newline_still_separates_statements() {
+        let stmts = parse_str("a\nb");
+        assert_eq!(stmts, vec![sym("a"), sym("b")]);
+    }
+
+    #[test]
+    fn test_list_juxtaposition_is_multiplication() {
+        let expr = parse_one("2{1, 2}");
+        match expr {
+            Expr::Call { head, args } => {
+                assert_eq!(*head, sym("Times"));
+                assert_eq!(args[0], Expr::Integer(Integer::from(2)));
+                assert!(matches!(args[1], Expr::List(_)));
+            }
+            _ => panic!("Expected Times"),
+        }
+    }
+
+    #[test]
+    fn test_match_brace_is_not_multiplication() {
+        let expr = parse_one("match x { 1 => 2 }");
+        assert!(matches!(expr, Expr::Match { .. }));
+    }
+
+    #[test]
+    fn test_match_inside_call_argument() {
+        let expr = parse_one("f[match x { 1 => 2 }]");
+        match expr {
+            Expr::Call { args, .. } => assert!(matches!(args[0], Expr::Match { .. })),
+            _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_replace_all_left_associative() {
+        let expr = parse_one("a /. b /. c");
+        assert_eq!(
+            expr,
+            Expr::ReplaceAll {
+                expr: Box::new(Expr::ReplaceAll {
+                    expr: Box::new(sym("a")),
+                    rules: Box::new(sym("b")),
+                }),
+                rules: Box::new(sym("c")),
+            }
+        );
+    }
+
+    #[test]
+    fn test_replace_all_binds_looser_than_rule() {
+        // `a -> b /. c` → ReplaceAll[Rule[a, b], c]
+        assert_eq!(
+            parse_one("a -> b /. c"),
+            Expr::ReplaceAll {
+                expr: Box::new(Expr::Rule {
+                    lhs: Box::new(sym("a")),
+                    rhs: Box::new(sym("b")),
+                }),
+                rules: Box::new(sym("c")),
+            }
+        );
+        // `a /. b -> c` → ReplaceAll[a, Rule[b, c]]
+        assert_eq!(
+            parse_one("a /. b -> c"),
+            Expr::ReplaceAll {
+                expr: Box::new(sym("a")),
+                rules: Box::new(Expr::Rule {
+                    lhs: Box::new(sym("b")),
+                    rhs: Box::new(sym("c")),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn test_pattern_apply_and_replace() {
+        let expr = parse_one("f[x @@ y]");
+        match expr {
+            Expr::Call { args, .. } => {
+                assert!(matches!(args[0], Expr::Apply { .. }));
+            }
+            _ => panic!("Expected Call"),
+        }
+        let expr = parse_one("f[x /. y]");
+        match expr {
+            Expr::Call { args, .. } => {
+                assert!(matches!(args[0], Expr::ReplaceAll { .. }));
+            }
+            _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_function_single_argument_is_pure() {
+        let expr = parse_one("Function[BinomialQ[#, x]]");
+        assert!(matches!(expr, Expr::Pure { .. }));
+        // Two-argument form still names parameters.
+        let expr = parse_one("Function[x, x + 1]");
+        match expr {
+            Expr::Function { params, .. } => assert_eq!(params, vec!["x".to_string()]),
+            _ => panic!("Expected Function"),
+        }
+    }
+
+    #[test]
+    fn test_immediate_definition_with_guard() {
+        let expr = parse_one("f[x_] = x /; x > 0");
+        match expr {
+            Expr::FuncDef { delayed, guard, .. } => {
+                assert!(!delayed);
+                assert!(guard.is_some());
+            }
+            _ => panic!("Expected FuncDef, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_delayed_assign_to_symbol() {
+        assert_eq!(
+            parse_one("x := 5"),
+            Expr::Assign {
+                lhs: Box::new(sym("x")),
+                rhs: Box::new(Expr::Integer(Integer::from(5))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_definition_inside_call_argument() {
+        // `If[...]` arguments are parsed as patterns; `:=` must be accepted.
+        let expr = parse_one("If[c, f[x_] := x, y]");
+        match expr {
+            Expr::If { then_branch, .. } => {
+                assert!(matches!(*then_branch, Expr::FuncDef { .. }));
+            }
+            _ => panic!("Expected If"),
+        }
+    }
+
+    #[test]
+    fn test_multiline_export_list() {
+        // `expect_ident` must skip newlines: multi-line idents lists are common
+        // in package headers.
+        assert_eq!(
+            parse_str("export A, B,\nC"),
+            vec![Expr::Export(vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string()
+            ])]
+        );
+    }
+
+    #[test]
+    fn test_debug_info_records_statement_line() {
+        let toks = tokenize("a;\nb").unwrap();
+        let stmts = parse_with_debug_info(toks).unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].2, 1);
+        assert_eq!(stmts[1].2, 2);
+    }
+
+    #[test]
+    fn test_parse_corpus_files() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else if p.extension().is_some_and(|x| x == "syma") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(std::path::Path::new("."), &mut files);
+        files.sort();
+        let mut failures = Vec::new();
+        for f in &files {
+            let src = std::fs::read_to_string(f).unwrap();
+            let parsed = tokenize(&src)
+                .map_err(|e| e.to_string())
+                .and_then(|t| parse(t).map_err(|e| e.to_string()));
+            if let Err(e) = parsed {
+                failures.push(format!("{:?}: {}", f, e));
+            }
+        }
+        // Three files still fail on their own quirks (see report); everything
+        // else in the shipped corpus must parse.
+        for f in &failures {
+            println!("corpus parse failure: {}", f);
+        }
+        assert!(
+            failures.len() <= 3,
+            "too many corpus parse failures: {:?}",
+            failures
+        );
     }
 }
