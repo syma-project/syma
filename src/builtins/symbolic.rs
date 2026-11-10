@@ -167,7 +167,7 @@ fn simplify_times(args: &[Value]) -> Value {
     for arg in args {
         match arg {
             Value::Integer(n) if n.is_zero() => return Value::Integer(Integer::from(0)),
-            Value::Integer(n) if *n == Integer::from(1) => {}
+            Value::Integer(n) if *n == 1 => {}
             Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 0.0) => {
                 return Value::Integer(Integer::from(0));
             }
@@ -244,9 +244,9 @@ fn simplify_times(args: &[Value]) -> Value {
     let mut result: Vec<Value> = Vec::new();
     // Add numeric product unless it's 1 (in any form)
     let is_one = match &numeric_product {
-        Value::Integer(n) => *n == Integer::from(1),
+        Value::Integer(n) => *n == 1,
         Value::Real(r) => *r == Float::with_val(DEFAULT_PRECISION, 1.0),
-        Value::Rational(r) => **r == Rational::from(1_i64),
+        Value::Rational(r) => **r == 1,
         _ => false,
     };
     if !is_one {
@@ -256,7 +256,7 @@ fn simplify_times(args: &[Value]) -> Value {
         if exp.is_zero() {
             continue;
         }
-        if exp == Integer::from(1) {
+        if exp == 1 {
             result.push(base);
         } else {
             result.push(simplify_call("Power", &[base, Value::Integer(exp)]));
@@ -358,7 +358,21 @@ fn expand_value(val: &Value) -> Value {
         Value::Call { head, args } => {
             let expanded_args: Vec<Value> = args.iter().map(expand_value).collect();
             match head.as_str() {
-                "Times" => expand_times(&expanded_args),
+                "Times" => match expanded_args.len() {
+                    0 => Value::Integer(Integer::from(1)),
+                    1 => expanded_args.into_iter().next().unwrap(),
+                    2 => expand_times(&expanded_args),
+                    // Fold pairwise so products of 3+ factors (that may contain
+                    // sums) still distribute fully.
+                    _ => {
+                        let mut it = expanded_args.into_iter();
+                        let mut acc = it.next().unwrap();
+                        for next in it {
+                            acc = expand_times(&[acc, next]);
+                        }
+                        acc
+                    }
+                },
                 "Power" => expand_power(&expanded_args),
                 "Divide" if args.len() == 2 => {
                     let canceled = cancel_common_factors(&args[0], &args[1]);
@@ -494,7 +508,7 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
     }
 
     // Polynomial long division
-    let mut remainder: Vec<Value> = num_coeffs.iter().map(|v| simplify_value(v)).collect();
+    let mut remainder: Vec<Value> = num_coeffs.iter().map(simplify_value).collect();
     let den_lead_inv = invert_value(den_lead);
 
     let quot_deg = num_deg - den_deg;
@@ -514,11 +528,10 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
         quot_coeffs[i as usize] = q.clone();
 
         // Subtract q * den_coeffs shifted by i from remainder
-        for k in 0..den_coeffs.len() {
+        for (k, den_k) in den_coeffs.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub =
-                    expand_value(&simplify_call("Times", &[q.clone(), den_coeffs[k].clone()]));
+                let sub = expand_value(&simplify_call("Times", &[q.clone(), den_k.clone()]));
                 let neg = expand_value(&simplify_call(
                     "Times",
                     &[Value::Integer(Integer::from(-1)), sub],
@@ -534,7 +547,7 @@ fn try_polynomial_divide(num: &Value, den: &Value) -> Option<Value> {
     }
 
     // Check if all remaining coefficients are zero
-    let all_zero = remainder.iter().all(|v| is_zero_value(v));
+    let all_zero = remainder.iter().all(is_zero_value);
     if !all_zero {
         return None;
     }
@@ -654,9 +667,16 @@ fn expand_power(args: &[Value]) -> Value {
             args: plus_args,
         } = base
         && head == "Plus"
-        && plus_args.len() == 2
         && (0..=10).contains(&n_i64)
     {
+        if plus_args.len() != 2 {
+            // General (multinomial) case: repeated distribution.
+            let mut acc = Value::Integer(Integer::from(1));
+            for _ in 0..n_i64 {
+                acc = expand_times(&[acc, base.clone()]);
+            }
+            return acc;
+        }
         let (a, b) = (&plus_args[0], &plus_args[1]);
         let mut terms = Vec::new();
         for k in 0..=n_i64 {
@@ -739,46 +759,48 @@ pub fn builtin_d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         .collect();
 
     // Check if second argument is a List {x, n} or {x, n, x0}
-    if let Value::List(items) = &unwrapped[1] {
-        if !items.is_empty() && items.len() >= 2 && items.len() <= 3 {
-            let var = items[0].clone();
-            let n = items[1].to_integer().ok_or_else(|| {
-                EvalError::Error("D: order n must be a non-negative integer".to_string())
-            })?;
-            if n < 0 {
-                return Err(EvalError::Error(
-                    "D: order n must be a non-negative integer".to_string(),
-                ));
-            }
-            // Repeatedly differentiate n times w.r.t. var
-            let mut result = unwrapped[0].clone();
-            for _ in 0..n as usize {
-                result = eval_d_2(result, var.clone(), env)?;
-            }
-            if items.len() == 3 {
-                // D[f, {x, n, x0}] — evaluate at x = x0
-                let var_name = match &var {
-                    Value::Symbol(s) => s.clone(),
-                    _ => {
-                        return Err(EvalError::Error(
-                            "D: variable in {x, n, x0} must be a symbol".to_string(),
-                        ));
-                    }
-                };
-                if unwrapped.len() > 2 {
-                    for arg in &unwrapped[2..] {
-                        result = eval_d_2(result, arg.clone(), env)?;
-                    }
+    if let Value::List(items) = &unwrapped[1]
+        && !items.is_empty()
+        && items.len() >= 2
+        && items.len() <= 3
+    {
+        let var = items[0].clone();
+        let n = items[1].to_integer().ok_or_else(|| {
+            EvalError::Error("D: order n must be a non-negative integer".to_string())
+        })?;
+        if n < 0 {
+            return Err(EvalError::Error(
+                "D: order n must be a non-negative integer".to_string(),
+            ));
+        }
+        // Repeatedly differentiate n times w.r.t. var
+        let mut result = unwrapped[0].clone();
+        for _ in 0..n as usize {
+            result = eval_d_2(result, var.clone(), env)?;
+        }
+        if items.len() == 3 {
+            // D[f, {x, n, x0}] — evaluate at x = x0
+            let var_name = match &var {
+                Value::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "D: variable in {x, n, x0} must be a symbol".to_string(),
+                    ));
                 }
-                return Ok(substitute_and_eval(&result, &var_name, &items[2]));
-            }
+            };
             if unwrapped.len() > 2 {
                 for arg in &unwrapped[2..] {
                     result = eval_d_2(result, arg.clone(), env)?;
                 }
             }
-            return Ok(result);
+            return Ok(substitute_and_eval(&result, &var_name, &items[2]));
         }
+        if unwrapped.len() > 2 {
+            for arg in &unwrapped[2..] {
+                result = eval_d_2(result, arg.clone(), env)?;
+            }
+        }
+        return Ok(result);
     }
 
     // Multi-arg: D[f, x, y, z, ...] — fold left: D[D[D[f, x], y], z]
@@ -814,19 +836,17 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
         head: ref h,
         ref args,
     } = concrete
+        && h == "D"
+        && args.len() == 2
     {
-        if h == "D" && args.len() == 2 {
-            // Call eval_d_2 directly with already-unwrapped args
-            let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
-            return eval_d_2(inner_result, var, env);
-        }
+        // Call eval_d_2 directly with already-unwrapped args
+        let inner_result = eval_d_2(args[0].clone(), args[1].clone(), env)?;
+        return eval_d_2(inner_result, var, env);
     }
 
     // Flatten nested Plus/Times (parser builds nested, Flat flattens at runtime)
     let flattened = match &concrete {
-        &Value::Call { ref head, ref args }
-            if (head == "Plus" || head == "Times") && args.len() >= 2 =>
-        {
+        Value::Call { head, args } if (head == "Plus" || head == "Times") && args.len() >= 2 => {
             let flat_args = crate::eval::flatten_flat_args(head, args);
             if flat_args.len() != args.len() {
                 Some(Value::Call {
@@ -915,7 +935,7 @@ fn add_times(left: Vec<Value>, right: Vec<Value>) -> Value {
 
 /// Create a Times of values. Returns 0 if any arg is 0.
 fn make_times(items: Vec<Value>) -> Value {
-    if items.iter().any(|v| is_zero(v)) {
+    if items.iter().any(is_zero) {
         return Value::Integer(rug::Integer::from(0));
     }
     match items.len() {
@@ -988,10 +1008,10 @@ fn lazy_load_d(env: &Env) -> Result<(), EvalError> {
 
     // After loading, ensure the D function is in the root scope so it's
     // accessible from all child scopes.
-    if let Some(d_func) = env.get("D") {
-        if let Value::Function(_) = &d_func {
-            env.root_env().set("D".to_string(), d_func);
-        }
+    if let Some(d_func) = env.get("D")
+        && let Value::Function(_) = &d_func
+    {
+        env.root_env().set("D".to_string(), d_func);
     }
 
     Ok(())
@@ -1156,13 +1176,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
         for dir in paths.iter() {
             let candidate = dir.join(REL_PATH).join(fname);
             if candidate.exists() {
-                if let Ok(source) = std::fs::read_to_string(&candidate) {
-                    if let Ok(tokens) = crate::lexer::tokenize(&source) {
-                        if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                            for (expr, _suppress) in stmts {
-                                let _ = crate::eval::eval(&expr, env);
-                            }
-                        }
+                if let Ok(source) = std::fs::read_to_string(&candidate)
+                    && let Ok(tokens) = crate::lexer::tokenize(&source)
+                    && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+                {
+                    for (expr, _suppress) in stmts {
+                        let _ = crate::eval::eval(&expr, env);
                     }
                 }
                 return;
@@ -1181,13 +1200,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
             .join(REL_PATH)
             .join(fname);
         if candidate.exists() {
-            if let Ok(source) = std::fs::read_to_string(&candidate) {
-                if let Ok(tokens) = crate::lexer::tokenize(&source) {
-                    if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                        for (expr, _suppress) in stmts {
-                            let _ = crate::eval::eval(&expr, env);
-                        }
-                    }
+            if let Ok(source) = std::fs::read_to_string(&candidate)
+                && let Ok(tokens) = crate::lexer::tokenize(&source)
+                && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+            {
+                for (expr, _suppress) in stmts {
+                    let _ = crate::eval::eval(&expr, env);
                 }
             }
             return;
@@ -1195,13 +1213,12 @@ fn load_integrate_file(env: &Env, fname: &str) {
     }
 
     // Fallback: embedded source
-    if let Some(source) = embedded_integrate_source(fname) {
-        if let Ok(tokens) = crate::lexer::tokenize(&source) {
-            if let Ok(stmts) = crate::parser::parse_with_suppress(tokens) {
-                for (expr, _suppress) in stmts {
-                    let _ = crate::eval::eval(&expr, env);
-                }
-            }
+    if let Some(source) = embedded_integrate_source(fname)
+        && let Ok(tokens) = crate::lexer::tokenize(&source)
+        && let Ok(stmts) = crate::parser::parse_with_suppress(tokens)
+    {
+        for (expr, _suppress) in stmts {
+            let _ = crate::eval::eval(&expr, env);
         }
     }
 }
@@ -1681,7 +1698,7 @@ fn expr_from_coeffs(coeffs: &[Value], var: &str) -> Value {
 fn strip_pattern(v: &Value) -> Value {
     match v {
         Value::Pattern(unevaluated) => expr_to_value(unevaluated),
-        Value::List(items) => Value::List(items.iter().map(|item| strip_pattern(item)).collect()),
+        Value::List(items) => Value::List(items.iter().map(strip_pattern).collect()),
         _ => v.clone(),
     }
 }
@@ -2054,143 +2071,73 @@ fn solve_quartic(coeffs: &[Value], var: &str) -> Value {
             let d = di.to_f64();
             let e = ei.to_f64();
 
-            // Depress quartic: x = t - b/(4a)
-            // t^4 + p*t^2 + q*t + r = 0
-            let p = c / a - 6.0 * (b / a).powi(2) / 4.0;
-            let q = d / a + 3.0 * (b / a).powi(3) / 8.0 - b * c / (2.0 * a * a);
-            let r = e / a - 3.0 * (b / a).powi(4) / 256.0 + (b / a).powi(2) * c / (16.0 * a)
-                - b * d / (8.0 * a * a);
+            // Depress quartic: x = t - b/(4a)  =>  t^4 + p t^2 + q t + r = 0
+            let p = c / a - 3.0 * b * b / (8.0 * a * a);
+            let q = d / a - b * c / (2.0 * a * a) + b * b * b / (8.0 * a * a * a);
+            let r = e / a - 3.0 * b.powi(4) / (256.0 * a.powi(4)) + b * b * c / (16.0 * a.powi(3))
+                - b * d / (4.0 * a.powi(3));
 
-            // Resolvent cubic: m^3 + 2p*m^2 + (p^2 - 4r)*m - q^2 = 0
-            // Substitute m = y - 2p/3 to depress:
-            // y^3 + Py + Q = 0
-            let resolvent_p = p * p / 3.0 - 4.0 * r;
-            let resolvent_q = 2.0 * p * p * p / 27.0 - p * (p * p - 4.0 * r) / 3.0 - q * q;
+            // Resolvent cubic in m: m^3 + 2p m^2 + (p^2 - 4r) m - q^2 = 0.
+            // Depress with m = y - 2p/3 to get y^3 + P y + Q = 0.
+            let res_a = 2.0 * p;
+            let res_b = p * p - 4.0 * r;
+            let res_c = -q * q;
+            let res_p = res_b - res_a * res_a / 3.0;
+            let res_q = 2.0 * res_a * res_a * res_a / 27.0 - res_a * res_b / 3.0 + res_c;
 
-            // Cardano: resolvent_disc = resolvent_q^2/4 + resolvent_p^3/27
-            let resolvent_disc =
-                resolvent_q * resolvent_q / 4.0 + resolvent_p * resolvent_p * resolvent_p / 27.0;
-
-            if resolvent_disc >= 0.0 {
-                let u_cub = -resolvent_q / 2.0 + resolvent_disc.sqrt();
-                let v_cub = -resolvent_q / 2.0 - resolvent_disc.sqrt();
-                let u = u_cub.copysign(1.0).abs().powf(1.0 / 3.0);
-                let v = v_cub.copysign(1.0).abs().powf(1.0 / 3.0);
-                let y = u + v;
-                let m = y - 2.0 * p / 3.0;
-
-                if m < 0.0 {
-                    return Value::List(vec![]);
-                }
-
-                let sqrt_m = m.sqrt();
-
-                // Two quadratics:
-                // t^2 + sqrt(m)*t + (m/2 + p/sqrt(m)) = 0  [sign chosen to match -q]
-                // t^2 - sqrt(m)*t + (m/2 - p/sqrt(m)) = 0
-                let q_sign = if q >= 0.0 { 1.0 } else { -1.0 };
-                let s1 = q_sign * sqrt_m;
-                let s2 = -q_sign * sqrt_m;
-                let c1 = m / 2.0 + p / sqrt_m;
-                let c2 = m / 2.0 - p / sqrt_m;
-
-                // Quadratic 1: t^2 + s1*t + c1 = 0
-                // Quadratic 2: t^2 + s2*t + c2 = 0
-
-                let mut roots: Vec<Value> = Vec::new();
-
-                for (s, c) in [(s1, c1), (s2, c2)] {
-                    let disc = s * s - 4.0 * c;
-                    if disc >= 0.0 {
-                        let sqrt_disc = disc.sqrt();
-                        let t1 = (-s + sqrt_disc) / 2.0;
-                        let t2 = (-s - sqrt_disc) / 2.0;
-                        let shift = -b / (4.0 * a);
-                        let x1 = t1 + shift;
-                        let x2 = t2 + shift;
-                        if disc > 1e-12 {
-                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
-                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x2)));
-                        } else {
-                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
-                        }
-                    }
-                }
-
-                let x_sym = Value::Symbol(var.to_string());
-                Value::List(
-                    roots
-                        .into_iter()
-                        .map(|r| Value::Rule {
-                            lhs: Box::new(x_sym.clone()),
-                            rhs: Box::new(r),
-                            delayed: false,
-                        })
-                        .collect(),
-                )
+            // A real root y of the depressed resolvent cubic.
+            let disc = res_q * res_q / 4.0 + res_p * res_p * res_p / 27.0;
+            let y = if disc >= 0.0 {
+                (-res_q / 2.0 + disc.sqrt()).cbrt() + (-res_q / 2.0 - disc.sqrt()).cbrt()
             } else {
-                // resolvent_disc < 0: casus irreducibilis for resolvent cubic
-                // Try trigonometric method for the resolvent cubic
-                // y^3 + resolvent_p*y + resolvent_q = 0 with resolvent_disc < 0
-                let mut roots: Vec<Value> = Vec::new();
-                let r_trig = ((-resolvent_q / 2.0) / (-resolvent_p / 3.0).powf(1.5))
-                    .abs()
-                    .min(1.0);
-                let theta = (r_trig).acos();
-
+                // Three real roots: pick the largest so that m = y - 2p/3 > 0.
+                let s = (-res_p / 3.0).sqrt();
+                let arg = (3.0 * res_q) / (2.0 * res_p) * (-3.0 / res_p).sqrt();
+                let theta = arg.clamp(-1.0, 1.0).acos() / 3.0;
+                let mut best = f64::NEG_INFINITY;
                 for k in 0..3 {
-                    let y = 2.0
-                        * (-resolvent_p / 3.0).sqrt()
-                        * ((theta as f64 - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos());
-                    let m = y - 2.0 * p / 3.0;
-
-                    if m < 1e-12 {
-                        continue;
-                    }
-
-                    let sqrt_m = m.sqrt();
-                    let c1 = m / 2.0 + p / sqrt_m;
-                    let c2 = m / 2.0 - p / sqrt_m;
-                    let q_sign = if q >= 0.0 { 1.0 } else { -1.0 };
-                    let s1 = q_sign * sqrt_m;
-                    let s2 = -q_sign * sqrt_m;
-
-                    for (s, c) in [(s1, c1), (s2, c2)] {
-                        let disc = s * s - 4.0 * c;
-                        if disc >= 0.0 {
-                            let sqrt_disc = disc.sqrt();
-                            let t1 = (-s + sqrt_disc) / 2.0;
-                            let t2 = (-s - sqrt_disc) / 2.0;
-                            let shift = -b / (4.0 * a);
-                            let x1 = t1 + shift;
-                            let x2 = t2 + shift;
-                            if disc > 1e-12 {
-                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
-                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x2)));
-                            } else {
-                                roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
-                            }
-                        }
-                    }
-
-                    // Return first valid factorization found
-                    if !roots.is_empty() {
-                        let x_sym = Value::Symbol(var.to_string());
-                        return Value::List(
-                            roots
-                                .into_iter()
-                                .map(|r| Value::Rule {
-                                    lhs: Box::new(x_sym.clone()),
-                                    rhs: Box::new(r),
-                                    delayed: false,
-                                })
-                                .collect(),
-                        );
+                    let yy =
+                        2.0 * s * (theta - 2.0 * std::f64::consts::PI * (k as f64) / 3.0).cos();
+                    if yy > best {
+                        best = yy;
                     }
                 }
+                best
+            };
+            let m = y - 2.0 * p / 3.0;
 
-                Value::List(vec![])
+            let mut roots: Vec<Value> = Vec::new();
+            if m > 1e-12 {
+                // t^4 + p t^2 + q t + r = (t^2 + s t + c1)(t^2 - s t + c2)
+                let s = m.sqrt();
+                let c1 = (p + m - q / s) / 2.0;
+                let c2 = (p + m + q / s) / 2.0;
+                let shift = -b / (4.0 * a);
+                for (sq, cc) in [(s, c1), (-s, c2)] {
+                    let d2 = sq * sq - 4.0 * cc;
+                    if d2 >= 0.0 {
+                        let sd = d2.sqrt();
+                        let x1 = (-sq + sd) / 2.0 + shift;
+                        let x2 = (-sq - sd) / 2.0 + shift;
+                        roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x1)));
+                        if d2 > 1e-12 {
+                            roots.push(Value::Real(Float::with_val(DEFAULT_PRECISION, x2)));
+                        }
+                    }
+                }
             }
+
+            let x_sym = Value::Symbol(var.to_string());
+            Value::List(
+                roots
+                    .into_iter()
+                    .map(|r| Value::Rule {
+                        lhs: Box::new(x_sym.clone()),
+                        rhs: Box::new(r),
+                        delayed: false,
+                    })
+                    .collect(),
+            )
         }
         _ => Value::List(vec![]),
     }
@@ -2614,13 +2561,7 @@ fn extract_symbol_from(val: &Value) -> Result<String, EvalError> {
         Value::Symbol(s) | Value::Str(s) => Ok(s.clone()),
         Value::Builtin(name, _) => Ok(name.clone()),
         Value::Function(fd) => Ok(fd.name.clone()),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => Ok(s.clone()),
-            _ => Err(EvalError::TypeError {
-                expected: "Symbol or String".to_string(),
-                got: val.type_name().to_string(),
-            }),
-        },
+        Value::Pattern(Expr::Symbol(s)) => Ok(s.clone()),
         _ => Err(EvalError::TypeError {
             expected: "Symbol or String".to_string(),
             got: val.type_name().to_string(),
@@ -2680,15 +2621,7 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
         Value::Symbol(s) | Value::Str(s) => s.clone(),
         Value::Builtin(name, _) => name.clone(),
         Value::Function(fd) => fd.name.clone(),
-        Value::Pattern(p) => match p {
-            Expr::Symbol(s) => s.clone(),
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "Symbol or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
+        Value::Pattern(Expr::Symbol(s)) => s.clone(),
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),
@@ -2809,6 +2742,45 @@ mod tests {
             Value::Call { head, .. } if head == "Plus" => {}
             _ => panic!("Expected Plus (expanded), got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_expand_three_factors() {
+        // Regression: Times with 3+ factors was not distributed.
+        let expr = simplify_call(
+            "Times",
+            &[
+                simplify_call("Plus", &[sym("x"), int(1)]),
+                simplify_call("Plus", &[sym("x"), int(2)]),
+                simplify_call("Plus", &[sym("x"), int(3)]),
+            ],
+        );
+        let result = builtin_expand(&[expr]).unwrap();
+        let coeffs = extract_polynomial_coeffs(&result, "x");
+        let vals: Vec<i64> = coeffs
+            .iter()
+            .map(|c| match c {
+                Value::Integer(n) => n.to_i64().unwrap_or(0),
+                _ => 0,
+            })
+            .collect();
+        // (x+1)(x+2)(x+3) = x^3 + 6x^2 + 11x + 6
+        assert_eq!(vals, vec![6, 11, 6, 1]);
+    }
+
+    #[test]
+    fn test_expand_trinomial_power() {
+        // Regression: (x+y+1)^2 with a 3-term base was not expanded.
+        let base = simplify_call("Plus", &[sym("x"), sym("y"), int(1)]);
+        let expr = simplify_call("Power", &[base, int(2)]);
+        let result = builtin_expand(&[expr]).unwrap();
+        let at_one = substitute_and_eval(&result, "x", &int(1));
+        let at_one = substitute_and_eval(&at_one, "y", &int(1));
+        // (1+1+1)^2 = 9
+        assert!(
+            matches!(&at_one, Value::Integer(n) if *n == 9),
+            "got {at_one}"
+        );
     }
 
     // ── Differentiation integration tests ──
@@ -2974,16 +2946,68 @@ mod tests {
         let result = builtin_solve(&[eq, sym("x")]).unwrap();
         match &result {
             Value::List(items) if !items.is_empty() => {
-                // Each item should be a Rule
+                let mut roots: Vec<f64> = Vec::new();
                 for item in items {
-                    assert!(
-                        matches!(item, Value::Rule { .. }),
-                        "Expected Rule, got {:?}",
-                        item
-                    );
+                    let rhs = match item {
+                        Value::Rule { rhs, .. } => rhs.as_ref(),
+                        _ => panic!("Expected Rule, got {:?}", item),
+                    };
+                    roots.push(match rhs {
+                        Value::Real(r) => r.to_f64(),
+                        Value::Integer(n) => n.to_f64(),
+                        _ => panic!("Expected numeric root, got {:?}", rhs),
+                    });
+                }
+                roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                // Regression: wrong depression/resolvent formulas produced
+                // roots near -0.33 and -2.03 instead of {-2,-1,1,2}.
+                assert_eq!(roots.len(), 4, "expected four roots, got {roots:?}");
+                for (got, want) in roots.iter().zip([-2.0, -1.0, 1.0, 2.0]) {
+                    assert!((got - want).abs() < 1e-9, "roots {roots:?}");
                 }
             }
             _ => panic!("Expected a list of solutions, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_solve_quartic_shifted() {
+        // (x-1)(x-2)(x-3)(x-4) = 0 → roots 1,2,3,4. Here b != 0, which
+        // exercises the quartic depression/resolvent formulas.
+        let poly = simplify_call(
+            "Times",
+            &[
+                simplify_call("Plus", &[sym("x"), int(-1)]),
+                simplify_call("Plus", &[sym("x"), int(-2)]),
+                simplify_call("Plus", &[sym("x"), int(-3)]),
+                simplify_call("Plus", &[sym("x"), int(-4)]),
+            ],
+        );
+        let poly = builtin_expand(&[poly]).unwrap();
+        let eq = Value::Call {
+            head: "Equal".to_string(),
+            args: vec![poly, int(0)],
+        };
+        let result = builtin_solve(&[eq, sym("x")]).unwrap();
+        let items = match &result {
+            Value::List(items) => items,
+            _ => panic!("expected list, got {result}"),
+        };
+        let mut roots: Vec<f64> = items
+            .iter()
+            .filter_map(|item| match item {
+                Value::Rule { rhs, .. } => match rhs.as_ref() {
+                    Value::Real(r) => Some(r.to_f64()),
+                    Value::Integer(n) => Some(n.to_f64()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(roots.len(), 4, "expected four roots, got {roots:?}");
+        for (got, want) in roots.iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert!((got - want).abs() < 1e-9, "roots {roots:?}");
         }
     }
 

@@ -183,73 +183,88 @@ pub fn builtin_odd_q(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-/// HalfIntegerQ[a] — is a a half-integer (n + 1/2)
-pub fn builtin_half_integer_q(args: &[Value]) -> Result<Value, EvalError> {
+/// EvenQ[a] — is a an even integer
+pub fn builtin_even_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
-            "HalfIntegerQ requires exactly 1 argument".to_string(),
+            "EvenQ requires exactly 1 argument".to_string(),
         ));
     }
     match &args[0] {
-        Value::Rational(r) => {
-            let den = r.denom();
-            if *den == Integer::from(2) && r.numer().is_odd() {
-                return Ok(Value::Bool(true));
-            }
-            let num = r.numer();
-            if num.is_even() && *den == Integer::from(1) {
-                return Ok(Value::Bool(false));
-            }
-            let double = num.clone() / den.clone();
-            Ok(Value::Bool(double.is_odd()))
-        }
+        Value::Integer(n) => Ok(Value::Bool(n.is_even())),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+/// HalfIntegerQ[a, b, ...] — all args are half-integers (odd multiples of 1/2).
+pub fn builtin_half_integer_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "HalfIntegerQ requires at least 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Bool(args.iter().all(is_half_integer)))
+}
+
+fn is_half_integer(v: &Value) -> bool {
+    match v {
+        // Odd multiple of 1/2: numerator odd, denominator 2.
+        Value::Rational(r) => *r.denom() == 2 && r.numer().is_odd(),
         Value::Real(r) => {
             let doubled: Float = r.clone() * 2.0;
-            if doubled.is_integer() {
-                let val = doubled.to_f64() as i64;
-                return Ok(Value::Bool(val % 2 != 0));
-            }
-            Ok(Value::Bool(false))
+            doubled.is_integer() && doubled.to_f64() as i64 % 2 != 0
         }
-        Value::Integer(_) => Ok(Value::Bool(false)),
-        _ => Ok(Value::Bool(false)),
+        _ => false,
     }
 }
 
-/// RationalQ[a] — is a a rational number (Integer or Rational)
+/// RationalQ[a, b, ...] — all args are rational numbers (Integer or Rational).
 pub fn builtin_rational_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "RationalQ requires exactly 1 argument".to_string(),
+            "RationalQ requires at least 1 argument".to_string(),
         ));
     }
-    Ok(Value::Bool(matches!(
-        &args[0],
-        Value::Integer(_) | Value::Rational(_)
-    )))
+    Ok(Value::Bool(args.iter().all(|a| {
+        matches!(a, Value::Integer(_) | Value::Rational(_))
+    })))
 }
 
-/// IntegersQ[{a, b, ...}] — all elements are integers
+/// FractionQ[a, b, ...] — all args are explicit non-integer fractions.
+pub fn builtin_fraction_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "FractionQ requires at least 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Bool(
+        args.iter().all(|a| matches!(a, Value::Rational(_))),
+    ))
+}
+
+/// IntegersQ[a, b, ...] or IntegersQ[{a, b, ...}] — all values are integers.
 pub fn builtin_integers_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "IntegersQ requires exactly 1 argument".to_string(),
+            "IntegersQ requires at least 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::List(items) => Ok(Value::Bool(
-            items.iter().all(|i| matches!(i, Value::Integer(_))),
-        )),
-        Value::Integer(_) => Ok(Value::Bool(true)),
-        _ => Ok(Value::Bool(false)),
+    let all_int = |v: &Value| matches!(v, Value::Integer(_));
+    if args.len() == 1
+        && let Value::List(items) = &args[0]
+    {
+        return Ok(Value::Bool(items.iter().all(all_int)));
     }
+    Ok(Value::Bool(args.iter().all(all_int)))
 }
 
-/// PolyQ[expr, x] — expr is a polynomial in x
+/// PolyQ[expr] / PolyQ[expr, x] / PolyQ[expr, x, n] — expr is a polynomial in
+/// `x` (optionally of degree at most `n`). Rubi rule files call the 3-argument
+/// form.
 pub fn builtin_poly_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() || args.len() > 3 {
         return Err(EvalError::Error(
-            "PolyQ requires 1 or 2 arguments".to_string(),
+            "PolyQ requires 1 to 3 arguments".to_string(),
         ));
     }
     // Simple heuristic: no denominators containing the variable
@@ -261,7 +276,19 @@ pub fn builtin_poly_q(args: &[Value]) -> Result<Value, EvalError> {
         Some(ref vx) => is_polynomial(&args[0], vx),
         None => is_polynomial_any(&args[0]),
     };
-    Ok(Value::Bool(result))
+    if !result {
+        return Ok(Value::Bool(false));
+    }
+    // Optional degree bound.
+    if let Some(Value::Integer(maxdeg)) = args.get(2)
+        && !maxdeg.is_negative()
+        && let Some(vx) = &var
+        && let Some(deg) = poly_degree_in(&args[0], vx)
+        && let Some(limit) = maxdeg.to_i64()
+    {
+        return Ok(Value::Bool(deg <= limit));
+    }
+    Ok(Value::Bool(true))
 }
 
 /// AtomQ[a] — is a an atomic value (not a Call or List)
@@ -367,7 +394,7 @@ pub fn builtin_known_cotangent_integrand_q(args: &[Value]) -> Result<Value, Eval
 
 /// Simp[expr, x] — simplify (delegate to Simplify)
 pub fn builtin_simp(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "Simp requires at least 1 argument".to_string(),
         ));
@@ -539,7 +566,7 @@ pub fn builtin_nonfree_factors(args: &[Value]) -> Result<Value, EvalError> {
 
 /// ExpandIntegrand[expr, x] — expand integrand (delegate to Expand)
 pub fn builtin_expand_integrand(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "ExpandIntegrand requires at least 1 argument".to_string(),
         ));
@@ -549,7 +576,7 @@ pub fn builtin_expand_integrand(args: &[Value]) -> Result<Value, EvalError> {
 
 /// ExpandToSum[expr, x] — expand to sum (delegate to Expand)
 pub fn builtin_expand_to_sum(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "ExpandToSum requires at least 1 argument".to_string(),
         ));
@@ -593,7 +620,7 @@ pub fn builtin_dist(args: &[Value]) -> Result<Value, EvalError> {
 
 /// RemoveContent[expr, x] — remove constant content (stub: return expr)
 pub fn builtin_remove_content(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "RemoveContent requires at least 1 argument".to_string(),
         ));
@@ -628,7 +655,7 @@ pub fn builtin_linear_q(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
     let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
-    Ok(Value::Bool(coeffs.len() >= 1 && coeffs.len() <= 2))
+    Ok(Value::Bool(!coeffs.is_empty() && coeffs.len() <= 2))
 }
 
 /// SumQ[expr] — is expr a sum (Plus with multiple args)
@@ -772,38 +799,35 @@ pub fn builtin_with(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap bindings from Pattern(Expr)
     let bindings_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     // Evaluate bindings in child env to get concrete values
     let bindings_val = eval(&bindings_expr, &child_env)?;
-    match &bindings_val {
-        Value::List(pairs) => {
-            for pair in pairs {
-                match pair {
-                    Value::Rule { lhs, rhs, .. } => {
-                        let name = match &**lhs {
-                            Value::Symbol(s) => s.clone(),
-                            _ => lhs.to_string(),
-                        };
-                        child_env.set(name, (**rhs).clone());
-                    }
-                    Value::Call { head, args: a } if head == "Set" && a.len() == 2 => {
-                        let name = match &a[0] {
-                            Value::Symbol(s) => s.clone(),
-                            _ => a[0].to_string(),
-                        };
-                        child_env.set(name, a[1].clone());
-                    }
-                    _ => {}
+    if let Value::List(pairs) = &bindings_val {
+        for pair in pairs {
+            match pair {
+                Value::Rule { lhs, rhs, .. } => {
+                    let name = match &**lhs {
+                        Value::Symbol(s) => s.clone(),
+                        _ => lhs.to_string(),
+                    };
+                    child_env.set(name, (**rhs).clone());
                 }
+                Value::Call { head, args: a } if head == "Set" && a.len() == 2 => {
+                    let name = match &a[0] {
+                        Value::Symbol(s) => s.clone(),
+                        _ => a[0].to_string(),
+                    };
+                    child_env.set(name, a[1].clone());
+                }
+                _ => {}
             }
         }
-        _ => {}
     }
     // Unwrap body from Pattern(Expr) and eval in child env
     let body_expr = match &args[1] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     eval(&body_expr, &child_env)
 }
@@ -819,7 +843,7 @@ pub fn builtin_module(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap vars from Pattern(Expr)
     let vars_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     let vars_val = eval(&vars_expr, &child_env)?;
     if let Value::List(vars) = &vars_val {
@@ -834,7 +858,7 @@ pub fn builtin_module(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Unwrap body and eval in child env
     let body_expr = match &args[1] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     eval(&body_expr, &child_env)
 }
@@ -848,20 +872,20 @@ pub fn builtin_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     // Evaluate condition first
     let cond_expr = match &args[0] {
         Value::Pattern(e) => e.clone(),
-        ref v => value_to_expr(v),
+        v => value_to_expr(v),
     };
     let cond_val = eval(&cond_expr, env)?;
     let cond = cond_val.to_bool();
     if cond {
         let body_expr = match &args[1] {
             Value::Pattern(e) => e.clone(),
-            ref v => value_to_expr(v),
+            v => value_to_expr(v),
         };
         eval(&body_expr, env)
     } else if args.len() == 3 {
         let body_expr = match &args[2] {
             Value::Pattern(e) => e.clone(),
-            ref v => value_to_expr(v),
+            v => value_to_expr(v),
         };
         eval(&body_expr, env)
     } else {
@@ -961,12 +985,89 @@ pub fn builtin_quadratic_q(args: &[Value]) -> Result<Value, EvalError> {
 
 /// FunctionOfQ[expr, var] — does expr depend on var
 pub fn builtin_function_of_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    // Rubi calls this as FunctionOfQ[v, u, x] (or with an extra PureFlag);
+    // the 2-arg form FunctionOfQ[expr, var] is also accepted.
+    if args.len() < 2 || args.len() > 4 {
         return Err(EvalError::Error(
-            "FunctionOfQ requires exactly 2 arguments".to_string(),
+            "FunctionOfQ requires 2, 3, or 4 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(!is_constant_wrt(&args[0], &args[1])))
+    if args.len() == 2 {
+        return Ok(Value::Bool(!is_constant_wrt(&args[0], &args[1])));
+    }
+    let (v, u, x) = (&args[0], &args[1], &args[2]);
+    let x = match x {
+        Value::Symbol(s) => s.as_str(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    Ok(Value::Bool(function_of_q(v, u, x)))
+}
+
+/// True if `val` contains no occurrence of the symbol `sym`.
+fn free_of_symbol(val: &Value, sym: &str) -> bool {
+    match val {
+        Value::Symbol(s) => s != sym,
+        Value::Call { args, .. } | Value::List(args) => args.iter().all(|a| free_of_symbol(a, sym)),
+        _ => true,
+    }
+}
+
+/// Rubi's `FunctionOfQ[v, u, x]`: is `u` a function of `v` (in `x`)?
+fn function_of_q(v: &Value, u: &Value, x: &str) -> bool {
+    // If u does not involve x, it is not considered a function of v.
+    if free_of_symbol(u, x) {
+        return false;
+    }
+    // An atom v is trivially "the" x-dependence of u.
+    if matches!(
+        v,
+        Value::Symbol(_) | Value::Integer(_) | Value::Real(_) | Value::Rational(_)
+    ) {
+        return true;
+    }
+    // Drop factors of v that are free of x.
+    let reduced;
+    let v = match v {
+        Value::Call { head, args } if head == "Times" => {
+            let nonfree: Vec<Value> = args
+                .iter()
+                .filter(|a| !free_of_symbol(a, x))
+                .cloned()
+                .collect();
+            if nonfree.len() == 1 {
+                return function_of_q(&nonfree[0], u, x);
+            }
+            reduced = Value::Call {
+                head: "Times".to_string(),
+                args: nonfree,
+            };
+            &reduced
+        }
+        _ => v,
+    };
+    function_of_expn(u, v, x)
+}
+
+/// Does the x-dependence of `u` flow entirely through powers/products/sums of `v`?
+fn function_of_expn(u: &Value, v: &Value, x: &str) -> bool {
+    if u.struct_eq(v) {
+        return true;
+    }
+    match u {
+        Value::Integer(_) | Value::Real(_) | Value::Rational(_) => true,
+        Value::Symbol(s) => s != x,
+        Value::Call { head, args } => match head.as_str() {
+            "Power" if args.len() == 2 && free_of_symbol(&args[1], x) => {
+                args[0].struct_eq(v) || function_of_expn(&args[0], v, x)
+            }
+            "Times" => args
+                .iter()
+                .all(|f| free_of_symbol(f, x) || function_of_expn(f, v, x)),
+            "Plus" => args.iter().all(|t| function_of_expn(t, v, x)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// FunctionOfLinear[expr, x] — identity stub
@@ -979,15 +1080,45 @@ pub fn builtin_function_of_linear(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
-/// InverseFunctionFreeQ[expr, func, x] — is expr free of func in x
+/// InverseFunctionFreeQ[expr, x] — is expr free of inverse functions in x
 pub fn builtin_inverse_function_free_q(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 3 {
+    // Rubi calls this with two arguments (u, x).
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "InverseFunctionFreeQ requires exactly 3 arguments".to_string(),
+            "InverseFunctionFreeQ requires at least 2 arguments".to_string(),
         ));
     }
-    // Stub: return True
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(inverse_function_free_q(&args[0], &args[1])))
+}
+
+fn inverse_function_free_q(expr: &Value, x: &Value) -> bool {
+    match expr {
+        Value::Call { head, args } => {
+            let inverse = matches!(
+                head.as_str(),
+                "ArcSin"
+                    | "ArcCos"
+                    | "ArcTan"
+                    | "ArcCot"
+                    | "ArcSec"
+                    | "ArcCsc"
+                    | "ArcSinh"
+                    | "ArcCosh"
+                    | "ArcTanh"
+                    | "ArcCoth"
+                    | "ArcSech"
+                    | "ArcCsch"
+                    | "Log"
+                    | "PolyLog"
+            );
+            if inverse && args.iter().any(|a| !is_constant_wrt(a, x)) {
+                return false;
+            }
+            args.iter().all(|a| inverse_function_free_q(a, x))
+        }
+        Value::List(items) => items.iter().all(|i| inverse_function_free_q(i, x)),
+        _ => true,
+    }
 }
 
 /// DerivativeDivides[expr, x] — stub, return True
@@ -1104,21 +1235,23 @@ pub fn builtin_subst_for(args: &[Value]) -> Result<Value, EvalError> {
     Ok(substitute_value(&args[0], &args[1], &args[2]))
 }
 
-/// SubstForInverseFunction[result, func, args, x] — stub
+/// SubstForInverseFunction[result, func, x] — stub
 pub fn builtin_subst_for_inverse_function(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 4 {
+    // Rubi calls this with 3 arguments (u, tmp, x).
+    if args.len() < 3 {
         return Err(EvalError::Error(
-            "SubstForInverseFunction requires at least 4 arguments".to_string(),
+            "SubstForInverseFunction requires at least 3 arguments".to_string(),
         ));
     }
     Ok(args[0].clone())
 }
 
-/// SubstForFractionalPowerOfLinear[result, expr, x] — stub
+/// SubstForFractionalPowerOfLinear[result, x] — stub
 pub fn builtin_subst_for_fractional_power_of_linear(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 3 {
+    // Rubi calls this with 2 arguments (u, x).
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "SubstForFractionalPowerOfLinear requires at least 3 arguments".to_string(),
+            "SubstForFractionalPowerOfLinear requires at least 2 arguments".to_string(),
         ));
     }
     Ok(args[0].clone())
@@ -1138,9 +1271,10 @@ pub fn builtin_subst_for_fractional_power_q(args: &[Value]) -> Result<Value, Eva
 pub fn builtin_subst_for_fractional_power_of_quotient_of_linears(
     args: &[Value],
 ) -> Result<Value, EvalError> {
-    if args.len() < 3 {
+    // Rubi calls this with 2 arguments (u, x).
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "SubstForFractionalPowerOfQuotientOfLinears requires at least 3 arguments".to_string(),
+            "SubstForFractionalPowerOfQuotientOfLinears requires at least 2 arguments".to_string(),
         ));
     }
     Ok(args[0].clone())
@@ -1915,11 +2049,12 @@ pub fn builtin_minimum_monomial_exponent(args: &[Value]) -> Result<Value, EvalEr
     Ok(Value::Integer(Integer::from(0)))
 }
 
-/// PowerVariableExpn[expr, x] — stub
+/// PowerVariableExpn[expr, m, x] — stub
 pub fn builtin_power_variable_expn(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    // Rubi calls this with 3 arguments (u, m, x).
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "PowerVariableExpn requires exactly 2 arguments".to_string(),
+            "PowerVariableExpn requires at least 2 arguments".to_string(),
         ));
     }
     Ok(args[0].clone())
@@ -1965,10 +2100,10 @@ fn value_to_float(v: &Value) -> Option<Float> {
 fn substitute_value(expr: &Value, old_var: &Value, new_expr: &Value) -> Value {
     match expr {
         Value::Symbol(s) => {
-            if let Value::Symbol(os) = old_var {
-                if s == os {
-                    return new_expr.clone();
-                }
+            if let Value::Symbol(os) = old_var
+                && s == os
+            {
+                return new_expr.clone();
             }
             expr.clone()
         }
@@ -2008,22 +2143,48 @@ fn is_constant_wrt(val: &Value, var: &Value) -> bool {
     }
 }
 
-fn is_polynomial(val: &Value, var: &str) -> bool {
+/// Degree of `val` as a polynomial in `var`, or `None` if it is not clearly a
+/// polynomial in `var`.
+fn poly_degree_in(val: &Value, var: &str) -> Option<i64> {
+    match val {
+        Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => {
+            Some(0)
+        }
+        Value::Symbol(s) => Some(if s == var { 1 } else { 0 }),
+        Value::Call { head, args } => match head.as_str() {
+            "Plus" => args.iter().map(|a| poly_degree_in(a, var)).max().flatten(),
+            "Times" => args
+                .iter()
+                .try_fold(0i64, |acc, a| poly_degree_in(a, var).map(|d| acc + d)),
+            "Power" if args.len() == 2 => match &args[1] {
+                Value::Integer(n) if !n.is_negative() => {
+                    poly_degree_in(&args[0], var).and_then(|d| n.to_i64().map(|e| d * e))
+                }
+                _ => None,
+            },
+            "Divide" if args.len() == 2 => {
+                let num = poly_degree_in(&args[0], var)?;
+                let den = poly_degree_in(&args[1], var)?;
+                if den == 0 { Some(num) } else { None }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_polynomial(val: &Value, _var: &str) -> bool {
     match val {
         Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => true,
         Value::Symbol(_s) => true,
         Value::Call { head, args } => match head.as_str() {
-            "Plus" | "Times" => args.iter().all(|a| is_polynomial(a, var)),
+            "Plus" | "Times" => args.iter().all(|a| is_polynomial(a, _var)),
             "Power" if args.len() == 2 => {
-                is_polynomial(&args[0], var)
+                is_polynomial(&args[0], _var)
                     && matches!(&args[1], Value::Integer(n) if !n.is_negative())
             }
-            "Divide" => {
-                if args.len() == 2 {
-                    is_polynomial(&args[0], var) && is_polynomial(&args[1], var)
-                } else {
-                    false
-                }
+            "Divide" if args.len() == 2 => {
+                is_polynomial(&args[0], _var) && is_polynomial(&args[1], _var)
             }
             _ => false,
         },
@@ -2043,8 +2204,8 @@ fn contains_complex(val: &Value) -> bool {
     match val {
         Value::Symbol(s) => s == "I",
         Value::Complex { .. } => true,
-        Value::Call { args, .. } => args.iter().any(|a| contains_complex(a)),
-        Value::List(items) => items.iter().any(|a| contains_complex(a)),
+        Value::Call { args, .. } => args.iter().any(contains_complex),
+        Value::List(items) => items.iter().any(contains_complex),
         _ => false,
     }
 }
@@ -2070,5 +2231,142 @@ fn leaf_count(val: &Value) -> usize {
         Value::Call { args, .. } => args.iter().map(leaf_count).sum(),
         Value::List(items) => items.iter().map(leaf_count).sum(),
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Rational;
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+
+    fn sym(s: &str) -> Value {
+        Value::Symbol(s.to_string())
+    }
+
+    fn call(head: &str, args: Vec<Value>) -> Value {
+        Value::Call {
+            head: head.to_string(),
+            args,
+        }
+    }
+
+    fn rat(n: i64, d: i64) -> Value {
+        Value::Rational(Box::new(Rational::from((n, d))))
+    }
+
+    fn is_true(v: &Value) -> bool {
+        matches!(v, Value::Bool(true))
+    }
+
+    fn is_false(v: &Value) -> bool {
+        matches!(v, Value::Bool(false))
+    }
+
+    #[test]
+    fn test_even_q_integers() {
+        assert!(is_true(&builtin_even_q(&[int(4)]).unwrap()));
+        assert!(is_true(&builtin_even_q(&[int(0)]).unwrap()));
+        assert!(is_true(&builtin_even_q(&[int(-6)]).unwrap()));
+        assert!(is_false(&builtin_even_q(&[int(3)]).unwrap()));
+        assert!(is_false(
+            &builtin_even_q(&[Value::Symbol("x".to_string())]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_odd_q_integers() {
+        assert!(is_true(&builtin_odd_q(&[int(3)]).unwrap()));
+        assert!(is_true(&builtin_odd_q(&[int(-7)]).unwrap()));
+        assert!(is_false(&builtin_odd_q(&[int(4)]).unwrap()));
+    }
+
+    #[test]
+    fn test_variadic_numeric_predicates() {
+        // Rubi calls these with several arguments (e.g. RationalQ[a,b,c,d]).
+        assert!(is_true(&builtin_rational_q(&[int(1), rat(3, 2)]).unwrap()));
+        assert!(is_false(&builtin_rational_q(&[int(1), sym("x")]).unwrap()));
+        assert!(is_true(
+            &builtin_fraction_q(&[rat(1, 2), rat(3, 4)]).unwrap()
+        ));
+        assert!(is_false(&builtin_fraction_q(&[int(1)]).unwrap()));
+        assert!(is_true(&builtin_integers_q(&[int(1), int(2)]).unwrap()));
+        assert!(is_false(&builtin_integers_q(&[int(1), rat(1, 2)]).unwrap()));
+        assert!(is_true(
+            &builtin_integers_q(&[Value::List(vec![int(1), int(2)])]).unwrap()
+        ));
+        assert!(is_true(
+            &builtin_half_integer_q(&[rat(1, 2), rat(3, 2)]).unwrap()
+        ));
+        assert!(is_false(
+            &builtin_half_integer_q(&[rat(1, 2), int(1)]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_half_integer_q() {
+        assert!(is_true(&builtin_half_integer_q(&[rat(1, 2)]).unwrap()));
+        assert!(is_true(&builtin_half_integer_q(&[rat(-3, 2)]).unwrap()));
+        assert!(!is_true(&builtin_half_integer_q(&[rat(1, 3)]).unwrap()));
+        // Regression: odd integers must not be classified as half-integers.
+        assert!(is_false(&builtin_half_integer_q(&[int(3)]).unwrap()));
+        assert!(is_false(&builtin_half_integer_q(&[rat(3, 1)]).unwrap()));
+    }
+
+    #[test]
+    fn test_eq_q_and_ne_q() {
+        assert!(is_true(&builtin_eq_q(&[int(2), int(2)]).unwrap()));
+        assert!(is_false(&builtin_eq_q(&[int(2), int(3)]).unwrap()));
+        assert!(is_true(&builtin_ne_q(&[int(2), int(3)]).unwrap()));
+    }
+
+    #[test]
+    fn test_function_of_q_accepts_rubi_arity() {
+        // The integrate rules call FunctionOfQ[v, u, x]; ensure 3 args work.
+        let v = call("Power", vec![sym("x"), int(2)]);
+        assert!(matches!(
+            builtin_function_of_q(&[v, sym("x"), sym("x")]).unwrap(),
+            Value::Bool(_)
+        ));
+        // u free of x is not a function of v.
+        let v = call("Power", vec![sym("x"), int(3)]);
+        assert!(is_false(
+            &builtin_function_of_q(&[v, int(1), sym("x")]).unwrap()
+        ));
+        // Atom v with an x-dependent u.
+        let u = call("Times", vec![int(2), sym("x")]);
+        assert!(is_true(
+            &builtin_function_of_q(&[sym("x"), u, sym("x")]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_inverse_function_free_q_accepts_two_args() {
+        // The rules call InverseFunctionFreeQ[u, x] (two arguments).
+        assert!(is_true(
+            &builtin_inverse_function_free_q(&[sym("x"), sym("x")]).unwrap()
+        ));
+        let log_x = call("Log", vec![sym("x")]);
+        assert!(is_false(
+            &builtin_inverse_function_free_q(&[log_x, sym("x")]).unwrap()
+        ));
+        // A Log of a constant is still "free" w.r.t. x.
+        let log_2 = call("Log", vec![int(2)]);
+        assert!(is_true(
+            &builtin_inverse_function_free_q(&[log_2, sym("x")]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_comparison_predicates_require_numeric() {
+        assert!(is_true(&builtin_gt_q(&[int(3), int(2)]).unwrap()));
+        assert!(is_false(&builtin_gt_q(&[int(2), int(3)]).unwrap()));
+        // Non-numeric returns False rather than erroring.
+        assert!(is_false(
+            &builtin_gt_q(&[Value::Symbol("x".to_string()), int(1)]).unwrap()
+        ));
     }
 }

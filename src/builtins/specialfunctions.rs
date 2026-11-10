@@ -28,24 +28,27 @@ fn unevaluated(head: &str, args: &[Value]) -> Value {
 
 // ── Erf / Erfc / ErfInverse ──
 
-const ERf_P: f64 = 0.3275911;
-const ERf_A1: f64 = 0.254829592;
-const ERf_A2: f64 = -0.284496736;
-const ERf_A3: f64 = 1.421413741;
-const ERf_A4: f64 = -1.453152027;
-const ERf_A5: f64 = 1.061405429;
+const ERF_P: f64 = 0.3275911;
+const ERF_A1: f64 = 0.254829592;
+const ERF_A2: f64 = -0.284496736;
+const ERF_A3: f64 = 1.421413741;
+const ERF_A4: f64 = -1.453152027;
+const ERF_A5: f64 = 1.061405429;
 
 fn erf_approx(x: f64) -> f64 {
     let ax = x.abs();
-    let t = 1.0 / (1.0 + ERf_P * ax);
-    let poly = ERf_A1*t + (ERf_A2*t + (ERf_A3*t + (ERf_A4*t + ERf_A5*t))*t)*t;
+    let t = 1.0 / (1.0 + ERF_P * ax);
+    // a1 t + a2 t^2 + a3 t^3 + a4 t^4 + a5 t^5
+    let poly = t * (ERF_A1 + t * (ERF_A2 + t * (ERF_A3 + t * (ERF_A4 + t * ERF_A5))));
     let result = 1.0 - poly * (-ax * ax).exp();
     if x < 0.0 { -result } else { result }
 }
 
 pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Erf requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Erf requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
@@ -58,7 +61,11 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::Real(r) => {
             if r.is_infinite() {
-                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 1 } else { -1 })));
+                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() {
+                    1
+                } else {
+                    -1
+                })));
             }
             Ok(real(erf_approx(r.to_f64())))
         }
@@ -68,7 +75,9 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Erfc requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Erfc requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
@@ -81,7 +90,11 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
         }
         Value::Real(r) => {
             if r.is_infinite() {
-                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() { 0 } else { 2 })));
+                return Ok(Value::Integer(Integer::from(if r.is_sign_positive() {
+                    0
+                } else {
+                    2
+                })));
             }
             Ok(real(1.0 - erf_approx(r.to_f64())))
         }
@@ -90,49 +103,56 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 fn inverse_erf_approx(x: f64) -> f64 {
-    if x.abs() < 1e-10 {
-        return x / std::f64::consts::PI * (2.0 + std::f64::consts::PI * x * x);
+    if x == 0.0 {
+        return 0.0;
     }
     let s = x.signum();
     let ax = x.abs();
-    if ax < 0.7 {
-        let c0 = 0.5 * std::f64::consts::PI;
-        let c1 = c0 / 3.0;
-        let c2 = 3.0 * c0 / 40.0;
-        let c3 = c0 / 105.0;
-        let c4 = 3.0 * c0 / 3763.0;
-        let ax2 = ax * ax;
-        s * (ax * (c0 + c1*ax2 + c2*ax2*ax2 + c3*ax2*ax2*ax2*ax2 + c4*ax2*ax2*ax2*ax2*ax2*ax2))
-    } else {
-        let mut w = s * (-2.0 * (1.0 - ax) * (1.0 + 0.5 * (1.0 - ax))).ln() / std::f64::consts::PI;
-        for _ in 0..20 {
-            let ew = erf_approx(w);
-            let diff = ew - x;
-            if diff.abs() < 1e-16 { break; }
-            let deriv = 2.0 / std::f64::consts::PI.sqrt() * (-w * w).exp();
-            w -= diff / deriv;
+    // Winitzki's closed-form approximation is accurate to ~1e-4 over (-1, 1);
+    // Newton iterations below sharpen it to machine precision.
+    let a = 0.147;
+    let ln1mx2 = (1.0 - ax * ax).ln();
+    let c = 2.0 / (std::f64::consts::PI * a) + ln1mx2 / 2.0;
+    let inner = (c * c - ln1mx2 / a).max(0.0).sqrt() - c;
+    let mut w = s * inner.max(0.0).sqrt();
+    for _ in 0..25 {
+        let ew = erf_approx(w);
+        let diff = ew - x;
+        if diff.abs() < 1e-16 {
+            break;
         }
-        w
+        let deriv = 2.0 / std::f64::consts::PI.sqrt() * (-w * w).exp();
+        if deriv == 0.0 {
+            break;
+        }
+        w -= diff / deriv;
     }
+    w
 }
 
 pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("ErfInverse requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "ErfInverse requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(n) => {
             let x = n.to_f64();
             if x.abs() >= 1.0 {
-                return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
+                return Err(EvalError::Error(
+                    "ErfInverse: argument must be in (-1, 1)".to_string(),
+                ));
             }
             Ok(real(inverse_erf_approx(x)))
         }
         Value::Real(r) => {
             let x = r.to_f64();
             if x.abs() >= 1.0 {
-                return Err(EvalError::Error("ErfInverse: argument must be in (-1, 1)".to_string()));
+                return Err(EvalError::Error(
+                    "ErfInverse: argument must be in (-1, 1)".to_string(),
+                ));
             }
             Ok(real(inverse_erf_approx(x)))
         }
@@ -144,7 +164,9 @@ pub fn builtin_erf_inverse(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Error("Beta requires exactly 2 arguments".to_string()));
+        return Err(EvalError::Error(
+            "Beta requires exactly 2 arguments".to_string(),
+        ));
     }
     match (&args[0], &args[1]) {
         (Value::Integer(x), Value::Integer(y)) => {
@@ -158,7 +180,7 @@ pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
             let gamma_x = fx.clone().gamma();
             let gamma_y = fy.clone().gamma();
             let gamma_xy = fx_sum.gamma();
-            Ok(Value::Real(&gamma_x * &gamma_y / &gamma_xy))
+            Ok(Value::Real(gamma_x * gamma_y / gamma_xy))
         }
         (Value::Real(x), Value::Real(y)) => {
             if x.is_sign_negative() || y.is_sign_negative() {
@@ -169,7 +191,7 @@ pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
             let gamma_y = y.clone().gamma();
             let sum = Float::with_val(prec, x + y);
             let gamma_xy = sum.gamma();
-            Ok(Value::Real(&gamma_x * &gamma_y / &gamma_xy))
+            Ok(Value::Real(gamma_x * gamma_y / gamma_xy))
         }
         _ => Ok(unevaluated("Beta", args)),
     }
@@ -184,8 +206,8 @@ pub fn builtin_beta_regularized(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) if *n == Integer::from(0) => Ok(Value::Integer(Integer::from(0))),
-        Value::Integer(n) if *n == Integer::from(1) => Ok(Value::Integer(Integer::from(1))),
+        Value::Integer(n) if *n == 0 => Ok(Value::Integer(Integer::from(0))),
+        Value::Integer(n) if *n == 1 => Ok(Value::Integer(Integer::from(1))),
         Value::Real(r) if r.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Real(r) if *r == Float::with_val(DEFAULT_PRECISION, 1u32) => {
             Ok(Value::Integer(Integer::from(1)))
@@ -197,17 +219,13 @@ pub fn builtin_beta_regularized(args: &[Value]) -> Result<Value, EvalError> {
 // ── Zeta ──
 
 fn is_small_even_positive(n: &Float) -> Option<u64> {
-    let rounded = n.round();
+    let rounded = n.clone().round();
     let diff = Float::with_val(n.prec(), n - &rounded).abs();
     if diff > 1e-10 {
         return None;
     }
     let int_val = rounded.to_integer()?;
-    if !int_val.is_negative()
-        && int_val % Integer::from(2) == Integer::from(0)
-        && int_val > Integer::from(1)
-        && int_val <= Integer::from(20)
-    {
+    if !int_val.is_negative() && int_val.is_even() && int_val > 1 && int_val <= 20 {
         int_val.to_u64()
     } else {
         None
@@ -237,16 +255,18 @@ fn zeta_even(k: u64) -> Float {
         factorial *= Float::with_val(prec, i);
     }
     let b_abs = Float::with_val(prec, bn_num.abs()) / bn_den.abs();
-    (&two_pi_n * &b_abs) / (Float::with_val(prec, 2u32) * factorial)
+    (two_pi_n * b_abs) / (Float::with_val(prec, 2u32) * factorial)
 }
 
 pub fn builtin_zeta(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Zeta requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Zeta requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
         Value::Integer(n) => {
-            if *n <= Integer::from(1) {
+            if *n <= 1 {
                 return Ok(unevaluated("Zeta", args));
             }
             let f = Float::with_val(DEFAULT_PRECISION, n);
@@ -271,19 +291,16 @@ pub fn builtin_zeta(args: &[Value]) -> Result<Value, EvalError> {
 fn compute_zeta_numeric(s: &Float) -> Float {
     let prec = s.prec().max(DEFAULT_PRECISION);
     let s_f = Float::with_val(prec, s);
-    let s_floor = s_f.floor();
+    let s_floor = s_f.clone().floor();
     let tolerance = Float::with_val(prec, 1e-15);
 
     if s_floor > Float::with_val(prec, 2u32) {
         let mut sum = Float::with_val(prec, 0.0);
         for n in 1..=1_000_000u32 {
             let n_f = Float::with_val(prec, n);
-            {
-                let nf_pow = n_f.pow(&s_f.clone());
-                Float::with_val(prec, 1.0) / nf_pow
-            }
+            let term = Float::with_val(prec, 1.0) / n_f.pow(&s_f);
             sum += term.clone();
-            if term < tolerance.clone() {
+            if term < tolerance {
                 break;
             }
         }
@@ -300,12 +317,10 @@ fn compute_zeta_numeric(s: &Float) -> Float {
         }
         let n_last = Float::with_val(prec, max_n);
         let one = Float::with_val(prec, 1u32);
-        {
-            let exponent = &one - &s_f;
-            let n_last_pow = n_last.pow(&exponent);
-            let denom = &s_f - &one;
-            &n_last_pow / &denom
-        }
+        let exponent = Float::with_val(prec, &one - &s_f);
+        let n_last_pow = n_last.pow(&exponent);
+        let denom = Float::with_val(prec, &s_f - &one);
+        let tail = n_last_pow / denom;
         sum + tail
     }
 }
@@ -322,7 +337,7 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
     let z_val = &args[1];
 
     if let (Value::Integer(s), _) = (s_val, z_val) {
-        if *s == Integer::from(0) {
+        if *s == 0 {
             // Li_0(z) = z / (1 - z)
             if let Some(z) = to_f64(z_val) {
                 if (z - 1.0).abs() < 1e-15 {
@@ -332,7 +347,7 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
             }
             return Ok(unevaluated("PolyLog", args));
         }
-        if *s == Integer::from(1) {
+        if *s == 1 {
             // Li_1(z) = -Log(1 - z)
             if let Some(z) = to_f64(z_val) {
                 if z >= 1.0 {
@@ -367,36 +382,35 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Digamma / PolyGamma ──
 
-const EULER_GAMMA_F64: f64 = 0.57721566490153286060;
+const EULER_GAMMA_F64: f64 = std::f64::consts::EULER_GAMMA;
 
 fn digamma_approx(z: f64) -> f64 {
+    // Recurrence ψ(z) = ψ(z+1) - 1/z, applied until z is large enough for the
+    // asymptotic series below to be accurate.
     let mut offset = 0.0_f64;
     let mut z = z;
     while z < 10.0 {
-        offset += 1.0 / z;
+        offset -= 1.0 / z;
         z += 1.0;
     }
-    // Undo last increment
-    offset -= 1.0 / z;
-    z -= 1.0;
     let z2 = z * z;
     let z4 = z2 * z2;
     let z6 = z4 * z2;
     let z8 = z4 * z4;
-    offset + z.ln() - 1.0 / (2.0 * z) - 1.0 / (12.0 * z2)
-        + 1.0 / (120.0 * z4) - 1.0 / (252.0 * z6) + 691.0 / (240.0 * z8)
+    offset + z.ln() - 1.0 / (2.0 * z) - 1.0 / (12.0 * z2) + 1.0 / (120.0 * z4) - 1.0 / (252.0 * z6)
+        + 1.0 / (240.0 * z8)
 }
 
 pub fn builtin_digamma(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("Digamma requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "Digamma requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if *n == Integer::from(1) => {
-            Ok(real(-EULER_GAMMA_F64))
-        }
+        Value::Integer(n) if *n == 1 => Ok(real(-EULER_GAMMA_F64)),
         Value::Integer(n) => {
-            if n.is_negative() || *n == Integer::from(0) {
+            if n.is_negative() || *n == 0 {
                 return Ok(unevaluated("Digamma", args));
             }
             Ok(real(digamma_approx(n.to_f64())))
@@ -422,7 +436,7 @@ pub fn builtin_polygamma(args: &[Value]) -> Result<Value, EvalError> {
 
     // PolyGamma[0, z] = Digamma[z]
     if let (Value::Integer(n), _) = (n_val, z_val) {
-        if *n == Integer::from(0) {
+        if *n == 0 {
             return builtin_digamma(&[z_val.clone()]);
         }
         if n.is_negative() {
@@ -436,7 +450,7 @@ pub fn builtin_polygamma(args: &[Value]) -> Result<Value, EvalError> {
         }
         let n_int = n as u64;
         // ψ^(n)(z) = (-1)^(n+1) * n! * Σ_{k=0}^∞ 1/(k+z)^(n+1)
-        let sign = if n_int % 2 == 0 { -1.0 } else { 1.0 };
+        let sign = if n_int.is_multiple_of(2) { -1.0 } else { 1.0 };
         let mut factorial = 1.0_f64;
         for i in 1..=n as u32 {
             factorial *= i as f64;
@@ -470,26 +484,20 @@ fn airy_ai_approx(z: f64) -> f64 {
             // Power series: Ai(z) = c0 * (1 + z^3/6 + 7*z^6/360 + ...)
             //                   - c1 * (z + z^4/12 + z^7/720 + ...)
             // Ai(0) = c0 ≈ 0.355028, Ai'(0) = -c1 ≈ -0.259329
-            let ai0 = 0.35502805388781723587;
-            let ai0_prime = -0.25932985380908484339;
+            let ai0 = 0.355_028_053_887_817_2;
+            let ai0_prime = -0.259_329_853_809_084_85;
             // Series: Ai(z) = ai0 * Σ (3^k * z^(3k)) / (3^k * k! * 2^k * 3^k * ...)
             // Simpler: use the known series form
             // Ai(z) = ai0 * S0(z) + ai0_prime * S1(z)
             // where S0 = 1 + z^3/6 + 7z^6/360 + ...
             //       S1 = z + z^4/12 + z^7/720 + ...
-            let mut s0 = 1.0_f64;
-            let mut s1 = z;
-            let mut z3 = z * z * z;
-            let mut z7 = z3 * z * z * z;
-            let mut term0 = z3 / 6.0;
-            let mut term1 = z7 / 12.0;
-            s0 += term0;
-            s1 += term1;
-            // Additional terms
-            let z9 = z7 * z * z;
-            let z12 = z9 * z * z * z;
-            s0 += 7.0 * z9 / 360.0;
-            s1 += z12 / 720.0;
+            let z2 = z * z;
+            let z3 = z2 * z;
+            let z6 = z3 * z3;
+            // S0 = 1 + z^3/6 + 7 z^6/360 + ...
+            let s0 = 1.0 + z3 / 6.0 + 7.0 * z6 / 360.0;
+            // S1 = z + z^4/12 + z^7/720 + ...
+            let s1 = z + z * z3 / 12.0 + z * z6 / 720.0;
             ai0 * s0 + ai0_prime * s1
         } else {
             // Asymptotic expansion for z >= 0.5
@@ -499,7 +507,8 @@ fn airy_ai_approx(z: f64) -> f64 {
             let leading = exp_factor / (2.0 * std::f64::consts::PI.sqrt() * z14);
             // First few terms of the asymptotic series
             let u = 1.0 / (z32);
-            let p = 1.0 - 5.0/144.0*u + 2005.0/21504.0*u*u - 156205.0/2129920.0*u*u*u;
+            let p =
+                1.0 - 5.0 / 144.0 * u + 2005.0 / 21504.0 * u * u - 156205.0 / 2129920.0 * u * u * u;
             leading * p
         }
     } else {
@@ -510,19 +519,19 @@ fn airy_ai_approx(z: f64) -> f64 {
         let az14 = az.sqrt().sqrt(); // |z|^(1/4)
         let leading = 1.0 / (std::f64::consts::PI.sqrt() * az14);
         let u = 1.0 / (az32);
-        let p = 1.0 - 5.0/144.0*u + 2005.0/21504.0*u*u;
+        let p = 1.0 - 5.0 / 144.0 * u + 2005.0 / 21504.0 * u * u;
         leading * p * theta.sin()
     }
 }
 
 pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Error("AiryAi requires exactly 1 argument".to_string()));
+        return Err(EvalError::Error(
+            "AiryAi requires exactly 1 argument".to_string(),
+        ));
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => {
-            Ok(real(0.3550280538878172))
-        }
+        Value::Integer(n) if n.is_zero() => Ok(real(0.3550280538878172)),
         Value::Integer(n) => Ok(real(airy_ai_approx(n.to_f64()))),
         Value::Real(r) => Ok(real(airy_ai_approx(r.to_f64()))),
         _ => Ok(unevaluated("AiryAi", args)),
@@ -541,25 +550,23 @@ pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
     let z_val = &args[1];
 
     // J_n(0) special cases
-    if let Value::Integer(z) = z_val {
-        if z.is_zero() {
-            if let Value::Integer(n) = n_val {
-                if *n == Integer::from(0) {
-                    return Ok(Value::Integer(Integer::from(1)));
-                }
-                return Ok(Value::Integer(Integer::from(0)));
-            }
+    if let Value::Integer(z) = z_val
+        && z.is_zero()
+        && let Value::Integer(n) = n_val
+    {
+        if *n == 0 {
+            return Ok(Value::Integer(Integer::from(1)));
         }
+        return Ok(Value::Integer(Integer::from(0)));
     }
-    if let Value::Real(z) = z_val {
-        if z.is_zero() {
-            if let Value::Integer(n) = n_val {
-                if *n == Integer::from(0) {
-                    return Ok(Value::Integer(Integer::from(1)));
-                }
-                return Ok(Value::Integer(Integer::from(0)));
-            }
+    if let Value::Real(z) = z_val
+        && z.is_zero()
+        && let Value::Integer(n) = n_val
+    {
+        if *n == 0 {
+            return Ok(Value::Integer(Integer::from(1)));
         }
+        return Ok(Value::Integer(Integer::from(0)));
     }
 
     match (n_val, z_val) {
@@ -590,13 +597,13 @@ fn bessel_j_series(n: u64, z: f64) -> f64 {
         gamma_nk1 *= j as f64;
     }
     let mut z_power = half_z_n;
-    let neg = if n % 2 == 0 { 1.0 } else { -1.0 };
-    sum += neg * z_power / gamma_nk1;
+    // The alternating sign depends only on k, not on n.
+    sum += z_power / gamma_nk1;
     for k in 1..=100 {
         fact_k *= k as f64;
         gamma_nk1 *= (n + k) as f64;
         z_power *= half_z * half_z;
-        let sign = if (k + n) % 2 == 0 { 1.0 } else { -1.0 };
+        let sign = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
         let term = sign * z_power / (fact_k * gamma_nk1);
         sum += term;
         if term.abs() < tolerance {
@@ -626,9 +633,17 @@ pub fn builtin_bessel_i(args: &[Value]) -> Result<Value, EvalError> {
             "BesselI requires exactly 2 arguments: BesselI[n, z]".to_string(),
         ));
     }
+    // I_n(0): 1 for n == 0, 0 otherwise (exact).
+    if let (Value::Integer(n), z) = (&args[0], &args[1])
+        && to_f64(z).is_some_and(|z| z == 0.0)
+    {
+        if *n == 0 {
+            return Ok(Value::Integer(Integer::from(1)));
+        }
+        return Ok(Value::Integer(Integer::from(0)));
+    }
     match (&args[0], &args[1]) {
-        (Value::Integer(n), &_) if !n.is_negative() =>
-        {
+        (Value::Integer(n), &_) if !n.is_negative() => {
             if let (Some(n), Some(z)) = (to_f64(&args[0]), to_f64(&args[1])) {
                 return Ok(real(bessel_i_series(n as u64, z)));
             }
@@ -719,18 +734,18 @@ fn lambert_w_approx(z: f64) -> f64 {
     if (z - NEG_INV_E).abs() < 1e-15 {
         return -1.0;
     }
-    // Initial guess
-    let mut w = if z > 0.0 {
-        z.ln()
-    } else {
-        -1.0
-    };
-    // Halley's method
-    for _ in 0..30 {
-        let ew = (-w).exp();
-        let f = w * ew - z;
-        let fp = ew * (w + 1.0);
-        let fp2 = ew * (w + 2.0);
+    // Initial guess: ln(z) is a good starting point for z > 0; the branch point
+    // -1/e (handled above) is the sensible start for z < 0.
+    let mut w = if z > 0.0 { z.ln() } else { -1.0 };
+    // Halley's method on f(w) = w - z e^{-w} = 0 (the defining equation w e^w = z).
+    for _ in 0..50 {
+        let e_neg_w = (-w).exp();
+        let f = w - z * e_neg_w;
+        let fp = 1.0 + z * e_neg_w;
+        let fp2 = -z * e_neg_w;
+        if fp == 0.0 {
+            break;
+        }
         let delta = f / fp * (1.0 + f * fp2 / (2.0 * fp * fp));
         w -= delta;
         if delta.abs() < 1e-15 {
@@ -749,11 +764,9 @@ pub fn builtin_dirichlet_eta(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) if *n == Integer::from(1) => {
-            Ok(real(std::f64::consts::LN_2))
-        }
+        Value::Integer(n) if *n == 1 => Ok(real(std::f64::consts::LN_2)),
         Value::Integer(n) => {
-            if n.is_negative() || *n == Integer::from(0) {
+            if n.is_negative() || *n == 0 {
                 return Ok(unevaluated("DirichletEta", args));
             }
             Ok(real(compute_eta_numeric(n.to_f64())))
@@ -762,10 +775,10 @@ pub fn builtin_dirichlet_eta(args: &[Value]) -> Result<Value, EvalError> {
             if r.is_sign_negative() || r.is_zero() {
                 return Ok(unevaluated("DirichletEta", args));
             }
-            if let Some(one) = to_f64(&Value::Integer(Integer::from(1))) {
-                if (r.to_f64() - one).abs() < 1e-15 {
-                    return Ok(real(std::f64::consts::LN_2));
-                }
+            if let Some(one) = to_f64(&Value::Integer(Integer::from(1)))
+                && (r.to_f64() - one).abs() < 1e-15
+            {
+                return Ok(real(std::f64::consts::LN_2));
             }
             if r.to_f64() <= 0.0 {
                 return Ok(unevaluated("DirichletEta", args));
@@ -821,7 +834,7 @@ mod tests {
     #[test]
     fn test_erf_zero() {
         let result = builtin_erf(&[Value::Integer(Integer::from(0))]).unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(0)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
     }
 
     #[test]
@@ -855,13 +868,14 @@ mod tests {
     #[test]
     fn test_erfc_zero() {
         let result = builtin_erfc(&[Value::Integer(Integer::from(0))]).unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(1)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 1));
     }
 
     #[test]
     fn test_erfc_erf_complement() {
         let erf_val = builtin_erf(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
-        let erfc_val = builtin_erfc(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
+        let erfc_val =
+            builtin_erfc(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.5))]).unwrap();
         if let (Value::Real(e), Value::Real(c)) = (erf_val, erfc_val) {
             let sum = e.to_f64() + c.to_f64();
             assert!((sum - 1.0).abs() < 1e-10);
@@ -871,7 +885,7 @@ mod tests {
     #[test]
     fn test_erf_inverse_zero() {
         let result = builtin_erf_inverse(&[Value::Integer(Integer::from(0))]).unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(0)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
     }
 
     #[test]
@@ -894,7 +908,7 @@ mod tests {
         .unwrap();
         if let Value::Real(r) = result {
             // B(2,3) = 1! * 2! / 4! = 2/24 = 1/12 ≈ 0.08333
-            assert!((r.to_f64() - 1.0/12.0).abs() < 1e-8);
+            assert!((r.to_f64() - 1.0 / 12.0).abs() < 1e-8);
         }
     }
 
@@ -916,7 +930,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
         ])
         .unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(0)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
     }
 
     #[test]
@@ -927,7 +941,7 @@ mod tests {
             Value::Integer(Integer::from(2)),
         ])
         .unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(1)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 1));
     }
 
     #[test]
@@ -989,6 +1003,22 @@ mod tests {
     }
 
     #[test]
+    fn test_digamma_five() {
+        // Regression: the recurrence used the wrong sign, making ψ small-int
+        // wildly wrong (ψ(5) ≈ 1.5061176684).
+        let result = builtin_digamma(&[Value::Integer(Integer::from(5))]).unwrap();
+        if let Value::Real(r) = result {
+            assert!(
+                (r.to_f64() - 1.5061176684).abs() < 1e-6,
+                "got {}",
+                r.to_f64()
+            );
+        } else {
+            panic!("expected Real");
+        }
+    }
+
+    #[test]
     fn test_digamma_large() {
         let result = builtin_digamma(&[Value::Integer(Integer::from(100))]).unwrap();
         if let Value::Real(r) = result {
@@ -1019,13 +1049,26 @@ mod tests {
     }
 
     #[test]
+    fn test_airy_ai_small_positive() {
+        // Regression: the power series used wrong powers (z^6/z^9 vs z^4/z^7),
+        // so Ai(0.4) was substantially off. Ai(0.4) ≈ 0.254556.
+        let result =
+            builtin_airy_ai(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.4))]).unwrap();
+        if let Value::Real(r) = result {
+            assert!((r.to_f64() - 0.254556).abs() < 1e-4, "got {}", r.to_f64());
+        } else {
+            panic!("expected Real");
+        }
+    }
+
+    #[test]
     fn test_bessel_j_0_0() {
         let result = builtin_bessel_j(&[
             Value::Integer(Integer::from(0)),
             Value::Integer(Integer::from(0)),
         ])
         .unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(1)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 1));
     }
 
     #[test]
@@ -1035,7 +1078,27 @@ mod tests {
             Value::Integer(Integer::from(0)),
         ])
         .unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(0)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
+    }
+
+    #[test]
+    fn test_bessel_j_one_one() {
+        // Regression: the series applied (-1)^(k+n) instead of (-1)^k, flipping
+        // the sign of J_n for odd n. J_1(1) ≈ 0.4400505857.
+        let result = builtin_bessel_j(&[
+            Value::Integer(Integer::from(1)),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 1.0)),
+        ])
+        .unwrap();
+        if let Value::Real(r) = result {
+            assert!(
+                (r.to_f64() - 0.4400505857).abs() < 1e-6,
+                "got {}",
+                r.to_f64()
+            );
+        } else {
+            panic!("expected Real");
+        }
     }
 
     #[test]
@@ -1058,20 +1121,31 @@ mod tests {
             Value::Integer(Integer::from(0)),
         ])
         .unwrap();
-        assert!(matches!(result, Value::Integer(Integer(ref n)) if *n == Integer::from(1)));
+        assert!(matches!(result, Value::Integer(n) if n == 1));
+    }
+
+    #[test]
+    fn test_bessel_i_1_0() {
+        let result = builtin_bessel_i(&[
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(0)),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::Integer(n) if n == 0));
     }
 
     #[test]
     fn test_lambert_w_zero() {
         let result = builtin_lambert_w(&[Value::Integer(Integer::from(0))]).unwrap();
-        assert!(matches!(result, Value::Integer(ref n) if *n == Integer::from(0)));
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
     }
 
     #[test]
     fn test_lambert_w_e() {
-        let result = builtin_lambert_w(&[
-            Value::Real(Float::with_val(DEFAULT_PRECISION, std::f64::consts::E)),
-        ])
+        let result = builtin_lambert_w(&[Value::Real(Float::with_val(
+            DEFAULT_PRECISION,
+            std::f64::consts::E,
+        ))])
         .unwrap();
         if let Value::Real(r) = result {
             // W(e) = 1
@@ -1081,9 +1155,10 @@ mod tests {
 
     #[test]
     fn test_lambert_w_neg_inv_e() {
-        let result = builtin_lambert_w(&[
-            Value::Real(Float::with_val(DEFAULT_PRECISION, -1.0 / std::f64::consts::E)),
-        ])
+        let result = builtin_lambert_w(&[Value::Real(Float::with_val(
+            DEFAULT_PRECISION,
+            -1.0 / std::f64::consts::E,
+        ))])
         .unwrap();
         if let Value::Real(r) = result {
             assert!((r.to_f64() + 1.0).abs() < 1e-6);
@@ -1110,13 +1185,14 @@ mod tests {
 
     #[test]
     fn test_all_functions_arg_count() {
+        // `EvalError::Error` renders with an "Error: " prefix via `Display`.
         assert_eq!(
             builtin_erf(&[]).unwrap_err().to_string(),
-            "Erf requires exactly 1 argument"
+            "Error: Erf requires exactly 1 argument"
         );
         assert_eq!(
             builtin_bessel_j(&[]).unwrap_err().to_string(),
-            "BesselJ requires exactly 2 arguments: BesselJ[n, z]"
+            "Error: BesselJ requires exactly 2 arguments: BesselJ[n, z]"
         );
     }
 }
