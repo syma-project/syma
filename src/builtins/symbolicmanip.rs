@@ -3080,6 +3080,50 @@ pub fn builtin_resultant(args: &[Value]) -> Result<Value, EvalError> {
     Ok(compute_resultant(p, q, &var))
 }
 
+/// Subresultant polynomial remainder sequence of `p` and `q` with respect to
+/// `var`, exposed from `crate::polynomial::subresultants`.
+///
+/// Returns the exact rational remainder sequence, whose last element is a
+/// greatest common divisor (over the rationals) of the two polynomials. The
+/// result is left unevaluated whenever the inputs are not polynomials with
+/// rational coefficients in `var`.
+pub fn builtin_subresultants(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "Subresultants requires exactly 3 arguments: Subresultants[poly1, poly2, x]"
+                .to_string(),
+        ));
+    }
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[2].type_name().to_string(),
+            });
+        }
+    };
+    let p = &args[0];
+    let q = &args[1];
+    if !is_polynomial_in(p, &var) || !is_polynomial_in(q, &var) {
+        return Ok(call_ref("Subresultants", args));
+    }
+    let Some(pc): Option<Vec<Rational>> = poly_coeffs(p, &var).iter().map(value_to_rat).collect()
+    else {
+        return Ok(call_ref("Subresultants", args));
+    };
+    let Some(qc): Option<Vec<Rational>> = poly_coeffs(q, &var).iter().map(value_to_rat).collect()
+    else {
+        return Ok(call_ref("Subresultants", args));
+    };
+    let seq = polynomial::subresultants(&pc, &qc);
+    Ok(Value::List(
+        seq.iter()
+            .map(|poly| rebuild_poly_from_rat(poly, &var))
+            .collect(),
+    ))
+}
+
 /// Compute the resultant of two polynomials using the Sylvester matrix determinant approach.
 fn compute_resultant(p: &Value, q: &Value, var: &str) -> Value {
     let p_coeffs = poly_coeffs(p, var);
@@ -4132,6 +4176,23 @@ pub fn builtin_variables(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(set.into_iter().map(Value::Symbol).collect()))
 }
 
+/// `ListofVars` is an alias of `Variables`: it returns the sorted list of free
+/// variables appearing in a polynomial expression, or stays unevaluated when
+/// the argument is inapplicable.
+pub fn builtin_list_of_vars(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ListofVars requires exactly 1 argument".to_string(),
+        ));
+    }
+    if !is_polynomial_expr(&args[0]) {
+        return Ok(call_ref("ListofVars", args));
+    }
+    let mut set = BTreeSet::new();
+    collect_vars(&args[0], &mut set);
+    Ok(Value::List(set.into_iter().map(Value::Symbol).collect()))
+}
+
 // ── Factor helpers ──
 
 fn collect_factor_pairs(v: &Value) -> (Value, Vec<(Value, i64)>) {
@@ -4585,6 +4646,8 @@ pub fn register(env: &Env) {
     );
     super::register_builtin(env, "HornerForm", builtin_horner_form);
     super::register_builtin(env, "Variables", builtin_variables);
+    super::register_builtin(env, "ListofVars", builtin_list_of_vars);
+    super::register_builtin(env, "Subresultants", builtin_subresultants);
     super::register_builtin(env, "FactorList", builtin_factor_list);
     super::register_builtin(env, "FactorSquareFree", builtin_factor_square_free);
     super::register_builtin(env, "FactorTermsList", builtin_factor_terms_list);
@@ -5642,5 +5705,76 @@ mod tests {
         assert_close(eval_at(&e, &[("a", 1), ("b", 2), ("c", 3)]), 11.0);
         let h = eval_str("HornerForm[x^2 + 3x + 2, x]");
         assert_close(eval_at(&h, &[("x", 4)]), 30.0);
+    }
+
+    // ── Subresultants tests ──
+
+    #[test]
+    fn test_subresultants_common_factor() {
+        // x^2 - 1 and x - 1 share the factor x - 1; the remainder sequence
+        // ends with that (monic) common divisor.
+        let p = val_call("Plus", vec![pow(val_sym("x"), 2), val_int(-1)]);
+        let q = val_call("Plus", vec![val_sym("x"), val_int(-1)]);
+        let res = builtin_subresultants(&[p, q, val_sym("x")]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected a list, got {res:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items[0].struct_eq(&val_call("Plus", vec![val_int(-1), pow(val_sym("x"), 2)])));
+        assert!(items[1].struct_eq(&val_call("Plus", vec![val_int(-1), val_sym("x")])));
+    }
+
+    #[test]
+    fn test_subresultants_coprime_nonempty() {
+        // (x - 1) and (x - 2) are coprime: the sequence ends with a nonzero
+        // constant capturing the resultant (-1).
+        let p = val_call("Plus", vec![val_sym("x"), val_int(-1)]);
+        let q = val_call("Plus", vec![val_sym("x"), val_int(-2)]);
+        let res = builtin_subresultants(&[p, q, val_sym("x")]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected a list, got {res:?}");
+        };
+        assert!(!items.is_empty());
+        assert!(!is_zero_v(&simplify_value(items.last().unwrap())));
+    }
+
+    #[test]
+    fn test_subresultants_unevaluated_on_symbolic_coeff() {
+        // Coefficient `a` is symbolic, so the rational algorithm does not apply.
+        let p = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![val_sym("a"), val_sym("x")]),
+                val_int(1),
+            ],
+        );
+        let q = val_call("Plus", vec![val_sym("x"), val_int(-1)]);
+        let res = builtin_subresultants(&[p, q, val_sym("x")]).unwrap();
+        assert!(matches!(&res, Value::Call { head, .. } if head == "Subresultants"));
+    }
+
+    #[test]
+    fn test_subresultants_non_symbol_var_errors() {
+        let p = val_sym("x");
+        let q = val_sym("x");
+        assert!(builtin_subresultants(&[p, q, val_int(0)]).is_err());
+    }
+
+    // ── ListofVars tests ──
+
+    #[test]
+    fn test_list_of_vars_alias() {
+        let v = eval_str("ListofVars[x^2 + y]");
+        assert!(matches!(&v, Value::List(items) if items.len() == 2));
+        let direct =
+            builtin_list_of_vars(&[val_call("Plus", vec![pow(val_sym("x"), 2), val_sym("y")])])
+                .unwrap();
+        assert!(direct.struct_eq(&v));
+    }
+
+    #[test]
+    fn test_list_of_vars_unevaluated() {
+        let res = builtin_list_of_vars(&[val_call("Sin", vec![val_sym("x")])]).unwrap();
+        assert!(matches!(&res, Value::Call { head, .. } if head == "ListofVars"));
     }
 }

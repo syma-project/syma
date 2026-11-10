@@ -383,6 +383,11 @@ pub fn builtin_vertex_degree(args: &[Value]) -> Result<Value, EvalError> {
     degree_dispatch("VertexDegree", args)
 }
 
+/// DegreeList[g] / DegreeList[g, v] — the degree sequence (alias of `Degree[g]`).
+pub fn builtin_degree_list(args: &[Value]) -> Result<Value, EvalError> {
+    degree_dispatch("DegreeList", args)
+}
+
 // ── Connectivity and paths ──────────────────────────────────────────────────
 
 /// ConnectedComponents[g] — weakly connected components.
@@ -1411,11 +1416,8 @@ pub fn builtin_connected_graph_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(seen.iter().all(|b| *b)))
 }
 
-/// FindSpanningTree[g] — a BFS spanning tree (forest) over the weak adjacency.
-pub fn builtin_find_spanning_tree(args: &[Value]) -> Result<Value, EvalError> {
-    let Some(g) = args.first().and_then(as_graph) else {
-        return Ok(unevaluated("FindSpanningTree", args));
-    };
+/// A BFS spanning tree (forest) over the weak adjacency of `g`.
+fn spanning_tree(g: &Graph) -> Graph {
     let n = g.vertices.len();
     let adj = g.weak_neighbors();
     let mut seen = vec![false; n];
@@ -1447,7 +1449,23 @@ pub fn builtin_find_spanning_tree(args: &[Value]) -> Result<Value, EvalError> {
             directed: false,
         });
     }
-    Ok(graph_value(&out))
+    out
+}
+
+/// FindSpanningTree[g] — a BFS spanning tree (forest) over the weak adjacency.
+pub fn builtin_find_spanning_tree(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("FindSpanningTree", args));
+    };
+    Ok(graph_value(&spanning_tree(&g)))
+}
+
+/// KruskalTree[g] — alias of `FindSpanningTree`.
+pub fn builtin_kruskal_tree(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("KruskalTree", args));
+    };
+    Ok(graph_value(&spanning_tree(&g)))
 }
 
 /// Union-find for Kruskal's algorithm.
@@ -1952,36 +1970,50 @@ pub fn builtin_pagerank_centrality(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(pr.into_iter().map(real).collect()))
 }
 
+/// Local clustering coefficient of every vertex (0 for fewer than two neighbours).
+fn local_clustering(g: &Graph) -> Vec<f64> {
+    let adj = neighbor_sets(g);
+    (0..g.vertices.len())
+        .map(|i| {
+            let ns = &adj[i];
+            let k = ns.len();
+            if k < 2 {
+                return 0.0;
+            }
+            let mut links = 0usize;
+            for a in 0..k {
+                for b in a + 1..k {
+                    if adj[ns[a]].contains(&ns[b]) {
+                        links += 1;
+                    }
+                }
+            }
+            2.0 * links as f64 / (k * (k - 1)) as f64
+        })
+        .collect()
+}
+
+/// Mean of the local clustering coefficients.
+fn mean_clustering(g: &Graph) -> f64 {
+    let n = g.vertices.len();
+    if n == 0 {
+        return 0.0;
+    }
+    local_clustering(g).iter().sum::<f64>() / n as f64
+}
+
 /// LocalClusteringCoefficient[g] / LocalClusteringCoefficient[g, v]
 pub fn builtin_local_clustering_coefficient(args: &[Value]) -> Result<Value, EvalError> {
     let Some(g) = args.first().and_then(as_graph) else {
         return Ok(unevaluated("LocalClusteringCoefficient", args));
     };
-    let adj = neighbor_sets(&g);
-    let coeff = |i: usize| -> f64 {
-        let ns = &adj[i];
-        let k = ns.len();
-        if k < 2 {
-            return 0.0;
-        }
-        let mut links = 0usize;
-        for a in 0..k {
-            for b in a + 1..k {
-                if adj[ns[a]].contains(&ns[b]) {
-                    links += 1;
-                }
-            }
-        }
-        2.0 * links as f64 / (k * (k - 1)) as f64
-    };
+    let coeff = local_clustering(&g);
     if args.len() >= 2
         && let Some(i) = g.index_of(&args[1])
     {
-        return Ok(real(coeff(i)));
+        return Ok(real(coeff[i]));
     }
-    Ok(Value::List(
-        (0..g.vertices.len()).map(|i| real(coeff(i))).collect(),
-    ))
+    Ok(Value::List(coeff.into_iter().map(real).collect()))
 }
 
 /// GlobalClusteringCoefficient[g] — mean local clustering coefficient.
@@ -1989,16 +2021,15 @@ pub fn builtin_global_clustering_coefficient(args: &[Value]) -> Result<Value, Ev
     let Some(g) = args.first().and_then(as_graph) else {
         return Ok(unevaluated("GlobalClusteringCoefficient", args));
     };
-    let n = g.vertices.len();
-    if n == 0 {
-        return Ok(real(0.0));
-    }
-    let locals = builtin_local_clustering_coefficient(args)?;
-    let Value::List(items) = locals else {
-        return Ok(unevaluated("GlobalClusteringCoefficient", args));
+    Ok(real(mean_clustering(&g)))
+}
+
+/// ClusteringCoefficient[g] — average local clustering coefficient.
+pub fn builtin_clustering_coefficient(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(g) = args.first().and_then(as_graph) else {
+        return Ok(unevaluated("ClusteringCoefficient", args));
     };
-    let sum: f64 = items.iter().filter_map(|v| v.to_real()).sum();
-    Ok(real(sum / n as f64))
+    Ok(real(mean_clustering(&g)))
 }
 
 /// GraphAssortativity[g] — degree assortativity (Pearson correlation).
@@ -2117,6 +2148,7 @@ pub fn register(env: &Env) {
     register_builtin(env, "AdjacencyMatrix", builtin_adjacency_matrix);
     register_builtin(env, "AdjacencyList", builtin_adjacency_list);
     register_builtin(env, "VertexDegree", builtin_vertex_degree);
+    register_builtin(env, "DegreeList", builtin_degree_list);
     register_builtin(env, "ConnectedComponents", builtin_connected_components);
     register_builtin(env, "FindShortestPath", builtin_find_shortest_path);
     register_builtin(env, "GraphDistance", builtin_graph_distance);
@@ -2148,6 +2180,7 @@ pub fn register(env: &Env) {
     register_builtin(env, "ConnectedGraphQ", builtin_connected_graph_q);
     register_builtin(env, "FindSpanningTree", builtin_find_spanning_tree);
     register_builtin(env, "Kruskal", builtin_kruskal);
+    register_builtin(env, "KruskalTree", builtin_kruskal_tree);
     register_builtin(env, "FindClique", builtin_find_clique);
     register_builtin(env, "FindKClique", builtin_find_k_clique);
     register_builtin(env, "HamiltonianPath", builtin_hamiltonian_path);
@@ -2170,6 +2203,7 @@ pub fn register(env: &Env) {
         "GlobalClusteringCoefficient",
         builtin_global_clustering_coefficient,
     );
+    register_builtin(env, "ClusteringCoefficient", builtin_clustering_coefficient);
     register_builtin(env, "GraphAssortativity", builtin_graph_assortativity);
     register_builtin(env, "RandomGraph", builtin_random_graph);
 
@@ -2757,6 +2791,57 @@ mod tests {
             .to_real()
             .unwrap();
         assert!((-1.0..=1.0).contains(&a));
+    }
+
+    #[test]
+    fn test_clustering_coefficient_alias() {
+        approx(
+            eval_str("ClusteringCoefficient[Graph[{1<->2, 2<->3, 3<->1}]]")
+                .to_real()
+                .unwrap(),
+            1.0,
+        );
+        // A star has no links among neighbours of any vertex.
+        approx(
+            eval_str("ClusteringCoefficient[Graph[{1<->2, 1<->3, 1<->4}]]")
+                .to_real()
+                .unwrap(),
+            0.0,
+        );
+        assert!(
+            matches!(eval_str("ClusteringCoefficient[5]"), Value::Call { head, .. } if head == "ClusteringCoefficient")
+        );
+    }
+
+    #[test]
+    fn test_degree_list_alias() {
+        assert_eq!(
+            ints(&eval_str("DegreeList[Graph[{1<->2, 2<->3, 3<->1}]]")),
+            vec![2, 2, 2]
+        );
+        assert_eq!(eval_str("DegreeList[Graph[{1<->2, 2<->3}], 2]"), int(2));
+        assert!(
+            matches!(eval_str("DegreeList[5]"), Value::Call { head, .. } if head == "DegreeList")
+        );
+    }
+
+    #[test]
+    fn test_kruskal_tree_alias() {
+        assert_eq!(
+            eval_str("EdgeCount[KruskalTree[Graph[{1<->2, 2<->3, 3<->1}]]]"),
+            int(2)
+        );
+        assert_eq!(
+            eval_str("VertexCount[KruskalTree[Graph[{1<->2, 2<->3, 3<->1}]]]"),
+            int(3)
+        );
+        assert_eq!(
+            eval_str("EdgeCount[KruskalTree[Graph[{1<->2, 3<->4}]]]"),
+            int(2)
+        );
+        assert!(
+            matches!(eval_str("KruskalTree[5]"), Value::Call { head, .. } if head == "KruskalTree")
+        );
     }
 
     #[test]

@@ -443,6 +443,9 @@ const DAY_NAMES: [&str; 7] = [
     "Sunday",
 ];
 
+/// Abbreviated weekday names, index-aligned with `DAY_NAMES` (Monday = 0).
+const DAY_SHORT_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 const MONTH_NAMES: [&str; 12] = [
     "January",
     "February",
@@ -713,6 +716,27 @@ pub fn builtin_day_name(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(DAY_NAMES[dow as usize].to_string()))
 }
 
+/// `DayShortName[date]` — abbreviated name of the day of the week (`Mon`..`Sun`).
+pub fn builtin_day_short_name(args: &[Value]) -> Result<Value, EvalError> {
+    let (y, m, d) = match args.len() {
+        0 => {
+            let (y, m, d, _, _, _) = get_current_datetime();
+            (y, m, d)
+        }
+        1 => {
+            let (y, m, d, _, _, _) = date_spec_to_datetime(&args[0])?;
+            (y, m, d)
+        }
+        _ => {
+            return Err(EvalError::Error(
+                "DayShortName takes 0 or 1 argument".to_string(),
+            ));
+        }
+    };
+    let dow = day_of_week(y, m, d);
+    Ok(Value::Str(DAY_SHORT_NAMES[dow as usize].to_string()))
+}
+
 /// `DayCount[date1, date2]` or `DayCount[]`
 /// Number of days between two dates.
 pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
@@ -951,6 +975,7 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "DateValue", builtin_date_value);
     register_builtin(env, "DateDifference", builtin_date_difference);
     register_builtin(env, "DayName", builtin_day_name);
+    register_builtin(env, "DayShortName", builtin_day_short_name);
     register_builtin(env, "DayCount", builtin_day_count);
     register_builtin(env, "MonthName", builtin_month_name);
     register_builtin(env, "DaysInMonth", builtin_days_in_month);
@@ -1153,6 +1178,36 @@ mod tests {
         let date = Value::List(vec![val_int(2000), val_int(1), val_int(1)]);
         let result = builtin_day_name(&[date]).unwrap();
         assert_eq!(result, Value::Str("Saturday".to_string()));
+    }
+
+    #[test]
+    fn test_builtin_day_short_name() {
+        let date = Value::List(vec![val_int(2024), val_int(1), val_int(1)]);
+        assert_eq!(
+            builtin_day_short_name(&[date]).unwrap(),
+            Value::Str("Mon".to_string())
+        );
+
+        let date = Value::List(vec![val_int(2000), val_int(1), val_int(1)]);
+        assert_eq!(
+            builtin_day_short_name(&[date]).unwrap(),
+            Value::Str("Sat".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builtin_day_short_name_no_args_is_a_weekday() {
+        match builtin_day_short_name(&[]).unwrap() {
+            Value::Str(s) => {
+                assert!(DAY_SHORT_NAMES.contains(&s.as_str()), "unexpected day: {s}")
+            }
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_builtin_day_short_name_arity() {
+        assert!(builtin_day_short_name(&[val_int(1), val_int(2)]).is_err());
     }
 
     #[test]

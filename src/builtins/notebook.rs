@@ -54,6 +54,14 @@ fn symbol_name(v: &Value) -> Option<String> {
     }
 }
 
+/// Extract an integer stream handle.
+fn as_handle(v: &Value) -> Option<u64> {
+    match v {
+        Value::Integer(n) => n.to_u64(),
+        _ => None,
+    }
+}
+
 /// Current session directory (absolute when possible).
 fn current_dir(env: &Env) -> PathBuf {
     if let Some(Value::Str(s)) = env.get(CWD_KEY) {
@@ -313,6 +321,27 @@ pub fn builtin_binary_write(args: &[Value], env: &Env) -> Result<Value, EvalErro
     Ok(Value::Null)
 }
 
+// ── Streams ─────────────────────────────────────────────────────────────────
+
+/// `StreamPosition[stream]` — the byte cursor of an open stream.
+///
+/// Read streams report their cursor; write streams report the underlying file
+/// position. When no cursor is available (a closed or unknown handle) the
+/// stream object is returned unchanged, and a non-handle argument leaves the
+/// call unevaluated.
+pub fn builtin_stream_position(args: &[Value]) -> Result<Value, EvalError> {
+    let [stream] = args else {
+        return inert("StreamPosition", args);
+    };
+    let Some(handle) = as_handle(stream) else {
+        return inert("StreamPosition", args);
+    };
+    match super::streams::stream_position(handle) {
+        Some(pos) => Ok(Value::Integer(Integer::from(pos))),
+        None => Ok(stream.clone()),
+    }
+}
+
 // ── Timing ──────────────────────────────────────────────────────────────────
 
 /// `TimeUsed[]` — CPU time consumed by the session, in seconds.
@@ -531,6 +560,7 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "CreateWindow", builtin_create_window);
     super::register_builtin(env, "SetSelectedNotebook", builtin_set_selected_notebook);
     super::register_builtin(env, "CurrentNotebooks", builtin_current_notebooks);
+    super::register_builtin(env, "StreamPosition", builtin_stream_position);
     super::register_builtin(env, "TimeUsed", builtin_time_used);
     super::register_builtin(env, "SessionTime", builtin_session_time);
     super::register_builtin(env, "TimeObject", builtin_time_object);
@@ -563,6 +593,7 @@ pub fn register(env: &Env) {
         "CreateWindow",
         "SetSelectedNotebook",
         "CurrentNotebooks",
+        "StreamPosition",
         "BinaryRead",
         "BinaryWrite",
         "TimeUsed",
@@ -866,6 +897,57 @@ mod tests {
         ));
         assert!(matches!(
             builtin_symbols(&[s("a"), s("b")], &env).unwrap(),
+            Value::Call { .. }
+        ));
+    }
+
+    #[test]
+    fn test_stream_position_tracks_read_cursor() {
+        let env = env_with_builtins();
+        let path = temp_path("streampos");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+        let handle =
+            crate::builtins::streams::builtin_open_read(&[s(path.to_str().unwrap())], &env)
+                .unwrap();
+        assert_eq!(builtin_stream_position(&[handle.clone()]).unwrap(), int(0));
+
+        crate::builtins::streams::builtin_read_line(&[handle.clone()], &env).unwrap();
+        assert_eq!(builtin_stream_position(&[handle.clone()]).unwrap(), int(6));
+
+        crate::builtins::streams::builtin_close(&[handle.clone()], &env).unwrap();
+        // A closed handle has no cursor, so the stream object is echoed back.
+        assert_eq!(builtin_stream_position(&[handle.clone()]).unwrap(), handle);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_stream_position_write_stream_echoes_object() {
+        let env = env_with_builtins();
+        let path = temp_path("streamposwrite");
+        let handle =
+            crate::builtins::streams::builtin_open_write(&[s(path.to_str().unwrap())], &env)
+                .unwrap();
+        // The handle is a live write stream; its position is reported numerically.
+        assert!(matches!(
+            builtin_stream_position(&[handle.clone()]).unwrap(),
+            Value::Integer(_)
+        ));
+        crate::builtins::streams::builtin_close(&[handle], &env).unwrap();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_stream_position_inapplicable_is_inert() {
+        assert!(matches!(
+            builtin_stream_position(&[]).unwrap(),
+            Value::Call { .. }
+        ));
+        assert!(matches!(
+            builtin_stream_position(&[s("not-a-stream")]).unwrap(),
+            Value::Call { .. }
+        ));
+        assert!(matches!(
+            builtin_stream_position(&[int(1), int(2)]).unwrap(),
             Value::Call { .. }
         ));
     }

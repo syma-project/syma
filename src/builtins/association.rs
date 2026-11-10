@@ -757,6 +757,37 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── Key ────────────────────────────────────────────────────────────────
+
+/// `Key[assoc, k]` gives the canonicalized key `k` in `assoc`.
+///
+/// Association keys are stored in canonical string form (see `value_to_key`),
+/// so the stored key is returned in that canonical form regardless of whether
+/// the caller passed a string, symbol, integer, ... `Key[{assoc1, ...}, k]`
+/// applies the same operation across a list of associations.
+///
+/// Returns unevaluated when the first argument is neither an association nor a
+/// (non-empty) list of associations, and leaves the one-argument wrapper form
+/// `Key[k]` untouched.
+pub fn builtin_key(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("Key", args);
+    }
+    if let Value::List(items) = &args[0]
+        && all_assocs(items)
+    {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(builtin_key(&[item.clone(), args[1].clone()])?);
+        }
+        return Ok(Value::List(out));
+    }
+    match &args[0] {
+        Value::Assoc(_) => Ok(Value::Str(value_to_key(&args[1]))),
+        _ => unevaluated("Key", args),
+    }
+}
+
 // ── Lookup ──────────────────────────────────────────────────────────────
 
 /// Lookup[assoc, key] returns the value associated with key, or
@@ -1112,6 +1143,9 @@ pub fn register(env: &Env) {
 
     // Overrides the datamore definition with an identical-but-defensive version.
     super::register_builtin_env(env, "AssociationMap", builtin_association_map);
+
+    // `Key[assoc, k]` (the one-argument wrapper form `Key[k]` stays inert).
+    super::register_builtin(env, "Key", builtin_key);
 
     super::register_builtin(env, "MissingQ", builtin_missing_q);
 }
@@ -2082,6 +2116,61 @@ mod tests {
                         }),
                     ),
                 ],
+            }
+        );
+    }
+
+    // ── Key ──
+
+    #[test]
+    fn test_key_canonicalizes() {
+        // String key is returned as-is.
+        assert_eq!(
+            eval_str("Key[<|\"a\" -> 1, \"b\" -> 2|>, \"a\"]"),
+            string("a")
+        );
+        // Symbol key canonicalizes to its stored string form.
+        assert_eq!(eval_str("Key[<|a -> 1|>, a]"), string("a"));
+        // Numeric key canonicalizes to the stored string form too.
+        assert_eq!(eval_str("Key[<|\"2\" -> 1|>, 2]"), string("2"));
+    }
+
+    #[test]
+    fn test_key_maps_over_list_of_assocs() {
+        assert_eq!(
+            eval_str("Key[{<|\"a\" -> 1|>, <|\"a\" -> 2|>}, \"a\"]"),
+            list(vec![string("a"), string("a")])
+        );
+    }
+
+    #[test]
+    fn test_key_unevaluated() {
+        assert_eq!(
+            eval_str("Key[x, \"a\"]"),
+            Value::Call {
+                head: "Key".to_string(),
+                args: vec![Value::Symbol("x".to_string()), string("a")],
+            }
+        );
+        // The one-argument wrapper form stays inert.
+        assert_eq!(
+            eval_str("Key[\"a\"]"),
+            Value::Call {
+                head: "Key".to_string(),
+                args: vec![string("a")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_direct() {
+        let a = assoc(vec![("a", integer(1))]);
+        assert_eq!(builtin_key(&[a, string("a")]).unwrap(), string("a"));
+        assert_eq!(
+            builtin_key(&[integer(5), string("a")]).unwrap(),
+            Value::Call {
+                head: "Key".to_string(),
+                args: vec![integer(5), string("a")],
             }
         );
     }

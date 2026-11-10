@@ -17,13 +17,31 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "LinearOptimization", builtin_linear_optimization);
     super::register_builtin(env, "LinearProgramming", builtin_linear_optimization);
     super::register_builtin_env(env, "Interpolation", builtin_interpolation);
-    super::register_builtin(env, "InterpolatingFunction", builtin_interpolating_function);
+    super::register_builtin_env(env, "InterpolatingFunction", builtin_interpolating_function);
     super::register_builtin_env(env, "MinValue", builtin_min_value);
     super::register_builtin_env(env, "MaxValue", builtin_max_value);
+    super::register_builtin_env(env, "NonlinearModelFit", builtin_nonlinear_model_fit);
+    super::register_builtin_env(env, "FunctionInterpolation", builtin_function_interpolation);
+    // Internal head used by `Interpolation`/`FunctionInterpolation` result
+    // objects so that symbolic points (e.g. `Pi/2`) resolve numerically.
+    super::register_builtin_env(env, "FitInterpolationFunction", builtin_fit_interp_eval);
+    // `FittedModel` is the callable fit object returned by `NonlinearModelFit`;
+    // `FitResiduals`/`Property` expose and dispatch its properties.
+    super::register_builtin_env(env, "FittedModel", builtin_fitted_model);
+    super::register_builtin_env(env, "FitResiduals", builtin_fit_residuals);
+    super::register_builtin_env(env, "Property", builtin_property);
 
     // These builtins must see their arguments unevaluated (basis functions,
     // model expressions and variables are symbolic).
-    for name in ["Fit", "FindFit", "Interpolation", "MinValue", "MaxValue"] {
+    for name in [
+        "Fit",
+        "FindFit",
+        "Interpolation",
+        "MinValue",
+        "MaxValue",
+        "NonlinearModelFit",
+        "FunctionInterpolation",
+    ] {
         env.set_attributes(name, vec!["HoldAll".to_string()]);
     }
 }
@@ -420,6 +438,60 @@ fn gauss_newton(
     (best_ss, best)
 }
 
+/// Best nonlinear least-squares fit produced by `nonlinear_fit_core`.
+struct NonlinearFit {
+    params: Vec<String>,
+    best: Vec<f64>,
+    vars: Vec<String>,
+    residuals: Vec<f64>,
+}
+
+/// Shared core for `FindFit`/`NonlinearModelFit`: parse the data and model, run
+/// a multi-start Gauss–Newton search and return the best parameters together
+/// with the signed residuals `y_i - model(x_i)`.
+fn nonlinear_fit_core(
+    data: &Value,
+    model: &Value,
+    params_v: &Value,
+    vars_v: &Value,
+    env: &Env,
+) -> Option<NonlinearFit> {
+    let params = match collect_symbols(params_v) {
+        Some(p) if !p.is_empty() => p,
+        _ => return None,
+    };
+    let vars = collect_symbols(vars_v)?;
+    let (coords, ys) = parse_points(data, vars.len())?;
+    if coords.is_empty() {
+        return None;
+    }
+
+    let np = params.len();
+    let starts: Vec<Vec<f64>> = vec![vec![1.0; np], vec![0.5; np], vec![2.0; np], vec![0.25; np]];
+    let mut best_ss = f64::INFINITY;
+    let mut best = vec![1.0; np];
+    for start in &starts {
+        let (ss, p) = gauss_newton(model, &params, &vars, &coords, &ys, start, env);
+        if ss < best_ss {
+            best_ss = ss;
+            best = p;
+        }
+    }
+
+    let residuals: Vec<f64> = coords
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ys[i] - eval_model(model, &params, &best, &vars, c, env).unwrap_or(f64::NAN))
+        .collect();
+
+    Some(NonlinearFit {
+        params,
+        best,
+        vars,
+        residuals,
+    })
+}
+
 /// FindFit[data, model, params, vars] — nonlinear least-squares fit.
 pub fn builtin_find_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 4 {
@@ -430,37 +502,15 @@ pub fn builtin_find_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let params_v = arg_to_uneval(&args[2]);
     let vars_v = arg_to_uneval(&args[3]);
 
-    let params = match collect_symbols(&params_v) {
-        Some(p) if !p.is_empty() => p,
-        _ => return Ok(unevaluated("FindFit", args)),
-    };
-    let vars = match collect_symbols(&vars_v) {
-        Some(v) => v,
+    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, env) {
+        Some(f) => f,
         None => return Ok(unevaluated("FindFit", args)),
     };
-    let (coords, ys) = match parse_points(&data, vars.len()) {
-        Some(p) => p,
-        None => return Ok(unevaluated("FindFit", args)),
-    };
-    if coords.is_empty() {
-        return Ok(unevaluated("FindFit", args));
-    }
 
-    let np = params.len();
-    let starts: Vec<Vec<f64>> = vec![vec![1.0; np], vec![0.5; np], vec![2.0; np], vec![0.25; np]];
-    let mut best_ss = f64::INFINITY;
-    let mut best = vec![1.0; np];
-    for start in &starts {
-        let (ss, p) = gauss_newton(&model, &params, &vars, &coords, &ys, start, env);
-        if ss < best_ss {
-            best_ss = ss;
-            best = p;
-        }
-    }
-
-    let rules: Vec<Value> = params
+    let rules: Vec<Value> = fit
+        .params
         .iter()
-        .zip(best.iter())
+        .zip(fit.best.iter())
         .map(|(name, val)| Value::Rule {
             lhs: Box::new(Value::Symbol(name.clone())),
             rhs: Box::new(super::real(*val)),
@@ -468,6 +518,257 @@ pub fn builtin_find_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         })
         .collect();
     Ok(Value::List(rules))
+}
+
+/// Collect the free symbols appearing in `v` (used to infer model variables).
+fn collect_free_symbols(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Symbol(s) => {
+            if !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+        Value::List(items) => {
+            for it in items {
+                collect_free_symbols(it, out);
+            }
+        }
+        Value::Call { args, .. } => {
+            for a in args {
+                collect_free_symbols(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// NonlinearModelFit[data, model, params, vars] — nonlinear least-squares fit
+/// returning a callable fit object.
+///
+/// The result is applied as `fit[x]` (value at `x`) or `fit[coords]` (value at a
+/// coordinate vector), and exposes properties via
+/// `fit["BestFitParameters"]`, `fit["FitResiduals"]`, `fit["Fit"]`,
+/// `fit[Property["..."]]` and `fit[FitResiduals]`.
+pub fn builtin_nonlinear_model_fit(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 3 || args.len() > 4 {
+        return Ok(unevaluated("NonlinearModelFit", args));
+    }
+    let data = arg_to_value(&args[0], env)?;
+    let model = arg_to_uneval(&args[1]);
+    let params_v = arg_to_uneval(&args[2]);
+    let vars_v = if args.len() == 4 {
+        arg_to_uneval(&args[3])
+    } else {
+        // Infer the variables as the free symbols of the model minus parameters.
+        let mut free = Vec::new();
+        collect_free_symbols(&model, &mut free);
+        if let Some(ps) = collect_symbols(&params_v) {
+            free.retain(|s| !ps.contains(s));
+        }
+        Value::List(free.into_iter().map(Value::Symbol).collect())
+    };
+
+    let fit = match nonlinear_fit_core(&data, &model, &params_v, &vars_v, env) {
+        Some(f) => f,
+        None => return Ok(unevaluated("NonlinearModelFit", args)),
+    };
+
+    let rules: Vec<Value> = fit
+        .params
+        .iter()
+        .zip(fit.best.iter())
+        .map(|(name, val)| Value::Rule {
+            lhs: Box::new(Value::Symbol(name.clone())),
+            rhs: Box::new(super::real(*val)),
+            delayed: false,
+        })
+        .collect();
+    let residuals = Value::List(fit.residuals.iter().map(|r| super::real(*r)).collect());
+    let vars = Value::List(fit.vars.iter().map(|s| Value::Symbol(s.clone())).collect());
+
+    Ok(Value::PureFunction {
+        body: Expr::Call {
+            head: Box::new(Expr::Symbol("FittedModel".to_string())),
+            args: vec![
+                crate::eval::table::value_to_expr(&Value::List(rules)),
+                crate::eval::table::value_to_expr(&residuals),
+                crate::eval::table::value_to_expr(&model),
+                crate::eval::table::value_to_expr(&vars),
+                Expr::Slot(Some(1)),
+            ],
+        },
+        slot_count: 1,
+        params: vec![],
+        env: None,
+    })
+}
+
+/// Extract the property name from a `FittedModel` request argument.
+fn property_name(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.clone()),
+        Value::Symbol(s) => Some(s.clone()),
+        Value::Builtin(name, _) => Some(name.clone()),
+        Value::Call { head, args } if head == "Property" && args.len() == 1 => {
+            property_name(&args[0])
+        }
+        _ => None,
+    }
+}
+
+/// Extract `(name, value)` pairs from a list of parameter rules.
+fn extract_param_rules(v: &Value) -> (Vec<String>, Vec<f64>) {
+    let mut names = Vec::new();
+    let mut vals = Vec::new();
+    if let Value::List(items) = v {
+        for it in items {
+            if let Value::Rule { lhs, rhs, .. } = it
+                && let Value::Symbol(s) = lhs.as_ref()
+                && let Some(x) = super::to_f64(rhs)
+            {
+                names.push(s.clone());
+                vals.push(x);
+            }
+        }
+    }
+    (names, vals)
+}
+
+/// Substitute parameter names with their fitted values.
+fn substitute_params(model: &Value, names: &[String], vals: &[f64]) -> Value {
+    let mut m = model.clone();
+    for (n, v) in names.iter().zip(vals.iter()) {
+        m = substitute(&m, n, &super::real(*v));
+    }
+    m
+}
+
+/// Collect variable names from a symbol or a list of symbols.
+fn var_names(v: &Value) -> Vec<String> {
+    match v {
+        Value::List(items) => items
+            .iter()
+            .filter_map(|it| match it {
+                Value::Symbol(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        Value::Symbol(s) => vec![s.clone()],
+        _ => vec![],
+    }
+}
+
+/// Substitute a symbol in an expression with an arbitrary replacement expression.
+fn expr_substitute(expr: &Expr, name: &str, repl: &Expr) -> Expr {
+    match expr {
+        Expr::Symbol(s) if s == name => repl.clone(),
+        Expr::List(items) => Expr::List(
+            items
+                .iter()
+                .map(|e| expr_substitute(e, name, repl))
+                .collect(),
+        ),
+        Expr::Call { head, args } => Expr::Call {
+            head: Box::new(expr_substitute(head, name, repl)),
+            args: args
+                .iter()
+                .map(|e| expr_substitute(e, name, repl))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// FittedModel[rules, residuals, model, vars, request] — dispatch a fit object.
+fn builtin_fitted_model(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 5 {
+        return Ok(unevaluated("FittedModel", args));
+    }
+    // The evaluator wraps rule components and symbolic args in `Pattern`; strip
+    // those so numeric parsing and substitution see plain values.
+    let rules_v = deep_unwrap(&args[0]);
+    let residuals = &args[1];
+    let model = deep_unwrap(&args[2]);
+    let vars_v = deep_unwrap(&args[3]);
+    let request = deep_unwrap(&args[4]);
+
+    let (param_names, param_vals) = extract_param_rules(&rules_v);
+    let vars = var_names(&vars_v);
+    let model = &model;
+
+    if let Some(prop) = property_name(&request) {
+        return Ok(match prop.as_str() {
+            "BestFitParameters" | "ParameterRules" => rules_v.clone(),
+            "FitResiduals" | "Residuals" => residuals.clone(),
+            "Fit" | "BestFit" => substitute_params(model, &param_names, &param_vals),
+            "FitFunction" => {
+                let m = substitute_params(model, &param_names, &param_vals);
+                let mut body = crate::eval::table::value_to_expr(&m);
+                for (i, name) in vars.iter().enumerate() {
+                    body = expr_substitute(&body, name, &Expr::Slot(Some(i + 1)));
+                }
+                Value::PureFunction {
+                    body,
+                    slot_count: vars.len(),
+                    params: vec![],
+                    env: None,
+                }
+            }
+            _ => return Ok(unevaluated("FittedModel", args)),
+        });
+    }
+
+    // Numeric evaluation at a scalar or an explicit coordinate vector.
+    let coords: Option<Vec<f64>> = if vars.len() == 1 {
+        eval_scalar(&request, env).map(|x| vec![x])
+    } else if let Value::List(items) = &request {
+        if items.len() == vars.len() {
+            items.iter().map(|it| eval_scalar(it, env)).collect()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(coords) = coords {
+        let mut m = substitute_params(model, &param_names, &param_vals);
+        for (name, c) in vars.iter().zip(coords.iter()) {
+            m = substitute(&m, name, &super::real(*c));
+        }
+        return Ok(match eval_scalar(&m, env) {
+            Some(v) => super::real(v),
+            None => unevaluated("FittedModel", args),
+        });
+    }
+
+    Ok(unevaluated("FittedModel", args))
+}
+
+/// FitResiduals[fit] — residuals of a fit object.
+pub fn builtin_fit_residuals(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated("FitResiduals", args));
+    }
+    if let Ok(v) =
+        crate::eval::apply_function(&args[0], &[Value::Str("FitResiduals".to_string())], env)
+        && !matches!(&v, Value::Call { head, .. } if head == "FittedModel")
+    {
+        return Ok(v);
+    }
+    Ok(unevaluated("FitResiduals", args))
+}
+
+/// Property[obj, name] — access a property of an object; `Property[name]` stays
+/// notationally symbolic so that `obj[Property[name]]` works.
+pub fn builtin_property(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() == 2
+        && let Ok(v) = crate::eval::apply_function(&args[0], std::slice::from_ref(&args[1]), env)
+        && !matches!(&v, Value::Call { head, .. } if head == "FittedModel")
+    {
+        return Ok(v);
+    }
+    Ok(unevaluated("Property", args))
 }
 
 // ── LeastSquares ────────────────────────────────────────────────────────────
@@ -848,7 +1149,7 @@ pub fn builtin_interpolation(args: &[Value], env: &Env) -> Result<Value, EvalErr
 
     Ok(Value::PureFunction {
         body: Expr::Call {
-            head: Box::new(Expr::Symbol("InterpolatingFunction".to_string())),
+            head: Box::new(Expr::Symbol("FitInterpolationFunction".to_string())),
             args: vec![
                 crate::eval::table::value_to_expr(&build_hermite_rows(&xs, &ys, order)),
                 Expr::Slot(Some(1)),
@@ -858,6 +1159,22 @@ pub fn builtin_interpolation(args: &[Value], env: &Env) -> Result<Value, EvalErr
         params: vec![],
         env: None,
     })
+}
+
+/// FitInterpolationFunction[rows, t] — evaluate a Hermite interpolant, resolving
+/// the point numerically (handles symbolic constants such as `Pi/2`).
+pub fn builtin_fit_interp_eval(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated("FitInterpolationFunction", args));
+    }
+    let t = match eval_scalar(&args[1], env) {
+        Some(t) => t,
+        None => return Ok(unevaluated("FitInterpolationFunction", args)),
+    };
+    match hermite_eval(&args[0], t) {
+        Some(v) => Ok(super::real(v)),
+        None => Ok(unevaluated("FitInterpolationFunction", args)),
+    }
 }
 
 /// Piecewise cubic Hermite interpolation over `{{x, y, y'}, …}`.
@@ -905,7 +1222,7 @@ fn hermite_eval(data: &Value, t: f64) -> Option<f64> {
 }
 
 /// InterpolatingFunction[data] / InterpolatingFunction[data, x].
-pub fn builtin_interpolating_function(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_interpolating_function(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     match args.len() {
         1 => Ok(Value::PureFunction {
             body: Expr::Call {
@@ -920,7 +1237,7 @@ pub fn builtin_interpolating_function(args: &[Value]) -> Result<Value, EvalError
             env: None,
         }),
         2 => {
-            let t = match super::to_f64(&args[1]) {
+            let t = match eval_scalar(&args[1], env) {
                 Some(t) => t,
                 None => return Ok(unevaluated("InterpolatingFunction", args)),
             };
@@ -931,6 +1248,69 @@ pub fn builtin_interpolating_function(args: &[Value]) -> Result<Value, EvalError
         }
         _ => Ok(unevaluated("InterpolatingFunction", args)),
     }
+}
+
+// ── FunctionInterpolation ───────────────────────────────────────────────────
+
+/// FunctionInterpolation[expr, {x, xmin, xmax}] — sample `expr` on a grid and
+/// build a piecewise-Hermite interpolant over the samples.
+///
+/// `FunctionInterpolation[expr, {x, xmin, xmax}, InterpolationOrder -> n]`
+/// selects the interpolation order.
+pub fn builtin_function_interpolation(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Ok(unevaluated("FunctionInterpolation", args));
+    }
+    let expr = deep_unwrap(&arg_to_uneval(&args[0]));
+    let spec = match deep_unwrap(&arg_to_uneval(&args[1])) {
+        Value::List(items) if items.len() >= 3 => items,
+        _ => return Ok(unevaluated("FunctionInterpolation", args)),
+    };
+    let var = match &spec[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(unevaluated("FunctionInterpolation", args)),
+    };
+    let (lo, hi) = match (eval_scalar(&spec[1], env), eval_scalar(&spec[2], env)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Ok(unevaluated("FunctionInterpolation", args)),
+    };
+    if hi <= lo {
+        return Ok(unevaluated("FunctionInterpolation", args));
+    }
+
+    let n = 100usize;
+    let mut xs = Vec::with_capacity(n + 1);
+    let mut ys = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let x = lo + (hi - lo) * (i as f64) / (n as f64);
+        let sub = substitute(&expr, &var, &super::real(x));
+        match eval_scalar(&sub, env) {
+            Some(y) => {
+                xs.push(x);
+                ys.push(y);
+            }
+            None => return Ok(unevaluated("FunctionInterpolation", args)),
+        }
+    }
+
+    let order = if args.len() == 3 {
+        parse_interp_order(&arg_to_uneval(&args[2])).unwrap_or(3)
+    } else {
+        3
+    };
+
+    Ok(Value::PureFunction {
+        body: Expr::Call {
+            head: Box::new(Expr::Symbol("FitInterpolationFunction".to_string())),
+            args: vec![
+                crate::eval::table::value_to_expr(&build_hermite_rows(&xs, &ys, order)),
+                Expr::Slot(Some(1)),
+            ],
+        },
+        slot_count: 1,
+        params: vec![],
+        env: None,
+    })
 }
 
 // ── MinValue / MaxValue ─────────────────────────────────────────────────────
@@ -1358,5 +1738,146 @@ mod tests {
     fn test_min_value_bounded() {
         let v = num("MinValue[x^2, {x, -3, 1}]");
         assert_close(v, 0.0);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_linear() {
+        // The returned fit object is callable at a point.
+        let v = num("NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][4]");
+        assert_close(v, 9.0);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_best_fit_parameters() {
+        let a = num(
+            "a /. NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][\"BestFitParameters\"]",
+        );
+        let b = num(
+            "b /. NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][\"BestFitParameters\"]",
+        );
+        assert_close(a, 2.0);
+        assert_close(b, 1.0);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_residuals() {
+        let res = eval_str(
+            "NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][\"FitResiduals\"]",
+        );
+        let items = match res {
+            Value::List(items) => items,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(items.len(), 3);
+        for it in &items {
+            assert_close(to_f64(it).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_property_call() {
+        let a = num(
+            "a /. NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][Property[\"BestFitParameters\"]]",
+        );
+        assert_close(a, 2.0);
+    }
+
+    #[test]
+    fn test_fit_residuals_builtin() {
+        let res = eval_str(
+            "FitResiduals[NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x]]",
+        );
+        let items = match res {
+            Value::List(items) => items,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(items.len(), 3);
+        for it in &items {
+            assert_close(to_f64(it).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_exponential() {
+        let a = num(
+            "a /. NonlinearModelFit[{{0, 1}, {1, 2.718281828}, {2, 7.389056099}}, a Exp[x], {a}, x][\"BestFitParameters\"]",
+        );
+        assert_close(a, 1.0);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_inapplicable() {
+        // Non-numeric data stays unevaluated.
+        let v = eval_str("NonlinearModelFit[{{x, y}}, a x + b, {a, b}, x]");
+        assert!(matches!(v, Value::Call { .. }));
+    }
+
+    #[test]
+    fn test_function_interpolation_basic() {
+        let v = num("FunctionInterpolation[x^2, {x, 0, 2}][1.0]");
+        assert_close(v, 1.0);
+    }
+
+    #[test]
+    fn test_function_interpolation_trig() {
+        let v = num("FunctionInterpolation[Sin[x], {x, 0, Pi}][Pi/2]");
+        assert_close(v, 1.0);
+    }
+
+    #[test]
+    fn test_function_interpolation_inapplicable() {
+        let v = eval_str("FunctionInterpolation[x^2, x]");
+        assert!(matches!(v, Value::Call { .. }));
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_fit_property() {
+        // "Fit" yields the model with fitted parameters substituted in.
+        // "Fit" yields the model with fitted parameters substituted in.
+        let v = eval_str(
+            "CoefficientList[NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][\"Fit\"], x]",
+        );
+        let c = match v {
+            Value::List(items) => items,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(c.len(), 2);
+        assert_close(to_f64(&c[0]).unwrap(), 1.0);
+        assert_close(to_f64(&c[1]).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_fitfunction_property() {
+        let f = "NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][\"FitFunction\"]";
+        let v = num(&format!("({f})[4]"));
+        assert_close(v, 9.0);
+    }
+
+    #[test]
+    fn test_fit_residuals_symbol_property() {
+        let res = eval_str(
+            "NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}, x][FitResiduals]",
+        );
+        let items = match res {
+            Value::List(items) => items,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(items.len(), 3);
+        for it in &items {
+            assert_close(to_f64(it).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn test_function_interpolation_order_option() {
+        let v = num("FunctionInterpolation[x, {x, 0, 2}, InterpolationOrder -> 1][0.5]");
+        assert_close(v, 0.5);
+    }
+
+    #[test]
+    fn test_nonlinear_model_fit_infers_vars() {
+        // The variable list may be omitted and is inferred from the model.
+        let v = num("NonlinearModelFit[{{0, 1}, {1, 3}, {2, 5}}, a x + b, {a, b}][4]");
+        assert_close(v, 9.0);
     }
 }

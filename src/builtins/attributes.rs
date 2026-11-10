@@ -117,7 +117,7 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         | "PrimeNu" | "PositiveQ" | "NegativeQ" | "NonNegativeQ" | "ZeroQ" => llr(),
         // -- String functions (Listable only) --
         "StringLength" | "StringReverse" | "StringContainsQ" | "StringStartsQ" | "StringEndsQ"
-        | "StringFreeQ" | "ToUpperCase" | "ToLowerCase" => llr(),
+        | "StringFreeQ" | "ToUpperCase" | "ToLowerCase" | "LowerCase" | "UpperCase" => llr(),
         // -- Developer context --
         "BesselSimplify" | "GammaSimplify" | "PolyGammaSimplify" | "ZetaSimplify"
         | "PolyLogSimplify" | "TrigToRadicals" => llr(),

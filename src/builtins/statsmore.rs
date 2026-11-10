@@ -1687,6 +1687,312 @@ pub fn builtin_distribution_fit_test(args: &[Value]) -> Result<Value, EvalError>
     }
 }
 
+// ── Hypothesis tests: location and variance ─────────────────────────────────
+
+/// Standard-normal upper-tail probability `P(Z > z)`.
+fn normal_sf(z: f64) -> f64 {
+    let mut m = HashMap::new();
+    m.insert("Distribution".to_string(), Value::Str("Normal".to_string()));
+    m.insert("Mean".to_string(), super::real(0.0));
+    m.insert("SD".to_string(), super::real(1.0));
+    match st::builtin_cdf(&[Value::Assoc(m), super::real(z)]) {
+        Ok(v) => (1.0 - as_f64(&v).unwrap_or(0.5)).clamp(0.0, 1.0),
+        Err(_) => 0.5,
+    }
+}
+
+/// Student's-`t` upper-tail probability `P(T_ν > t)`.
+fn student_t_sf(nu: f64, t: f64) -> Option<f64> {
+    let mut m = HashMap::new();
+    m.insert(
+        "Distribution".to_string(),
+        Value::Str("StudentT".to_string()),
+    );
+    m.insert("Nu".to_string(), super::real(nu));
+    let c = as_f64(&st::builtin_cdf(&[Value::Assoc(m), super::real(t)]).ok()?)?;
+    Some((1.0 - c).clamp(0.0, 1.0))
+}
+
+/// Chi-square upper-tail probability `P(X_k > x)`.
+fn chi_square_sf(k: f64, x: f64) -> f64 {
+    (1.0 - chi_square_cdf(k, x)).clamp(0.0, 1.0)
+}
+
+/// F upper-tail probability `P(F_{d1,d2} > x)`.
+///
+/// Uses `P(F > x) = I_{d2/(d2 + d1 x)}(d2/2, d1/2)`, i.e. a Beta CDF.
+fn f_sf(d1: f64, d2: f64, x: f64) -> Option<f64> {
+    if x <= 0.0 {
+        return Some(1.0);
+    }
+    if !x.is_finite() {
+        return Some(0.0);
+    }
+    let s = d2 / (d2 + d1 * x);
+    let mut m = HashMap::new();
+    m.insert("Distribution".to_string(), Value::Str("Beta".to_string()));
+    m.insert("Alpha".to_string(), super::real(d2 / 2.0));
+    m.insert("Beta".to_string(), super::real(d1 / 2.0));
+    as_f64(&st::builtin_cdf(&[Value::Assoc(m), super::real(s)]).ok()?)
+}
+
+/// Sample mean and unbiased (n−1) variance.
+fn mean_var(nums: &[f64]) -> (f64, f64) {
+    let n = nums.len() as f64;
+    let mean = nums.iter().sum::<f64>() / n;
+    let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    (mean, var)
+}
+
+/// Two-sided p-value `2·min(p_lo, p_hi)`, capped at 1.
+fn two_sided(p_lo: f64, p_hi: f64) -> f64 {
+    (2.0 * p_lo.min(p_hi)).clamp(0.0, 1.0)
+}
+
+/// Split an optional trailing `"Test"` string off the argument list.
+fn split_test_name(args: &[Value]) -> (&[Value], &str) {
+    match args.last() {
+        Some(Value::Str(s)) if args.len() >= 2 => (&args[..args.len() - 1], s.as_str()),
+        _ => (args, ""),
+    }
+}
+
+/// One-sample location test against a hypothesized center `mu`.
+fn one_sample_location(name: &str, nums: &[f64], mu: f64, which: &str) -> Result<Value, EvalError> {
+    let n = nums.len();
+    if n < 2 {
+        return unevaluated(name, &[]);
+    }
+    let nf = n as f64;
+    let (mean, var) = mean_var(nums);
+    match which {
+        "" | "T" | "StudentT" => {
+            let se = (var / nf).sqrt();
+            let t = if se > 0.0 { (mean - mu) / se } else { 0.0 };
+            match student_t_sf(nf - 1.0, t) {
+                Some(sf) => Ok(super::real(two_sided(sf, 1.0 - sf))),
+                None => unevaluated(name, &[]),
+            }
+        }
+        "Z" | "Normal" => {
+            let se = (var / nf).sqrt();
+            if se <= 0.0 {
+                return Ok(super::real(if mean == mu { 1.0 } else { 0.0 }));
+            }
+            let z = (mean - mu) / se;
+            Ok(super::real((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0)))
+        }
+        "SignedRank" | "Wilcoxon" => match signed_rank_p(nums, mu) {
+            Some(p) => Ok(super::real(p)),
+            None => unevaluated(name, &[]),
+        },
+        _ => unevaluated(name, &[]),
+    }
+}
+
+/// Wilcoxon signed-rank two-sided p-value (normal approximation).
+fn signed_rank_p(nums: &[f64], mu: f64) -> Option<f64> {
+    let diffs: Vec<f64> = nums.iter().map(|x| x - mu).filter(|d| *d != 0.0).collect();
+    let n = diffs.len();
+    if n < 1 {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| {
+        diffs[i]
+            .abs()
+            .partial_cmp(&diffs[j].abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut ranks = vec![0.0_f64; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && diffs[order[j + 1]].abs() == diffs[order[i]].abs() {
+            j += 1;
+        }
+        let avg = (i + j) as f64 / 2.0 + 1.0;
+        for k in i..=j {
+            ranks[order[k]] = avg;
+        }
+        i = j + 1;
+    }
+    let w_plus: f64 = (0..n).filter(|&k| diffs[k] > 0.0).map(|k| ranks[k]).sum();
+    let nf = n as f64;
+    let mean = nf * (nf + 1.0) / 4.0;
+    let var = nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0;
+    if var <= 0.0 {
+        return Some(1.0);
+    }
+    let diff = w_plus - mean;
+    let z = (diff - 0.5 * diff.signum()) / var.sqrt();
+    Some((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0))
+}
+
+/// Two-sample location test (Welch's t) between two numeric samples.
+fn two_sample_location(name: &str, a: &[f64], b: &[f64], which: &str) -> Result<Value, EvalError> {
+    let (n1, n2) = (a.len(), b.len());
+    if n1 < 2 || n2 < 2 {
+        return unevaluated(name, &[]);
+    }
+    let (f1, f2) = (n1 as f64, n2 as f64);
+    let (m1, v1) = mean_var(a);
+    let (m2, v2) = mean_var(b);
+    let se2 = v1 / f1 + v2 / f2;
+    if se2 <= 0.0 {
+        return Ok(super::real(if m1 == m2 { 1.0 } else { 0.0 }));
+    }
+    match which {
+        "Z" | "Normal" => {
+            let z = (m1 - m2) / se2.sqrt();
+            Ok(super::real((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0)))
+        }
+        "" | "T" | "StudentT" => {
+            let t = (m1 - m2) / se2.sqrt();
+            // Welch–Satterthwaite degrees of freedom.
+            let df = se2 * se2 / ((v1 / f1).powi(2) / (f1 - 1.0) + (v2 / f2).powi(2) / (f2 - 1.0));
+            match student_t_sf(df, t) {
+                Some(sf) => Ok(super::real(two_sided(sf, 1.0 - sf))),
+                None => unevaluated(name, &[]),
+            }
+        }
+        _ => unevaluated(name, &[]),
+    }
+}
+
+/// Shared argument parsing/dispatch for `MeanTest` and `LocationTest`.
+fn location_test_impl(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    let (pos, named) = split_test_name(args);
+    let which = named.to_string();
+    match pos.len() {
+        // `test[{a, b}, ...]` — two-sample list form.
+        1 => {
+            if let Value::List(outer) = &pos[0]
+                && outer.len() == 2
+                && let (Value::List(a), Value::List(b)) = (&outer[0], &outer[1])
+            {
+                let a = extract_nums(a)?;
+                let b = extract_nums(b)?;
+                return two_sample_location(name, &a, &b, &which);
+            }
+            unevaluated(name, args)
+        }
+        // `test[data, mu]` or `test[data1, data2]`.
+        2 => {
+            let a = match &pos[0] {
+                Value::List(items) => extract_nums(items)?,
+                _ => return unevaluated(name, args),
+            };
+            if let Value::List(b) = &pos[1] {
+                let b = extract_nums(b)?;
+                return two_sample_location(name, &a, &b, &which);
+            }
+            match as_f64(&pos[1]) {
+                Some(mu) => one_sample_location(name, &a, mu, &which),
+                None => unevaluated(name, args),
+            }
+        }
+        _ => unevaluated(name, args),
+    }
+}
+
+/// MeanTest[data, mu] — p-value for the population mean.
+///
+/// Also supports the two-sample forms `MeanTest[{a, b}]` and `MeanTest[a, b]`
+/// (Welch's unequal-variance t-test) and an optional trailing test name
+/// (`"T"`, `"Z"`, `"SignedRank"`).
+pub fn builtin_mean_test(args: &[Value]) -> Result<Value, EvalError> {
+    location_test_impl("MeanTest", args)
+}
+
+/// LocationTest[data, mu] — p-value for the population location.
+///
+/// Same argument forms and tests as [`builtin_mean_test`].
+pub fn builtin_location_test(args: &[Value]) -> Result<Value, EvalError> {
+    location_test_impl("LocationTest", args)
+}
+
+/// VarianceTest[data, var] — p-value for the population variance.
+///
+/// One-sample chi-square form `VarianceTest[data, σ0]`; two-sample forms
+/// `VarianceTest[{a, b}]` / `VarianceTest[a, b]` (F-test on the variance
+/// ratio). An optional trailing test name (`"ChiSquare"`, `"F"`) selects the
+/// statistic.
+pub fn builtin_variance_test(args: &[Value]) -> Result<Value, EvalError> {
+    let (pos, named) = split_test_name(args);
+    let which = named.to_string();
+    match pos.len() {
+        1 => {
+            if let Value::List(outer) = &pos[0]
+                && outer.len() == 2
+                && let (Value::List(a), Value::List(b)) = (&outer[0], &outer[1])
+            {
+                let a = extract_nums(a)?;
+                let b = extract_nums(b)?;
+                return variance_two_sample(&a, &b, &which);
+            }
+            unevaluated("VarianceTest", args)
+        }
+        2 => {
+            let a = match &pos[0] {
+                Value::List(items) => extract_nums(items)?,
+                _ => return unevaluated("VarianceTest", args),
+            };
+            if let Value::List(b) = &pos[1] {
+                let b = extract_nums(b)?;
+                return variance_two_sample(&a, &b, &which);
+            }
+            let var0 = match as_f64(&pos[1]) {
+                Some(v) if v > 0.0 => v,
+                _ => return unevaluated("VarianceTest", args),
+            };
+            variance_one_sample(&a, var0, &which)
+        }
+        _ => unevaluated("VarianceTest", args),
+    }
+}
+
+/// One-sample chi-square variance test against `var0`.
+fn variance_one_sample(nums: &[f64], var0: f64, which: &str) -> Result<Value, EvalError> {
+    let n = nums.len();
+    if n < 2 {
+        return unevaluated("VarianceTest", &[]);
+    }
+    if !matches!(which, "" | "ChiSquare" | "ChiSquared" | "Variance") {
+        return unevaluated("VarianceTest", &[]);
+    }
+    let (_, var) = mean_var(nums);
+    let df = (n - 1) as f64;
+    let stat = df * var / var0;
+    let lo = chi_square_cdf(df, stat);
+    let hi = chi_square_sf(df, stat);
+    Ok(super::real(two_sided(lo, hi)))
+}
+
+/// Two-sample F variance-ratio test.
+fn variance_two_sample(a: &[f64], b: &[f64], which: &str) -> Result<Value, EvalError> {
+    if a.len() < 2 || b.len() < 2 {
+        return unevaluated("VarianceTest", &[]);
+    }
+    if !matches!(which, "" | "F" | "FRatio" | "Variance") {
+        return unevaluated("VarianceTest", &[]);
+    }
+    let d1 = (a.len() - 1) as f64;
+    let d2 = (b.len() - 1) as f64;
+    let (_, v1) = mean_var(a);
+    let (_, v2) = mean_var(b);
+    if v1 <= 0.0 || v2 <= 0.0 {
+        return Ok(super::real(1.0));
+    }
+    let f = v1 / v2;
+    let hi = match f_sf(d1, d2, f) {
+        Some(p) => p,
+        None => return unevaluated("VarianceTest", &[]),
+    };
+    let lo = 1.0 - hi;
+    Ok(super::real(two_sided(lo, hi)))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -1755,6 +2061,10 @@ pub fn register(env: &Env) {
     );
     register_builtin(env, "AndersonDarlingTest", builtin_anderson_darling_test);
     register_builtin(env, "DistributionFitTest", builtin_distribution_fit_test);
+    // Location and variance hypothesis tests
+    register_builtin(env, "MeanTest", builtin_mean_test);
+    register_builtin(env, "LocationTest", builtin_location_test);
+    register_builtin(env, "VarianceTest", builtin_variance_test);
     // Hold the event/integrand so free variables survive argument evaluation
     // (e.g. `x == 2` must not collapse to `False`).
     env.set_attributes("Expectation", vec!["HoldFirst".to_string()]);
@@ -2306,6 +2616,115 @@ mod tests {
         ));
         assert!(matches!(
             builtin_find_distribution_parameters(&[lst(vec![iv(1)]), uniform(0.0, 1.0)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+    }
+
+    // ── Hypothesis tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mean_test_centered() {
+        // Sample mean equals mu -> p = 1.
+        let v = builtin_mean_test(&[lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]), iv(3)]).unwrap();
+        approx(as_f(&v), 1.0);
+    }
+
+    #[test]
+    fn test_mean_test_shifted_tiny_p() {
+        let v = builtin_mean_test(&[lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]), iv(0)]).unwrap();
+        let p = as_f(&v);
+        assert!((0.0..0.05).contains(&p), "p = {p}");
+    }
+
+    #[test]
+    fn test_mean_test_known_p_value() {
+        // t = 4.2426, df = 4 -> two-sided p ~ 0.01313.
+        let v = builtin_mean_test(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            super::super::real(0.0),
+        ])
+        .unwrap();
+        assert!((as_f(&v) - 0.0131).abs() < 0.002, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_mean_test_two_sample_list_form() {
+        let outer = lst(vec![
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            lst(vec![iv(6), iv(7), iv(8), iv(9), iv(10)]),
+        ]);
+        let v = builtin_mean_test(&[outer]).unwrap();
+        assert!(as_f(&v) < 0.01, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_mean_test_two_sample_flat_form() {
+        let a = lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]);
+        let b = lst(vec![iv(6), iv(7), iv(8), iv(9), iv(10)]);
+        let v = builtin_mean_test(&[a, b]).unwrap();
+        assert!(as_f(&v) < 0.01, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_mean_test_z_and_signed_rank() {
+        let data = lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]);
+        let z = builtin_mean_test(&[data.clone(), iv(0), Value::Str("Z".to_string())]).unwrap();
+        assert!(as_f(&z) < 0.05, "z p = {}", as_f(&z));
+        let sr = builtin_mean_test(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5), iv(6)]),
+            iv(0),
+            Value::Str("SignedRank".to_string()),
+        ])
+        .unwrap();
+        assert!(as_f(&sr) < 0.05, "signed-rank p = {}", as_f(&sr));
+    }
+
+    #[test]
+    fn test_location_test_matches_mean_test() {
+        let data = lst(vec![iv(2), iv(4), iv(6), iv(8)]);
+        let a = builtin_mean_test(&[data.clone(), iv(3)]).unwrap();
+        let b = builtin_location_test(&[data, iv(3)]).unwrap();
+        approx(as_f(&a), as_f(&b));
+    }
+
+    #[test]
+    fn test_variance_test_matching() {
+        // s^2 = 2.5, stat = 4·2.5/2.5 = 4, df = 4 -> two-sided p ~ 0.812.
+        let v = builtin_variance_test(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            super::super::real(2.5),
+        ])
+        .unwrap();
+        assert!((as_f(&v) - 0.81).abs() < 0.05, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_variance_test_two_sample() {
+        let outer = lst(vec![
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            lst(vec![iv(10), iv(20), iv(30), iv(40), iv(50)]),
+        ]);
+        let v = builtin_variance_test(&[outer]).unwrap();
+        assert!(as_f(&v) < 0.05, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_hypothesis_tests_unevaluated() {
+        assert!(matches!(
+            builtin_mean_test(&[Value::Symbol("z".to_string())]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_variance_test(&[lst(vec![iv(1)]), iv(2)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        // Unknown named test.
+        assert!(matches!(
+            builtin_location_test(&[
+                lst(vec![iv(1), iv(2), iv(3)]),
+                iv(0),
+                Value::Str("Bogus".to_string())
+            ]),
             Err(EvalError::NoMatch { .. })
         ));
     }

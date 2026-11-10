@@ -1,7 +1,8 @@
 //! Charting package builtins.
 //!
 //! Provides SVG-based chart primitives: BarChart, Histogram, PieChart,
-//! DonutChart, BubbleChart, WaterfallChart, RegionPlot, and ContourPlot.
+//! DonutChart, BubbleChart, WaterfallChart, BarcodePlot, WordCloud, RegionPlot,
+//! and ContourPlot.
 
 use crate::value::{EvalError, Value};
 
@@ -2468,6 +2469,227 @@ pub fn builtin_swatch_legend(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(svg))
 }
 
+// ── BarcodePlot ────────────────────────────────────────────────────────────────
+
+/// `BarcodePlot[positions]` or `BarcodePlot[{{pos, label}, ...}]` — draws a
+/// vertical tick at each position, with an optional label. Trailing arguments
+/// may carry chart options. Returns the call unevaluated when the argument
+/// cannot be interpreted as positions.
+pub fn builtin_barcode_plot(args: &[Value]) -> Result<Value, EvalError> {
+    let unevaluated = |args: &[Value]| Value::Call {
+        head: "BarcodePlot".to_string(),
+        args: args.to_vec(),
+    };
+
+    let Some(Value::List(items)) = args.first() else {
+        return Ok(unevaluated(args));
+    };
+
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, _grid_lines) = parse_chart_options(&options);
+
+    // Accept bare positions or `{position, label}` pairs.
+    let mut bars: Vec<(f64, Option<String>)> = Vec::new();
+    for item in items {
+        match item {
+            Value::List(p) if !p.is_empty() => {
+                if let Some(pos) = super::to_f64(&p[0]).filter(|v| v.is_finite()) {
+                    let label = p.get(1).map(|v| match v {
+                        Value::Str(s) => s.clone(),
+                        Value::Symbol(s) => s.clone(),
+                        other => other.to_string(),
+                    });
+                    bars.push((pos, label));
+                }
+            }
+            other => {
+                if let Some(pos) = super::to_f64(other).filter(|v| v.is_finite()) {
+                    bars.push((pos, None));
+                }
+            }
+        }
+    }
+
+    if bars.is_empty() {
+        return Ok(unevaluated(args));
+    }
+
+    let xs: Vec<f64> = bars.iter().map(|b| b.0).collect();
+    let x_min = xs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let x_max = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = if (x_max - x_min).abs() > 1e-12 {
+        x_max - x_min
+    } else {
+        1.0
+    };
+    let x_min_p = x_min - span * 0.08;
+    let x_max_p = x_max + span * 0.08;
+    let (x_min_p, x_max_p) = guard_range(x_min_p, x_max_p);
+    let plot_w = (width - MARGIN_LEFT - MARGIN_RIGHT).max(1.0);
+    let plot_h = (height - MARGIN_TOP - MARGIN_BOTTOM).max(1.0);
+    let baseline = MARGIN_TOP + plot_h;
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" style=\"background:white\">\n",
+        width as i32, height as i32, width as i32, height as i32
+    ));
+
+    // Baseline axis.
+    svg.push_str(&format!(
+        "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+        MARGIN_LEFT, baseline, MARGIN_LEFT + plot_w, baseline, AXIS_COLOR
+    ));
+
+    for (i, (pos, label)) in bars.iter().enumerate() {
+        let sx = MARGIN_LEFT + (pos - x_min_p) / (x_max_p - x_min_p) * plot_w;
+        let color = palette_color(i);
+        svg.push_str(&format!(
+            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"3\"/>\n",
+            sx,
+            MARGIN_TOP + 4.0,
+            sx,
+            baseline,
+            color
+        ));
+        if let Some(label) = label {
+            svg.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" fill=\"{}\">{}</text>\n",
+                sx,
+                MARGIN_TOP + plot_h / 2.0,
+                DARK_TEXT,
+                escape_xml(label)
+            ));
+        }
+    }
+
+    svg.push_str("</svg>\n");
+    Ok(Value::Str(svg))
+}
+
+// ── WordCloud ──────────────────────────────────────────────────────────────────
+
+/// `WordCloud[words]`, `WordCloud["some text"]` or
+/// `WordCloud[{{word, weight}, ...}]` — lays words out in rows, scaling the
+/// font size by frequency or supplied weight. Returns the call unevaluated when
+/// no words can be extracted.
+pub fn builtin_word_cloud(args: &[Value]) -> Result<Value, EvalError> {
+    let unevaluated = |args: &[Value]| Value::Call {
+        head: "WordCloud".to_string(),
+        args: args.to_vec(),
+    };
+
+    let Some(first) = args.first() else {
+        return Ok(unevaluated(args));
+    };
+
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, _grid_lines) = parse_chart_options(&options);
+
+    // Collect (word, weight) pairs, accumulating repeats as frequency.
+    let mut entries: Vec<(String, f64)> = Vec::new();
+    let mut push = |word: &str, weight: f64| {
+        if word.is_empty() {
+            return;
+        }
+        if let Some(existing) = entries.iter_mut().find(|e| e.0 == word) {
+            existing.1 += weight;
+        } else {
+            entries.push((word.to_string(), weight));
+        }
+    };
+
+    match first {
+        Value::Str(text) => {
+            for w in text.split_whitespace() {
+                push(w, 1.0);
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                match item {
+                    Value::Str(s) => push(s, 1.0),
+                    Value::Symbol(s) => push(s, 1.0),
+                    Value::List(p) if !p.is_empty() => {
+                        let word = match &p[0] {
+                            Value::Str(s) => s.clone(),
+                            Value::Symbol(s) => s.clone(),
+                            _ => continue,
+                        };
+                        let weight = p.get(1).and_then(super::to_f64).unwrap_or(1.0);
+                        push(&word, weight.max(0.0));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => return Ok(unevaluated(args)),
+    }
+
+    if entries.is_empty() {
+        return Ok(unevaluated(args));
+    }
+
+    entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let max_w = entries
+        .iter()
+        .map(|e| e.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_w = entries.iter().map(|e| e.1).fold(f64::INFINITY, f64::min);
+    let w_range = max_w - min_w;
+    const MIN_FONT: f64 = 12.0;
+    const MAX_FONT: f64 = 46.0;
+    let font_for = |w: f64| -> f64 {
+        if w_range < 1e-12 {
+            (MIN_FONT + MAX_FONT) / 2.0
+        } else {
+            MIN_FONT + (w - min_w) / w_range * (MAX_FONT - MIN_FONT)
+        }
+    };
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" style=\"background:white\">\n",
+        width as i32, height as i32, width as i32, height as i32
+    ));
+
+    // Greedy row layout: advance left-to-right, wrapping when the estimated
+    // text width would exceed the canvas.
+    let pad = 12.0_f64;
+    let max_x = width - pad;
+    let mut x = pad;
+    let mut y = pad;
+    let mut row_h = 0.0_f64;
+
+    for (i, (word, weight)) in entries.iter().enumerate() {
+        if y > height - pad {
+            break;
+        }
+        let font = font_for(*weight);
+        let est_w = word.chars().count() as f64 * font * 0.6;
+        if x > pad && x + est_w > max_x {
+            x = pad;
+            y += row_h * 1.25;
+            row_h = 0.0;
+        }
+        row_h = row_h.max(font);
+        let color = palette_color(i);
+        svg.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"{:.1}\" fill=\"{}\">{}</text>\n",
+            x,
+            y + font,
+            font,
+            color,
+            escape_xml(word)
+        ));
+        x += est_w + font * 0.4;
+    }
+
+    svg.push_str("</svg>\n");
+    Ok(Value::Str(svg))
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 
 /// Register all Charting builtins.
@@ -2481,6 +2703,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "DonutChart", builtin_donut_chart);
     register_builtin(env, "BubbleChart", builtin_bubble_chart);
     register_builtin(env, "WaterfallChart", builtin_waterfall_chart);
+    register_builtin(env, "BarcodePlot", builtin_barcode_plot);
+    register_builtin(env, "WordCloud", builtin_word_cloud);
     register_builtin(env, "TreeMap", builtin_tree_map);
     register_builtin(env, "Dendrogram", builtin_dendrogram);
     register_builtin(env, "RegionPlot", builtin_region_plot);
@@ -2508,6 +2732,8 @@ pub const SYMBOLS: &[&str] = &[
     "DonutChart",
     "BubbleChart",
     "WaterfallChart",
+    "BarcodePlot",
+    "WordCloud",
     "TreeMap",
     "Dendrogram",
     "RegionPlot",
@@ -2737,6 +2963,100 @@ mod tests {
             }
             _ => panic!("Expected string"),
         }
+    }
+
+    #[test]
+    fn test_barcode_plot_basic() {
+        let data = Value::List(vec![int_val(1), int_val(3), int_val(5)]);
+        let result = builtin_barcode_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<svg"), "Expected SVG output");
+                assert!(svg.contains("<line"), "Expected vertical barcode lines");
+                assert!(svg.contains("</svg>"), "Expected closing SVG tag");
+            }
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_barcode_plot_labels_escaped() {
+        let data = Value::List(vec![
+            Value::List(vec![int_val(1), Value::Str("a".to_string())]),
+            Value::List(vec![real_val(2.5), Value::Str("b&c".to_string())]),
+        ]);
+        let result = builtin_barcode_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains(">a<"), "Expected label a");
+                assert!(svg.contains("b&amp;c"), "Expected escaped label");
+            }
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_barcode_plot_inapplicable() {
+        assert!(
+            matches!(builtin_barcode_plot(&[int_val(5)]).unwrap(), Value::Call { head, .. } if head == "BarcodePlot")
+        );
+        assert!(
+            matches!(builtin_barcode_plot(&[Value::List(vec![])]).unwrap(), Value::Call { head, .. } if head == "BarcodePlot")
+        );
+        assert!(
+            matches!(builtin_barcode_plot(&[]).unwrap(), Value::Call { head, .. } if head == "BarcodePlot")
+        );
+    }
+
+    #[test]
+    fn test_word_cloud_basic() {
+        let data = Value::List(vec![
+            Value::Str("rust".to_string()),
+            Value::Str("rust".to_string()),
+            Value::Str("code".to_string()),
+            Value::Str("sym".to_string()),
+        ]);
+        let result = builtin_word_cloud(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<svg"), "Expected SVG output");
+                assert!(svg.contains(">rust<"), "Expected word text");
+                assert!(svg.contains("font-size"), "Expected sized text");
+                assert!(svg.contains("</svg>"), "Expected closing SVG tag");
+            }
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_word_cloud_string_and_weighted() {
+        let from_text = builtin_word_cloud(&[Value::Str("a b a c a".to_string())]).unwrap();
+        assert!(matches!(from_text, Value::Str(svg) if svg.contains(">a<")));
+
+        let weighted = Value::List(vec![
+            Value::List(vec![Value::Str("big".to_string()), int_val(10)]),
+            Value::List(vec![Value::Str("small".to_string()), int_val(1)]),
+        ]);
+        let result = builtin_word_cloud(&[weighted]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains(">big<") && svg.contains(">small<"));
+            }
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_word_cloud_inapplicable() {
+        assert!(
+            matches!(builtin_word_cloud(&[int_val(7)]).unwrap(), Value::Call { head, .. } if head == "WordCloud")
+        );
+        assert!(
+            matches!(builtin_word_cloud(&[Value::List(vec![])]).unwrap(), Value::Call { head, .. } if head == "WordCloud")
+        );
+        assert!(
+            matches!(builtin_word_cloud(&[]).unwrap(), Value::Call { head, .. } if head == "WordCloud")
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::ast::Expr;
+use crate::env::Env;
 use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
@@ -388,6 +389,99 @@ pub fn builtin_to_lower_case(args: &[Value]) -> Result<Value, EvalError> {
     }
     let s = str_arg(args, 0)?;
     Ok(Value::Str(s.to_lowercase()))
+}
+
+/// Build an unevaluated `head[...]` value.
+fn unevaluated(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+/// Shared implementation of `LowerCase` / `UpperCase`.
+///
+/// `LowerCase[s]` / `UpperCase[s]` convert every character of `s`, matching
+/// `ToLowerCase` / `ToUpperCase`. The two-argument form `LowerCase[s, n]` /
+/// `UpperCase[s, n]` converts only the `n`-th character (1-based; negative `n`
+/// counts from the end, Wolfram-style).
+///
+/// The call is left unevaluated when it does not apply: a non-string first
+/// argument, an invalid arity, or a position that is not an integer / is out of
+/// range (including `0`, which refers to no character).
+fn case_convert(head: &str, args: &[Value], upper: bool) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated(head, args);
+    }
+    let s = match str_of(&args[0]) {
+        Ok(s) => s,
+        Err(_) => return unevaluated(head, args),
+    };
+    let convert = |c: char| -> String {
+        if upper {
+            c.to_uppercase().collect()
+        } else {
+            c.to_lowercase().collect()
+        }
+    };
+    if args.len() == 1 {
+        return Value::Str(if upper {
+            s.to_uppercase()
+        } else {
+            s.to_lowercase()
+        });
+    }
+    let n = match &args[1] {
+        Value::Integer(n) => n.to_i64(),
+        _ => None,
+    };
+    let Some(n) = n else {
+        return unevaluated(head, args);
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    if len == 0 || n == 0 {
+        return unevaluated(head, args);
+    }
+    let idx = if n > 0 { n - 1 } else { len as i64 + n };
+    if idx < 0 || idx as usize >= len {
+        return unevaluated(head, args);
+    }
+    let idx = idx as usize;
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if i == idx {
+            out.push_str(&convert(c));
+        } else {
+            out.push(c);
+        }
+    }
+    Value::Str(out)
+}
+
+/// `LowerCase[s]` / `LowerCase[s, n]` — lower-case every character, or the `n`-th.
+pub fn builtin_lower_case(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(case_convert("LowerCase", args, false))
+}
+
+/// `UpperCase[s]` / `UpperCase[s, n]` — upper-case every character, or the `n`-th.
+pub fn builtin_upper_case(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(case_convert("UpperCase", args, true))
+}
+
+/// Register the case-conversion builtins added in this module.
+///
+/// `LowerCase` / `UpperCase` are the position-aware companions of
+/// `ToLowerCase` / `ToUpperCase`; `ToTitleCase` is registered as an alias of
+/// `TitleCase` (implemented in [`super::text`]).
+pub fn register(env: &Env) {
+    super::register_builtin(env, "LowerCase", builtin_lower_case);
+    super::register_builtin(env, "UpperCase", builtin_upper_case);
+    super::register_builtin(
+        env,
+        "ToTitleCase",
+        crate::builtins::text::builtin_title_case,
+    );
 }
 
 /// Characters["string"] — split string into a list of single-character strings.
@@ -1589,6 +1683,109 @@ mod tests {
         assert_eq!(
             builtin_lower_case_q(&[string("a b c")]).unwrap(),
             Value::Bool(true)
+        );
+    }
+
+    // ── LowerCase / UpperCase (position aware) ──
+
+    #[test]
+    fn test_lower_case_all() {
+        assert_eq!(builtin_lower_case(&[string("AbC")]).unwrap(), string("abc"));
+        assert_eq!(builtin_lower_case(&[string("")]).unwrap(), string(""));
+        // Non-ASCII letters are handled too.
+        assert_eq!(builtin_lower_case(&[string("ÄBC")]).unwrap(), string("äbc"));
+    }
+
+    #[test]
+    fn test_upper_case_all() {
+        assert_eq!(builtin_upper_case(&[string("AbC")]).unwrap(), string("ABC"));
+        assert_eq!(builtin_upper_case(&[string("")]).unwrap(), string(""));
+        assert_eq!(builtin_upper_case(&[string("äbc")]).unwrap(), string("ÄBC"));
+    }
+
+    #[test]
+    fn test_lower_case_nth_char() {
+        assert_eq!(
+            builtin_lower_case(&[string("ABC"), int(2)]).unwrap(),
+            string("AbC")
+        );
+        // Negative index counts from the end.
+        assert_eq!(
+            builtin_lower_case(&[string("ABC"), int(-1)]).unwrap(),
+            string("ABc")
+        );
+        // A position that is not a letter is left untouched.
+        assert_eq!(
+            builtin_lower_case(&[string("A1C"), int(2)]).unwrap(),
+            string("A1C")
+        );
+    }
+
+    #[test]
+    fn test_upper_case_nth_char() {
+        assert_eq!(
+            builtin_upper_case(&[string("abc"), int(1)]).unwrap(),
+            string("Abc")
+        );
+        assert_eq!(
+            builtin_upper_case(&[string("abc"), int(-2)]).unwrap(),
+            string("aBc")
+        );
+    }
+
+    #[test]
+    fn test_lower_upper_case_unevaluated() {
+        // Non-string first argument stays unevaluated.
+        assert!(matches!(
+            builtin_lower_case(&[Value::Symbol("x".to_string())]).unwrap(),
+            Value::Call { .. }
+        ));
+        // Out-of-range / zero / non-integer position stays unevaluated.
+        assert!(matches!(
+            builtin_lower_case(&[string("ABC"), int(4)]).unwrap(),
+            Value::Call { .. }
+        ));
+        assert!(matches!(
+            builtin_upper_case(&[string("abc"), int(0)]).unwrap(),
+            Value::Call { .. }
+        ));
+        assert!(matches!(
+            builtin_upper_case(&[string("abc"), string("2")]).unwrap(),
+            Value::Call { .. }
+        ));
+        // Too many arguments stays unevaluated.
+        assert!(matches!(
+            builtin_lower_case(&[string("ABC"), int(1), int(2)]).unwrap(),
+            Value::Call { .. }
+        ));
+    }
+
+    #[test]
+    fn test_case_builtins_registered() {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        for name in ["LowerCase", "UpperCase", "ToTitleCase"] {
+            assert!(
+                matches!(env.get(name), Some(Value::Builtin(..))),
+                "{name} not registered as builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn test_title_case_and_capitalize_coverage() {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        assert!(env.get("TitleCase").is_some(), "TitleCase not registered");
+        assert!(env.get("Capitalize").is_some(), "Capitalize not registered");
+        // `ToTitleCase` is an alias of `TitleCase`; both share behavior.
+        assert_eq!(
+            crate::builtins::text::builtin_title_case(&[string("hello wORLD")]).unwrap(),
+            string("Hello World")
+        );
+        assert_eq!(
+            crate::builtins::text::builtin_capitalize(&[string("hELLO")]).unwrap(),
+            string("Hello")
         );
     }
 

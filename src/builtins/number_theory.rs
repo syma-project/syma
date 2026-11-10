@@ -1932,12 +1932,298 @@ pub fn builtin_number_expand(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── ExtendedGCD ───────────────────────────────────────────────────────────
+
+/// Build an unevaluated `head[args]` expression (used for bad input).
+fn unevaluated_call(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+/// Extended Euclidean algorithm for a single pair. Returns `(g, x, y)` with
+/// `a*x + b*y == g` and `g >= 0`.
+fn extended_gcd_pair(a: &Integer, b: &Integer) -> (Integer, Integer, Integer) {
+    let (mut old_r, mut r) = (a.clone(), b.clone());
+    let (mut old_s, mut s) = (Integer::from(1), Integer::from(0));
+    let (mut old_t, mut t) = (Integer::from(0), Integer::from(1));
+    while !r.is_zero() {
+        let q = old_r.clone() / r.clone();
+        let nr = old_r.clone() - q.clone() * r.clone();
+        let ns = old_s.clone() - q.clone() * s.clone();
+        let nt = old_t.clone() - q.clone() * t.clone();
+        old_r = std::mem::replace(&mut r, nr);
+        old_s = std::mem::replace(&mut s, ns);
+        old_t = std::mem::replace(&mut t, nt);
+    }
+    if old_r.is_negative() {
+        (-old_r, -old_s, -old_t)
+    } else {
+        (old_r, old_s, old_t)
+    }
+}
+
+/// `ExtendedGCD[n1, n2, ...]` — returns `{g, {r1, r2, ...}}` where
+/// `g == GCD[n1, n2, ...]` and `g == r1*n1 + r2*n2 + ...`.
+pub fn builtin_extended_gcd(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(unevaluated_call("ExtendedGCD", args));
+    }
+    let mut ints = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Value::Integer(n) => ints.push(n.clone()),
+            _ => return Ok(unevaluated_call("ExtendedGCD", args)),
+        }
+    }
+    if ints.len() == 1 {
+        let n = &ints[0];
+        let g = n.clone().abs();
+        let coeff = if n.is_zero() {
+            Integer::from(0)
+        } else if n.is_negative() {
+            Integer::from(-1)
+        } else {
+            Integer::from(1)
+        };
+        return Ok(Value::List(vec![
+            Value::Integer(g),
+            Value::List(vec![Value::Integer(coeff)]),
+        ]));
+    }
+    let mut g = ints[0].clone();
+    let mut coeffs = vec![Integer::from(1)];
+    for nxt in &ints[1..] {
+        let (g2, x, y) = extended_gcd_pair(&g, nxt);
+        for c in coeffs.iter_mut() {
+            *c *= &x;
+        }
+        coeffs.push(y);
+        g = g2;
+    }
+    // All-zero input has GCD 0; report the canonical {0, {0, ...}}.
+    if g.is_zero() {
+        for c in coeffs.iter_mut() {
+            *c = Integer::from(0);
+        }
+    }
+    Ok(Value::List(vec![
+        Value::Integer(g),
+        Value::List(coeffs.into_iter().map(Value::Integer).collect()),
+    ]))
+}
+
+// ── MantissaExponent / ExpMantissa ────────────────────────────────────────
+
+/// Exact `(mantissa, exponent)` for a non-zero rational `x` in `base`, with
+/// `x == mantissa * base^exponent` and `1/base <= |mantissa| < 1`.
+fn mantissa_exponent_exact(x: &Rational, base: &Integer) -> (Rational, Integer) {
+    let neg = x.is_negative();
+    let b = Rational::from(base.clone());
+    let b_recip = Rational::from((Integer::from(1), base.clone()));
+    let one = Rational::from(1);
+    let mut a = x.clone().abs();
+    let mut e = Integer::from(0);
+    if a >= one {
+        while a >= one {
+            a /= &b;
+            e += Integer::from(1);
+        }
+    } else {
+        while a < b_recip {
+            a *= &b;
+            e -= Integer::from(1);
+        }
+    }
+    if neg {
+        a = -a;
+    }
+    (a, e)
+}
+
+/// `MantissaExponent[x]` / `MantissaExponent[x, b]` — returns `{m, e}` with
+/// `x == m * b^e` and `1/b <= |m| < 1`. Exact for exact input.
+pub fn builtin_mantissa_exponent(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated_call("MantissaExponent", args));
+    }
+    let base = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 2 => b.clone(),
+            _ => return Ok(unevaluated_call("MantissaExponent", args)),
+        }
+    } else {
+        Integer::from(10)
+    };
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::List(vec![
+                    Value::Integer(Integer::from(0)),
+                    Value::Integer(Integer::from(0)),
+                ]));
+            }
+            let (m, e) = mantissa_exponent_exact(&Rational::from(n.clone()), &base);
+            Ok(Value::List(vec![
+                Value::Rational(Box::new(m)),
+                Value::Integer(e),
+            ]))
+        }
+        Value::Rational(r) => {
+            if r.is_zero() {
+                return Ok(Value::List(vec![
+                    Value::Integer(Integer::from(0)),
+                    Value::Integer(Integer::from(0)),
+                ]));
+            }
+            let (m, e) = mantissa_exponent_exact(r, &base);
+            Ok(Value::List(vec![
+                Value::Rational(Box::new(m)),
+                Value::Integer(e),
+            ]))
+        }
+        Value::Real(x) => {
+            if x.is_zero() {
+                return Ok(Value::List(vec![
+                    Value::Real(Float::with_val(x.prec(), 0)),
+                    Value::Integer(Integer::from(0)),
+                ]));
+            }
+            let prec = x.prec();
+            let ln_abs = x.clone().abs().ln();
+            let ln_base = Float::with_val(prec, &base).ln();
+            let e = (ln_abs / ln_base).floor().to_f64() as i32 + 1;
+            let scale = Float::with_val(prec, &base).pow(e);
+            let m = x.clone() / scale;
+            Ok(Value::List(vec![
+                Value::Real(m),
+                Value::Integer(Integer::from(e)),
+            ]))
+        }
+        _ => Ok(unevaluated_call("MantissaExponent", args)),
+    }
+}
+
+/// Rescale an exact rational by `pow` (positive) or its reciprocal.
+fn scale_exact(r: &Rational, pow: &Integer, neg_exp: bool) -> Rational {
+    let p = Rational::from(pow.clone());
+    if neg_exp {
+        (r / &p).into()
+    } else {
+        (r * &p).into()
+    }
+}
+
+/// Collapse a denominator-1 rational back to an integer.
+fn rat_or_int(r: Rational) -> Value {
+    if r.denom() == &Integer::from(1) {
+        Value::Integer(r.numer().clone())
+    } else {
+        Value::Rational(Box::new(r))
+    }
+}
+
+/// `ExpMantissa[{m, e}]` — inverse of `MantissaExponent`: `m * 10^e`.
+/// Also accepts `ExpMantissa[m, e]` and `ExpMantissa[{m, e}, b]`.
+pub fn builtin_exp_mantissa(args: &[Value]) -> Result<Value, EvalError> {
+    let (m, e, base) = match args {
+        [Value::List(items)] if items.len() == 2 => (&items[0], &items[1], Integer::from(10)),
+        [Value::List(items), Value::Integer(b)] if items.len() == 2 => {
+            (&items[0], &items[1], b.clone())
+        }
+        [m, e] => (m, e, Integer::from(10)),
+        _ => return Ok(unevaluated_call("ExpMantissa", args)),
+    };
+    if base < 2 {
+        return Ok(unevaluated_call("ExpMantissa", args));
+    }
+    let e_int = match e {
+        Value::Integer(n) => n.clone(),
+        _ => return Ok(unevaluated_call("ExpMantissa", args)),
+    };
+    let neg_exp = e_int.is_negative();
+    let e_u32 = match e_int.abs().to_u32() {
+        Some(v) => v,
+        None => return Ok(unevaluated_call("ExpMantissa", args)),
+    };
+    let pow = base.pow(e_u32);
+    match m {
+        Value::Integer(n) => Ok(rat_or_int(scale_exact(
+            &Rational::from(n.clone()),
+            &pow,
+            neg_exp,
+        ))),
+        Value::Rational(r) => Ok(rat_or_int(scale_exact(r, &pow, neg_exp))),
+        Value::Real(x) => {
+            let prec = x.prec();
+            let f = Float::with_val(prec, &pow);
+            let result = if neg_exp {
+                x.clone() / f
+            } else {
+                x.clone() * f
+            };
+            Ok(Value::Real(result))
+        }
+        _ => Ok(unevaluated_call("ExpMantissa", args)),
+    }
+}
+
+// ── SquareFreePart ────────────────────────────────────────────────────────
+
+/// `SquareFreePart[n]` — the product of the primes dividing `n` to an odd
+/// power, carrying the sign of `n`. Equals `n` divided by its largest square
+/// divisor.
+pub fn builtin_square_free_part(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_call("SquareFreePart", args));
+    }
+    match &args[0] {
+        Value::Integer(n) => {
+            if n.is_zero() {
+                return Ok(Value::Integer(Integer::from(0)));
+            }
+            let neg = n.is_negative();
+            let mut part = Integer::from(1);
+            for (p, e) in factor_integer(n) {
+                if !e.is_multiple_of(2) {
+                    part *= p;
+                }
+            }
+            if neg {
+                part = -part;
+            }
+            Ok(Value::Integer(part))
+        }
+        _ => Ok(unevaluated_call("SquareFreePart", args)),
+    }
+}
+
+/// Register the additional number-theory builtins defined in this module.
+pub fn register(env: &Env) {
+    super::register_builtin(env, "ExtendedGCD", builtin_extended_gcd);
+    super::register_builtin(env, "MantissaExponent", builtin_mantissa_exponent);
+    super::register_builtin(env, "ExpMantissa", builtin_exp_mantissa);
+    super::register_builtin(env, "SquareFreePart", builtin_square_free_part);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
+    }
+
+    fn rat(n: i64, d: i64) -> Value {
+        Value::Rational(Box::new(Rational::from((
+            Integer::from(n),
+            Integer::from(d),
+        ))))
+    }
+
+    fn call_is(v: &Value, head: &str) -> bool {
+        matches!(v, Value::Call { head: h, .. } if h == head)
     }
 
     #[test]
@@ -2617,5 +2903,218 @@ mod tests {
         // The zeroth next prime is the largest prime <= n.
         assert_eq!(builtin_next_prime(&[int(10), int(0)]).unwrap(), int(7));
         assert_eq!(builtin_next_prime(&[int(7), int(0)]).unwrap(), int(7));
+    }
+
+    // ── ExtendedGCD ──
+
+    #[test]
+    fn test_extended_gcd_known_pairs() {
+        // 2*(-1) + 3*1 = 1
+        assert_eq!(
+            builtin_extended_gcd(&[int(2), int(3)]).unwrap(),
+            Value::List(vec![int(1), Value::List(vec![int(-1), int(1)])])
+        );
+        // 60*1 + 18*(-3) = 6
+        assert_eq!(
+            builtin_extended_gcd(&[int(60), int(18)]).unwrap(),
+            Value::List(vec![int(6), Value::List(vec![int(1), int(-3)])])
+        );
+        // 6*(-2) + 15*1 + 30*0 = 3
+        assert_eq!(
+            builtin_extended_gcd(&[int(6), int(15), int(30)]).unwrap(),
+            Value::List(vec![int(3), Value::List(vec![int(-2), int(1), int(0)])])
+        );
+    }
+
+    #[test]
+    fn test_extended_gcd_bezout_identity() {
+        for (a, b) in [(6i64, 15i64), (12, 8), (7, 13), (-12, 8), (0, 5), (-9, -6)] {
+            let out = builtin_extended_gcd(&[int(a), int(b)]).unwrap();
+            let Value::List(items) = out else {
+                panic!("expected a list")
+            };
+            let Value::Integer(g) = &items[0] else {
+                panic!("expected integer gcd")
+            };
+            let Value::List(coeffs) = &items[1] else {
+                panic!("expected coefficient list")
+            };
+            let (Value::Integer(x), Value::Integer(y)) = (&coeffs[0], &coeffs[1]) else {
+                panic!("expected integer coefficients")
+            };
+            assert_eq!(g, &(Integer::from(a) * x + Integer::from(b) * y));
+            assert!(!g.is_negative());
+        }
+    }
+
+    #[test]
+    fn test_extended_gcd_single_and_zero() {
+        assert_eq!(
+            builtin_extended_gcd(&[int(-6)]).unwrap(),
+            Value::List(vec![int(6), Value::List(vec![int(-1)])])
+        );
+        assert_eq!(
+            builtin_extended_gcd(&[int(0), int(0)]).unwrap(),
+            Value::List(vec![int(0), Value::List(vec![int(0), int(0)])])
+        );
+    }
+
+    #[test]
+    fn test_extended_gcd_bad_input() {
+        assert!(call_is(
+            &builtin_extended_gcd(&[Value::Symbol("x".to_string()), int(3)]).unwrap(),
+            "ExtendedGCD"
+        ));
+        assert!(call_is(&builtin_extended_gcd(&[]).unwrap(), "ExtendedGCD"));
+    }
+
+    // ── MantissaExponent ──
+
+    #[test]
+    fn test_mantissa_exponent_exact() {
+        assert_eq!(
+            builtin_mantissa_exponent(&[int(123451)]).unwrap(),
+            Value::List(vec![rat(123451, 1000000), int(6)])
+        );
+        assert_eq!(
+            builtin_mantissa_exponent(&[int(100)]).unwrap(),
+            Value::List(vec![rat(1, 10), int(3)])
+        );
+        assert_eq!(
+            builtin_mantissa_exponent(&[rat(1, 2)]).unwrap(),
+            Value::List(vec![rat(1, 2), int(0)])
+        );
+        assert_eq!(
+            builtin_mantissa_exponent(&[int(-123451)]).unwrap(),
+            Value::List(vec![rat(-123451, 1000000), int(6)])
+        );
+        assert_eq!(
+            builtin_mantissa_exponent(&[int(0)]).unwrap(),
+            Value::List(vec![int(0), int(0)])
+        );
+    }
+
+    #[test]
+    fn test_mantissa_exponent_base() {
+        // 1027 / 2048 lies in [1/2, 1), so the base-2 exponent is 11.
+        assert_eq!(
+            builtin_mantissa_exponent(&[int(1027), int(2)]).unwrap(),
+            Value::List(vec![rat(1027, 2048), int(11)])
+        );
+    }
+
+    #[test]
+    fn test_mantissa_exponent_real() {
+        let out =
+            builtin_mantissa_exponent(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 123.456))])
+                .unwrap();
+        let Value::List(items) = out else {
+            panic!("expected list")
+        };
+        assert_eq!(items[1], int(3));
+        let Value::Real(m) = &items[0] else {
+            panic!("expected real mantissa")
+        };
+        assert!((m.to_f64() - 0.123456).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_mantissa_exponent_bad_input() {
+        assert!(call_is(
+            &builtin_mantissa_exponent(&[Value::Symbol("x".to_string())]).unwrap(),
+            "MantissaExponent"
+        ));
+        assert!(call_is(
+            &builtin_mantissa_exponent(&[int(5), int(1)]).unwrap(),
+            "MantissaExponent"
+        ));
+        assert!(call_is(
+            &builtin_mantissa_exponent(&[]).unwrap(),
+            "MantissaExponent"
+        ));
+    }
+
+    // ── ExpMantissa ──
+
+    #[test]
+    fn test_exp_mantissa_exact() {
+        assert_eq!(
+            builtin_exp_mantissa(&[Value::List(vec![rat(1, 10), int(3)])]).unwrap(),
+            int(100)
+        );
+        assert_eq!(
+            builtin_exp_mantissa(&[Value::List(vec![int(5), int(-2)])]).unwrap(),
+            rat(1, 20)
+        );
+        // Two-argument form.
+        assert_eq!(builtin_exp_mantissa(&[int(5), int(2)]).unwrap(), int(500));
+        // Base-2 form inverts the base-2 MantissaExponent.
+        assert_eq!(
+            builtin_exp_mantissa(&[Value::List(vec![rat(1027, 2048), int(11)]), int(2)]).unwrap(),
+            int(1027)
+        );
+    }
+
+    #[test]
+    fn test_exp_mantissa_roundtrip() {
+        let n = int(987654321);
+        let decomposed = builtin_mantissa_exponent(&[n.clone()]).unwrap();
+        assert_eq!(builtin_exp_mantissa(&[decomposed]).unwrap(), n);
+    }
+
+    #[test]
+    fn test_exp_mantissa_bad_input() {
+        assert!(call_is(
+            &builtin_exp_mantissa(&[Value::Symbol("x".to_string())]).unwrap(),
+            "ExpMantissa"
+        ));
+        assert!(call_is(
+            &builtin_exp_mantissa(&[Value::List(vec![int(1), rat(1, 2)])]).unwrap(),
+            "ExpMantissa"
+        ));
+    }
+
+    // ── SquareFreePart ──
+
+    #[test]
+    fn test_square_free_part() {
+        assert_eq!(builtin_square_free_part(&[int(12)]).unwrap(), int(3));
+        assert_eq!(builtin_square_free_part(&[int(24)]).unwrap(), int(6));
+        assert_eq!(builtin_square_free_part(&[int(9)]).unwrap(), int(1));
+        assert_eq!(builtin_square_free_part(&[int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_square_free_part(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_square_free_part(&[int(-12)]).unwrap(), int(-3));
+        assert_eq!(builtin_square_free_part(&[int(150)]).unwrap(), int(6));
+    }
+
+    #[test]
+    fn test_square_free_part_bad_input() {
+        assert!(call_is(
+            &builtin_square_free_part(&[Value::Symbol("x".to_string())]).unwrap(),
+            "SquareFreePart"
+        ));
+        assert!(call_is(
+            &builtin_square_free_part(&[int(1), int(2)]).unwrap(),
+            "SquareFreePart"
+        ));
+    }
+
+    // ── End-to-end registration ──
+
+    #[test]
+    fn test_new_builtins_registered_in_env() {
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        let eval = |input: &str| -> Value {
+            let tokens = crate::lexer::tokenize(input).unwrap();
+            let ast = crate::parser::parse(tokens).unwrap();
+            crate::eval::eval_program(&ast, &env).unwrap()
+        };
+        assert_eq!(eval("ExtendedGCD[60, 18]"), eval("{6, {1, -3}}"));
+        assert_eq!(eval("SquareFreePart[24]"), int(6));
+        assert_eq!(
+            eval("ExpMantissa[MantissaExponent[987654321]]"),
+            int(987654321)
+        );
     }
 }

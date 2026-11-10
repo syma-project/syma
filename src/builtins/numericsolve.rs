@@ -1635,6 +1635,537 @@ fn hessenberg(a: &mut [Vec<f64>], n: usize) {
     }
 }
 
+// ── ConvexOptimization / QuadraticOptimization ──────────────────────────────
+//
+// Small/medium numeric constrained minimizers. The objective and constraints
+// are held (HoldAll); the search uses KKT-free *feasible-ish* steps: a quadratic
+// penalty is added to the objective and the resulting unconstrained problem is
+// driven by gradient descent (ConvexOptimization) or Newton's method
+// (QuadraticOptimization), with the penalty weight increased over an outer loop
+// so equality constraints end up satisfied to high accuracy. Results use the
+// Wolfram `{value, {x -> x0, ...}}` shape, matching `Minimize`.
+
+/// Register the numeric optimizers. Kept self-contained so the central
+/// `register_builtins` routine only needs a single call.
+pub fn register(env: &Env) {
+    super::register_builtin_env(env, "ConvexOptimization", builtin_convex_optimization);
+    super::register_builtin_env(env, "QuadraticOptimization", builtin_quadratic_optimization);
+    for name in ["ConvexOptimization", "QuadraticOptimization"] {
+        env.set_attributes(
+            name,
+            vec![
+                "HoldAll".to_string(),
+                "Locked".to_string(),
+                "ReadProtected".to_string(),
+            ],
+        );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConstraintSense {
+    Equal,
+    LessEqual,
+    GreaterEqual,
+    Unequal,
+}
+
+/// A scalar constraint written as `residual <= / >= / == 0`.
+struct ScalarConstraint {
+    residual: Value,
+    sense: ConstraintSense,
+}
+
+/// Build an unevaluated `head[args...]` result.
+fn unevaluated_call(name: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: name.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+/// Does `v` look like a comparison/compound constraint (used to tell
+/// `Optimization[{f, cons}, vars]` apart from `Optimization[f, vars]`)?
+fn is_constraint_like(v: &Value) -> bool {
+    match v {
+        Value::Bool(_) => true,
+        Value::Symbol(s) => s == "True" || s == "False",
+        Value::List(_) => true,
+        Value::Call { head, .. } => matches!(
+            head.as_str(),
+            "Equal" | "Unequal" | "Less" | "LessEqual" | "Greater" | "GreaterEqual" | "And" | "Or"
+        ),
+        _ => false,
+    }
+}
+
+/// Flatten constraints (lists/`And`) into scalar residuals. `Or` is treated
+/// like a conjunction, which is exact for the common case of a single branch.
+fn collect_constraints(v: &Value, out: &mut Vec<ScalarConstraint>) -> bool {
+    match v {
+        Value::Bool(true) => true,
+        Value::Bool(false) => false,
+        Value::Symbol(s) if s == "True" => true,
+        Value::Symbol(s) if s == "False" => false,
+        Value::List(items) => items.iter().all(|i| collect_constraints(i, out)),
+        Value::Call { head, args } if head == "And" || head == "Or" => {
+            args.iter().all(|a| collect_constraints(a, out))
+        }
+        Value::Call { head, args } if args.len() == 2 => {
+            let sense = match head.as_str() {
+                "Equal" => ConstraintSense::Equal,
+                "Unequal" => ConstraintSense::Unequal,
+                "Less" | "LessEqual" => ConstraintSense::LessEqual,
+                "Greater" | "GreaterEqual" => ConstraintSense::GreaterEqual,
+                _ => return false,
+            };
+            // residual = lhs - rhs
+            let residual = Value::Call {
+                head: "Plus".to_string(),
+                args: vec![
+                    args[0].clone(),
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(Integer::from(-1)), args[1].clone()],
+                    },
+                ],
+            };
+            out.push(ScalarConstraint { residual, sense });
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Extract the optimization variables from a spec `x`, `{x, y, ...}`; entries
+/// may also be lists like `{x, xmin, xmax}` (bounds are ignored here).
+fn parse_vars(spec: &Value, exprs: &[&Value]) -> Option<Vec<String>> {
+    let one = |it: &Value| -> Option<String> {
+        match it {
+            Value::Symbol(s) => Some(s.clone()),
+            Value::List(inner) if !inner.is_empty() => match &inner[0] {
+                Value::Symbol(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => resolve_var(it, exprs).ok(),
+        }
+    };
+    match spec {
+        Value::Symbol(s) => Some(vec![s.clone()]),
+        Value::List(items) => {
+            let mut vars = Vec::new();
+            for it in items {
+                vars.push(one(it)?);
+            }
+            if vars.is_empty() { None } else { Some(vars) }
+        }
+        _ => None,
+    }
+}
+
+/// Parse an initial point: a list of numbers (possibly compound like `-10`), a
+/// bare number for a single variable, or `var -> value` rules.
+fn parse_init(spec: &Value, vars: &[String], name: &str, env: &Env) -> Option<Vec<f64>> {
+    let items = match spec {
+        Value::List(items) => items.clone(),
+        _ if vars.len() == 1 => vec![spec.clone()],
+        _ => return None,
+    };
+    let mut x = vec![0.0; vars.len()];
+    let mut set = vec![false; vars.len()];
+    for it in &items {
+        match it {
+            Value::Rule { lhs, rhs, .. } => {
+                let Value::Symbol(s) = lhs.as_ref() else {
+                    return None;
+                };
+                let idx = vars.iter().position(|v| v == s)?;
+                x[idx] = spec_number(rhs, name, 1, env).ok()?;
+                set[idx] = true;
+            }
+            _ => {
+                let value = spec_number(it, name, 1, env).ok()?;
+                let idx = set.iter().position(|s| !*s)?;
+                x[idx] = value;
+                set[idx] = true;
+            }
+        }
+    }
+    Some(x)
+}
+
+/// Substitute numeric values for every variable, then evaluate to `f64`.
+fn eval_scalar_at(expr: &Value, vars: &[String], xs: &[f64], env: &Env) -> Option<f64> {
+    let mut cur = expr.clone();
+    for (v, x) in vars.iter().zip(xs) {
+        cur = substitute_numeric(&cur, v, *x);
+    }
+    eval_expr_to_f64(&cur, env).ok()
+}
+
+/// Penalised objective `f(x) + mu * sum(violation^2)`.
+fn make_phi<'a>(
+    objective: &Value,
+    cons: &[ScalarConstraint],
+    vars: &[String],
+    env: &'a Env,
+    mu: f64,
+) -> impl Fn(&[f64]) -> f64 + 'a {
+    let obj = objective.clone();
+    let gs: Vec<(Value, ConstraintSense)> =
+        cons.iter().map(|c| (c.residual.clone(), c.sense)).collect();
+    let vars = vars.to_vec();
+    move |x: &[f64]| {
+        let mut value = eval_scalar_at(&obj, &vars, x, env).unwrap_or(f64::INFINITY);
+        let mut penalty = 0.0;
+        for (g, sense) in &gs {
+            let r = eval_scalar_at(g, &vars, x, env).unwrap_or(0.0);
+            let violation = match sense {
+                ConstraintSense::Equal => r.abs(),
+                ConstraintSense::LessEqual => r.max(0.0),
+                ConstraintSense::GreaterEqual => (-r).max(0.0),
+                ConstraintSense::Unequal => 0.0,
+            };
+            penalty += violation * violation;
+        }
+        value += mu * penalty;
+        value
+    }
+}
+
+fn vec_norm(v: &[f64]) -> f64 {
+    v.iter().map(|a| a * a).sum::<f64>().sqrt()
+}
+
+fn numeric_grad(f: &dyn Fn(&[f64]) -> f64, x: &[f64]) -> Vec<f64> {
+    let mut g = vec![0.0; x.len()];
+    for (i, gi) in g.iter_mut().enumerate() {
+        let h = 1e-6 * (1.0 + x[i].abs());
+        let mut xp = x.to_vec();
+        let mut xm = x.to_vec();
+        xp[i] += h;
+        xm[i] -= h;
+        *gi = (f(&xp) - f(&xm)) / (2.0 * h);
+    }
+    g
+}
+
+#[allow(clippy::needless_range_loop)] // symmetric index arithmetic.
+fn numeric_hessian(f: &dyn Fn(&[f64]) -> f64, x: &[f64]) -> Vec<Vec<f64>> {
+    let n = x.len();
+    let h: Vec<f64> = (0..n).map(|i| 1e-4 * (1.0 + x[i].abs())).collect();
+    let f0 = f(x);
+    let mut hess = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in i..n {
+            if i == j {
+                let mut xp = x.to_vec();
+                let mut xm = x.to_vec();
+                xp[i] += h[i];
+                xm[i] -= h[i];
+                hess[i][i] = (f(&xp) - 2.0 * f0 + f(&xm)) / (h[i] * h[i]);
+            } else {
+                let mut a = x.to_vec();
+                a[i] += h[i];
+                a[j] += h[j];
+                let mut b = x.to_vec();
+                b[i] += h[i];
+                b[j] -= h[j];
+                let mut c = x.to_vec();
+                c[i] -= h[i];
+                c[j] += h[j];
+                let mut d = x.to_vec();
+                d[i] -= h[i];
+                d[j] -= h[j];
+                let v = (f(&a) - f(&b) - f(&c) + f(&d)) / (4.0 * h[i] * h[j]);
+                hess[i][j] = v;
+                hess[j][i] = v;
+            }
+        }
+    }
+    hess
+}
+
+/// Solve `A x = b` by Gaussian elimination with partial pivoting.
+#[allow(clippy::needless_range_loop)]
+fn solve_linear(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = a[col][col].abs();
+        for r in col + 1..n {
+            if a[r][col].abs() > best {
+                best = a[r][col].abs();
+                piv = r;
+            }
+        }
+        if best < 1e-13 {
+            return None;
+        }
+        a.swap(col, piv);
+        b.swap(col, piv);
+        let diag = a[col][col];
+        for r in col + 1..n {
+            let factor = a[r][col] / diag;
+            if factor != 0.0 {
+                for c in col..n {
+                    a[r][c] -= factor * a[col][c];
+                }
+                b[r] -= factor * b[col];
+            }
+        }
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for j in i + 1..n {
+            s -= a[i][j] * x[j];
+        }
+        x[i] = s / a[i][i];
+    }
+    Some(x)
+}
+
+/// Backtracking line search along `dir`; returns an accepted point if any.
+fn line_search(
+    f: &dyn Fn(&[f64]) -> f64,
+    x: &[f64],
+    dir: &[f64],
+    fx: f64,
+    slope: f64,
+) -> Option<Vec<f64>> {
+    let mut step = 1.0;
+    for _ in 0..50 {
+        let cand: Vec<f64> = x.iter().zip(dir).map(|(a, d)| a + step * d).collect();
+        let cand_f = f(&cand);
+        if cand_f.is_finite() && cand_f <= fx + 1e-4 * step * slope {
+            return Some(cand);
+        }
+        step *= 0.5;
+    }
+    None
+}
+
+fn newton_minimize_n(f: &dyn Fn(&[f64]) -> f64, x0: &[f64], iters: usize) -> Vec<f64> {
+    let mut x = x0.to_vec();
+    let mut fx = f(&x);
+    for _ in 0..iters {
+        let g = numeric_grad(f, &x);
+        if vec_norm(&g) < 1e-11 {
+            break;
+        }
+        let mut hess = numeric_hessian(f, &x);
+        for (i, row) in hess.iter_mut().enumerate() {
+            row[i] += 1e-9 * (1.0 + row[i].abs());
+        }
+        let rhs: Vec<f64> = g.iter().map(|v| -v).collect();
+        let mut dir = match solve_linear(hess, rhs.clone()) {
+            Some(d) if d.iter().all(|v| v.is_finite()) => d,
+            _ => rhs.clone(),
+        };
+        let mut slope: f64 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
+        if slope >= 0.0 || slope.is_nan() {
+            dir = rhs;
+            slope = -g.iter().map(|v| v * v).sum::<f64>();
+        }
+        let Some(nx) = line_search(f, &x, &dir, fx, slope) else {
+            break;
+        };
+        let nf = f(&nx);
+        let dx = x
+            .iter()
+            .zip(&nx)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        x = nx;
+        fx = nf;
+        if dx < 1e-12 {
+            break;
+        }
+    }
+    x
+}
+
+fn gradient_descent_n(f: &dyn Fn(&[f64]) -> f64, x0: &[f64], iters: usize) -> Vec<f64> {
+    let mut x = x0.to_vec();
+    let mut fx = f(&x);
+    for _ in 0..iters {
+        let g = numeric_grad(f, &x);
+        let gn2: f64 = g.iter().map(|v| v * v).sum();
+        if gn2.sqrt() < 1e-11 {
+            break;
+        }
+        let dir: Vec<f64> = g.iter().map(|v| -v).collect();
+        let Some(nx) = line_search(f, &x, &dir, fx, -gn2) else {
+            break;
+        };
+        let nf = f(&nx);
+        let dx = x
+            .iter()
+            .zip(&nx)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        if nf < fx {
+            x = nx;
+            fx = nf;
+            if dx < 1e-12 {
+                break;
+            }
+        } else {
+            x = nx;
+            break;
+        }
+    }
+    x
+}
+
+/// Run one solver (gradient descent or Newton) plus a polish pass of the other.
+fn minimize_core(phi: &dyn Fn(&[f64]) -> f64, x0: &[f64], use_newton: bool) -> Vec<f64> {
+    if use_newton {
+        let x = newton_minimize_n(phi, x0, 80);
+        let y = gradient_descent_n(phi, &x, 200);
+        if phi(&y) < phi(&x) { y } else { x }
+    } else {
+        let x = gradient_descent_n(phi, x0, 400);
+        let y = newton_minimize_n(phi, &x, 80);
+        if phi(&y) < phi(&x) { y } else { x }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimization(
+    name: &str,
+    args: &[Value],
+    objective: &Value,
+    cons: &[ScalarConstraint],
+    vars: &[String],
+    env: &Env,
+    init: Option<Vec<f64>>,
+    use_newton: bool,
+) -> Value {
+    let n = vars.len();
+    let start0 = init.unwrap_or_else(|| vec![0.0; n]);
+    if eval_scalar_at(objective, vars, &start0, env).is_none() {
+        return unevaluated_call(name, args);
+    }
+
+    let mus: Vec<f64> = if cons.is_empty() {
+        vec![1.0]
+    } else {
+        vec![1e2, 1e4, 1e6]
+    };
+    let mut starts = vec![start0];
+    if n <= 6 {
+        starts.push(vec![1.0; n]);
+    }
+
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    for start in &starts {
+        let mut x = start.clone();
+        for &mu in &mus {
+            let phi = make_phi(objective, cons, vars, env, mu);
+            let nx = minimize_core(&phi, &x, use_newton);
+            if nx.iter().all(|v| v.is_finite()) {
+                x = nx;
+            }
+        }
+        if let Some(value) = eval_scalar_at(objective, vars, &x, env)
+            && value.is_finite()
+            && match &best {
+                Some((bv, _)) => value < *bv,
+                None => true,
+            }
+        {
+            best = Some((value, x));
+        }
+    }
+
+    match best {
+        Some((value, x)) => {
+            let rules: Vec<Value> = vars
+                .iter()
+                .zip(&x)
+                .map(|(v, xv)| Value::Rule {
+                    lhs: Box::new(Value::Symbol(v.clone())),
+                    rhs: Box::new(super::real(*xv)),
+                    delayed: false,
+                })
+                .collect();
+            Value::List(vec![super::real(value), Value::List(rules)])
+        }
+        None => unevaluated_call(name, args),
+    }
+}
+
+/// `ConvexOptimization[f, cons, vars]` (also `{f, cons}` / `f, vars` forms).
+pub fn builtin_convex_optimization(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    optimization_builtin(args, env, "ConvexOptimization", false)
+}
+
+/// `QuadraticOptimization[f, cons, vars]` (also `{f, cons}` / `f, vars` forms).
+pub fn builtin_quadratic_optimization(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    optimization_builtin(args, env, "QuadraticOptimization", true)
+}
+
+fn optimization_builtin(
+    args: &[Value],
+    env: &Env,
+    name: &str,
+    use_newton: bool,
+) -> Result<Value, EvalError> {
+    if !(2..=4).contains(&args.len()) {
+        return Ok(unevaluated_call(name, args));
+    }
+
+    let first = unheld(&args[0]);
+    let (objective, cons_src, vars_src, init_src) = match &first {
+        Value::List(items) if items.len() == 2 && is_constraint_like(&items[1]) => (
+            items[0].clone(),
+            Some(items[1].clone()),
+            deep_unheld(&args[1]),
+            args.get(2).map(deep_unheld),
+        ),
+        _ if args.len() == 2 => (first, None, deep_unheld(&args[1]), None),
+        _ => (
+            first,
+            Some(deep_unheld(&args[1])),
+            deep_unheld(&args[2]),
+            args.get(3).map(deep_unheld),
+        ),
+    };
+
+    let mut cons: Vec<ScalarConstraint> = Vec::new();
+    if let Some(cs) = &cons_src
+        && !collect_constraints(cs, &mut cons)
+    {
+        return Ok(unevaluated_call(name, args));
+    }
+
+    let Some(vars) = parse_vars(&vars_src, &[&objective]) else {
+        return Ok(unevaluated_call(name, args));
+    };
+    if vars.is_empty() {
+        return Ok(unevaluated_call(name, args));
+    }
+    for i in 0..vars.len() {
+        if vars[i + 1..].contains(&vars[i]) {
+            return Ok(unevaluated_call(name, args));
+        }
+    }
+
+    let init = match &init_src {
+        Some(v) => match parse_init(v, &vars, name, env) {
+            Some(x) => Some(x),
+            None => return Ok(unevaluated_call(name, args)),
+        },
+        None => None,
+    };
+
+    Ok(run_optimization(
+        name, args, &objective, &cons, &vars, env, init, use_newton,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2051,5 +2582,133 @@ mod tests {
         let b = vec![1.0, 1.0];
         let result = multiply_polys(&a, &b);
         assert_eq!(result, vec![1.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_optimization_helpers() {
+        // Gradient of a separable quadratic at a point.
+        let f = |x: &[f64]| x[0] * x[0] + 2.0 * x[1] * x[1];
+        let g = numeric_grad(&f, &[1.0, 1.0]);
+        assert!((g[0] - 2.0).abs() < 1e-5);
+        assert!((g[1] - 4.0).abs() < 1e-5);
+        // Linear solve: 2x + y = 5, x - y = 1  ->  (2, 1).
+        let sol = solve_linear(vec![vec![2.0, 1.0], vec![1.0, -1.0]], vec![5.0, 1.0]).unwrap();
+        assert!((sol[0] - 2.0).abs() < 1e-12);
+        assert!((sol[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_convex_optimization_unconstrained() {
+        // Multi-variable, both the value and the rules are checked.
+        assert_close(num("First[ConvexOptimization[x^2 + y^2, {}, {x, y}]]"), 0.0);
+        assert_close(
+            num("ConvexOptimization[x^2 + y^2, {}, {x, y}][[2, 1, 2]]"),
+            0.0,
+        );
+        assert_close(
+            num("ConvexOptimization[x^2 + y^2, {}, {x, y}][[2, 2, 2]]"),
+            0.0,
+        );
+        // Single-variable form.
+        assert_close(num("ConvexOptimization[(x - 5)^2 + 3, x][[2, 1, 2]]"), 5.0);
+    }
+
+    #[test]
+    fn test_convex_optimization_offcentre() {
+        assert_close(
+            num("First[ConvexOptimization[(x - 1)^2 + (y + 2)^2, {}, {x, y}]]"),
+            0.0,
+        );
+        assert_close(
+            num("ConvexOptimization[(x - 1)^2 + (y + 2)^2, {}, {x, y}][[2, 1, 2]]"),
+            1.0,
+        );
+        assert_close(
+            num("ConvexOptimization[(x - 1)^2 + (y + 2)^2, {}, {x, y}][[2, 2, 2]]"),
+            -2.0,
+        );
+    }
+
+    #[test]
+    fn test_convex_optimization_equality_constraint() {
+        // Minimising distance to (1, 2) on the line x + y == 3 gives value 0.
+        let value = num("First[ConvexOptimization[(x - 1)^2 + (y - 2)^2, x + y == 3, {x, y}]]");
+        assert!(value.abs() < 1e-5, "expected 0, got {value}");
+        let x = num("ConvexOptimization[(x - 1)^2 + (y - 2)^2, x + y == 3, {x, y}][[2, 1, 2]]");
+        let y = num("ConvexOptimization[(x - 1)^2 + (y - 2)^2, x + y == 3, {x, y}][[2, 2, 2]]");
+        assert!((x - 1.0).abs() < 1e-4, "expected x=1, got {x}");
+        assert!((y - 2.0).abs() < 1e-4, "expected y=2, got {y}");
+    }
+
+    #[test]
+    fn test_convex_optimization_inequality_constraint() {
+        // Minimising x^2 + y^2 on x + y >= 1 -> (1/2, 1/2), value 1/2.
+        let value = num("First[ConvexOptimization[x^2 + y^2, x + y >= 1, {x, y}]]");
+        assert!((value - 0.5).abs() < 1e-3, "expected 0.5, got {value}");
+        let x = num("ConvexOptimization[x^2 + y^2, x + y >= 1, {x, y}][[2, 1, 2]]");
+        assert!((x - 0.5).abs() < 1e-3, "expected x=0.5, got {x}");
+        // A list of constraints is also accepted.
+        let value2 = num("First[ConvexOptimization[x^2 + y^2, {x + y >= 1, x >= 0}, {x, y}]]");
+        assert!((value2 - 0.5).abs() < 1e-3, "expected 0.5, got {value2}");
+    }
+
+    #[test]
+    fn test_quadratic_optimization_unconstrained() {
+        assert_close(
+            num("First[QuadraticOptimization[x^2 + 2 y^2, {}, {x, y}]]"),
+            0.0,
+        );
+        assert_close(
+            num("QuadraticOptimization[(x - 3)^2 + (y + 1)^2, {}, {x, y}][[2, 1, 2]]"),
+            3.0,
+        );
+        assert_close(
+            num("QuadraticOptimization[(x - 3)^2 + (y + 1)^2, {}, {x, y}][[2, 2, 2]]"),
+            -1.0,
+        );
+    }
+
+    #[test]
+    fn test_quadratic_optimization_equality_constraint() {
+        // Minimise x^2 + y^2 on x - y == 2 -> (1, -1), value 2.
+        let value = num("First[QuadraticOptimization[x^2 + y^2, x - y == 2, {x, y}]]");
+        assert!((value - 2.0).abs() < 1e-5, "expected 2, got {value}");
+        let x = num("QuadraticOptimization[x^2 + y^2, x - y == 2, {x, y}][[2, 1, 2]]");
+        assert!((x - 1.0).abs() < 1e-4, "expected x=1, got {x}");
+    }
+
+    #[test]
+    fn test_optimization_initial_point() {
+        // Explicit initial point is honoured (same convex optimum).
+        assert_close(
+            num("First[ConvexOptimization[(x - 2)^2 + (y - 3)^2, {}, {x, y}, {10, -10}]]"),
+            0.0,
+        );
+        assert_close(
+            num("ConvexOptimization[(x - 2)^2 + (y - 3)^2, {}, {x, y}, {10, -10}][[2, 2, 2]]"),
+            3.0,
+        );
+    }
+
+    #[test]
+    fn test_optimization_unevaluated() {
+        // A free parameter makes the objective non-numeric.
+        let v = eval_str("ConvexOptimization[a x^2, {}, {x}]");
+        assert!(
+            matches!(&v, Value::Call { head, .. } if head == "ConvexOptimization"),
+            "expected unevaluated, got {v:?}"
+        );
+        // Unsupported constraint head.
+        let w = eval_str("QuadraticOptimization[x^2, Element[x, Reals], {x}]");
+        assert!(
+            matches!(&w, Value::Call { head, .. } if head == "QuadraticOptimization"),
+            "expected unevaluated, got {w:?}"
+        );
+        // Wrong arity.
+        let z = eval_str("ConvexOptimization[x^2]");
+        assert!(
+            matches!(&z, Value::Call { head, .. } if head == "ConvexOptimization"),
+            "expected unevaluated, got {z:?}"
+        );
     }
 }

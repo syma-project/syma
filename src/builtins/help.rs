@@ -863,6 +863,11 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "Lookup[assoc, key] returns the value associated with key in the association.",
         ),
         (
+            "LowerCase",
+            "LowerCase[s] converts all characters in s to lowercase.\n\
+             LowerCase[s, n] converts only the n-th character to lowercase.",
+        ),
+        (
             "LowpassFilter",
             "LowpassFilter[list, cutoff] applies a lowpass filter.",
         ),
@@ -1587,6 +1592,10 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         ),
         ("ToString", "ToString[expr] converts expr to a string."),
         (
+            "ToTitleCase",
+            "ToTitleCase[s] capitalizes the first letter of each word (alias of TitleCase).",
+        ),
+        (
             "ToUpperCase",
             "ToUpperCase[s] converts all characters in s to uppercase.",
         ),
@@ -1640,6 +1649,11 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "UnsameQ[a, b] or a =!= b returns True if a and b are not identical.",
         ),
         ("Unset", "Unset[lhs] removes any definition for lhs."),
+        (
+            "UpperCase",
+            "UpperCase[s] converts all characters in s to uppercase.\n\
+             UpperCase[s, n] converts only the n-th character to uppercase.",
+        ),
         (
             "ValueQ",
             "ValueQ[expr] returns True if expr has a value defined.",

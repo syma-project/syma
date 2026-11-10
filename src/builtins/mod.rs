@@ -1173,6 +1173,9 @@ pub fn register_builtins(env: &Env) {
         "PerfectNumberQ",
         number_theory::builtin_perfect_number_q,
     );
+    // Additional number-theory builtins (ExtendedGCD, MantissaExponent,
+    // ExpMantissa, SquareFreePart).
+    number_theory::register(env);
 
     // ── Reciprocal trig ──
 
@@ -1265,6 +1268,7 @@ pub fn register_builtins(env: &Env) {
 
     // ── Gap-fill modules (Mathematica parity) ──
     text::register(env);
+    string::register(env);
     listmore::register(env);
     linalgmore::register(env);
     statsmore::register(env);
@@ -1272,6 +1276,7 @@ pub fn register_builtins(env: &Env) {
     symbolicmore::register(env);
     introspect::register(env);
     fit::register(env);
+    numericsolve::register(env);
     polyreduce::register(env);
     symbolicmanip::register(env);
     dsolve::register(env);

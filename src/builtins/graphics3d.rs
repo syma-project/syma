@@ -40,6 +40,8 @@ const CONTOUR3D_GRID: usize = 12;
 const SLICE3D_GRID: usize = 14;
 /// Sample-grid resolution for 3D density clouds.
 const DENSITY3D_GRID: usize = 10;
+/// Sample-grid resolution for 3D predicate regions.
+const REGION3D_GRID: usize = 14;
 /// Sample-grid resolution for 3D vector fields.
 const VECTOR3D_GRID: usize = 6;
 /// Background resolution for density overlays.
@@ -126,6 +128,29 @@ fn sample(expr: &Expr, vars: &[(&str, f64)], env: &Env) -> Option<f64> {
         return super::to_f64(&res);
     }
     None
+}
+
+/// Sample a boolean predicate at the given variable bindings.
+///
+/// Mirrors [`sample`], but coerces the evaluated value through
+/// [`Value::to_bool`] instead of requiring a number, and applies pure-function
+/// predicates to the sample point.
+fn sample_pred(expr: &Expr, vars: &[(&str, f64)], env: &Env) -> bool {
+    let child = env.child();
+    for (name, value) in vars {
+        child.set((*name).to_string(), super::real(*value));
+    }
+    let Ok(val) = crate::eval::eval(expr, &child) else {
+        return false;
+    };
+    if is_function_value(&val) {
+        let call_args: Vec<Value> = vars.iter().map(|(_, v)| super::real(*v)).collect();
+        return match crate::eval::apply_function(&val, &call_args, env) {
+            Ok(res) => res.to_bool(),
+            Err(_) => false,
+        };
+    }
+    val.to_bool()
 }
 
 // ── Iterator specs ──────────────────────────────────────────────────────────
@@ -1203,6 +1228,80 @@ pub fn builtin_density_plot3d(args: &[Value], env: &Env) -> Result<Value, EvalEr
     Ok(finish_prims(prims, &args[4..], env))
 }
 
+// ── RegionPlot3D ────────────────────────────────────────────────────────────
+
+/// `RegionPlot3D[pred, {x, ..}, {y, ..}, {z, ..}]` — filled voxel region.
+///
+/// The predicate is sampled on a voxel grid; every cell whose centre satisfies
+/// it is kept and projected as a depth-sorted, depth-shaded square, so the
+/// region renders as a solid cloud through the existing SVG pipeline.
+pub fn builtin_region_plot3d(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let name = "RegionPlot3D";
+    if args.len() < 4 {
+        return Ok(unevaluated(name, args));
+    }
+    let pred = to_expr(&args[0]);
+    let (Some(xs), Some(ys), Some(zs)) = (
+        IterSpec::parse(&to_value(&args[1]), env),
+        IterSpec::parse(&to_value(&args[2]), env),
+        IterSpec::parse(&to_value(&args[3]), env),
+    ) else {
+        return Ok(unevaluated(name, args));
+    };
+
+    let n = REGION3D_GRID;
+    let proj = Projector::from_bounds(
+        V3 {
+            x: xs.min,
+            y: ys.min,
+            z: zs.min,
+        },
+        V3 {
+            x: xs.max,
+            y: ys.max,
+            z: zs.max,
+        },
+    );
+    let half = 0.5 / (n - 1) as f64;
+
+    let mut cells: Vec<(f64, f64, f64)> = Vec::new();
+    let (mut dmin, mut dmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    #[allow(clippy::needless_range_loop)]
+    for k in 0..n {
+        let z = zs.lerp(k as f64 / (n - 1) as f64);
+        for j in 0..n {
+            let y = ys.lerp(j as f64 / (n - 1) as f64);
+            for i in 0..n {
+                let x = xs.lerp(i as f64 / (n - 1) as f64);
+                if sample_pred(&pred, &[(&xs.var, x), (&ys.var, y), (&zs.var, z)], env) {
+                    let (sx, sy, depth) = proj.screen(V3 { x, y, z });
+                    dmin = dmin.min(depth);
+                    dmax = dmax.max(depth);
+                    cells.push((sx, sy, depth));
+                }
+            }
+        }
+    }
+    if cells.is_empty() {
+        return Ok(unevaluated(name, args));
+    }
+
+    // Far cells first so nearer ones overwrite them.
+    cells.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    let drange = (dmax - dmin).max(1e-12);
+
+    let mut prims: Vec<Value> = Vec::with_capacity(cells.len() * 2);
+    for (sx, sy, depth) in cells {
+        let t = ((depth - dmin) / drange).clamp(0.0, 1.0);
+        prims.push(rgb(0.30 + 0.35 * t, 0.55 + 0.30 * t, 0.85 + 0.10 * t));
+        prims.push(Value::Call {
+            head: "Rectangle".to_string(),
+            args: vec![point2(sx - half, sy - half), point2(sx + half, sy + half)],
+        });
+    }
+    Ok(finish_prims(prims, &args[4..], env))
+}
+
 // ── VectorPlot3D ────────────────────────────────────────────────────────────
 
 /// `VectorPlot3D[{vx, vy, vz}, {x, ..}, {y, ..}, {z, ..}]` — 3D arrow field.
@@ -1872,6 +1971,7 @@ pub fn register(env: &Env) {
     register_builtin_env(env, "ParametricPlot3D", builtin_parametric_plot3d);
     register_builtin_env(env, "ContourPlot3D", builtin_contour_plot3d);
     register_builtin_env(env, "DensityPlot3D", builtin_density_plot3d);
+    register_builtin_env(env, "RegionPlot3D", builtin_region_plot3d);
     register_builtin_env(env, "VectorPlot3D", builtin_vector_plot3d);
     register_builtin_env(env, "StreamDensityPlot", builtin_stream_density_plot);
     register_builtin_env(env, "VectorDensityPlot", builtin_vector_density_plot);
@@ -1893,6 +1993,7 @@ pub fn register(env: &Env) {
         "ParametricPlot3D",
         "ContourPlot3D",
         "DensityPlot3D",
+        "RegionPlot3D",
         "VectorPlot3D",
         "StreamDensityPlot",
         "VectorDensityPlot",
@@ -2266,6 +2367,36 @@ mod tests {
     fn test_list_polar_plot_inapplicable() {
         let v = builtin_list_polar_plot(&[Value::Integer(rug::Integer::from(1))]).unwrap();
         assert!(matches!(&v, Value::Call { head, .. } if head == "ListPolarPlot"));
+    }
+
+    #[test]
+    fn test_region_plot3d_filled_ball() {
+        let v = eval_str("RegionPlot3D[x^2 + y^2 + z^2 < 1/2, {x, -1, 1}, {y, -1, 1}, {z, -1, 1}]");
+        let (prims, _) = graphics_parts(&v);
+        assert!(count_head(prims, "Rectangle") > 0, "expected filled voxels");
+        assert!(svg_of(&v).contains("</svg>"));
+    }
+
+    #[test]
+    fn test_region_plot3d_pure_function_predicate() {
+        let v = eval_str(
+            "RegionPlot3D[(#1^2 + #2^2 + #3^2 < 1/2) &, {x, -1, 1}, {y, -1, 1}, {z, -1, 1}]",
+        );
+        let (prims, _) = graphics_parts(&v);
+        assert!(count_head(prims, "Rectangle") > 0);
+    }
+
+    #[test]
+    fn test_region_plot3d_empty_region_unevaluated() {
+        // No sampled point can satisfy the impossible predicate.
+        let v = eval_str("RegionPlot3D[x^2 + y^2 + z^2 < 0, {x, -1, 1}, {y, -1, 1}, {z, -1, 1}]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "RegionPlot3D"));
+    }
+
+    #[test]
+    fn test_region_plot3d_bad_arity_unevaluated() {
+        let v = eval_str("RegionPlot3D[x < 1, {x, 0, 1}]");
+        assert!(matches!(&v, Value::Call { head, .. } if head == "RegionPlot3D"));
     }
 
     #[test]

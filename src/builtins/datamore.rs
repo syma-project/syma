@@ -3,6 +3,7 @@
 //! Gap-fill module; see the individual builtin docs for semantics.
 
 use rug::Integer;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::ast::Expr;
@@ -311,6 +312,69 @@ pub fn builtin_min_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     extreme_by("MinBy", args, false, env)
 }
 
+// ── MaximalBy / MinimalBy ──────────────────────────────────────────────────
+
+/// Shared implementation of `MaximalBy`/`MinimalBy`.
+///
+/// `MaximalBy[list, f]` returns every element whose `f`-value is extremal, in
+/// order of appearance in `list`. `MaximalBy[list, f, n]` returns the `n`
+/// elements with the largest `f`-values, in decreasing order (ties broken by
+/// input order); `UpTo[n]` and negative `n` are accepted via `parse_count`.
+/// Returns unevaluated when `list` is not a list or `n` is not a count.
+fn maximal_by(name: &str, args: &[Value], want_max: bool, env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return unevaluated(name, args);
+    }
+    let items = match &args[0] {
+        Value::List(items) => items,
+        _ => return unevaluated(name, args),
+    };
+    let f = &args[1];
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        keys.push(apply_function(f, std::slice::from_ref(item), env)?);
+    }
+
+    if args.len() == 2 {
+        // Keep every element attaining the extremal key, in input order.
+        let extremum = keys.iter().cloned().reduce(|a, b| {
+            let take_b = match compare_values(&a, &b) {
+                Ordering::Less => want_max,
+                Ordering::Greater => !want_max,
+                Ordering::Equal => false,
+            };
+            if take_b { b } else { a }
+        });
+        let chosen = match extremum {
+            None => Vec::new(),
+            Some(extremum) => items
+                .iter()
+                .zip(keys.iter())
+                .filter(|(_, k)| compare_values(k, &extremum) == Ordering::Equal)
+                .map(|(item, _)| item.clone())
+                .collect(),
+        };
+        return Ok(Value::List(chosen));
+    }
+
+    let n = match parse_count(&args[2]) {
+        Some(n) => n,
+        None => return unevaluated(name, args),
+    };
+    let sorted = sort_indices_by_keys(&keys, want_max);
+    Ok(Value::List(slice_by_count(items, &sorted, n)))
+}
+
+/// `MaximalBy[list, f]` / `MaximalBy[list, f, n]` — elements maximizing `f`.
+pub fn builtin_maximal_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    maximal_by("MaximalBy", args, true, env)
+}
+
+/// `MinimalBy[list, f]` / `MinimalBy[list, f, n]` — elements minimizing `f`.
+pub fn builtin_minimal_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    maximal_by("MinimalBy", args, false, env)
+}
+
 // ── OrderingBy ─────────────────────────────────────────────────────────────
 
 /// `OrderingBy[list, f]` / `OrderingBy[list, f, n]` — positions sorting `list`
@@ -392,6 +456,8 @@ pub fn register(env: &Env) {
     super::register_builtin_env(env, "TakeSmallestBy", builtin_take_smallest_by);
     super::register_builtin_env(env, "MaxBy", builtin_max_by);
     super::register_builtin_env(env, "MinBy", builtin_min_by);
+    super::register_builtin_env(env, "MaximalBy", builtin_maximal_by);
+    super::register_builtin_env(env, "MinimalBy", builtin_minimal_by);
     super::register_builtin_env(env, "OrderingBy", builtin_ordering_by);
     super::register_builtin(env, "DeleteMissing", builtin_delete_missing);
 }
@@ -541,6 +607,79 @@ mod tests {
             }
             other => panic!("expected unevaluated MaxBy, got {other:?}"),
         }
+    }
+
+    // ── MaximalBy / MinimalBy ──
+
+    #[test]
+    fn test_maximal_by_all_maxima_in_order() {
+        // Every element attaining the maximal key, in input order.
+        assert_eq!(
+            eval_str("MaximalBy[{{a, 1}, {b, 1}, {b, 3}, {d, 2}, {a, 3}}, Last]"),
+            list(vec![
+                list(vec![Value::Symbol("b".to_string()), integer(3)]),
+                list(vec![Value::Symbol("a".to_string()), integer(3)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_maximal_by_n_is_sorted() {
+        assert_eq!(
+            eval_str("MaximalBy[{1, 2, 3, 4, 5}, Identity, 3]"),
+            list(vec![integer(5), integer(4), integer(3)])
+        );
+        // Ties keep their input order.
+        assert_eq!(
+            eval_str("MaximalBy[Range[-5, 5], Abs, 4]"),
+            list(vec![integer(-5), integer(5), integer(-4), integer(4),])
+        );
+    }
+
+    #[test]
+    fn test_maximal_by_upto() {
+        assert_eq!(
+            eval_str("MaximalBy[{1, 2, 3}, Identity, UpTo[5]]"),
+            list(vec![integer(3), integer(2), integer(1)])
+        );
+    }
+
+    #[test]
+    fn test_minimal_by() {
+        assert_eq!(
+            eval_str("MinimalBy[{{a, 3}, {b, 1}, {c, 1}}, Last]"),
+            list(vec![
+                list(vec![Value::Symbol("b".to_string()), integer(1)]),
+                list(vec![Value::Symbol("c".to_string()), integer(1)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_maximal_by_empty() {
+        assert_eq!(eval_str("MaximalBy[{}, Identity]"), list(vec![]));
+        assert_eq!(eval_str("MaximalBy[{}, Identity, 3]"), list(vec![]));
+    }
+
+    #[test]
+    fn test_maximal_by_unevaluated() {
+        assert_eq!(
+            eval_str("MaximalBy[x, g]"),
+            Value::Call {
+                head: "MaximalBy".to_string(),
+                args: vec![
+                    Value::Symbol("x".to_string()),
+                    Value::Symbol("g".to_string()),
+                ],
+            }
+        );
+        assert_eq!(
+            eval_str("MaximalBy[g]"),
+            Value::Call {
+                head: "MaximalBy".to_string(),
+                args: vec![Value::Symbol("g".to_string())],
+            }
+        );
     }
 
     // ── OrderingBy ──

@@ -12,6 +12,7 @@ use crate::env::Env;
 use crate::value::{EvalError, Format, Value};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::io::Seek;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,6 +112,17 @@ fn insert_stream(entry: StreamEntry) -> u64 {
 /// Run `f` against the open stream `handle`.
 fn with_stream<R>(handle: u64, f: impl FnOnce(&mut StreamEntry) -> R) -> Option<R> {
     STREAMS.lock().unwrap().get_mut(&handle).map(f)
+}
+
+/// Byte cursor of the open stream `handle`, if it can be determined.
+///
+/// Read streams track an in-memory cursor; write streams are queried through
+/// the underlying file handle.
+pub(crate) fn stream_position(handle: u64) -> Option<u64> {
+    with_stream(handle, |entry| match entry {
+        StreamEntry::Read { pos, .. } => Some(*pos as u64),
+        StreamEntry::Write(file) => file.stream_position().ok(),
+    })?
 }
 
 // ── Open / Close / Streams ──────────────────────────────────────────────────
