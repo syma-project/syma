@@ -1085,7 +1085,7 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, angle)))
         }
         Value::Integer(n) => {
-            if n.is_zero() || n.is_positive() {
+            if !n.is_negative() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
             } else {
                 Ok(Value::Real(Float::with_val(
@@ -1095,7 +1095,7 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         Value::Real(r) => {
-            if r.is_zero() || r.is_sign_positive() {
+            if !r.is_sign_negative() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
             } else {
                 let pi = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi);
@@ -1128,6 +1128,15 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
             if n.is_zero() {
                 Ok(Value::Integer(Integer::from(0)))
             } else if n.is_positive() {
+                Ok(Value::Integer(Integer::from(1)))
+            } else {
+                Ok(Value::Integer(Integer::from(-1)))
+            }
+        }
+        Value::Rational(r) => {
+            if r.numer().is_zero() {
+                Ok(Value::Integer(Integer::from(0)))
+            } else if r.is_positive() {
                 Ok(Value::Integer(Integer::from(1)))
             } else {
                 Ok(Value::Integer(Integer::from(-1)))
@@ -1317,7 +1326,10 @@ mod tests {
 
     #[test]
     fn test_abs_real() {
-        assert_eq!(builtin_abs(&[real(-3.14)]).unwrap(), real(3.14));
+        assert_eq!(
+            builtin_abs(&[real(-std::f64::consts::PI)]).unwrap(),
+            real(std::f64::consts::PI)
+        );
     }
 
     #[test]

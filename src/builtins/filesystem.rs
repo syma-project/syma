@@ -383,6 +383,29 @@ pub fn builtin_file_names(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(results))
 }
 
+// ── CreateDirectory ────────────────────────────────────────────────────────
+
+/// CreateDirectory[path] — create a directory (including parent directories).
+pub fn builtin_create_directory(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "CreateDirectory requires exactly 1 argument".to_string(),
+        ));
+    }
+    let path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    std::fs::create_dir_all(&path)
+        .map_err(|e| EvalError::Error(format!("CreateDirectory: {}", e)))?;
+    Ok(Value::Str(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -623,13 +623,14 @@ mod tests {
 
     #[test]
     fn test_position_first() {
+        let env = test_env();
         assert_eq!(
             builtin_position_first(
                 &[
                     val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
                     val_int(2)
                 ],
-                &Env::new()
+                &env
             )
             .unwrap(),
             val_int(2)
@@ -638,11 +639,10 @@ mod tests {
 
     #[test]
     fn test_position_first_not_found() {
-        let result = builtin_position_first(
-            &[val_list(vec![val_int(1), val_int(2)]), val_int(9)],
-            &Env::new(),
-        )
-        .unwrap();
+        let env = test_env();
+        let result =
+            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env)
+                .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -654,13 +654,14 @@ mod tests {
 
     #[test]
     fn test_position_last() {
+        let env = test_env();
         assert_eq!(
             builtin_position_last(
                 &[
                     val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
                     val_int(2)
                 ],
-                &Env::new()
+                &env
             )
             .unwrap(),
             val_int(4)
@@ -669,11 +670,10 @@ mod tests {
 
     #[test]
     fn test_position_last_not_found() {
-        let result = builtin_position_last(
-            &[val_list(vec![val_int(1), val_int(2)]), val_int(9)],
-            &Env::new(),
-        )
-        .unwrap();
+        let env = test_env();
+        let result =
+            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)], &env)
+                .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -912,6 +912,7 @@ mod tests {
     #[test]
     fn test_through_multi() {
         let env = test_env();
+        // A single function head is applied directly and returned unwrapped.
         let expr = Value::Call {
             head: "Abs".to_string(),
             args: vec![val_int(-3)],

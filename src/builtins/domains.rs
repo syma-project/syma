@@ -61,60 +61,26 @@ fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     let result = match dom_name {
-        "Integers" => {
-            if is_concrete(x) {
-                Value::Symbol(if matches!(x, Value::Integer(_)) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
+        "Integers" if is_concrete(x) => Value::Symbol(if matches!(x, Value::Integer(_)) {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        }),
+        "Rationals" if is_concrete(x) => {
+            Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
+                "True".to_string()
             } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
-            }
+                "False".to_string()
+            })
         }
-        "Rationals" => {
-            if is_concrete(x) {
-                Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
+        "Reals" if is_concrete(x) => Value::Symbol(
+            if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
+                "True".to_string()
             } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
-            }
-        }
-        "Reals" => {
-            if is_concrete(x) {
-                Value::Symbol(
-                    if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
-                        "True".to_string()
-                    } else {
-                        "False".to_string()
-                    },
-                )
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
-            }
-        }
-        "Complexes" => {
-            if is_concrete(x) {
-                Value::Symbol("True".to_string())
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
-            }
-        }
+                "False".to_string()
+            },
+        ),
+        "Complexes" if is_concrete(x) => Value::Symbol("True".to_string()),
         "Booleans" => match x {
             Value::Symbol(s) if s == "True" || s == "False" => Value::Symbol("True".to_string()),
             Value::Bool(_) => Value::Symbol("True".to_string()),

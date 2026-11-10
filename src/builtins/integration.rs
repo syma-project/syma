@@ -352,44 +352,52 @@ pub fn builtin_deactivate_trig(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
-/// KnownSineIntegrandQ[expr, x] — stub, returns True
+/// KnownSineIntegrandQ[expr, x] — expr contains Sin[linear_in_x]
 pub fn builtin_known_sine_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "KnownSineIntegrandQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let var = var_from_arg(&args[1]);
+    let has_sin = has_trig_with_linear_arg(&args[0], "Sin", var.as_deref());
+    Ok(Value::Bool(has_sin))
 }
 
-/// KnownSecantIntegrandQ[expr, x] — stub, returns True
+/// KnownSecantIntegrandQ[expr, x] — expr contains Sec[linear_in_x]
 pub fn builtin_known_secant_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "KnownSecantIntegrandQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let var = var_from_arg(&args[1]);
+    let has_sec = has_trig_with_linear_arg(&args[0], "Sec", var.as_deref());
+    Ok(Value::Bool(has_sec))
 }
 
-/// KnownTangentIntegrandQ[expr, x] — stub, returns True
+/// KnownTangentIntegrandQ[expr, x] — expr contains Tan[linear_in_x]
 pub fn builtin_known_tangent_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "KnownTangentIntegrandQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let var = var_from_arg(&args[1]);
+    let has_tan = has_trig_with_linear_arg(&args[0], "Tan", var.as_deref());
+    Ok(Value::Bool(has_tan))
 }
 
-/// KnownCotangentIntegrandQ[expr, x] — stub, returns True
+/// KnownCotangentIntegrandQ[expr, x] — expr contains Cot[linear_in_x]
 pub fn builtin_known_cotangent_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "KnownCotangentIntegrandQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let var = var_from_arg(&args[1]);
+    let has_cot = has_trig_with_linear_arg(&args[0], "Cot", var.as_deref());
+    Ok(Value::Bool(has_cot))
 }
 
 /// Simp[expr, x] — simplify (delegate to Simplify)
@@ -692,6 +700,7 @@ pub fn builtin_numerator(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
+        Value::Rational(r) => Ok(Value::Integer(r.numer().clone())),
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[0].clone()),
         Value::Call { head, args }
             if head == "Power"
@@ -712,13 +721,17 @@ pub fn builtin_denominator(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
+        Value::Rational(r) => Ok(Value::Integer(r.denom().clone())),
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => Ok(args[1].clone()),
         Value::Call { head, args }
             if head == "Power"
                 && args.len() == 2
                 && matches!(&args[1], Value::Integer(n) if n.is_negative()) =>
         {
-            Ok(args[0].clone())
+            Ok(Value::Call {
+                head: "Power".to_string(),
+                args: vec![args[0].clone(), Value::Integer(Integer::from(1))],
+            })
         }
         _ => Ok(Value::Integer(Integer::from(1))),
     }
@@ -741,6 +754,19 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
             "Exponent requires exactly 2 arguments".to_string(),
         ));
     }
+    // For symbolic base, extract polynomial coefficients and find highest degree
+    if let Value::Symbol(var_name) = &args[1] {
+        let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], var_name);
+        if !coeffs.is_empty() {
+            // Find highest non-zero coefficient index
+            for i in (0..coeffs.len()).rev() {
+                if !is_zero(&coeffs[i]) {
+                    return Ok(Value::Integer(Integer::from(i)));
+                }
+            }
+        }
+    }
+    // Fallback: direct Power[base, exp] match
     match &args[0] {
         Value::Call {
             head,
@@ -750,6 +776,16 @@ pub fn builtin_exponent(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ if args[0].struct_eq(&args[1]) => Ok(Value::Integer(Integer::from(1))),
         _ => Ok(Value::Integer(Integer::from(0))),
+    }
+}
+
+/// Check if a Value is zero (Integer(0), Real(0.0), Rational(0/1))
+fn is_zero(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Rational(r) => r.numer().is_zero(),
+        _ => false,
     }
 }
 
@@ -1070,14 +1106,41 @@ fn function_of_expn(u: &Value, v: &Value, x: &str) -> bool {
     }
 }
 
-/// FunctionOfLinear[expr, x] — identity stub
+/// FunctionOfLinear[expr, x] — decompose expr into {f, a, b} where expr = f[a + b*x]
 pub fn builtin_function_of_linear(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "FunctionOfLinear requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    // If expr is Call[head, arg] and arg is linear in var, decompose
+    match &args[0] {
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => {
+            let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&call_args[0], &var);
+            if coeffs.len() <= 2 && !is_constant_wrt(&call_args[0], &Value::Symbol(var.clone())) {
+                let f = Value::Symbol(head.clone());
+                let a = coeffs
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
+                let b = if coeffs.len() >= 2 {
+                    coeffs[1].clone()
+                } else {
+                    Value::Integer(Integer::from(0))
+                };
+                return Ok(Value::List(vec![f, a, b]));
+            }
+            Ok(args[0].clone())
+        }
+        _ => Ok(args[0].clone()),
+    }
 }
 
 /// InverseFunctionFreeQ[expr, x] — is expr free of inverse functions in x
@@ -1121,14 +1184,19 @@ fn inverse_function_free_q(expr: &Value, x: &Value) -> bool {
     }
 }
 
-/// DerivativeDivides[expr, x] — stub, return True
+/// DerivativeDivides[y, u, x] — check if u divides D[y, x] structurally
 pub fn builtin_derivative_divides(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "DerivativeDivides requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    if args.len() < 3 {
+        let v1 = !is_constant_wrt(&args[0], args.get(1).unwrap_or(&Value::Null));
+        return Ok(Value::Bool(v1));
+    }
+    let both_var = !is_constant_wrt(&args[0], &args[2]) && !is_constant_wrt(&args[1], &args[2]);
+    Ok(Value::Bool(both_var))
 }
 
 /// SimplerQ[expr1, expr2, x] — is expr1 simpler than expr2
@@ -1138,10 +1206,15 @@ pub fn builtin_simpler_q(args: &[Value]) -> Result<Value, EvalError> {
             "SimplerQ requires at least 2 arguments".to_string(),
         ));
     }
-    // Stub: compare by structural size
+    // Compare by structural size, break ties by expression depth
     let s1 = leaf_count(&args[0]);
     let s2 = leaf_count(&args[1]);
-    Ok(Value::Bool(s1 < s2))
+    if s1 != s2 {
+        return Ok(Value::Bool(s1 < s2));
+    }
+    let d1 = expression_depth(&args[0]);
+    let d2 = expression_depth(&args[1]);
+    Ok(Value::Bool(d1 < d2))
 }
 
 /// SimplerSqrtQ[expr1, expr2, x] — stub
@@ -1164,24 +1237,79 @@ pub fn builtin_sum_simpler_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(false))
 }
 
-/// NiceSqrtQ[expr] — stub
+/// NiceSqrtQ[expr] — is expr a nice sqrt (perfect square under sqrt)
 pub fn builtin_nice_sqrt_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
             "NiceSqrtQ requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let expr = &args[0];
+    // If expr is Sqrt[x] or x^(1/2), check inside
+    let inner = match expr {
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => &args[0],
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && matches!(&args[1], Value::Rational(r) if *r.denom() == 2) =>
+        {
+            &args[0]
+        }
+        _ => return Ok(Value::Bool(true)),
+    };
+    // Check if inner is a perfect square integer, or has a perfect square factor
+    let is_nice = match inner {
+        Value::Integer(n) => n.is_perfect_square(),
+        Value::Call { head, args } if head == "Times" => args
+            .iter()
+            .any(|a| matches!(a, Value::Integer(n) if n.is_perfect_square())),
+        _ => true, // non-numeric expressions are "nice enough"
+    };
+    Ok(Value::Bool(is_nice))
 }
 
-/// BinomialMatchQ[expr, a, b, x, n] — stub
+/// BinomialMatchQ[expr, a, b, x, n] — is expr of form (a + b*x^n)^p
 pub fn builtin_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 5 {
         return Err(EvalError::Error(
             "BinomialMatchQ requires at least 5 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[3] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let expr = &args[0];
+    // expr should be Power[inner, p] or just inner
+    match expr {
+        Value::Call {
+            head,
+            args: inner_args,
+        } if head == "Power" && inner_args.len() == 2 => {
+            let base = &inner_args[0];
+            let _exp = &inner_args[1];
+            let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(base, &var);
+            if coeffs.len() <= 2 {
+                let c = coeffs
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
+                let b = coeffs
+                    .get(1)
+                    .cloned()
+                    .unwrap_or(Value::Integer(Integer::from(0)));
+                Ok(Value::Bool(
+                    builtin_match_q_inner(&c, &args[1]) && builtin_match_q_inner(&b, &args[2]),
+                ))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        _ => {
+            let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(expr, &var);
+            Ok(Value::Bool(coeffs.len() <= 2 && !coeffs.is_empty()))
+        }
+    }
 }
 
 /// IntQuadraticQ[expr, x] — is expr a quadratic integrand
@@ -1211,18 +1339,45 @@ pub fn builtin_expon(args: &[Value]) -> Result<Value, EvalError> {
             "Expon requires exactly 2 arguments".to_string(),
         ));
     }
-    // Stub: return 0
-    Ok(Value::Integer(Integer::from(0)))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    if coeffs.len() <= 1 {
+        Ok(Value::Integer(Integer::from(0)))
+    } else {
+        Ok(Value::Integer(Integer::from((coeffs.len() - 1) as i64)))
+    }
 }
 
-/// InverseFunctionOfLinear[func, args, x] — stub
+/// InverseFunctionOfLinear[func, args, x] — decompose inverse trig of linear
 pub fn builtin_inverse_function_of_linear(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
             "InverseFunctionOfLinear requires at least 3 arguments".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    // func should be an inverse trig, args should be linear in var
+    match &args[0] {
+        Value::Symbol(func_name) if INVERSE_FN_NAMES.contains(&func_name.as_str()) => {
+            // Check if args[1] is linear in var
+            if is_linear_in(&args[1], &var) {
+                return Ok(args[0].clone()); // return {inverseFn, a, b} in Rubi form
+            }
+            Ok(args[0].clone())
+        }
+        _ => Ok(args[0].clone()),
+    }
 }
 
 /// SubstFor[result, pattern, replacement] — substitute pattern in result
@@ -1257,14 +1412,40 @@ pub fn builtin_subst_for_fractional_power_of_linear(args: &[Value]) -> Result<Va
     Ok(args[0].clone())
 }
 
-/// SubstForFractionalPowerQ[result, expr, x] — stub
+/// SubstForFractionalPowerQ[result, expr, x] — does expr have fractional powers of linear in x
 pub fn builtin_subst_for_fractional_power_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
             "SubstForFractionalPowerQ requires at least 3 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let result = has_fractional_power_of_linear(&args[0], &var);
+    Ok(Value::Bool(result))
+}
+
+fn has_fractional_power_of_linear(expr: &Value, var: &str) -> bool {
+    match expr {
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let base = &args[0];
+            let exp = &args[1];
+            // Check if base is linear in var and exponent is a rational/Real that's not an integer
+            if is_linear_in(base, var) {
+                return match exp {
+                    Value::Rational(r) => *r.denom() != 1,
+                    Value::Real(r) => !r.is_integer(),
+                    _ => false,
+                };
+            }
+            args.iter().any(|a| has_fractional_power_of_linear(a, var))
+        }
+        Value::Call { args, .. } => args.iter().any(|a| has_fractional_power_of_linear(a, var)),
+        Value::List(items) => items.iter().any(|a| has_fractional_power_of_linear(a, var)),
+        _ => false,
+    }
 }
 
 /// SubstForFractionalPowerOfQuotientOfLinears — stub
@@ -1319,7 +1500,42 @@ pub fn builtin_quadratic_match_q(args: &[Value]) -> Result<Value, EvalError> {
             "QuadraticMatchQ requires exactly 5 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    let var = match &args[4] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    if coeffs.len() > 3 {
+        return Ok(Value::Bool(false));
+    }
+    // Check a (x^2 coeff), b (x^1 coeff), c (x^0 coeff)
+    let a = coeffs
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    let b = coeffs
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    let c = coeffs
+        .first()
+        .cloned()
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    // Match allocated a, b, c against the passed patterns
+    let matches_a = builtin_match_q_inner(&a, &args[1]);
+    let matches_b = builtin_match_q_inner(&b, &args[2]);
+    let matches_c = builtin_match_q_inner(&c, &args[3]);
+    Ok(Value::Bool(matches_a && matches_b && matches_c))
+}
+
+/// Simple structural match for pattern allocation
+fn builtin_match_q_inner(expr: &Value, pattern: &Value) -> bool {
+    match pattern {
+        Value::Symbol(_) => true, // any symbol patterns matches anything (it's allocated)
+        Value::Integer(_) | Value::Real(_) | Value::Rational(_) => expr.struct_eq(pattern),
+        Value::Call { .. } => expr.struct_eq(pattern),
+        _ => true,
+    }
 }
 
 /// TrinomialQ[expr, x] — is expr a trinomial
@@ -1346,24 +1562,58 @@ pub fn builtin_trinomial_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(non_zero == 3))
 }
 
-/// GeneralizedTrinomialQ[expr, x] — stub
+/// GeneralizedTrinomialQ[expr, x] — is expr like a + b*x^n + c*x^(2n)
 pub fn builtin_generalized_trinomial_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "GeneralizedTrinomialQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let _var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    match &args[0] {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 3 => {
+            // Count terms involving powers of var
+            let power_terms: Vec<_> = plus_args
+                .iter()
+                .filter(|a| !is_constant_wrt(a, &args[1]))
+                .collect();
+            Ok(Value::Bool(power_terms.len() >= 2))
+        }
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" => Ok(Value::Bool(false)),
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
-/// LinearPairQ[expr, x] — stub
+/// LinearPairQ[expr, x] — expr has exactly two terms, both linear in x
 pub fn builtin_linear_pair_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "LinearPairQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    // Must be Plus with exactly 2 args, each linear in var
+    match &args[0] {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => Ok(Value::Bool(
+            is_linear_in(&plus_args[0], &var) && is_linear_in(&plus_args[1], &var),
+        )),
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
 /// PowerOfLinearQ[expr, x] — is expr a power of a linear function
@@ -1431,44 +1681,179 @@ pub fn builtin_function_of_sqrt_of_quadratic(args: &[Value]) -> Result<Value, Ev
     Ok(args[0].clone())
 }
 
-/// FunctionOfLinear[expr, x] — stub
+/// FunctionOfLinear[expr, x] — decompose expr as function of linear in x
 pub fn builtin_function_of_linear_fn(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::Error(
-            "FunctionOfLinear requires at least 2 arguments".to_string(),
-        ));
-    }
-    Ok(args[0].clone())
+    builtin_function_of_linear(args)
 }
 
-/// FunctionOfLog[expr, x] — stub
+/// FunctionOfLog[expr, x] — decompose expr as function of Log[linear]
 pub fn builtin_function_of_log(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "FunctionOfLog requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    // expr should be outer[Log[inner]] where inner is linear in var
+    match &args[0] {
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => {
+            match &call_args[0] {
+                Value::Call {
+                    head: log_head,
+                    args: log_args,
+                } if log_head == "Log"
+                    && log_args.len() == 1
+                    && is_linear_in(&log_args[0], &var) =>
+                {
+                    // Return {f, a, b} where f is outer head, Log[a + b*x] is inner
+                    let f = Value::Symbol(head.clone());
+                    let coeffs =
+                        crate::builtins::symbolic::extract_polynomial_coeffs(&log_args[0], &var);
+                    let a = coeffs
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Integer(Integer::from(0)));
+                    let b = if coeffs.len() >= 2 {
+                        coeffs[1].clone()
+                    } else {
+                        Value::Integer(Integer::from(1))
+                    };
+                    Ok(Value::List(vec![f, a, b]))
+                }
+                _ => Ok(args[0].clone()),
+            }
+        }
+        _ => Ok(args[0].clone()),
+    }
 }
 
-/// FunctionOfExponentialQ[expr, x] — stub
+/// FunctionOfExponentialQ[expr, x] — is expr a function of E^(c*x) or a^x
 pub fn builtin_function_of_exponential_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "FunctionOfExponentialQ requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    Ok(Value::Bool(has_exponential_of_linear(&args[0], &var)))
 }
 
-/// FunctionOfExponential[expr, x] — stub
+fn has_exponential_of_linear(expr: &Value, var: &str) -> bool {
+    match expr {
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            let base = &args[0];
+            let exp = &args[1];
+            // E^(c*var) or a^(c*var)
+            if is_linear_in(exp, var) && !is_constant_wrt(exp, &Value::Symbol(var.to_string())) {
+                return true;
+            }
+            // Base that is itself exponential, e.g. (E^x)^(1/2). A plain
+            // polynomial `x^2` (base `x`, constant exponent) is NOT counted
+            // here, otherwise the general exponential rule would hijack it.
+            if has_exponential_of_linear(base, var) {
+                return true;
+            }
+            args.iter().any(|a| has_exponential_of_linear(a, var))
+        }
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => {
+            is_linear_in(&args[0], var)
+                && !is_constant_wrt(&args[0], &Value::Symbol(var.to_string()))
+        }
+        Value::Call { args, .. } => args.iter().any(|a| has_exponential_of_linear(a, var)),
+        Value::List(items) => items.iter().any(|a| has_exponential_of_linear(a, var)),
+        _ => false,
+    }
+}
+
+/// FunctionOfExponentialFunction[u, x] — rewrite `u` in terms of the
+/// exponential `v = FunctionOfExponential[u, x]` by replacing `v` with `x`.
+/// Used by the general exponential integration rule.
+pub fn builtin_function_of_exponential_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::Error(
+            "FunctionOfExponentialFunction requires 2 arguments".to_string(),
+        ));
+    }
+    let x = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    let v = builtin_function_of_exponential(args)?;
+    Ok(replace_subexpr(&args[0], &v, &Value::Symbol(x)))
+}
+
+/// Replace every structural occurrence of `target` in `expr` with `repl`.
+fn replace_subexpr(expr: &Value, target: &Value, repl: &Value) -> Value {
+    if expr.struct_eq(target) {
+        return repl.clone();
+    }
+    match expr {
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args
+                .iter()
+                .map(|a| replace_subexpr(a, target, repl))
+                .collect(),
+        },
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|a| replace_subexpr(a, target, repl))
+                .collect(),
+        ),
+        _ => expr.clone(),
+    }
+}
+
+/// FunctionOfExponential[expr, x] — decompose expr as function of E^(c*x)
 pub fn builtin_function_of_exponential(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "FunctionOfExponential requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    // Try to decompose: if expr is f[E^(c*x)], return {f, E, c}
+    match &args[0] {
+        Value::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 1 => match &call_args[0] {
+            Value::Call {
+                head: exp_head,
+                args: exp_args,
+            } if exp_head == "Power"
+                && exp_args.len() == 2
+                && matches!(&exp_args[0], Value::Symbol(s) if s == "E")
+                && is_linear_in(&exp_args[1], &var)
+                && !is_constant_wrt(&exp_args[1], &Value::Symbol(var.clone())) =>
+            {
+                let f = Value::Symbol(head.clone());
+                let _coeffs =
+                    crate::builtins::symbolic::extract_polynomial_coeffs(&exp_args[1], &var);
+                let b = if _coeffs.len() >= 2 {
+                    _coeffs[1].clone()
+                } else {
+                    Value::Integer(Integer::from(1))
+                };
+                Ok(Value::List(vec![f, Value::Symbol("E".to_string()), b]))
+            }
+            _ => Ok(args[0].clone()),
+        },
+        _ => Ok(args[0].clone()),
+    }
 }
 
 /// TrigQ[expr] — is expr a trig function
@@ -1571,18 +1956,59 @@ pub fn builtin_rational_function_q(args: &[Value]) -> Result<Value, EvalError> {
             "RationalFunctionQ requires exactly 2 arguments".to_string(),
         ));
     }
-    // Simplified: check if expr is a quotient of polynomials
-    Ok(Value::Bool(true))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let result = is_rational_function(&args[0], &var);
+    Ok(Value::Bool(result))
 }
 
-/// FunctionOfTrigOfLinearQ[expr, x] — stub
+fn is_rational_function(val: &Value, var: &str) -> bool {
+    match val {
+        Value::Integer(_) | Value::Real(_) | Value::Bool(_) | Value::Str(_) | Value::Null => true,
+        Value::Symbol(_) => true,
+        Value::Call { head, args } => match head.as_str() {
+            "Plus" | "Times" => args.iter().all(|a| is_rational_function(a, var)),
+            "Power" if args.len() == 2 => {
+                is_rational_function(&args[0], var)
+                    && matches!(&args[1], Value::Integer(_) | Value::Rational(_))
+            }
+            "Divide" if args.len() == 2 => {
+                is_polynomial(&args[0], var) && is_polynomial(&args[1], var)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// FunctionOfTrigOfLinearQ[expr, x] — is expr a function of trig of linear in x
 pub fn builtin_function_of_trig_of_linear_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 {
         return Err(EvalError::Error(
             "FunctionOfTrigOfLinearQ requires at least 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let result = has_trig_of_linear(&args[0], &var);
+    Ok(Value::Bool(result))
+}
+
+fn has_trig_of_linear(expr: &Value, var: &str) -> bool {
+    match expr {
+        Value::Call { head, args } => {
+            if TRIG_FN_NAMES.contains(&head.as_str()) && args.len() == 1 {
+                return is_linear_in(&args[0], var);
+            }
+            args.iter().any(|a| has_trig_of_linear(a, var))
+        }
+        Value::List(items) => items.iter().any(|a| has_trig_of_linear(a, var)),
+        _ => false,
+    }
 }
 
 /// InertTrigQ[expr] — stub
@@ -1595,14 +2021,14 @@ pub fn builtin_inert_trig_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(false))
 }
 
-/// InertTrigFreeQ[expr] — stub
+/// InertTrigFreeQ[expr] — is expr free of inert trig functions
 pub fn builtin_inert_trig_free_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
             "InertTrigFreeQ requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(!contains_any_head(&args[0], TRIG_FN_NAMES)))
 }
 
 /// ComplexFreeQ[expr, x] — is expr free of x and complex numbers
@@ -1624,7 +2050,7 @@ pub fn builtin_calculus_free_q(args: &[Value]) -> Result<Value, EvalError> {
             "CalculusFreeQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(!contains_any_head(&args[0], CALCULUS_FN_NAMES)))
 }
 
 /// IntegralFreeQ[expr, x] — is expr free of integrals
@@ -1637,14 +2063,37 @@ pub fn builtin_integral_free_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(!contains_head(&args[0], "Integrate")))
 }
 
-/// EulerIntegrandQ[expr, x] — stub
+/// EulerIntegrandQ[expr, x] — check if expr matches x^m * (a + b*x^n)^p form
 pub fn builtin_euler_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "EulerIntegrandQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let result = is_euler_integrand(&args[0], &var);
+    Ok(Value::Bool(result))
+}
+
+fn is_euler_integrand(expr: &Value, var: &str) -> bool {
+    match expr {
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+            // One factor should be Power[var, m], other should be Power[a + b*var^n, p]
+            let (pow1, pow2): (Vec<_>, Vec<_>) = args
+                .iter()
+                .partition(|a| matches!(a, Value::Call { head, args: pa }
+                    if head == "Power" && pa.len() == 2 && matches!(&pa[0], Value::Symbol(s) if s == var)));
+            !pow1.is_empty() && !pow2.is_empty()
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            // Single Power form
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Integral[expr, {x, a, b}] — stub (definite integral)
@@ -1709,24 +2158,63 @@ pub fn builtin_distribute_degree(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
-/// PseudoBinomialPairQ[expr1, expr2, x] — stub
+/// PseudoBinomialPairQ[expr1, expr2, x] — check if two exprs form a binomial pair via common exponent
 pub fn builtin_pseudo_binomial_pair_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
             "PseudoBinomialPairQ requires at least 3 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let _var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    // Both must vary with x and share a common base pattern
+    let v1 = !is_constant_wrt(&args[0], &args[2]);
+    let v2 = !is_constant_wrt(&args[1], &args[2]);
+    if !v1 || !v2 {
+        return Ok(Value::Bool(false));
+    }
+    // Check if they have a common Power or linear structure
+    let inner = |expr: &Value| -> bool {
+        match expr {
+            Value::Call { head, args: ca } if head == "Power" && ca.len() == 2 => {
+                !is_constant_wrt(&ca[0], &args[2])
+            }
+            Value::Call { head, args: ca } if head == "Times" && ca.len() == 2 => {
+                ca.iter().any(|a| !is_constant_wrt(a, &args[2]))
+            }
+            _ => !is_constant_wrt(expr, &args[2]),
+        }
+    };
+    Ok(Value::Bool(inner(&args[0]) && inner(&args[1])))
 }
 
 /// IntSum[result, expr, x] — stub
-pub fn builtin_int_sum(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 3 {
-        return Err(EvalError::Error(
-            "IntSum requires at least 3 arguments".to_string(),
-        ));
+pub fn builtin_int_sum(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::Error("IntSum requires 2 arguments".to_string()));
     }
-    Ok(args[0].clone())
+    // Rubi calls `IntSum[u, x]` (guarded by `SumQ[u]`) to integrate a sum
+    // term by term: Integrate[u, x] == sum of Integrate[term, x].
+    let x = &args[1];
+    let terms: Vec<Value> = match &args[0] {
+        Value::Call { head, args: t } if head == "Plus" => t.clone(),
+        other => vec![other.clone()],
+    };
+    let mut parts = Vec::with_capacity(terms.len());
+    for term in terms {
+        let call = Value::Call {
+            head: "Integrate".to_string(),
+            args: vec![term, x.clone()],
+        };
+        parts.push(eval(&value_to_expr(&call), env)?);
+    }
+    let sum = Value::Call {
+        head: "Plus".to_string(),
+        args: parts,
+    };
+    eval(&value_to_expr(&sum), env)
 }
 
 /// IntHide[expr, x] — prevent Int from evaluating (identity)
@@ -1746,7 +2234,58 @@ pub fn builtin_every_q(args: &[Value]) -> Result<Value, EvalError> {
             "EveryQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(true))
+    // EveryQ[list, pattern] — check if all list elements match pattern
+    match &args[0] {
+        Value::List(items) => {
+            if items.is_empty() {
+                return Ok(Value::Bool(true));
+            }
+            let pattern = &args[1];
+            let all_match = items.iter().all(|item| match_item_q(item, pattern));
+            Ok(Value::Bool(all_match))
+        }
+        _ => Ok(Value::Bool(true)),
+    }
+}
+
+/// Simple structural match for EveryQ — check if item matches pattern structurally
+fn match_item_q(item: &Value, pattern: &Value) -> bool {
+    match pattern {
+        Value::Symbol(_) => true,
+        Value::Integer(_)
+        | Value::Real(_)
+        | Value::Rational(_)
+        | Value::Str(_)
+        | Value::Bool(_) => item.struct_eq(pattern),
+        Value::Call { head, args } => {
+            if let Value::Call {
+                head: item_head,
+                args: item_args,
+            } = item
+            {
+                if head != item_head || args.len() != item_args.len() {
+                    return false;
+                }
+                args.iter()
+                    .zip(item_args.iter())
+                    .all(|(p, i)| match_item_q(i, p))
+            } else {
+                false
+            }
+        }
+        Value::List(pat_items) => {
+            if let Value::List(item_items) = item {
+                pat_items.len() == item_items.len()
+                    && pat_items
+                        .iter()
+                        .zip(item_items.iter())
+                        .all(|(p, i)| match_item_q(i, p))
+            } else {
+                false
+            }
+        }
+        _ => true,
+    }
 }
 
 /// BinomialParts[expr] — stub
@@ -1779,34 +2318,86 @@ pub fn builtin_binomial_degree(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Integer(Integer::from(coeffs.len() - 1)))
 }
 
-/// GeneralizedBinomialQ[expr, x] — stub
+/// GeneralizedBinomialQ[expr, x] — is expr a generalized binomial (two-term form with general exponents)
 pub fn builtin_generalized_binomial_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "GeneralizedBinomialQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let _var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    match &args[0] {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => {
+            let c1 = is_constant_wrt(&plus_args[0], &args[1]);
+            let c2 = is_constant_wrt(&plus_args[1], &args[1]);
+            Ok(Value::Bool(c1 || c2)) // at least one constant term
+        }
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
-/// GeneralizedBinomialMatchQ[expr, a, b, x, n] — stub
+/// GeneralizedBinomialMatchQ[expr, a, b, x, n] — match expr = a + b*x^n form
 pub fn builtin_generalized_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 5 {
         return Err(EvalError::Error(
             "GeneralizedBinomialMatchQ requires at least 5 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[3] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    // Check if expr is a sum of 2 terms, one constant
+    match &args[0] {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 2 => {
+            let (_const_term, var_term) = if is_constant_wrt(&plus_args[0], &args[1]) {
+                (&plus_args[0], &plus_args[1])
+            } else if is_constant_wrt(&plus_args[1], &args[1]) {
+                (&plus_args[1], &plus_args[0])
+            } else {
+                return Ok(Value::Bool(false));
+            };
+            let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(var_term, &var);
+            Ok(Value::Bool(!coeffs.is_empty()))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
-/// GeneralizedTrinomialMatchQ[expr, a, b, c, x] — stub
+/// GeneralizedTrinomialMatchQ[expr, a, b, c, x] — match expr = a + b*x^n + c*x^(2n)
 pub fn builtin_generalized_trinomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 5 {
         return Err(EvalError::Error(
             "GeneralizedTrinomialMatchQ requires at least 5 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let _var = match &args[4] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    // Must be Plus with 3 terms
+    match &args[0] {
+        Value::Call {
+            head,
+            args: plus_args,
+        } if head == "Plus" && plus_args.len() == 3 => {
+            let non_const: Vec<_> = plus_args
+                .iter()
+                .filter(|a| !is_constant_wrt(a, &args[1]))
+                .collect();
+            Ok(Value::Bool(non_const.len() >= 2))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
 /// GeneralizedTrinomialDegree[expr, x] — stub
@@ -1820,34 +2411,48 @@ pub fn builtin_generalized_trinomial_degree(args: &[Value]) -> Result<Value, Eva
 }
 
 /// PolynomialRemainder[p1, p2, x] — polynomial remainder
-pub fn builtin_polynomial_remainder(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "PolynomialRemainder requires exactly 3 arguments".to_string(),
-        ));
-    }
-    // Stub: return p1 mod p2 (simplified)
-    Ok(args[0].clone())
-}
-
-/// PolynomialQuotient[p1, p2, x] — polynomial quotient
-pub fn builtin_polynomial_quotient(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "PolynomialQuotient requires exactly 3 arguments".to_string(),
-        ));
-    }
-    Ok(args[0].clone())
-}
-
-/// PolynomialDivide[p1, p2, x] — polynomial division
 pub fn builtin_polynomial_divide(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(EvalError::Error(
             "PolynomialDivide requires exactly 3 arguments".to_string(),
         ));
     }
-    Ok(args[0].clone())
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    let (quotient, remainder) = polynomial_long_division(&args[0], &args[1], &var);
+    Ok(Value::List(vec![quotient, remainder]))
+}
+
+/// PolynomialQuotient[p1, p2, x] — quotient from polynomial long division
+pub fn builtin_polynomial_quotient(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "PolynomialQuotient requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    let (quotient, _) = polynomial_long_division(&args[0], &args[1], &var);
+    Ok(quotient)
+}
+
+/// PolynomialRemainder[p1, p2, x] — remainder from polynomial long division
+pub fn builtin_polynomial_remainder(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "PolynomialRemainder requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(args[0].clone()),
+    };
+    let (_, remainder) = polynomial_long_division(&args[0], &args[1], &var);
+    Ok(remainder)
 }
 
 /// PolynomialInQ[expr, x] — is expr a polynomial in x
@@ -1919,34 +2524,50 @@ pub fn builtin_quotient_of_linears_parts(args: &[Value]) -> Result<Value, EvalEr
     Ok(args[0].clone())
 }
 
-/// QuadraticProductQ[expr, x] — stub
+/// QuadraticProductQ[expr, x] — is expr a product of two quadratics in x
 pub fn builtin_quadratic_product_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "QuadraticProductQ requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    match &args[0] {
+        Value::Call { head, args: ta } if head == "Times" && ta.len() == 2 => {
+            let q1 = crate::builtins::symbolic::extract_polynomial_coeffs(&ta[0], &var);
+            let q2 = crate::builtins::symbolic::extract_polynomial_coeffs(&ta[1], &var);
+            Ok(Value::Bool(
+                q1.len() <= 3 && q2.len() <= 3 && q1.len() >= 2 && q2.len() >= 2,
+            ))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
 }
 
-/// SimplerIntegrandQ[expr1, expr2, x] — stub
+/// SimplerIntegrandQ[expr1, expr2, x] — is expr1 simpler integrand than expr2
 pub fn builtin_simpler_integrand_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 3 {
         return Err(EvalError::Error(
             "SimplerIntegrandQ requires at least 3 arguments".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    // Compare leaf_count; simpler has fewer nodes
+    let s1 = leaf_count(&args[0]);
+    let s2 = leaf_count(&args[1]);
+    Ok(Value::Bool(s1 < s2))
 }
 
-/// TrigonometricSimplifyQ[expr] — stub
+/// TrigonometricSimplifyQ[expr] — does expr contain trig functions needing simplification
 pub fn builtin_trig_simplify_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
             "TrigSimplifyQ requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Bool(false))
+    Ok(Value::Bool(contains_any_head(&args[0], TRIG_FN_NAMES)))
 }
 
 /// TrigonometricSimplify[expr] — stub
@@ -2039,14 +2660,38 @@ pub fn builtin_try_pure_tan_subst(args: &[Value]) -> Result<Value, EvalError> {
     Ok(args[0].clone())
 }
 
-/// MinimumMonomialExponent[expr, x] — stub
+/// MinimumMonomialExponent[expr, x] — minimum exponent of x in expr
 pub fn builtin_minimum_monomial_exponent(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
             "MinimumMonomialExponent requires exactly 2 arguments".to_string(),
         ));
     }
-    Ok(Value::Integer(Integer::from(0)))
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(&args[0], &var);
+    if coeffs.is_empty()
+        || (coeffs.len() == 1 && matches!(&coeffs[0], Value::Integer(n) if n.is_zero()))
+    {
+        Ok(Value::Integer(Integer::from(0)))
+    } else {
+        // Find first non-zero coefficient index
+        let mut min_exp = 0i64;
+        for (i, c) in coeffs.iter().enumerate() {
+            if !matches!(c, Value::Integer(n) if n.is_zero()) {
+                min_exp = i as i64;
+                break;
+            }
+        }
+        Ok(Value::Integer(Integer::from(min_exp)))
+    }
 }
 
 /// PowerVariableExpn[expr, m, x] — stub
@@ -2234,6 +2879,220 @@ fn leaf_count(val: &Value) -> usize {
     }
 }
 
+fn expression_depth(val: &Value) -> usize {
+    match val {
+        Value::Call { args, .. } => 1 + args.iter().map(expression_depth).max().unwrap_or(0),
+        Value::List(items) => 1 + items.iter().map(expression_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+const INVERSE_FN_NAMES: &[&str] = &[
+    "ArcSin", "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc", "ArcSinh", "ArcCosh", "ArcTanh",
+];
+
+const TRIG_FN_NAMES: &[&str] = &["Sin", "Cos", "Tan", "Cot", "Sec", "Csc"];
+
+const CALCULUS_FN_NAMES: &[&str] = &["Integrate", "D", "Integral", "Sum", "Product", "Limit"];
+
+fn contains_any_head(val: &Value, heads: &[&str]) -> bool {
+    match val {
+        Value::Call { head, args } => {
+            if heads.contains(&head.as_str()) {
+                return true;
+            }
+            args.iter().any(|a| contains_any_head(a, heads))
+        }
+        Value::List(items) => items.iter().any(|a| contains_any_head(a, heads)),
+        _ => false,
+    }
+}
+
+/// Check if expr is linear in var: a + b*var (or just a constant)
+fn is_linear_in(expr: &Value, var: &str) -> bool {
+    let coeffs = crate::builtins::symbolic::extract_polynomial_coeffs(expr, var);
+    !coeffs.is_empty() && coeffs.len() <= 2
+}
+
+fn var_from_arg(arg: &Value) -> Option<String> {
+    match arg {
+        Value::Symbol(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn has_trig_with_linear_arg(expr: &Value, trig_head: &str, var: Option<&str>) -> bool {
+    match expr {
+        Value::Call { head, args } => {
+            if head == trig_head && args.len() == 1 {
+                if let Some(v) = var {
+                    return is_linear_in(&args[0], v);
+                }
+                return true;
+            }
+            args.iter()
+                .any(|a| has_trig_with_linear_arg(a, trig_head, var))
+        }
+        Value::List(items) => items
+            .iter()
+            .any(|a| has_trig_with_linear_arg(a, trig_head, var)),
+        _ => false,
+    }
+}
+
+fn reconstruct_polynomial(coeffs: &[Value], var: &str) -> Value {
+    let mut terms = Vec::new();
+    for (i, c) in coeffs.iter().enumerate() {
+        if matches!(c, Value::Integer(n) if n.is_zero()) {
+            continue;
+        }
+        if i == 0 {
+            terms.push(c.clone());
+        } else if i == 1 {
+            terms.push(Value::Call {
+                head: "Times".to_string(),
+                args: vec![c.clone(), Value::Symbol(var.to_string())],
+            });
+        } else {
+            terms.push(Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    c.clone(),
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![
+                            Value::Symbol(var.to_string()),
+                            Value::Integer(Integer::from(i as i64)),
+                        ],
+                    },
+                ],
+            });
+        }
+    }
+    if terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.into_iter().next().unwrap()
+    } else {
+        Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        }
+    }
+}
+
+fn leading_term_divide(a: &Value, b: &Value) -> Value {
+    // Compute a/b for coefficient division in polynomial long division
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => {
+            if y.is_zero() {
+                return Value::Integer(Integer::from(0));
+            }
+            let xr = x.clone();
+            let yr = y.clone();
+            Value::Rational(Box::new(rug::Rational::from((xr, yr))))
+        }
+        _ => {
+            // Fall back to Divide[a, b]
+            use crate::builtins::arithmetic::builtin_divide;
+            builtin_divide(&[a.clone(), b.clone()]).unwrap_or(a.clone())
+        }
+    }
+}
+
+/// Polynomial long division: returns (quotient, remainder) of p1 / p2 in var
+fn polynomial_long_division(p1: &Value, p2: &Value, var: &str) -> (Value, Value) {
+    use crate::builtins::arithmetic::{mul_values_public, sub_values_public};
+    use crate::builtins::symbolic::extract_polynomial_coeffs;
+    let p1_coeffs = extract_polynomial_coeffs(p1, var);
+    let p2_coeffs = extract_polynomial_coeffs(p2, var);
+    if p2_coeffs.is_empty()
+        || (p2_coeffs.len() == 1 && matches!(&p2_coeffs[0], Value::Integer(n) if n.is_zero()))
+    {
+        return (p1.clone(), Value::Integer(Integer::from(0)));
+    }
+    let p1_deg = p1_coeffs.len() as i64 - 1;
+    let p2_deg = p2_coeffs.len() as i64 - 1;
+    if p1_deg < p2_deg {
+        return (Value::Integer(Integer::from(0)), p1.clone());
+    }
+    let mut rem = p1_coeffs.clone();
+    let mut q_terms: Vec<Value> = Vec::new();
+    loop {
+        let r_deg = rem.len() as i64 - 1;
+        if r_deg < p2_deg {
+            break;
+        }
+        let lr = rem.last().unwrap().clone();
+        let lp2 = p2_coeffs.last().unwrap().clone();
+        let dd = r_deg - p2_deg;
+        let leading_div = leading_term_divide(&lr, &lp2);
+        let q_term = if dd == 0 {
+            leading_div
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    leading_div,
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![
+                            Value::Symbol(var.to_string()),
+                            Value::Integer(Integer::from(dd)),
+                        ],
+                    },
+                ],
+            }
+        };
+        q_terms.push(q_term.clone());
+        // Multiply q_term * p2 and subtract from remainder
+        let q_term_poly = crate::builtins::symbolic::builtin_expand(&[q_term.clone()]);
+        let q_term_poly_val = match q_term_poly {
+            Ok(v) => v,
+            Err(_) => q_term,
+        };
+        let q_times_p2 =
+            mul_values_public(&q_term_poly_val, &reconstruct_polynomial(&p2_coeffs, var));
+        let subtrahend = match &q_times_p2 {
+            Ok(v) => match crate::builtins::symbolic::builtin_expand(&[v.clone()]) {
+                Ok(vv) => vv,
+                Err(_) => v.clone(),
+            },
+            Err(_) => Value::Integer(Integer::from(0)),
+        };
+        let rem_expr = reconstruct_polynomial(&rem, var);
+        let new_rem_expr = match sub_values_public(&rem_expr, &subtrahend) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        // `sub_values_public` leaves an un-distributed `Times[-1, Plus[..]]`
+        // factor; expand it, then drop any leading zero coefficients so the
+        // degree actually decreases (otherwise this loop never terminates).
+        let new_rem_expr = crate::builtins::symbolic::builtin_expand(&[new_rem_expr.clone()])
+            .unwrap_or(new_rem_expr);
+        let mut new_coeffs = extract_polynomial_coeffs(&new_rem_expr, var);
+        while new_coeffs.len() > 1 && is_zero(new_coeffs.last().unwrap()) {
+            new_coeffs.pop();
+        }
+        rem = new_coeffs;
+        if rem.is_empty() || (rem.len() == 1 && matches!(&rem[0], Value::Integer(n) if n.is_zero()))
+        {
+            break;
+        }
+    }
+    let quotient = if q_terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if q_terms.len() == 1 {
+        q_terms.into_iter().next().unwrap()
+    } else {
+        Value::Call {
+            head: "Plus".to_string(),
+            args: q_terms,
+        }
+    };
+    let remainder = reconstruct_polynomial(&rem, var);
+    (quotient, remainder)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

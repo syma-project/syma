@@ -1,23 +1,7 @@
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
-use rug::Float;
 use rug::Integer;
-
-// Helper: convert a Value to f64.
-fn to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(n) => Some(n.to_f64()),
-        Value::Real(r) => Some(r.to_f64()),
-        Value::Rational(r) => Some(r.to_f64()),
-        _ => None,
-    }
-}
-
-// Helper: create a Real value from f64.
-fn real(v: f64) -> Value {
-    Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
-}
 
 // ── Helper functions ──
 
@@ -116,6 +100,9 @@ pub fn builtin_length(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::List(items) => Ok(Value::Integer(Integer::from(items.len() as i64))),
         Value::Str(s) => Ok(Value::Integer(Integer::from(s.chars().count() as i64))),
+        Value::Call {
+            args: call_args, ..
+        } => Ok(Value::Integer(Integer::from(call_args.len() as i64))),
         _ => Ok(Value::Integer(Integer::from(1))),
     }
 }
@@ -987,47 +974,78 @@ pub fn builtin_union(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
     }
+    seen.sort_by(compare_values);
     Ok(Value::List(seen))
 }
 
 pub fn builtin_intersection(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Intersection requires exactly 2 arguments".to_string(),
+            "Intersection requires at least 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::List(a), Value::List(b)) => Ok(Value::List(
-            a.iter()
-                .filter(|item| b.iter().any(|bitem| bitem.struct_eq(item)))
-                .cloned()
-                .collect(),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+    let lists: Vec<&[Value]> = args
+        .iter()
+        .map(|a| match a {
+            Value::List(items) => Ok(items.as_slice()),
+            _ => Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: a.type_name().to_string(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result: Vec<Value> = lists[0]
+        .iter()
+        .filter(|item| {
+            lists[1..]
+                .iter()
+                .all(|list| list.iter().any(|x| x.struct_eq(item)))
+        })
+        .cloned()
+        .collect();
+    let mut deduped = Vec::new();
+    for v in result {
+        if !deduped.iter().any(|d: &Value| d.struct_eq(&v)) {
+            deduped.push(v);
+        }
     }
+    deduped.sort_by(compare_values);
+    Ok(Value::List(deduped))
 }
 
 pub fn builtin_complement(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(EvalError::Error(
-            "Complement requires exactly 2 arguments".to_string(),
+            "Complement requires at least 2 arguments".to_string(),
         ));
     }
-    match (&args[0], &args[1]) {
-        (Value::List(a), Value::List(b)) => Ok(Value::List(
-            a.iter()
-                .filter(|item| !b.iter().any(|bitem| bitem.struct_eq(item)))
-                .cloned()
-                .collect(),
-        )),
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+    let lists: Vec<&[Value]> = args
+        .iter()
+        .map(|a| match a {
+            Value::List(items) => Ok(items.as_slice()),
+            _ => Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: a.type_name().to_string(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result: Vec<Value> = lists[0]
+        .iter()
+        .filter(|item| {
+            !lists[1..]
+                .iter()
+                .any(|list| list.iter().any(|x| x.struct_eq(item)))
+        })
+        .cloned()
+        .collect();
+    let mut deduped = Vec::new();
+    for v in result {
+        if !deduped.iter().any(|d: &Value| d.struct_eq(&v)) {
+            deduped.push(v);
+        }
     }
+    deduped.sort_by(compare_values);
+    Ok(Value::List(deduped))
 }
 
 pub fn builtin_tally(args: &[Value]) -> Result<Value, EvalError> {
@@ -1079,7 +1097,7 @@ pub fn builtin_pad_left(args: &[Value]) -> Result<Value, EvalError> {
             let pad_val = if args.len() == 3 {
                 args[2].clone()
             } else {
-                Value::Null
+                Value::Integer(Integer::from(0))
             };
             if n >= 0 {
                 if width <= items.len() {
@@ -1752,8 +1770,8 @@ pub fn builtin_moving_average(args: &[Value]) -> Result<Value, EvalError> {
     let mut result = Vec::with_capacity(items.len() - n + 1);
     for window in items.windows(n) {
         let count = window.len() as f64;
-        let sum: f64 = window.iter().filter_map(to_f64).sum();
-        result.push(real(sum / count));
+        let sum: f64 = window.iter().filter_map(super::to_f64).sum();
+        result.push(super::real(sum / count));
     }
     Ok(Value::List(result))
 }
@@ -1817,11 +1835,11 @@ pub fn builtin_list_convolve(args: &[Value]) -> Result<Value, EvalError> {
     for j in 0..=(n - k) {
         let mut sum = 0.0f64;
         for (i, k_val) in kernel.iter().enumerate() {
-            if let (Some(kf), Some(lf)) = (to_f64(k_val), to_f64(&list[j + i])) {
+            if let (Some(kf), Some(lf)) = (super::to_f64(k_val), super::to_f64(&list[j + i])) {
                 sum += kf * lf;
             }
         }
-        result.push(real(sum));
+        result.push(super::real(sum));
     }
     Ok(Value::List(result))
 }
@@ -1858,13 +1876,13 @@ pub fn builtin_nearest(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     // Compute distances as f64
-    let target_f = to_f64(target)
+    let target_f = super::to_f64(target)
         .ok_or_else(|| EvalError::Error("Nearest target must be numeric".to_string()))?;
 
     let mut scored: Vec<(f64, &Value)> = items
         .iter()
         .filter_map(|item| {
-            to_f64(item).map(|f| {
+            super::to_f64(item).map(|f| {
                 let d = (f - target_f).abs();
                 (d, item)
             })
@@ -2236,6 +2254,427 @@ pub fn builtin_fixed_point_list(args: &[Value], env: &Env) -> Result<Value, Eval
         result.push(val.clone());
     }
     Ok(Value::List(result))
+}
+
+/// ArrayPad[list, n] — pad list with n zeros on each side.
+/// ArrayPad[list, {before, after}] — pad with different amounts.
+/// ArrayPad[list, n, val] — pad with val instead of 0.
+pub fn builtin_array_pad(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("ArrayPad", args, 2)?;
+    let list = match &args[0] {
+        Value::List(l) => l.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let (before, after) = match &args[1] {
+        Value::Integer(n) => {
+            let v = n.to_i32().unwrap_or(0);
+            (v, v)
+        }
+        Value::List(ab) if ab.len() == 2 => {
+            let b = super::require_f64(&ab[0], "ArrayPad", 2)? as i32;
+            let a = super::require_f64(&ab[1], "ArrayPad", 2)? as i32;
+            (b, a)
+        }
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "integer or {before, after}".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let fill = if args.len() >= 3 {
+        args[2].clone()
+    } else {
+        Value::Integer(Integer::from(0))
+    };
+    let mut result = Vec::new();
+    for _ in 0..before.max(0) {
+        result.push(fill.clone());
+    }
+    result.extend(list);
+    for _ in 0..after.max(0) {
+        result.push(fill.clone());
+    }
+    Ok(Value::List(result))
+}
+
+/// ArrayReshape[list, {d1, d2, ...}] — reshape a flat list into the given dimensions.
+/// Total elements must match the product of dimensions.
+pub fn builtin_array_reshape(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ArrayReshape", args, 2)?;
+    let flat = match &args[0] {
+        Value::List(l) => l.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let dims = match &args[1] {
+        Value::List(d) => {
+            let mut result = Vec::new();
+            for v in d {
+                let n = v.to_integer().ok_or_else(|| EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: v.type_name().to_string(),
+                })? as usize;
+                if n == 0 {
+                    return Err(EvalError::Error(
+                        "ArrayReshape: dimension must be positive".to_string(),
+                    ));
+                }
+                result.push(n);
+            }
+            result
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "List of dimensions".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+
+    let total: usize = dims.iter().product();
+    if total != flat.len() {
+        return Err(EvalError::Error(format!(
+            "ArrayReshape: total elements ({}) does not match product of dimensions ({})",
+            flat.len(),
+            total
+        )));
+    }
+
+    // Build nested list structure from flat list
+    fn build_nested(flat: &[Value], dims: &[usize], offset: usize) -> Value {
+        if dims.len() == 1 {
+            Value::List(flat[offset..offset + dims[0]].to_vec())
+        } else {
+            let stride: usize = dims[1..].iter().product();
+            let mut result = Vec::with_capacity(dims[0]);
+            for i in 0..dims[0] {
+                result.push(build_nested(flat, &dims[1..], offset + i * stride));
+            }
+            Value::List(result)
+        }
+    }
+
+    Ok(build_nested(&flat, &dims, 0))
+}
+
+/// StringCases[string, pattern] — find all substrings matching a literal pattern.
+/// For now, supports literal string matching and `"*"` as a wildcard (matches any substring).
+pub fn builtin_string_cases(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("StringCases", args, 2)?;
+    let haystack = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let pattern = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+
+    let mut matches = Vec::new();
+
+    if pattern == "*" {
+        // Wildcard: match the entire string
+        if !haystack.is_empty() {
+            matches.push(Value::Str(haystack));
+        }
+    } else if pattern.contains('*') {
+        // Simple wildcard pattern: split by '*' and match prefix/suffix
+        let parts: Vec<&str> = pattern.splitn(2, '*').collect();
+        let prefix = parts[0];
+        let suffix = parts.get(1).unwrap_or(&"");
+        // Find all occurrences of the pattern
+        for i in 0..haystack.len() {
+            if haystack[i..].starts_with(prefix) {
+                let after_prefix = i + prefix.len();
+                // Find suffix starting from after_prefix
+                if let Some(pos) = haystack[after_prefix..].find(suffix) {
+                    let end = after_prefix + pos + suffix.len();
+                    matches.push(Value::Str(haystack[i..end].to_string()));
+                }
+            }
+        }
+    } else {
+        // Literal match: find all occurrences
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(&pattern) {
+            matches.push(Value::Str(pattern.clone()));
+            start += pos + pattern.len();
+        }
+    }
+
+    Ok(Value::List(matches))
+}
+
+// ── TakeWhile ──────────────────────────────────────────────────────────────
+
+/// TakeWhile[list, crit] — takes elements from the front of list while crit returns True.
+pub fn builtin_take_while(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "TakeWhile requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let mut result = Vec::new();
+    for item in items {
+        let keep = apply_function(&args[1], &[item.clone()], env)?;
+        match keep {
+            Value::Bool(true) => result.push(item.clone()),
+            _ => break,
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── DropWhile ──────────────────────────────────────────────────────────────
+
+/// DropWhile[list, crit] — drops elements from the front of list while crit returns True.
+pub fn builtin_drop_while(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "DropWhile requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let mut drop_count = 0;
+    for item in items {
+        let keep = apply_function(&args[1], &[item.clone()], env)?;
+        match keep {
+            Value::Bool(true) => drop_count += 1,
+            _ => break,
+        }
+    }
+    Ok(Value::List(items[drop_count..].to_vec()))
+}
+
+// ── MapIf ──────────────────────────────────────────────────────────────────
+
+/// MapIf[f, list, crit] — applies f only to elements matching crit.
+pub fn builtin_map_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "MapIf requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[1])?;
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        let test = apply_function(&args[2], &[item.clone()], env)?;
+        match test {
+            Value::Bool(true) => {
+                let mapped = apply_function(&args[0], &[item.clone()], env)?;
+                result.push(mapped);
+            }
+            _ => result.push(item.clone()),
+        }
+    }
+    Ok(Value::List(result))
+}
+
+// ── LongestCommonSubsequence ───────────────────────────────────────────────
+
+/// LongestCommonSubsequence[list1, list2] — finds the LCS of two lists or strings.
+pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubsequence requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Str(s1), Value::Str(s2)) => {
+            let chars1: Vec<char> = s1.chars().collect();
+            let chars2: Vec<char> = s2.chars().collect();
+            let lcs_chars = lcs_generic(&chars1, &chars2);
+            Ok(Value::Str(lcs_chars.into_iter().collect()))
+        }
+        (Value::List(l1), Value::List(l2)) => {
+            let lcs = lcs_generic(l1, l2);
+            Ok(Value::List(lcs))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "two Lists or two Strings".to_string(),
+            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
+        }),
+    }
+}
+
+/// Generic LCS using dynamic programming.
+fn lcs_generic<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    // Backtrack
+    let mut result = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result.push(a[i - 1].clone());
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    result.reverse();
+    result
+}
+
+// ── LongestCommonSubsequencePositions ──────────────────────────────────────
+
+/// LongestCommonSubsequencePositions[list1, list2] — positions of LCS in both lists.
+pub fn builtin_longest_common_subsequence_positions(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "LongestCommonSubsequencePositions requires exactly 2 arguments".to_string(),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::List(l1), Value::List(l2)) => {
+            let (pos1, pos2) = lcs_positions(l1, l2);
+            Ok(Value::List(vec![
+                Value::List(
+                    pos1.into_iter()
+                        .map(|i| Value::Integer(Integer::from(i as i64 + 1)))
+                        .collect(),
+                ),
+                Value::List(
+                    pos2.into_iter()
+                        .map(|i| Value::Integer(Integer::from(i as i64 + 1)))
+                        .collect(),
+                ),
+            ]))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "two Lists".to_string(),
+            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
+        }),
+    }
+}
+
+/// Compute LCS positions using DP backtracking.
+fn lcs_positions(a: &[Value], b: &[Value]) -> (Vec<usize>, Vec<usize>) {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    let mut pos1 = Vec::new();
+    let mut pos2 = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            pos1.push(i - 1);
+            pos2.push(j - 1);
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    pos1.reverse();
+    pos2.reverse();
+    (pos1, pos2)
+}
+
+// ── FindTransientRepeat ────────────────────────────────────────────────────
+
+/// FindTransientRepeat[list, n] — find transient prefix and repeating part.
+pub fn builtin_find_transient_repeat(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FindTransientRepeat requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let items = get_list(&args[0])?;
+    let max_period = match &args[1] {
+        Value::Integer(n) => n
+            .to_usize()
+            .ok_or_else(|| EvalError::Error("max period too large".to_string()))?,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "positive Integer".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    if items.is_empty() || max_period == 0 {
+        return Ok(Value::List(vec![Value::List(vec![]), Value::List(vec![])]));
+    }
+    // Try periods from 1 to max_period
+    for period in 1..=max_period.min(items.len()) {
+        // Find the shortest transient such that the rest is repeating with this period
+        let min_transient = items.len().saturating_sub(period * 2);
+        for transient_len in (0..=min_transient).rev() {
+            let remaining = &items[transient_len..];
+            if remaining.is_empty() {
+                continue;
+            }
+            if remaining.len() % period != 0 {
+                continue;
+            }
+            let pattern = &remaining[0..period];
+            let mut valid = true;
+            for chunk in remaining.chunks(period) {
+                if chunk != pattern {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                let transient: Vec<Value> = items[..transient_len].to_vec();
+                let repeat: Vec<Value> = pattern.to_vec();
+                return Ok(Value::List(vec![
+                    Value::List(transient),
+                    Value::List(repeat),
+                ]));
+            }
+        }
+    }
+    // No repeating pattern found
+    Ok(Value::List(vec![
+        Value::List(items.to_vec()),
+        Value::List(vec![]),
+    ]))
 }
 
 #[cfg(test)]
@@ -2757,10 +3196,7 @@ mod tests {
         // Negative n pads on the right (Wolfram: "negative length
         // specifications pad on the right"); |n| is the target length.
         let result = builtin_pad_left(&[list(vec![int(1), int(2), int(3)]), int(-5)]).unwrap();
-        assert_eq!(
-            result,
-            list(vec![int(1), int(2), int(3), Value::Null, Value::Null])
-        );
+        assert_eq!(result, list(vec![int(1), int(2), int(3), int(0), int(0)]));
         let result = builtin_pad_left(&[list(vec![int(1), int(2), int(3)]), int(-1)]).unwrap();
         assert_eq!(result, list(vec![int(1)]));
     }
@@ -3445,5 +3881,135 @@ mod tests {
     fn test_fixedpointlist_wrong_count() {
         let env = test_env();
         assert!(builtin_fixed_point_list(&[], &env).is_err());
+    }
+
+    // ── ArrayPad tests ──
+
+    #[test]
+    fn test_array_pad_basic() {
+        let result = builtin_array_pad(&[list(vec![int(1), int(2)]), int(1)]).unwrap();
+        assert_eq!(result, list(vec![int(0), int(1), int(2), int(0)]));
+    }
+
+    #[test]
+    fn test_array_pad_asymmetric() {
+        let result =
+            builtin_array_pad(&[list(vec![int(1), int(2)]), list(vec![int(2), int(1)])]).unwrap();
+        assert_eq!(result, list(vec![int(0), int(0), int(1), int(2), int(0)]));
+    }
+
+    #[test]
+    fn test_array_pad_custom_value() {
+        let result =
+            builtin_array_pad(&[list(vec![int(1)]), int(2), Value::Str("x".to_string())]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                Value::Str("x".to_string()),
+                Value::Str("x".to_string()),
+                int(1),
+                Value::Str("x".to_string()),
+                Value::Str("x".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_pad_non_list() {
+        assert!(builtin_array_pad(&[int(5), int(1)]).is_err());
+    }
+
+    #[test]
+    fn test_array_pad_few_args() {
+        assert!(builtin_array_pad(&[list(vec![int(1)])]).is_err());
+    }
+
+    // ── ArrayReshape tests ──
+
+    #[test]
+    fn test_array_reshape_2x3() {
+        let flat = list(vec![int(1), int(2), int(3), int(4), int(5), int(6)]);
+        let dims = list(vec![int(2), int(3)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(2), int(3)]),
+                list(vec![int(4), int(5), int(6)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_reshape_3x2() {
+        let flat = list(vec![int(1), int(2), int(3), int(4), int(5), int(6)]);
+        let dims = list(vec![int(3), int(2)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(2)]),
+                list(vec![int(3), int(4)]),
+                list(vec![int(5), int(6)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_array_reshape_size_mismatch() {
+        let flat = list(vec![int(1), int(2), int(3)]);
+        let dims = list(vec![int(2), int(2)]);
+        assert!(builtin_array_reshape(&[flat, dims]).is_err());
+    }
+
+    #[test]
+    fn test_array_reshape_1d() {
+        let flat = list(vec![int(1), int(2), int(3)]);
+        let dims = list(vec![int(3)]);
+        let result = builtin_array_reshape(&[flat, dims]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2), int(3)]));
+    }
+
+    // ── StringCases tests ──
+
+    #[test]
+    fn test_string_cases_literal() {
+        let result = builtin_string_cases(&[
+            Value::Str("abcabc".to_string()),
+            Value::Str("ab".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                Value::Str("ab".to_string()),
+                Value::Str("ab".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_string_cases_no_match() {
+        let result = builtin_string_cases(&[
+            Value::Str("hello".to_string()),
+            Value::Str("xyz".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_string_cases_wildcard() {
+        let result = builtin_string_cases(&[
+            Value::Str("hello world".to_string()),
+            Value::Str("*".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![Value::Str("hello world".to_string())]));
+    }
+
+    #[test]
+    fn test_string_cases_non_string() {
+        assert!(builtin_string_cases(&[int(5), Value::Str("a".to_string())]).is_err());
     }
 }

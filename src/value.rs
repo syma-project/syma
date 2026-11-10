@@ -136,6 +136,10 @@ pub enum Format {
     Grid,
     /// Deferred evaluation — display placeholder (e.g. `Defer[1 + 1]` → `1 + 1`).
     Deferred,
+    /// Plain-text display — show the inner string value without quotes.
+    /// Used by format builtins (`StringForm`, `TableForm`, `PaddedForm`, etc.)
+    /// that produce a pre-formatted string result.
+    Text,
 }
 
 /// Convert rug's `to_string_radix` output (e.g. `"3.14159e0"`, `"-1.5e2"`)
@@ -456,6 +460,7 @@ pub struct ClassDef {
     pub fields: Vec<ClassField>,
     pub methods: HashMap<String, ClassMethod>,
     pub constructor: Option<ClassConstructor>,
+    pub transforms: Vec<(Expr, Expr)>,
 }
 
 /// A class field with optional type hint and default value.
@@ -533,7 +538,7 @@ impl fmt::Display for EvalError {
             EvalError::Return(v) => write!(f, "Return: {}", v.as_ref()),
             EvalError::Break => write!(f, "Break"),
             EvalError::Continue => write!(f, "Continue"),
-            EvalError::Error(s) => write!(f, "Error: {}", s),
+            EvalError::Error(s) => write!(f, "{}", s),
             EvalError::FfiError(s) => write!(f, "FFI error: {}", s),
         }
     }
@@ -744,9 +749,11 @@ impl Value {
                 Format::BaseForm(_) => "BaseForm",
                 Format::Grid => "Grid",
                 Format::Deferred => "Deferred",
-                Format::Standard | Format::FullForm | Format::StandardForm | Format::OutputForm => {
-                    value.type_name()
-                }
+                Format::Standard
+                | Format::FullForm
+                | Format::StandardForm
+                | Format::OutputForm
+                | Format::Text => value.type_name(),
             },
         }
     }
@@ -798,10 +805,10 @@ impl Value {
 
     /// Convert to boolean.
     ///
-    /// Falsy values are `False`, numeric zeros, `Complex` zero, `Null`, and
-    /// empty lists/packed arrays; everything else is truthy. An unevaluated
-    /// `Call` (for example a symbolic comparison such as `x > 0`) is falsy,
-    /// because it has not reduced to `True`.
+    /// Falsy values are `False`, numeric zeros, `Complex` zero, `Null`, empty
+    /// lists/packed arrays, symbols other than `True`, and an unevaluated `Call`
+    /// (for example a symbolic comparison such as `x > 0`), because it has not
+    /// reduced to `True`.
     pub fn to_bool(&self) -> bool {
         match self {
             Value::Formatted { value, .. } => value.to_bool(),
@@ -814,6 +821,7 @@ impl Value {
             Value::List(l) => !l.is_empty(),
             Value::PackedArray(pa) => !pa.is_empty(),
             Value::Call { .. } => false,
+            Value::Symbol(s) => s == "True",
             _ => true,
         }
     }
@@ -1573,6 +1581,10 @@ impl fmt::Display for Value {
                 Format::BaseForm(base) => format_base_form(value, *base, f),
                 Format::Grid => format_grid(value, f),
                 Format::Deferred => write!(f, "{}", value),
+                Format::Text => match value.as_ref() {
+                    Value::Str(s) => write!(f, "{}", s),
+                    other => write!(f, "{}", other),
+                },
             },
         }
     }
@@ -1726,7 +1738,18 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     }
                 }
                 "Divide" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    let numer = &args[0];
+                    let needs_numer_parens = matches!(
+                        numer,
+                        Value::Call { head: h, .. } if h == "Plus" || h == "Times"
+                    );
+                    if needs_numer_parens {
+                        write!(f, "(")?;
+                        format_input_form(numer, f)?;
+                        write!(f, ")")?;
+                    } else {
+                        format_input_form(numer, f)?;
+                    }
                     write!(f, "/")?;
                     let denom = &args[1];
                     if matches!(
@@ -2017,6 +2040,7 @@ fn format_full_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 min_exponent, max_exponent, denominator
             )
         }
+        Value::Rational(r) => write!(f, "Rational[{}, {}]", r.numer(), r.denom()),
         _ => write!(f, "{}", v),
     }
 }

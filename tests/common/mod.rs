@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Shared test helpers for integration tests.
 ///
 /// Each test module should import via:

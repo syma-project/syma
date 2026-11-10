@@ -639,6 +639,37 @@ pub fn builtin_date_object(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+/// `DateList[]` or `DateList[date]` or `DateList[datespec]`
+/// Returns {year, month, day, hour, minute, second}.
+pub fn builtin_date_list(args: &[Value]) -> Result<Value, EvalError> {
+    let (y, m, d, h, mi, s) = match args.len() {
+        0 => get_current_datetime(),
+        1 => match &args[0] {
+            Value::List(elems) => extract_datetime(elems)?,
+            Value::Str(s) => parse_iso_date(s)?,
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "List or String".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
+        },
+        _ => {
+            return Err(EvalError::Error(
+                "DateList takes 0 or 1 argument".to_string(),
+            ));
+        }
+    };
+    Ok(Value::List(vec![
+        val_int(y),
+        val_int(m),
+        val_int(d),
+        val_int(h),
+        val_int(mi),
+        val_real(s),
+    ]))
+}
+
 /// `Today` — returns {year, month, day}
 pub fn builtin_today(args: &[Value]) -> Result<Value, EvalError> {
     if !args.is_empty() {
@@ -835,36 +866,6 @@ pub fn builtin_leap_year_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 // ── Registration ──
-
-/// `DateList[]` or `DateList[date]` — date components as `{y, m, d, h, mi, s}`.
-pub fn builtin_date_list(args: &[Value]) -> Result<Value, EvalError> {
-    let (y, m, d, h, mi, s) = match args.len() {
-        0 => get_current_datetime(),
-        1 => match &args[0] {
-            Value::List(elems) => extract_datetime(elems)?,
-            Value::Str(s) => parse_iso_date(s)?,
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
-        _ => {
-            return Err(EvalError::Error(
-                "DateList takes 0 or 1 argument".to_string(),
-            ));
-        }
-    };
-    Ok(Value::List(vec![
-        val_int(y),
-        val_int(m),
-        val_int(d),
-        val_int(h),
-        val_int(mi),
-        val_real(s),
-    ]))
-}
 
 /// Register all date/time builtins in the environment.
 pub fn register(env: &crate::env::Env) {

@@ -813,7 +813,7 @@ fn match_repeated_pattern(
     }
 }
 
-/// Flatten nested calls with the same head (for Flat attribute).
+/// Flatten nested calls with same head (for Flat attribute).
 /// e.g., `Plus[Plus[x_, y_], z_]` → `[x_, y_, z_]` when head is "Plus".
 fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
     let mut result = Vec::new();
@@ -823,21 +823,6 @@ fn flatten_expr_args(head: &str, args: &[Expr]) -> Vec<Expr> {
             && s == head
         {
             result.extend(flatten_expr_args(head, a));
-            continue;
-        }
-        result.push(arg.clone());
-    }
-    result
-}
-
-/// Flatten nested value calls with the same head (for Flat attribute).
-fn flatten_value_args(head: &str, args: &[Value]) -> Vec<Value> {
-    let mut result = Vec::new();
-    for arg in args {
-        if let Value::Call { head: h, args: a } = arg
-            && h == head
-        {
-            result.extend(flatten_value_args(head, a));
             continue;
         }
         result.push(arg.clone());
@@ -984,7 +969,7 @@ fn match_call_pattern(
                 args.to_vec()
             };
             let val_args: Vec<Value> = if is_flat {
-                flatten_value_args(&head_name, vargs)
+                crate::eval::flatten_flat_args(&head_name, vargs)
             } else {
                 vargs.clone()
             };

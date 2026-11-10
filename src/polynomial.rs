@@ -79,9 +79,9 @@ fn cauchy_bound(coeffs: &[f64]) -> f64 {
         return 1.0;
     }
     let mut sum_neg = 0.0;
-    for i in 0..n - 1 {
-        if coeffs[i] < 0.0 {
-            sum_neg += coeffs[i].abs();
+    for c in &coeffs[..n - 1] {
+        if *c < 0.0 {
+            sum_neg += c.abs();
         }
     }
     1.0 + sum_neg
@@ -351,29 +351,26 @@ pub fn resultant(a: &[Rational], b: &[Rational]) -> Rational {
         return r;
     }
 
-    // Build Sylvester matrix: (m+n) x (m+n).
-    //
-    // Each row holds coefficients in descending order placed at offset `i`
-    // (i.e. column `i` gets the leading coefficient). Writing the coefficients
-    // in ascending order here flips the determinant sign for some degrees, so
-    // index them as `coeff[deg - j]`.
+    // Build Sylvester matrix: (m+n) x (m+n)
     let size = m + n;
     let mut matrix: Vec<Vec<Rational>> = vec![vec![Rational::from(0); size]; size];
 
     // First n rows: coefficients of a shifted
     for i in 0..n {
-        for j in 0..=m {
-            matrix[i][i + j] = a[m - j].clone();
+        for (j, aj) in a.iter().enumerate().take(m + 1) {
+            matrix[i][i + j] = aj.clone();
         }
     }
     // Next m rows: coefficients of b shifted
     for i in 0..m {
-        for j in 0..=n {
-            matrix[n + i][i + j] = b[n - j].clone();
+        for (j, bj) in b.iter().enumerate().take(n + 1) {
+            matrix[n + i][i + j] = bj.clone();
         }
     }
 
-    determinant_rational(&matrix)
+    let det = determinant_rational(&matrix);
+    // Sylvester matrix convention: multiply by (-1)^(m*n)
+    if (m * n) % 2 == 1 { -det } else { det }
 }
 
 /// Compute determinant using Gaussian elimination with partial pivoting.
@@ -394,9 +391,9 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
         // Find pivot
         let mut pivot_row = col;
         let mut pivot_exists = false;
-        for row in col..n {
-            if !mat[row][col].is_zero() {
-                pivot_row = row;
+        for (i, mat_row) in mat[col..].iter().enumerate() {
+            if !mat_row[col].is_zero() {
+                pivot_row = col + i;
                 pivot_exists = true;
                 break;
             }
@@ -416,6 +413,7 @@ fn determinant_rational(matrix: &[Vec<Rational>]) -> Rational {
                 continue;
             }
             let factor = mat[row][col].clone() / piv.clone();
+            #[allow(clippy::needless_range_loop)]
             for j in col..n {
                 let col_j = mat[col][j].clone();
                 mat[row][j] -= factor.clone() * col_j;
@@ -611,8 +609,8 @@ pub fn min_poly_scale_int(p: &[Rational], _root_idx: usize, c: i64) -> Vec<Ratio
     // (px)^n + c1(px)^(n-1)*|c| + ... + cn*|c|^n  where px = x*sign(c)
     let mut result = Vec::with_capacity(deg + 1);
     let sign_c = if c < 0 { -1 } else { 1 };
-    for i in 0..=deg {
-        let mut coef = p[i].clone();
+    for (i, pi) in p.iter().enumerate().take(deg + 1) {
+        let mut coef = pi.clone();
         let power = deg - i;
         for _ in 0..power {
             coef *= abs_c;
@@ -663,6 +661,7 @@ fn min_poly_add_sub(
     let p_sub: Vec<Vec<Rational>> = (0..=n)
         .map(|j| {
             let mut poly_z: Vec<Rational> = vec![Rational::from(0); n + 1];
+            #[allow(clippy::needless_range_loop)]
             for k in j..=n {
                 let binom_kj = binomial(k, j);
                 let z_power = k - j;
@@ -697,6 +696,7 @@ fn min_poly_add_sub(
         // alpha = z + y where z = alpha - beta, y = beta
         // p(z + y) = sum_{k=0..n} p[k] * (z+y)^k
         let mut p_sub2: Vec<Vec<Rational>> = vec![vec![Rational::from(0); n + 1]; n + 1];
+        #[allow(clippy::needless_range_loop)]
         for j in 0..=n {
             for k in j..=n {
                 let binom_kj = binomial(k, j);
@@ -816,9 +816,9 @@ fn determinant_f64(matrix: &[Vec<f64>]) -> f64 {
     for col in 0..n {
         let mut pivot_row = col;
         let mut pivot_exists = false;
-        for row in col..n {
-            if mat[row][col].abs() > 1e-15 {
-                pivot_row = row;
+        for (i, mat_row) in mat[col..].iter().enumerate() {
+            if mat_row[col].abs() > 1e-15 {
+                pivot_row = col + i;
                 pivot_exists = true;
                 break;
             }
@@ -831,6 +831,7 @@ fn determinant_f64(matrix: &[Vec<f64>]) -> f64 {
             sign = -sign;
         }
         det *= mat[col][col];
+        #[allow(clippy::needless_range_loop)]
         for row in col + 1..n {
             if mat[row][col].abs() < 1e-15 {
                 continue;
@@ -1119,8 +1120,8 @@ pub fn min_poly_scale(p: &[Rational], _root_idx: usize, scale: &Rational) -> Vec
     // Multiply by c^deg to clear denominators:
     // c^deg * p(x/c) = sum p[k] * x^k * c^(deg-k)
     let mut result = Vec::with_capacity(deg + 1);
-    for k in 0..=deg {
-        let mut c = p[k].clone() * scale.clone();
+    for (k, pk) in p.iter().enumerate().take(deg + 1) {
+        let mut c = pk.clone() * scale.clone();
         let power = deg - k;
         for _ in 0..power {
             c *= scale;

@@ -1,5 +1,4 @@
 /// CLI integration tests: eval, examples, localsymbol, format, pattern.
-
 #[path = "common/mod.rs"]
 mod common;
 pub use common::*;

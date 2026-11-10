@@ -298,6 +298,19 @@ fn simplify_sin(args: &[Value]) -> Value {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(0)),
+        // sin(-x) -> -sin(x)
+        Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
+            if let Value::Integer(n) = &a[0]
+                && *n == -1
+                && a.len() == 2
+            {
+                return simplify_call(
+                    "Times",
+                    &[Value::Integer((-1).into()), call("Sin", vec![a[1].clone()])],
+                );
+            }
+            call_ref("Sin", args)
+        }
         _ => call_ref("Sin", args),
     }
 }
@@ -308,6 +321,16 @@ fn simplify_cos(args: &[Value]) -> Value {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Value::Integer(Integer::from(1)),
+        // cos(-x) -> cos(x)
+        Value::Call { head, args: a } if head == "Times" && !a.is_empty() => {
+            if let Value::Integer(n) = &a[0]
+                && *n == -1
+                && a.len() == 2
+            {
+                return call("Cos", vec![a[1].clone()]);
+            }
+            call_ref("Cos", args)
+        }
         _ => call_ref("Cos", args),
     }
 }
@@ -861,6 +884,21 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     };
     let concrete = flattened.unwrap_or(concrete);
 
+    // Normalize Divide[a, b] → Times[a, Power[b, -1]] so D rules can match
+    let concrete = match &concrete {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                args[0].clone(),
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![args[1].clone(), Value::Integer(Integer::from(-1))],
+                },
+            ],
+        },
+        _ => concrete,
+    };
+
     // Handle multi-arg Times/Plus in Rust
     if let Value::Call { ref head, ref args } = concrete {
         let name = head.as_str();
@@ -889,28 +927,38 @@ fn eval_d_2(expr: Value, var: Value, env: &Env) -> Result<Value, EvalError> {
     if let Some(d_func) = env.get("D")
         && let Value::Function(_) = &d_func
     {
-        // Evaluate Pattern args in the current environment to resolve symbolic
-        // variable names (u, n, etc.) that come from parent rule bodies.
-        // D has HoldAll, so args come as Value::Pattern(Expr). When the D call
-        // originates from another D rule's body (e.g., D[u, x] from the Power rule),
-        // the Expr contains symbolic variable names. Passing Pattern-wrapped symbols
-        // to the D function definitions causes pattern matching to bind to those
-        // symbolic names. By evaluating the Expr in env, we resolve them to actual values.
-        let concrete_expr = match &expr {
-            Value::Pattern(p) => crate::eval::eval(p, env)?,
-            Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
-            _ => expr.clone(),
-        };
+        // Use the normalized concrete expression (Divide→Times, flattened) for matching.
+        // For the variable, evaluate Pattern to resolve symbolic names from rule bodies.
         let concrete_var = match &var {
             Value::Pattern(p) => crate::eval::eval(p, env)?,
             Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
             _ => var.clone(),
         };
-        return crate::eval::apply_function(&d_func, &[concrete_expr, concrete_var], env);
+        return match crate::eval::apply_function(
+            &d_func,
+            &[concrete.clone(), concrete_var.clone()],
+            env,
+        ) {
+            Ok(v) => Ok(v),
+            Err(EvalError::NoMatch { .. }) => {
+                // No D rule matched — return unevaluated D with concrete (unwrapped) args
+                Ok(Value::Call {
+                    head: "D".to_string(),
+                    args: vec![concrete, concrete_var],
+                })
+            }
+            Err(e) => Err(e),
+        };
     }
+    // Use concrete (unwrapped, normalized) values for the unevaluated return
+    let concrete_var = match &var {
+        Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
+        Value::Hold(inner) | Value::HoldComplete(inner) => (**inner).clone(),
+        _ => var.clone(),
+    };
     Ok(Value::Call {
         head: "D".to_string(),
-        args: vec![expr, var],
+        args: vec![concrete, concrete_var],
     })
 }
 
@@ -1036,6 +1084,20 @@ pub fn builtin_integrate(args: &[Value], env: &Env) -> Result<Value, EvalError> 
     let expr = match &args[0] {
         Value::Pattern(p) => crate::pattern::unwrap_expr_to_value(p),
         _ => args[0].clone(),
+    };
+    // Normalize Divide[a, b] → Times[a, Power[b, -1]] for Rubi rule matching
+    let expr = match &expr {
+        Value::Call { head, args: dargs } if head == "Divide" && dargs.len() == 2 => Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                dargs[0].clone(),
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![dargs[1].clone(), Value::Integer(Integer::from(-1))],
+                },
+            ],
+        },
+        _ => expr,
     };
 
     // Extract variable name and optional bounds for definite integral
@@ -1544,32 +1606,21 @@ fn factor_linear(coeffs: &[Value], var: &str) -> Value {
     if let (Value::Integer(ai), Value::Integer(bi)) = (a, b) {
         let gcd = ai.clone().gcd(bi);
         if gcd > 1 {
-            let new_a = Value::Call {
-                head: "Plus".to_string(),
-                args: vec![
+            let new_a = simplify_call(
+                "Plus",
+                &[
                     Value::Integer(ai.clone() / &gcd),
-                    Value::Call {
-                        head: "Times".to_string(),
-                        args: vec![Value::Integer(bi.clone() / &gcd), x],
-                    },
+                    simplify_call("Times", &[Value::Integer(bi.clone() / &gcd), x]),
                 ],
-            };
-            return Value::Call {
-                head: "Times".to_string(),
-                args: vec![Value::Integer(gcd), new_a],
-            };
+            );
+            return simplify_call("Times", &[Value::Integer(gcd), new_a]);
         }
     }
-    Value::Call {
-        head: "Plus".to_string(),
-        args: vec![
-            a.clone(),
-            Value::Call {
-                head: "Times".to_string(),
-                args: vec![b.clone(), x],
-            },
-        ],
-    }
+    // Simplify so that Factor[x] returns `x`, not `Plus[0, Times[1, x]]`.
+    simplify_call(
+        "Plus",
+        &[a.clone(), simplify_call("Times", &[b.clone(), x])],
+    )
 }
 
 fn factor_quadratic(coeffs: &[Value], var: &str) -> Value {
@@ -2562,6 +2613,10 @@ fn extract_symbol_from(val: &Value) -> Result<String, EvalError> {
         Value::Builtin(name, _) => Ok(name.clone()),
         Value::Function(fd) => Ok(fd.name.clone()),
         Value::Pattern(Expr::Symbol(s)) => Ok(s.clone()),
+        Value::Pattern(_) => Err(EvalError::TypeError {
+            expected: "Symbol or String".to_string(),
+            got: val.type_name().to_string(),
+        }),
         _ => Err(EvalError::TypeError {
             expected: "Symbol or String".to_string(),
             got: val.type_name().to_string(),
@@ -2622,6 +2677,12 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
         Value::Builtin(name, _) => name.clone(),
         Value::Function(fd) => fd.name.clone(),
         Value::Pattern(Expr::Symbol(s)) => s.clone(),
+        Value::Pattern(_) => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Symbol or String".to_string(),
@@ -2632,6 +2693,71 @@ pub fn builtin_attributes(args: &[Value], env: &Env) -> Result<Value, EvalError>
     let attrs = env.get_attributes(&sym_name);
     let list: Vec<Value> = attrs.into_iter().map(Value::Symbol).collect();
     Ok(Value::List(list))
+}
+
+// ── CoefficientList ──────────────────────────────────────────────────────────
+
+/// CoefficientList[poly, x] — Extract coefficients of a polynomial in variable x,
+/// starting from the constant term.
+/// CoefficientList[1 + 3*x + 5*x^2, x] -> {1, 3, 5}
+/// CoefficientList[3*x^2 + 1, x] -> {1, 0, 3}
+pub fn builtin_coefficient_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "CoefficientList requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+
+    let coeffs = extract_polynomial_coeffs(&args[0], &var);
+    if coeffs.is_empty() {
+        return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
+    }
+    Ok(Value::List(coeffs))
+}
+
+// ── FromCoefficientList ──────────────────────────────────────────────────────
+
+/// FromCoefficientList[list, x] — Construct a polynomial from a list of coefficients
+/// (constant term first).
+/// FromCoefficientList[{1, 3, 5}, x] -> 1 + 3*x + 5*x^2
+pub fn builtin_from_coefficient_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "FromCoefficientList requires exactly 2 arguments".to_string(),
+        ));
+    }
+
+    let coeffs = match &args[0] {
+        Value::List(items) => items,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+
+    Ok(rebuild_poly_from_coeffs(coeffs, &var))
 }
 
 #[cfg(test)]
@@ -2645,6 +2771,17 @@ mod tests {
 
     fn int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(items)
+    }
+
+    fn call(head: &str, args: Vec<Value>) -> Value {
+        Value::Call {
+            head: head.to_string(),
+            args,
+        }
     }
 
     fn env() -> crate::env::Env {
@@ -2795,7 +2932,7 @@ mod tests {
         let expr = simplify_call("Power", &[sym("x"), int(2)]);
         let result = builtin_integrate(&[expr, sym("x")], &env).unwrap();
         match &result {
-            Value::Call { head, args } if head == "Times" => {
+            Value::Call { head, args } if head == "Times" || head == "Divide" => {
                 // Contains Power[x, 3]
                 assert!(
                     args.iter().any(|a| matches!(a,
@@ -2806,7 +2943,7 @@ mod tests {
                     result
                 );
             }
-            _ => panic!("Expected Times (x^3/3), got {:?}", result),
+            _ => panic!("Expected x^3/3 (Times or Divide), got {:?}", result),
         }
     }
 
@@ -3051,5 +3188,134 @@ mod tests {
         // Simplify[x] = x
         let result = builtin_simplify(&[sym("x")]).unwrap();
         assert_eq!(result, sym("x"));
+    }
+
+    // ── CoefficientList ──
+
+    #[test]
+    fn test_coefficient_list_basic() {
+        // CoefficientList[1 + 3*x + 5*x^2, x] -> {1, 3, 5}
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), sym("x")]),
+                call("Times", vec![int(5), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(3), int(5)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_with_gaps() {
+        // CoefficientList[3*x^2 + 1, x] -> {1, 0, 3}
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(0), int(3)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_constant() {
+        // CoefficientList[7, x] -> {7}
+        let result = builtin_coefficient_list(&[int(7), sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(7)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_zero() {
+        // CoefficientList[0, x] -> {0}
+        let result = builtin_coefficient_list(&[int(0), sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(0)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_linear() {
+        // CoefficientList[2*x + 3, x] -> {3, 2}
+        let poly = call("Plus", vec![int(3), call("Times", vec![int(2), sym("x")])]);
+        let result = builtin_coefficient_list(&[poly, sym("x")]).unwrap();
+        assert_eq!(result, list(vec![int(3), int(2)]));
+    }
+
+    #[test]
+    fn test_coefficient_list_bad_args() {
+        assert!(builtin_coefficient_list(&[]).is_err());
+        assert!(builtin_coefficient_list(&[int(1)]).is_err());
+    }
+
+    // ── FromCoefficientList ──
+
+    #[test]
+    fn test_from_coefficient_list_basic() {
+        // FromCoefficientList[{1, 3, 5}, x] -> 1 + 3*x + 5*x^2
+        let result =
+            builtin_from_coefficient_list(&[list(vec![int(1), int(3), int(5)]), sym("x")]).unwrap();
+        // Verify structure: Plus[1, Times[3, x], Times[5, Power[x, 2]]]
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "Plus");
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("Expected Plus Call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_from_coefficient_list_constant() {
+        // FromCoefficientList[{7}, x] -> 7
+        let result = builtin_from_coefficient_list(&[list(vec![int(7)]), sym("x")]).unwrap();
+        assert_eq!(result, int(7));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_with_zeros() {
+        // FromCoefficientList[{1, 0, 3}, x] -> 1 + 3*x^2
+        let result =
+            builtin_from_coefficient_list(&[list(vec![int(1), int(0), int(3)]), sym("x")]).unwrap();
+        match result {
+            Value::Call { head, args } => {
+                assert_eq!(head, "Plus");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Plus Call, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_from_coefficient_list_round_trip() {
+        // Round-trip: FromCoefficientList[CoefficientList[poly, x], x] should simplify to poly
+        let poly = call(
+            "Plus",
+            vec![
+                int(1),
+                call("Times", vec![int(3), sym("x")]),
+                call("Times", vec![int(5), call("Power", vec![sym("x"), int(2)])]),
+            ],
+        );
+        let coeffs = builtin_coefficient_list(&[poly.clone(), sym("x")]).unwrap();
+        let reconstructed = builtin_from_coefficient_list(&[coeffs, sym("x")]).unwrap();
+        // Both should be structurally equal (or equal after simplification)
+        let simplified_orig = builtin_simplify(&[poly]).unwrap();
+        let simplified_recon = builtin_simplify(&[reconstructed]).unwrap();
+        assert!(simplified_orig.struct_eq(&simplified_recon));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_empty() {
+        // FromCoefficientList[{}, x] -> 0
+        let result = builtin_from_coefficient_list(&[list(vec![]), sym("x")]).unwrap();
+        assert_eq!(result, int(0));
+    }
+
+    #[test]
+    fn test_from_coefficient_list_bad_args() {
+        assert!(builtin_from_coefficient_list(&[]).is_err());
+        assert!(builtin_from_coefficient_list(&[int(1)]).is_err());
     }
 }

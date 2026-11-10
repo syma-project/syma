@@ -621,7 +621,6 @@ pub fn builtin_real_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 // IntegerQ[val] is already implemented in math.rs; adding ExactNumberQ here.
-
 /// ExactNumberQ[val] — True if val is an exact number (Integer, Rational, or complex with exact parts).
 pub fn builtin_exact_number_q(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
@@ -1112,6 +1111,8 @@ fn extract_power_and_coeff(term: &Value, var: &str) -> (i64, Value) {
         }
         Value::Call { head, args } if head == "Times" => {
             let mut power: i64 = 0;
+            // `let coeff;` avoids the dead initializer origin silenced with
+            // `#[allow(unused_assignments)]`.
             let coeff;
             let mut other_factors: Vec<Value> = Vec::new();
 

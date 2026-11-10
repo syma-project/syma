@@ -699,6 +699,48 @@ pub fn builtin_lookup(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── AssociationThread ──────────────────────────────────────────────────────
+
+/// AssociationThread[keys, values] — create an association pairing keys with values.
+pub fn builtin_association_thread(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "AssociationThread requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let keys = match &args[0] {
+        Value::List(l) => l,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let values = match &args[1] {
+        Value::List(l) => l,
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "List".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    if keys.len() != values.len() {
+        return Err(EvalError::Error(format!(
+            "AssociationThread: key list length ({}) != value list length ({})",
+            keys.len(),
+            values.len()
+        )));
+    }
+    let mut map = HashMap::new();
+    for (k, v) in keys.iter().zip(values.iter()) {
+        let key = value_to_key(k);
+        map.insert(key, v.clone());
+    }
+    Ok(Value::Assoc(map))
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
