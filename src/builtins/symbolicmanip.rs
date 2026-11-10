@@ -1,5 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 
+use crate::env::Env;
+use crate::polynomial;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
@@ -127,6 +129,21 @@ fn is_one_v(v: &Value) -> bool {
         Value::Integer(n) => *n == 1,
         Value::Real(r) => *r == Float::with_val(DEFAULT_PRECISION, 1.0),
         _ => false,
+    }
+}
+
+/// Multiplicative inverse `1/v`, folding exact numeric bases so that
+/// polynomial division by a non-monic divisor reduces exactly.
+fn inverse_value(v: &Value) -> Value {
+    match v {
+        Value::Integer(n) if !n.is_zero() => {
+            Value::Rational(Box::new(Rational::from((Integer::from(1), n.clone()))))
+        }
+        Value::Rational(r) if !r.is_zero() => Value::Rational(Box::new((**r).clone().recip())),
+        _ => simplify_value(&call(
+            "Power",
+            vec![v.clone(), Value::Integer(Integer::from(-1))],
+        )),
     }
 }
 
@@ -1814,10 +1831,7 @@ fn polyn_div(num: &Value, den: &Value, var: &str) -> (Value, Value) {
 
     let mut remainder: Vec<Value> = num_coeffs.iter().map(simplify_value).collect();
     let den_lead = &den_coeffs[den_coeffs.len() - 1];
-    let den_lead_inv = call(
-        "Power",
-        vec![den_lead.clone(), Value::Integer(Integer::from(-1))],
-    );
+    let den_lead_inv = inverse_value(den_lead);
 
     let mut quot_coeffs: Vec<Value> =
         vec![Value::Integer(Integer::from(0)); (nd - dd + 1) as usize];
@@ -1831,24 +1845,27 @@ fn polyn_div(num: &Value, den: &Value, var: &str) -> (Value, Value) {
         if is_zero_v(r) {
             continue;
         }
-        let q_i = simplify_call("Times", &[r.clone(), den_lead_inv.clone()]);
+        let q_i = simplify_value(&simplify_call("Times", &[r.clone(), den_lead_inv.clone()]));
         quot_coeffs[i as usize] = q_i.clone();
 
         for (k, den_k) in den_coeffs.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub_term = expand_value(&simplify_call("Times", &[q_i.clone(), den_k.clone()]));
-                remainder[idx] = simplify_call(
+                let sub_term = expand_value(&simplify_value(&simplify_call(
+                    "Times",
+                    &[q_i.clone(), den_k.clone()],
+                )));
+                remainder[idx] = simplify_value(&expand_value(&simplify_call(
                     "Plus",
                     &[
                         remainder[idx].clone(),
                         simplify_call("Times", &[Value::Integer(Integer::from(-1)), sub_term]),
                     ],
-                );
+                )));
             }
         }
         for v in remainder.iter_mut() {
-            *v = simplify_value(v);
+            *v = simplify_value(&expand_value(v));
         }
     }
 
@@ -2901,10 +2918,10 @@ fn make_monic(poly: &Value, var: &str) -> Value {
         return poly.clone();
     }
     // Divide all coefficients by the leading coefficient
-    let lead_inv = call("Power", vec![lead_s, Value::Integer(Integer::from(-1))]);
+    let lead_inv = inverse_value(&lead_s);
     let new_coeffs: Vec<Value> = coeffs
         .iter()
-        .map(|c| simplify_call("Times", &[c.clone(), lead_inv.clone()]))
+        .map(|c| simplify_value(&simplify_call("Times", &[c.clone(), lead_inv.clone()])))
         .collect();
     rebuild_poly(&new_coeffs, var)
 }
@@ -2916,10 +2933,7 @@ fn coeff_div(a: &[Value], b: &[Value]) -> (Vec<Value>, Vec<Value>) {
     }
     let mut remainder: Vec<Value> = a.iter().map(simplify_value).collect();
     let b_lead = &b[b.len() - 1];
-    let b_lead_inv = call(
-        "Power",
-        vec![b_lead.clone(), Value::Integer(Integer::from(-1))],
-    );
+    let b_lead_inv = inverse_value(b_lead);
     let a_deg = a.len() as i64 - 1;
     let b_deg = b.len() as i64 - 1;
     if a_deg < b_deg {
@@ -2936,23 +2950,23 @@ fn coeff_div(a: &[Value], b: &[Value]) -> (Vec<Value>, Vec<Value>) {
         if is_zero_v(r) {
             continue;
         }
-        let q_i = simplify_call("Times", &[r.clone(), b_lead_inv.clone()]);
+        let q_i = simplify_value(&simplify_call("Times", &[r.clone(), b_lead_inv.clone()]));
         quot_coeffs[i as usize] = q_i.clone();
         for (k, b_k) in b.iter().enumerate() {
             let idx = (i + k as i64) as usize;
             if idx < remainder.len() {
-                let sub_term = simplify_call("Times", &[q_i.clone(), b_k.clone()]);
-                remainder[idx] = simplify_call(
+                let sub_term = simplify_value(&simplify_call("Times", &[q_i.clone(), b_k.clone()]));
+                remainder[idx] = simplify_value(&expand_value(&simplify_call(
                     "Plus",
                     &[
                         remainder[idx].clone(),
                         simplify_call("Times", &[Value::Integer(Integer::from(-1)), sub_term]),
                     ],
-                );
+                )));
             }
         }
         for v in remainder.iter_mut() {
-            *v = simplify_value(v);
+            *v = simplify_value(&expand_value(v));
         }
     }
     // Trim leading zeros from remainder
@@ -3430,6 +3444,1152 @@ fn factorial_value(n: i64) -> Value {
         result *= i;
     }
     Value::Integer(result)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Additional polynomial-algebra builtins.
+//
+// Shared helpers below are deliberately generic over `Value` coefficients so
+// that the routines also work with symbolic parameters, not just numbers.
+// ══════════════════════════════════════════════════════════════════════════
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+
+// ── Value-level scalar arithmetic ──
+
+fn cv_zero() -> Value {
+    Value::Integer(Integer::from(0))
+}
+
+fn cv_one() -> Value {
+    Value::Integer(Integer::from(1))
+}
+
+fn cv_add(a: &Value, b: &Value) -> Value {
+    if is_zero_v(a) {
+        return b.clone();
+    }
+    if is_zero_v(b) {
+        return a.clone();
+    }
+    simplify_call("Plus", &[a.clone(), b.clone()])
+}
+
+fn cv_neg(a: &Value) -> Value {
+    if is_zero_v(a) {
+        return cv_zero();
+    }
+    simplify_call("Times", &[Value::Integer(Integer::from(-1)), a.clone()])
+}
+
+fn cv_sub(a: &Value, b: &Value) -> Value {
+    cv_add(a, &cv_neg(b))
+}
+
+fn cv_mul(a: &Value, b: &Value) -> Value {
+    if is_zero_v(a) || is_zero_v(b) {
+        return cv_zero();
+    }
+    if is_one_v(a) {
+        return b.clone();
+    }
+    if is_one_v(b) {
+        return a.clone();
+    }
+    simplify_call("Times", &[a.clone(), b.clone()])
+}
+
+fn cv_div(a: &Value, b: &Value) -> Value {
+    if is_zero_v(a) {
+        return cv_zero();
+    }
+    if is_one_v(b) {
+        return a.clone();
+    }
+    simplify_call("Divide", &[a.clone(), b.clone()])
+}
+
+// ── Coefficient vectors (ascending powers) ──
+
+fn cvv_trim(v: &mut Vec<Value>) {
+    while v.len() > 1 && is_zero_v(v.last().unwrap()) {
+        v.pop();
+    }
+}
+
+fn cvv_coeff(v: &[Value], i: i64) -> Value {
+    if i < 0 || i as usize >= v.len() {
+        cv_zero()
+    } else {
+        v[i as usize].clone()
+    }
+}
+
+#[allow(dead_code)]
+fn cvv_degree(v: &[Value]) -> i64 {
+    for i in (0..v.len()).rev() {
+        if !is_zero_v(&v[i]) {
+            return i as i64;
+        }
+    }
+    -1
+}
+
+fn cvv_mul(a: &[Value], b: &[Value]) -> Vec<Value> {
+    if a.is_empty() || b.is_empty() {
+        return vec![cv_zero()];
+    }
+    let mut out = vec![cv_zero(); a.len() + b.len() - 1];
+    for (i, x) in a.iter().enumerate() {
+        if is_zero_v(x) {
+            continue;
+        }
+        for (j, y) in b.iter().enumerate() {
+            out[i + j] = cv_add(&out[i + j], &cv_mul(x, y));
+        }
+    }
+    cvv_trim(&mut out);
+    out
+}
+
+fn cvv_pow(a: &[Value], e: usize) -> Vec<Value> {
+    let mut out = vec![cv_one()];
+    for _ in 0..e {
+        out = cvv_mul(&out, a);
+    }
+    out
+}
+
+fn cvv_scale(a: &[Value], s: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = a.iter().map(|c| cv_mul(c, s)).collect();
+    cvv_trim(&mut out);
+    out
+}
+
+fn cvv_sub(a: &[Value], b: &[Value]) -> Vec<Value> {
+    let n = a.len().max(b.len());
+    let mut out = vec![cv_zero(); n];
+    for i in 0..n {
+        let av = a.get(i).cloned().unwrap_or_else(cv_zero);
+        let bv = b.get(i).cloned().unwrap_or_else(cv_zero);
+        out[i] = cv_sub(&av, &bv);
+    }
+    cvv_trim(&mut out);
+    out
+}
+
+// ── Multivariate monomial polynomials ──
+//
+// A polynomial is a list of `(exponents, coefficient)` monomials, where the
+// exponent vector is indexed by the ordered variable list. Lexicographic order
+// on the exponent vector gives the leading term, so the first variable is the
+// most significant (matching Wolfram's variable-ordering convention).
+
+fn mp_parse_term(term: &Value, vars: &[String]) -> (Vec<i64>, Value) {
+    let mut exps = vec![0i64; vars.len()];
+    if let Value::Symbol(s) = term
+        && let Some(idx) = vars.iter().position(|v| v == s)
+    {
+        exps[idx] = 1;
+        return (exps, cv_one());
+    }
+    (exps, term.clone())
+}
+
+fn mp_add_term(poly: &mut Vec<(Vec<i64>, Value)>, exps: Vec<i64>, coeff: Value) {
+    if is_zero_v(&coeff) {
+        return;
+    }
+    if let Some(slot) = poly.iter_mut().find(|(e, _)| e == &exps) {
+        slot.1 = cv_add(&slot.1, &coeff);
+        if is_zero_v(&slot.1) {
+            let s = slot.1.clone();
+            poly.retain(|(_, c)| !c.struct_eq(&s) || !is_zero_v(c));
+        }
+    } else {
+        poly.push((exps, coeff));
+    }
+}
+
+fn mp_add_into(dst: &mut Vec<(Vec<i64>, Value)>, src: &[(Vec<i64>, Value)]) {
+    for (e, c) in src {
+        mp_add_term(dst, e.clone(), c.clone());
+    }
+}
+
+fn mp_mul(a: &[(Vec<i64>, Value)], b: &[(Vec<i64>, Value)]) -> Vec<(Vec<i64>, Value)> {
+    let mut out = Vec::new();
+    for (ea, ca) in a {
+        for (eb, cb) in b {
+            let mut e = ea.clone();
+            for (k, ek) in e.iter_mut().enumerate() {
+                *ek += eb[k];
+            }
+            mp_add_term(&mut out, e, cv_mul(ca, cb));
+        }
+    }
+    out
+}
+
+fn mp_pow(a: &[(Vec<i64>, Value)], e: usize) -> Vec<(Vec<i64>, Value)> {
+    let len = a.first().map(|x| x.0.len()).unwrap_or(0);
+    let mut out = vec![(vec![0i64; len], cv_one())];
+    for _ in 0..e {
+        out = mp_mul(&out, a);
+    }
+    out
+}
+
+/// Fully expand an expression into a multivariate monomial polynomial over
+/// `vars`; factors not involving any variable become coefficients.
+fn mp_parse(expr: &Value, vars: &[String]) -> Vec<(Vec<i64>, Value)> {
+    match expr {
+        Value::Call { head, args } if head == "Plus" => {
+            let mut out = Vec::new();
+            for a in args {
+                mp_add_into(&mut out, &mp_parse(a, vars));
+            }
+            out
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut out = vec![(vec![0i64; vars.len()], cv_one())];
+            for a in args {
+                out = mp_mul(&out, &mp_parse(a, vars));
+            }
+            out
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(e) = &args[1]
+                && let Some(ei) = e.to_i64()
+                && ei >= 0
+                && is_polynomial_in(&args[0], &vars.first().cloned().unwrap_or_default())
+            {
+                return mp_pow(&mp_parse(&args[0], vars), ei as usize);
+            }
+            let (exps, coeff) = mp_parse_term(expr, vars);
+            vec![(exps, coeff)]
+        }
+        _ => vec![mp_parse_term(expr, vars)],
+    }
+}
+
+fn mono_cmp(a: &[i64], b: &[i64]) -> Ordering {
+    for i in 0..a.len().min(b.len()) {
+        if a[i] != b[i] {
+            return a[i].cmp(&b[i]);
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+fn mp_lead_index(poly: &[(Vec<i64>, Value)]) -> Option<usize> {
+    poly.iter()
+        .enumerate()
+        .max_by(|(_, (ea, _)), (_, (eb, _))| mono_cmp(ea, eb))
+        .map(|(i, _)| i)
+}
+
+fn mp_divisible(t: &[i64], d: &[i64]) -> bool {
+    t.iter().zip(d.iter()).all(|(a, b)| a >= b)
+}
+
+/// Build a `Value` from a monomial polynomial using `names` as the variables.
+fn mp_to_value(poly: &[(Vec<i64>, Value)], names: &[String]) -> Value {
+    let mut terms: Vec<Value> = Vec::new();
+    for (exps, coeff) in poly {
+        if is_zero_v(coeff) {
+            continue;
+        }
+        let mut factors: Vec<Value> = Vec::new();
+        if !is_one_v(coeff) {
+            factors.push(coeff.clone());
+        }
+        for (i, e) in exps.iter().enumerate() {
+            if *e == 0 {
+                continue;
+            }
+            let base = Value::Symbol(names[i].clone());
+            if *e == 1 {
+                factors.push(base);
+            } else {
+                factors.push(call("Power", vec![base, Value::Integer(Integer::from(*e))]));
+            }
+        }
+        let term = if factors.is_empty() {
+            cv_one()
+        } else if factors.len() == 1 {
+            factors.pop().unwrap()
+        } else {
+            call("Times", factors)
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        cv_zero()
+    } else if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        simplify_call("Plus", &terms)
+    }
+}
+
+fn mp_elementary(k: usize, n: usize) -> Vec<(Vec<i64>, Value)> {
+    if k > n {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for mask in 0u64..(1u64 << n) {
+        if mask.count_ones() as usize != k {
+            continue;
+        }
+        let mut exps = vec![0i64; n];
+        for (i, e) in exps.iter_mut().enumerate() {
+            if mask & (1u64 << i) != 0 {
+                *e = 1;
+            }
+        }
+        mp_add_term(&mut out, exps, cv_one());
+    }
+    out
+}
+
+fn is_partition(exps: &[i64]) -> bool {
+    exps.windows(2).all(|w| w[0] >= w[1])
+}
+
+// ── Shared parsing helpers ──
+
+fn as_symbol_list(v: &Value) -> Vec<String> {
+    match v {
+        Value::Symbol(s) => vec![s.clone()],
+        Value::List(items) => items
+            .iter()
+            .filter_map(|i| match i {
+                Value::Symbol(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn as_value_list(v: &Value) -> Vec<Value> {
+    match v {
+        Value::List(items) => items.clone(),
+        _ => vec![v.clone()],
+    }
+}
+
+fn value_to_rat(v: &Value) -> Option<Rational> {
+    match v {
+        Value::Integer(n) => Some(Rational::from(n.clone())),
+        Value::Rational(r) => Some((**r).clone()),
+        _ => None,
+    }
+}
+
+fn rebuild_poly_from_rat(coeffs: &[Rational], var: &str) -> Value {
+    let vals: Vec<Value> = coeffs.iter().map(polynomial::rational_to_value).collect();
+    rebuild_poly(&vals, var)
+}
+
+/// Split integer coefficients into `(content, reduced)`; returns `None` when a
+/// coefficient is not an integer.
+fn int_content(coeffs: &[Value]) -> Option<(Integer, Vec<Value>)> {
+    if coeffs.is_empty() {
+        return Some((Integer::from(1), coeffs.to_vec()));
+    }
+    let mut g = Integer::from(0);
+    for c in coeffs {
+        match c {
+            Value::Integer(n) => g = g.gcd(n),
+            _ => return None,
+        }
+    }
+    if g.is_zero() {
+        g = Integer::from(1);
+    }
+    let neg = matches!(coeffs.iter().rev().find(|c| !is_zero_v(c)), Some(Value::Integer(n)) if n.is_negative());
+    if neg {
+        g = -g;
+    }
+    let reduced = coeffs
+        .iter()
+        .map(|c| match c {
+            Value::Integer(n) => Value::Integer((n / &g).into()),
+            other => other.clone(),
+        })
+        .collect();
+    Some((g, reduced))
+}
+
+// ── PolynomialReduce ──
+
+pub fn builtin_polynomial_reduce(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 3 {
+        return Err(EvalError::Error(
+            "PolynomialReduce requires 3 arguments: PolynomialReduce[poly, {poly1, ...}, {x1, ...}]".to_string(),
+        ));
+    }
+    let vars = as_symbol_list(&args[2]);
+    if vars.is_empty() {
+        return Ok(call_ref("PolynomialReduce", args));
+    }
+    let divisors: Vec<Vec<(Vec<i64>, Value)>> = as_value_list(&args[1])
+        .iter()
+        .map(|d| mp_parse(d, &vars))
+        .collect();
+    let mut work = mp_parse(&args[0], &vars);
+    let leads: Vec<Option<usize>> = divisors.iter().map(|d| mp_lead_index(d)).collect();
+
+    let mut quotients: Vec<Vec<(Vec<i64>, Value)>> = vec![Vec::new(); divisors.len()];
+    let mut remainder: Vec<(Vec<i64>, Value)> = Vec::new();
+    let mut guard = 0u64;
+    while !work.is_empty() && guard < 100_000 {
+        guard += 1;
+        let li = match mp_lead_index(&work) {
+            Some(i) => i,
+            None => break,
+        };
+        let (lexp, lcoeff) = work[li].clone();
+        let mut reduced = false;
+        for (i, d) in divisors.iter().enumerate() {
+            let Some(dli) = leads[i] else { continue };
+            let (dexp, dcoeff) = &d[dli];
+            if mp_divisible(&lexp, dexp) {
+                let mut qexp = lexp.clone();
+                for (k, qe) in qexp.iter_mut().enumerate() {
+                    *qe -= dexp[k];
+                }
+                let qcoeff = cv_div(&lcoeff, dcoeff);
+                mp_add_term(&mut quotients[i], qexp.clone(), qcoeff.clone());
+                let scaled: Vec<(Vec<i64>, Value)> = d
+                    .iter()
+                    .map(|(e, c)| {
+                        let mut ne = e.clone();
+                        for (k, ne_k) in ne.iter_mut().enumerate() {
+                            *ne_k += qexp[k];
+                        }
+                        (ne, cv_neg(&cv_mul(&qcoeff, c)))
+                    })
+                    .collect();
+                mp_add_into(&mut work, &scaled);
+                reduced = true;
+                break;
+            }
+        }
+        if !reduced {
+            mp_add_term(&mut remainder, lexp.clone(), lcoeff.clone());
+            work.remove(li);
+        }
+        if work.is_empty() {
+            break;
+        }
+    }
+
+    let q_values: Vec<Value> = quotients.iter().map(|q| mp_to_value(q, &vars)).collect();
+    Ok(Value::List(vec![
+        Value::List(q_values),
+        mp_to_value(&remainder, &vars),
+    ]))
+}
+
+// ── SymmetricReduction / elementary & power symmetric polynomials ──
+
+pub fn builtin_symmetric_reduction(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Error(
+            "SymmetricReduction requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let vars = as_symbol_list(&args[1]);
+    if vars.is_empty() {
+        return Ok(call_ref("SymmetricReduction", args));
+    }
+    let n = vars.len();
+    let names: Vec<String> = if args.len() == 3 {
+        as_symbol_list(&args[2])
+    } else {
+        (1..=n).map(|i| format!("s{i}")).collect()
+    };
+
+    let mut work = mp_parse(&args[0], &vars);
+    let mut sym: Vec<(Vec<i64>, Value)> = Vec::new();
+    let mut remainder: Vec<(Vec<i64>, Value)> = Vec::new();
+    let mut guard = 0u64;
+    while !work.is_empty() && guard < 10_000 {
+        guard += 1;
+        let li = match mp_lead_index(&work) {
+            Some(i) => i,
+            None => break,
+        };
+        let (exps, coeff) = work[li].clone();
+        if is_partition(&exps) {
+            let mut lambdas = vec![0i64; n];
+            for i in 0..n {
+                let next = if i + 1 < n { exps[i + 1] } else { 0 };
+                lambdas[i] = exps[i] - next;
+            }
+            let mut e_poly = vec![(vec![0i64; n], cv_one())];
+            for (i, lam) in lambdas.iter().enumerate() {
+                if *lam > 0 {
+                    let ek = mp_elementary(i + 1, n);
+                    let eip = mp_pow(&ek, *lam as usize);
+                    e_poly = mp_mul(&e_poly, &eip);
+                }
+            }
+            let _ = names.first();
+            let sym_exps = lambdas.clone();
+            mp_add_term(&mut sym, sym_exps, coeff.clone());
+            let scaled: Vec<(Vec<i64>, Value)> = e_poly
+                .iter()
+                .map(|(e, c)| (e.clone(), cv_neg(&cv_mul(&coeff, c))))
+                .collect();
+            mp_add_into(&mut work, &scaled);
+        } else {
+            mp_add_term(&mut remainder, exps, coeff);
+            work.remove(li);
+        }
+    }
+
+    let p_value = mp_to_value(&sym, &names);
+    let r_value = mp_to_value(&remainder, &vars);
+    Ok(Value::List(vec![p_value, r_value]))
+}
+
+fn parse_symmetric_data(args: &[Value]) -> Option<(i64, Vec<Value>)> {
+    if args.len() != 2 {
+        return None;
+    }
+    value_to_i64(&args[0])
+        .map(|k| (k, as_value_list(&args[1])))
+        .or_else(|| value_to_i64(&args[1]).map(|k| (k, as_value_list(&args[0]))))
+}
+
+pub fn builtin_elementary_symmetric_polynomial(args: &[Value]) -> Result<Value, EvalError> {
+    let Some((k, data)) = parse_symmetric_data(args) else {
+        return Ok(call_ref("ElementarySymmetricPolynomial", args));
+    };
+    if k < 0 {
+        return Ok(call_ref("ElementarySymmetricPolynomial", args));
+    }
+    let k = k as usize;
+    if k == 0 {
+        return Ok(cv_one());
+    }
+    if k > data.len() {
+        return Ok(cv_zero());
+    }
+    let n = data.len();
+    let mut terms: Vec<Value> = Vec::new();
+    for mask in 0u64..(1u64 << n) {
+        if mask.count_ones() as usize != k {
+            continue;
+        }
+        let mut factors = Vec::new();
+        for (i, d) in data.iter().enumerate() {
+            if mask & (1u64 << i) != 0 {
+                factors.push(d.clone());
+            }
+        }
+        let term = if factors.len() == 1 {
+            factors.pop().unwrap()
+        } else {
+            simplify_call("Times", &factors)
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        Ok(cv_zero())
+    } else {
+        Ok(simplify_call("Plus", &terms))
+    }
+}
+
+pub fn builtin_power_symmetric_polynomial(args: &[Value]) -> Result<Value, EvalError> {
+    let Some((k, data)) = parse_symmetric_data(args) else {
+        return Ok(call_ref("PowerSymmetricPolynomial", args));
+    };
+    if k < 0 {
+        return Ok(call_ref("PowerSymmetricPolynomial", args));
+    }
+    let terms: Vec<Value> = data
+        .iter()
+        .map(|d| {
+            if k == 0 {
+                cv_one()
+            } else if k == 1 {
+                d.clone()
+            } else {
+                simplify_call("Power", &[d.clone(), Value::Integer(Integer::from(k))])
+            }
+        })
+        .collect();
+    if terms.is_empty() {
+        Ok(cv_zero())
+    } else {
+        Ok(simplify_call("Plus", &terms))
+    }
+}
+
+// ── HornerForm ──
+
+pub fn builtin_horner_form(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "HornerForm requires 1 or 2 arguments: HornerForm[expr, var?]".to_string(),
+        ));
+    }
+    let var = if args.len() == 2 {
+        match &args[1] {
+            Value::Symbol(s) => s.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Symbol".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
+            }
+        }
+    } else {
+        match find_var(&args[0]) {
+            Some(v) => v,
+            None => return Ok(simplify_value(&args[0])),
+        }
+    };
+    if !is_polynomial_in(&args[0], &var) {
+        return Ok(call_ref("HornerForm", args));
+    }
+    let coeffs = poly_coeffs(&args[0], &var);
+    if coeffs.len() <= 1 {
+        return Ok(simplify_value(&args[0]));
+    }
+    let x = Value::Symbol(var);
+    let mut acc = coeffs[coeffs.len() - 1].clone();
+    for i in (0..coeffs.len() - 1).rev() {
+        let inner = simplify_call("Times", &[x.clone(), acc]);
+        acc = simplify_call("Plus", &[coeffs[i].clone(), inner]);
+    }
+    Ok(acc)
+}
+
+// ── Variables ──
+
+fn is_polynomial_expr(e: &Value) -> bool {
+    match e {
+        Value::Integer(_) | Value::Real(_) | Value::Rational(_) => true,
+        Value::Symbol(s) => !is_known_constant_sym(s),
+        Value::Call { head, args } => match head.as_str() {
+            "Plus" | "Times" => args.iter().all(is_polynomial_expr),
+            "Power" if args.len() == 2 => {
+                matches!(&args[1], Value::Integer(k) if !k.is_negative())
+                    && is_polynomial_expr(&args[0])
+            }
+            "Divide" if args.len() == 2 => {
+                is_polynomial_expr(&args[0]) && !free_appears_p(&args[1], &find_any_var(&args[1]))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn collect_vars(e: &Value, out: &mut BTreeSet<String>) {
+    match e {
+        Value::Symbol(s) => {
+            if !is_known_constant_sym(s) {
+                out.insert(s.clone());
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            collect_vars(&args[0], out);
+        }
+        Value::Call { args, .. } => {
+            for a in args {
+                collect_vars(a, out);
+            }
+        }
+        Value::List(items) => {
+            for i in items {
+                collect_vars(i, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn builtin_variables(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Variables requires exactly 1 argument".to_string(),
+        ));
+    }
+    if !is_polynomial_expr(&args[0]) {
+        return Ok(call_ref("Variables", args));
+    }
+    let mut set = BTreeSet::new();
+    collect_vars(&args[0], &mut set);
+    Ok(Value::List(set.into_iter().map(Value::Symbol).collect()))
+}
+
+// ── Factor helpers ──
+
+fn collect_factor_pairs(v: &Value) -> (Value, Vec<(Value, i64)>) {
+    match v {
+        Value::Call { head, args } if head == "Times" => {
+            let mut content = cv_one();
+            let mut factors = Vec::new();
+            for a in args {
+                let (c, mut f) = collect_factor_pairs(a);
+                content = cv_mul(&content, &c);
+                factors.append(&mut f);
+            }
+            (content, factors)
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(e) = &args[1]
+                && let Some(ei) = e.to_i64()
+            {
+                if ei == 1 {
+                    collect_factor_pairs(&args[0])
+                } else {
+                    (cv_one(), vec![(args[0].clone(), ei)])
+                }
+            } else {
+                (cv_one(), vec![(v.clone(), 1)])
+            }
+        }
+        Value::Integer(_) | Value::Rational(_) => (v.clone(), Vec::new()),
+        _ => (cv_one(), vec![(v.clone(), 1)]),
+    }
+}
+
+pub fn builtin_factor_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FactorList requires exactly 1 argument".to_string(),
+        ));
+    }
+    let poly = &args[0];
+    let Some(var) = find_var(poly) else {
+        return Ok(Value::List(vec![Value::List(vec![
+            simplify_value(poly),
+            cv_one(),
+        ])]));
+    };
+    let coeffs = poly_coeffs(poly, &var);
+    if coeffs.len() <= 1 {
+        return Ok(Value::List(vec![Value::List(vec![
+            simplify_value(poly),
+            cv_one(),
+        ])]));
+    }
+    let (content_int, reduced_coeffs) =
+        int_content(&coeffs).unwrap_or((Integer::from(1), coeffs.clone()));
+    let reduced = rebuild_poly(&reduced_coeffs, &var);
+    let factored = crate::builtins::symbolic::builtin_factor(&[reduced.clone()])
+        .unwrap_or_else(|_| reduced.clone());
+    let (content_factors, mut factors) = collect_factor_pairs(&factored);
+    let content = cv_mul(&Value::Integer(content_int), &content_factors);
+    if factors.is_empty() {
+        factors.push((reduced.clone(), 1));
+    }
+    let mut list = vec![Value::List(vec![simplify_value(&content), cv_one()])];
+    for (f, e) in factors {
+        list.push(Value::List(vec![f, Value::Integer(Integer::from(e))]));
+    }
+    Ok(Value::List(list))
+}
+
+pub fn builtin_factor_square_free(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FactorSquareFree requires exactly 1 argument".to_string(),
+        ));
+    }
+    let poly = &args[0];
+    let Some(var) = find_var(poly) else {
+        return Ok(simplify_value(poly));
+    };
+    if !is_polynomial_in(poly, &var) {
+        return Ok(call_ref("FactorSquareFree", args));
+    }
+    let coeffs_v = poly_coeffs(poly, &var);
+    let Some(rc): Option<Vec<Rational>> = coeffs_v.iter().map(value_to_rat).collect() else {
+        return Ok(call_ref("FactorSquareFree", args));
+    };
+    if rc.iter().all(|c| c.is_zero()) {
+        return Ok(cv_zero());
+    }
+    let decomp = polynomial::square_free_decomposition(&rc);
+    if decomp.is_empty() {
+        return Ok(simplify_value(poly));
+    }
+    let lead = rc.iter().rev().find(|c| !c.is_zero()).cloned().unwrap();
+    let mut factors: Vec<Value> = Vec::new();
+    for (fac, mult) in decomp {
+        let fp = rebuild_poly_from_rat(&fac, &var);
+        if mult == 1 {
+            factors.push(fp);
+        } else {
+            factors.push(call(
+                "Power",
+                vec![fp, Value::Integer(Integer::from(mult as i64))],
+            ));
+        }
+    }
+    let lead_v = polynomial::rational_to_value(&lead);
+    if !is_one_v(&lead_v) {
+        factors.insert(0, lead_v);
+    }
+    if factors.is_empty() {
+        return Ok(simplify_value(poly));
+    }
+    Ok(simplify_value(&call("Times", factors)))
+}
+
+fn flatten_mults(v: &Value, out: &mut Vec<(Value, Integer)>) {
+    match v {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                flatten_mults(a, out);
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(e) = &args[1] {
+                out.push((args[0].clone(), e.clone()));
+            } else {
+                out.push((v.clone(), Integer::from(1)));
+            }
+        }
+        _ => out.push((v.clone(), Integer::from(1))),
+    }
+}
+
+fn rebuild_from_mults(mults: &[(Value, Integer)]) -> Value {
+    if mults.is_empty() {
+        return cv_one();
+    }
+    let mut factors = Vec::new();
+    for (base, exp) in mults {
+        if exp.is_zero() {
+            continue;
+        }
+        if *exp == 1 {
+            factors.push(base.clone());
+        } else {
+            factors.push(call(
+                "Power",
+                vec![base.clone(), Value::Integer(exp.clone())],
+            ));
+        }
+    }
+    if factors.is_empty() {
+        cv_one()
+    } else if factors.len() == 1 {
+        factors.pop().unwrap()
+    } else {
+        call("Times", factors)
+    }
+}
+
+/// Divide a polynomial by a monomial (product of variables), assuming exact
+/// division. Operates term-by-term so `Plus` denominators cancel fully.
+fn cancel_monomial(poly: &Value, mono: &Value) -> Value {
+    let mut div_mults = Vec::new();
+    flatten_mults(mono, &mut div_mults);
+    let terms: Vec<Value> = match poly {
+        Value::Call { head, args } if head == "Plus" => args.clone(),
+        _ => vec![poly.clone()],
+    };
+    let mut out_terms = Vec::new();
+    for t in terms {
+        let mut tm = Vec::new();
+        flatten_mults(&t, &mut tm);
+        for (db, de) in &div_mults {
+            if let Some(pos) = tm.iter().position(|(b, _)| b.struct_eq(db)) {
+                tm[pos].1 -= de.clone();
+            }
+        }
+        tm.retain(|(_, e)| !e.is_zero());
+        out_terms.push(simplify_value(&rebuild_from_mults(&tm)));
+    }
+    if out_terms.is_empty() {
+        cv_zero()
+    } else if out_terms.len() == 1 {
+        out_terms.pop().unwrap()
+    } else {
+        simplify_call("Plus", &out_terms)
+    }
+}
+
+fn collect_symbol_factors(term: &Value, vars: &[String], out: &mut BTreeMap<String, i64>) {
+    match term {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                collect_symbol_factors(a, vars, out);
+            }
+        }
+        Value::Symbol(s) => {
+            if !vars.contains(s) && !is_known_constant_sym(s) {
+                *out.entry(s.clone()).or_insert(0) += 1;
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Symbol(s) = &args[0]
+                && !vars.contains(s)
+                && !is_known_constant_sym(s)
+                && let Value::Integer(e) = &args[1]
+                && let Some(ei) = e.to_i64()
+            {
+                *out.entry(s.clone()).or_insert(0) += ei;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn common_free_factor(poly: &Value, vars: &[String]) -> Value {
+    let terms: Vec<&Value> = match poly {
+        Value::Call { head, args } if head == "Plus" => args.iter().collect(),
+        _ => vec![poly],
+    };
+    if terms.is_empty() {
+        return cv_one();
+    }
+    let mut common: Option<BTreeMap<String, i64>> = None;
+    for t in &terms {
+        let mut m = BTreeMap::new();
+        collect_symbol_factors(t, vars, &mut m);
+        common = Some(match common {
+            None => m,
+            Some(prev) => prev
+                .into_iter()
+                .filter_map(|(k, v)| m.get(&k).map(|v2| (k, v.min(*v2))))
+                .collect(),
+        });
+    }
+    let cm = common.unwrap_or_default();
+    let mut factors: Vec<Value> = Vec::new();
+    for (k, cnt) in cm {
+        if cnt <= 0 {
+            continue;
+        }
+        if cnt == 1 {
+            factors.push(Value::Symbol(k));
+        } else {
+            factors.push(call(
+                "Power",
+                vec![Value::Symbol(k), Value::Integer(Integer::from(cnt))],
+            ));
+        }
+    }
+    if factors.is_empty() {
+        cv_one()
+    } else if factors.len() == 1 {
+        factors.pop().unwrap()
+    } else {
+        call("Times", factors)
+    }
+}
+
+pub fn builtin_factor_terms_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "FactorTermsList requires 1 or 2 arguments: FactorTermsList[poly, {x, ...}?]"
+                .to_string(),
+        ));
+    }
+    let vars = match args.get(1) {
+        None => Vec::new(),
+        Some(v) => as_symbol_list(v),
+    };
+    let poly = &args[0];
+    let Some(var) = find_var(poly) else {
+        return Ok(Value::List(vec![simplify_value(poly), cv_one()]));
+    };
+    let coeffs = poly_coeffs(poly, &var);
+    let (content_int, reduced_coeffs) =
+        int_content(&coeffs).unwrap_or((Integer::from(1), coeffs.clone()));
+    let content = Value::Integer(content_int);
+    let reduced = rebuild_poly(&reduced_coeffs, &var);
+    if vars.is_empty() {
+        return Ok(Value::List(vec![
+            simplify_value(&content),
+            simplify_value(&reduced),
+        ]));
+    }
+    let free = common_free_factor(&reduced, &vars);
+    let remaining = if is_one_v(&free) {
+        reduced.clone()
+    } else {
+        simplify_value(&cancel_monomial(&reduced, &free))
+    };
+    Ok(Value::List(vec![
+        simplify_value(&content),
+        simplify_value(&free),
+        simplify_value(&remaining),
+    ]))
+}
+
+// ── PolynomialLCM ──
+
+pub fn builtin_polynomial_lcm(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "PolynomialLCM requires exactly 3 arguments: PolynomialLCM[poly1, poly2, x]"
+                .to_string(),
+        ));
+    }
+    let var = match &args[2] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[2].type_name().to_string(),
+            });
+        }
+    };
+    if !is_polynomial_in(&args[0], &var) || !is_polynomial_in(&args[1], &var) {
+        return Ok(call_ref("PolynomialLCM", args));
+    }
+    let g = simplify_value(&builtin_polynomial_gcd(args)?);
+    if is_zero_v(&g) {
+        return Ok(cv_zero());
+    }
+    let p = poly_coeffs(&args[0], &var);
+    let q = poly_coeffs(&args[1], &var);
+    if p.iter().all(is_zero_v) || q.iter().all(is_zero_v) {
+        return Ok(cv_zero());
+    }
+    // Coefficient-level `p*q / gcd`: avoids relying on expression expansion.
+    let prod = cvv_mul(&p, &q);
+    let (quot, rem) = coeff_div(&prod, &poly_coeffs(&g, &var));
+    if !rem.iter().all(is_zero_v) {
+        return Ok(call_ref("PolynomialLCM", args));
+    }
+    Ok(simplify_value(&rebuild_poly(&quot, &var)))
+}
+
+// ── Decompose ──
+
+/// Try to write `f = g(h)` with `deg h == m`. Returns `(g, h)` coefficient
+/// vectors on success. The inner polynomial is normalised to have zero constant
+/// term, which is always possible by shifting the outer polynomial.
+fn try_decompose_degree(f: &[Value], m: usize) -> Option<(Vec<Value>, Vec<Value>)> {
+    let n = f.len() - 1;
+    if m < 2 || m > n || !n.is_multiple_of(m) {
+        return None;
+    }
+    let d = n / m;
+    let lead = f[n].clone();
+    if is_zero_v(&lead) {
+        return None;
+    }
+    let mut h = vec![cv_zero(); m + 1];
+    h[m] = cv_one();
+    // Determine h's coefficients from degree m-1 down to 1 using the top
+    // coefficients of f, where only the leading term of g contributes.
+    for k in 1..m {
+        let p = n - k;
+        h[m - k] = cv_zero();
+        let hd = cvv_pow(&h, d);
+        let known = cvv_coeff(&hd, p as i64);
+        let target = cv_div(&f[p], &lead);
+        let diff = cv_sub(&target, &known);
+        h[m - k] = cv_div(&diff, &Value::Integer(Integer::from(d as i64)));
+    }
+    cvv_trim(&mut h);
+    // Composition division to recover g.
+    let mut g = vec![cv_zero(); d + 1];
+    g[d] = lead.clone();
+    let mut resid = f.to_vec();
+    cvv_trim(&mut resid);
+    let gd_term = cvv_scale(&cvv_pow(&h, d), &lead);
+    resid = cvv_sub(&resid, &gd_term);
+    for j in (0..d).rev() {
+        let top = cvv_coeff(&resid, (m * j) as i64);
+        g[j] = top.clone();
+        let term = cvv_scale(&cvv_pow(&h, j), &top);
+        resid = cvv_sub(&resid, &term);
+    }
+    if !resid.iter().all(is_zero_v) {
+        return None;
+    }
+    cvv_trim(&mut g);
+    Some((g, h))
+}
+
+fn decompose_coeffs(coeffs: &[Value], var: &str) -> Vec<Value> {
+    let n = coeffs.len() - 1;
+    if n < 2 {
+        return vec![rebuild_poly(coeffs, var)];
+    }
+    let mut candidates: Vec<usize> = (2..=n / 2).filter(|m| n.is_multiple_of(*m)).collect();
+    candidates.push(n);
+    for m in candidates {
+        if let Some((g, h)) = try_decompose_degree(coeffs, m) {
+            let mut result = decompose_coeffs(&g, var);
+            result.push(rebuild_poly(&h, var));
+            return result;
+        }
+    }
+    vec![rebuild_poly(coeffs, var)]
+}
+
+pub fn builtin_decompose(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "Decompose requires exactly 2 arguments: Decompose[poly, x]".to_string(),
+        ));
+    }
+    let var = match &args[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Symbol".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    if !is_polynomial_in(&args[0], &var) {
+        return Ok(call_ref("Decompose", args));
+    }
+    let coeffs = poly_coeffs(&args[0], &var);
+    if coeffs.iter().all(is_zero_v) {
+        return Ok(Value::List(vec![cv_zero()]));
+    }
+    let list = decompose_coeffs(&coeffs, &var);
+    if list.len() == 1 {
+        // No decomposition: return the (already canonical) original.
+        return Ok(Value::List(vec![args[0].clone()]));
+    }
+    Ok(Value::List(list))
+}
+
+// ── Registration ──
+
+/// Register the polynomial-algebra builtins implemented in this module.
+pub fn register(env: &Env) {
+    super::register_builtin(env, "PolynomialReduce", builtin_polynomial_reduce);
+    super::register_builtin(env, "SymmetricReduction", builtin_symmetric_reduction);
+    super::register_builtin(
+        env,
+        "ElementarySymmetricPolynomial",
+        builtin_elementary_symmetric_polynomial,
+    );
+    super::register_builtin(
+        env,
+        "PowerSymmetricPolynomial",
+        builtin_power_symmetric_polynomial,
+    );
+    super::register_builtin(env, "HornerForm", builtin_horner_form);
+    super::register_builtin(env, "Variables", builtin_variables);
+    super::register_builtin(env, "FactorList", builtin_factor_list);
+    super::register_builtin(env, "FactorSquareFree", builtin_factor_square_free);
+    super::register_builtin(env, "FactorTermsList", builtin_factor_terms_list);
+    super::register_builtin(env, "Decompose", builtin_decompose);
+    super::register_builtin(env, "PolynomialLCM", builtin_polynomial_lcm);
 }
 
 #[cfg(test)]
@@ -4078,5 +5238,409 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(&c3, Value::Integer(n) if *n == Integer::from(1)));
+    }
+
+    // ══════════════════════ Polynomial algebra builtins ══════════════════════
+
+    fn pow(v: Value, e: i64) -> Value {
+        val_call("Power", vec![v, val_int(e)])
+    }
+
+    fn eval_at(v: &Value, assigns: &[(&str, i64)]) -> f64 {
+        let mut cur = v.clone();
+        for (name, x) in assigns {
+            cur = substitute(&cur, name, &val_int(*x));
+        }
+        numeric_eval(&cur).to_f64()
+    }
+
+    fn assert_close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap()
+    }
+
+    #[test]
+    fn test_polynomial_reduce_univariate() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 3),
+                val_call("Times", vec![val_int(2), pow(val_sym("x"), 2)]),
+                val_call("Times", vec![val_int(3), val_sym("x")]),
+                val_int(4),
+            ],
+        );
+        let div = val_call("Plus", vec![val_sym("x"), val_int(1)]);
+        let res = builtin_polynomial_reduce(&[
+            poly.clone(),
+            Value::List(vec![div.clone()]),
+            val_sym("x"),
+        ])
+        .unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list, got {res}")
+        };
+        assert_eq!(items.len(), 2);
+        let Value::List(qs) = &items[0] else {
+            panic!("expected quotient list")
+        };
+        assert_eq!(qs.len(), 1);
+        let recon = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![qs[0].clone(), div]),
+                items[1].clone(),
+            ],
+        );
+        assert_close(eval_at(&recon, &[("x", 5)]), eval_at(&poly, &[("x", 5)]));
+        // (poly at -1) == 2, the remainder.
+        assert_close(eval_at(&items[1], &[("x", 3)]), 2.0);
+    }
+
+    #[test]
+    fn test_polynomial_reduce_multivariate() {
+        let poly = val_call("Plus", vec![pow(val_sym("x"), 2), pow(val_sym("y"), 2)]);
+        let div = val_call(
+            "Plus",
+            vec![
+                val_sym("x"),
+                val_call("Times", vec![val_int(-1), val_sym("y")]),
+            ],
+        );
+        let vars = Value::List(vec![val_sym("x"), val_sym("y")]);
+        let res = builtin_polynomial_reduce(&[poly.clone(), Value::List(vec![div.clone()]), vars])
+            .unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list, got {res}")
+        };
+        let Value::List(qs) = &items[0] else {
+            panic!("expected quotient list")
+        };
+        let recon = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![qs[0].clone(), div]),
+                items[1].clone(),
+            ],
+        );
+        assert_close(
+            eval_at(&recon, &[("x", 3), ("y", 1)]),
+            eval_at(&poly, &[("x", 3), ("y", 1)]),
+        );
+        // Remainder x^2 + y^2 - (x + y)(x - y) = 2 y^2.
+        assert_close(eval_at(&items[1], &[("x", 3), ("y", 1)]), 2.0);
+    }
+
+    #[test]
+    fn test_polynomial_reduce_single_divisor_not_list() {
+        let poly = val_call("Plus", vec![pow(val_sym("x"), 2), val_int(1)]);
+        let div = val_call("Plus", vec![val_sym("x"), val_int(1)]);
+        let res = builtin_polynomial_reduce(&[poly, div, val_sym("x")]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        // Remainder of x^2+1 divided by x+1 is 2.
+        assert_close(eval_at(&items[1], &[("x", 4)]), 2.0);
+    }
+
+    #[test]
+    fn test_symmetric_reduction_symmetric() {
+        let f = val_call("Plus", vec![pow(val_sym("x"), 2), pow(val_sym("y"), 2)]);
+        let res = builtin_symmetric_reduction(&[
+            f.clone(),
+            Value::List(vec![val_sym("x"), val_sym("y")]),
+        ])
+        .unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        // Remainder is zero for a symmetric input.
+        assert!(eval_at(&items[1], &[("x", 2), ("y", 3)]).abs() < 1e-12);
+        // Reconstruct from s1 = x+y, s2 = x*y.
+        let mut recon = items[0].clone();
+        recon = substitute(
+            &recon,
+            "s1",
+            &val_call("Plus", vec![val_sym("x"), val_sym("y")]),
+        );
+        recon = substitute(
+            &recon,
+            "s2",
+            &val_call("Times", vec![val_sym("x"), val_sym("y")]),
+        );
+        assert_close(
+            eval_at(&recon, &[("x", 2), ("y", 3)]),
+            eval_at(&f, &[("x", 2), ("y", 3)]),
+        );
+    }
+
+    #[test]
+    fn test_symmetric_reduction_nonsymmetric() {
+        let f = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 2),
+                val_call("Times", vec![val_int(-1), pow(val_sym("y"), 2)]),
+            ],
+        );
+        let res = builtin_symmetric_reduction(&[
+            f.clone(),
+            Value::List(vec![val_sym("x"), val_sym("y")]),
+        ])
+        .unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        let mut recon = items[0].clone();
+        recon = substitute(
+            &recon,
+            "s1",
+            &val_call("Plus", vec![val_sym("x"), val_sym("y")]),
+        );
+        recon = substitute(
+            &recon,
+            "s2",
+            &val_call("Times", vec![val_sym("x"), val_sym("y")]),
+        );
+        let total = val_call("Plus", vec![recon, items[1].clone()]);
+        assert_close(
+            eval_at(&total, &[("x", 4), ("y", 1)]),
+            eval_at(&f, &[("x", 4), ("y", 1)]),
+        );
+    }
+
+    #[test]
+    fn test_elementary_symmetric_polynomial() {
+        let data = Value::List(vec![val_sym("a"), val_sym("b"), val_sym("c")]);
+        let res = builtin_elementary_symmetric_polynomial(&[val_int(2), data]).unwrap();
+        assert_close(eval_at(&res, &[("a", 1), ("b", 2), ("c", 3)]), 11.0);
+        let e0 = builtin_elementary_symmetric_polynomial(&[
+            val_int(0),
+            Value::List(vec![val_sym("a"), val_sym("b")]),
+        ])
+        .unwrap();
+        assert!(matches!(&e0, Value::Integer(n) if *n == 1));
+        let e3 = builtin_elementary_symmetric_polynomial(&[
+            val_int(3),
+            Value::List(vec![val_sym("a"), val_sym("b")]),
+        ])
+        .unwrap();
+        assert!(is_zero_v(&e3));
+    }
+
+    #[test]
+    fn test_power_symmetric_polynomial() {
+        let data = Value::List(vec![val_sym("a"), val_sym("b"), val_sym("c")]);
+        let res = builtin_power_symmetric_polynomial(&[val_int(2), data]).unwrap();
+        assert_close(eval_at(&res, &[("a", 1), ("b", 2), ("c", 3)]), 14.0);
+        let p0 = builtin_power_symmetric_polynomial(&[
+            val_int(0),
+            Value::List(vec![val_sym("a"), val_sym("b")]),
+        ])
+        .unwrap();
+        assert!(matches!(&p0, Value::Integer(n) if *n == 2));
+    }
+
+    #[test]
+    fn test_variables_sorted_and_unevaluated() {
+        let expr = val_call("Plus", vec![pow(val_sym("x"), 2), val_sym("y")]);
+        let res = builtin_variables(&[expr]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        assert!(items[0].struct_eq(&val_sym("x")));
+        assert!(items[1].struct_eq(&val_sym("y")));
+        // Non-polynomial input stays unevaluated.
+        let res2 = builtin_variables(&[val_call("Sin", vec![val_sym("x")])]).unwrap();
+        assert!(matches!(&res2, Value::Call { head, .. } if head == "Variables"));
+    }
+
+    #[test]
+    fn test_horner_form_reconstructs() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 3),
+                val_call("Times", vec![val_int(2), pow(val_sym("x"), 2)]),
+                val_call("Times", vec![val_int(3), val_sym("x")]),
+                val_int(4),
+            ],
+        );
+        let res = builtin_horner_form(&[poly.clone(), val_sym("x")]).unwrap();
+        // Must be a nested form, not the original flat sum.
+        assert!(matches!(&res, Value::Call { head, .. } if head == "Plus" || head == "Times"));
+        assert_close(eval_at(&res, &[("x", 2)]), eval_at(&poly, &[("x", 2)]));
+    }
+
+    #[test]
+    fn test_factor_list_structure() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![val_int(2), pow(val_sym("x"), 2)]),
+                val_int(-2),
+            ],
+        );
+        let res = builtin_factor_list(&[poly.clone()]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 3);
+        let Value::List(first) = &items[0] else {
+            panic!("expected pair")
+        };
+        assert!(matches!(&first[0], Value::Integer(n) if *n == 2));
+        // Product of factors reconstructs the polynomial.
+        let mut prod = val_int(1);
+        for item in items {
+            let Value::List(pair) = item else {
+                panic!("pair")
+            };
+            prod = val_call(
+                "Times",
+                vec![
+                    prod,
+                    pow(
+                        pair[0].clone(),
+                        match &pair[1] {
+                            Value::Integer(n) => n.to_i64().unwrap(),
+                            _ => 1,
+                        },
+                    ),
+                ],
+            );
+        }
+        assert_close(eval_at(&prod, &[("x", 3)]), eval_at(&poly, &[("x", 3)]));
+    }
+
+    #[test]
+    fn test_factor_square_free_reconstructs() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 2),
+                val_call("Times", vec![val_int(2), val_sym("x")]),
+                val_int(1),
+            ],
+        );
+        let res = builtin_factor_square_free(&[poly.clone()]).unwrap();
+        assert_close(eval_at(&res, &[("x", 7)]), eval_at(&poly, &[("x", 7)]));
+    }
+
+    #[test]
+    fn test_factor_terms_list() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![val_int(6), val_sym("x")]),
+                val_int(9),
+            ],
+        );
+        let res = builtin_factor_terms_list(&[poly]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], Value::Integer(n) if *n == 3));
+        // content * remaining == original polynomial.
+        let recon = val_call("Times", vec![items[0].clone(), items[1].clone()]);
+        assert_close(eval_at(&recon, &[("x", 4)]), 33.0);
+    }
+
+    #[test]
+    fn test_factor_terms_list_free_factor() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![val_int(2), val_sym("x"), val_sym("y")]),
+                val_call("Times", vec![val_int(3), val_sym("y")]),
+            ],
+        );
+        let res = builtin_factor_terms_list(&[poly, Value::List(vec![val_sym("x")])]).unwrap();
+        let Value::List(items) = &res else {
+            panic!("expected list")
+        };
+        assert_eq!(items.len(), 3);
+        assert!(items[1].struct_eq(&val_sym("y")));
+        let recon = val_call(
+            "Times",
+            vec![items[0].clone(), items[1].clone(), items[2].clone()],
+        );
+        assert_close(eval_at(&recon, &[("x", 2), ("y", 3)]), 12.0 + 9.0);
+    }
+
+    #[test]
+    fn test_decompose_reconstructs() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 4),
+                val_call("Times", vec![val_int(2), pow(val_sym("x"), 2)]),
+                val_int(1),
+            ],
+        );
+        let res = builtin_decompose(&[poly.clone(), val_sym("x")]).unwrap();
+        let Value::List(list) = &res else {
+            panic!("expected list")
+        };
+        assert!(list.len() >= 2);
+        // Compose list from innermost outward.
+        let mut acc = val_sym("x");
+        for p in list.iter().rev() {
+            acc = substitute(p, "x", &acc);
+        }
+        assert_close(eval_at(&acc, &[("x", 2)]), eval_at(&poly, &[("x", 2)]));
+    }
+
+    #[test]
+    fn test_decompose_no_decomposition() {
+        let poly = val_call(
+            "Plus",
+            vec![
+                val_call("Times", vec![val_int(2), val_sym("x")]),
+                val_int(1),
+            ],
+        );
+        let res = builtin_decompose(&[poly.clone(), val_sym("x")]).unwrap();
+        let Value::List(list) = &res else {
+            panic!("expected list")
+        };
+        assert_eq!(list.len(), 1);
+        assert!(list[0].struct_eq(&poly));
+    }
+
+    #[test]
+    fn test_polynomial_lcm_divisible() {
+        let p = val_call("Plus", vec![pow(val_sym("x"), 2), val_int(-1)]);
+        let q = val_call(
+            "Plus",
+            vec![
+                pow(val_sym("x"), 2),
+                val_call("Times", vec![val_int(2), val_sym("x")]),
+                val_int(1),
+            ],
+        );
+        let res = builtin_polynomial_lcm(&[p.clone(), q.clone(), val_sym("x")]).unwrap();
+        for d in [p, q] {
+            let (_, rem) = polyn_div(&res, &d, "x");
+            assert!(is_zero_v(&simplify_value(&rem)));
+        }
+    }
+
+    #[test]
+    fn test_registered_builtins_eval() {
+        let v = eval_str("Variables[x^2 + y]");
+        assert!(matches!(&v, Value::List(items) if items.len() == 2));
+        let e = eval_str("ElementarySymmetricPolynomial[2, {a, b, c}]");
+        assert_close(eval_at(&e, &[("a", 1), ("b", 2), ("c", 3)]), 11.0);
+        let h = eval_str("HornerForm[x^2 + 3x + 2, x]");
+        assert_close(eval_at(&h, &[("x", 4)]), 30.0);
     }
 }

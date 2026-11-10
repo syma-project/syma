@@ -15,6 +15,7 @@ use crate::env::Env;
 use crate::eval::apply_function;
 use crate::eval::eval;
 use crate::value::{BuiltinFn, EvalError, Value};
+use rug::Integer;
 
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
@@ -32,6 +33,10 @@ pub fn register(env: &Env) {
         ("TimeConstrained", builtin_time_constrained),
         ("MemoryConstrained", builtin_memory_constrained),
         ("Enclose", builtin_enclose),
+        ("Piecewise", builtin_piecewise),
+        ("Unless", builtin_unless),
+        ("WithCleanup", builtin_with_cleanup),
+        ("IgnoringInactive", builtin_ignoring_inactive),
     ] {
         env.set(
             name.to_string(),
@@ -302,6 +307,160 @@ pub fn builtin_enclose(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 }
 
+// ── Piecewise / Unless / WithCleanup / IgnoringInactive ──────────────────────
+
+/// `Piecewise[{{v1, c1}, {v2, c2}, …}, default]`.
+///
+/// Evaluate the conditions in order and return the value of the first branch
+/// whose condition is `True`; if every condition is `False`, return `default`
+/// (or `0` when no default is given). A call with a malformed piece list, or a
+/// condition that does not reduce to a boolean, is returned unevaluated.
+pub fn builtin_piecewise(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated_values("Piecewise", args));
+    }
+    let pieces = held_expr(&args[0]);
+    let items = match &pieces {
+        Expr::List(items) => items,
+        _ => return Ok(unevaluated_values("Piecewise", args)),
+    };
+    for item in items {
+        let pair = match item {
+            Expr::List(pair) if pair.len() == 2 => pair,
+            _ => return Ok(unevaluated_values("Piecewise", args)),
+        };
+        match eval(&pair[1], env)? {
+            Value::Bool(true) => return eval(&pair[0], env),
+            Value::Bool(false) => {}
+            _ => return Ok(unevaluated_values("Piecewise", args)),
+        }
+    }
+    match args.get(1) {
+        Some(default) => eval(&held_expr(default), env),
+        None => Ok(Value::Integer(Integer::from(0))),
+    }
+}
+
+/// `Unless[test, body]` — evaluate `body` unless `test` evaluates to `True`.
+///
+/// With the `HoldAll` attribute the test and body are held; the test is
+/// evaluated first and `body` only runs when the test is not `True`.
+pub fn builtin_unless(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated_values("Unless", args));
+    }
+    if eval(&held_expr(&args[0]), env)?.to_bool() {
+        Ok(Value::Null)
+    } else {
+        eval(&held_expr(&args[1]), env)
+    }
+}
+
+/// `WithCleanup[expr, cleanup]` — evaluate `expr`, then always evaluate
+/// `cleanup`, returning the result of `expr`.
+///
+/// An error raised by `expr` (including non-local transfers such as `Throw`)
+/// propagates after the cleanup has run, so cleanup actions always execute.
+pub fn builtin_with_cleanup(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(unevaluated_values("WithCleanup", args));
+    }
+    let result = eval(&held_expr(&args[0]), env);
+    let cleanup = eval(&held_expr(&args[1]), env);
+    match result {
+        Ok(value) => {
+            cleanup?;
+            Ok(value)
+        }
+        Err(error) => {
+            // The primary error wins; a cleanup error is still surfaced when
+            // the body itself succeeded (handled above).
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
+/// `IgnoringInactive[expr]` — evaluate `expr`, treating `Inactive[…]` wrappers
+/// as if they were active, then evaluate the resulting expression.
+///
+/// `Inactive[head]` becomes `head` and `Inactive[head][args]` becomes
+/// `head[args]`; stripping is applied recursively throughout the result.
+pub fn builtin_ignoring_inactive(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_values("IgnoringInactive", args));
+    }
+    let value = eval(&held_expr(&args[0]), env)?;
+    let (stripped, changed) = strip_inactive(value);
+    if !changed {
+        return Ok(stripped);
+    }
+    let expr = crate::eval::table::value_to_expr(&stripped);
+    eval(&expr, env)
+}
+
+/// Recursively remove `Inactive[…]` wrappers. Returns the transformed value and
+/// whether anything changed.
+fn strip_inactive(value: Value) -> (Value, bool) {
+    match value {
+        Value::Call { head, args } => {
+            let mut changed = false;
+            let new_args = args
+                .into_iter()
+                .map(|a| {
+                    let (na, c) = strip_inactive(a);
+                    changed |= c;
+                    na
+                })
+                .collect::<Vec<_>>();
+            if head == "Inactive" {
+                if new_args.len() == 1 {
+                    return (new_args.into_iter().next().unwrap(), true);
+                }
+                return (
+                    Value::Call {
+                        head,
+                        args: new_args,
+                    },
+                    changed,
+                );
+            }
+            if let Some(inner) = head
+                .strip_prefix("Inactive[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                return (
+                    Value::Call {
+                        head: inner.to_string(),
+                        args: new_args,
+                    },
+                    true,
+                );
+            }
+            (
+                Value::Call {
+                    head,
+                    args: new_args,
+                },
+                changed,
+            )
+        }
+        Value::List(items) => {
+            let mut changed = false;
+            let new_items = items
+                .into_iter()
+                .map(|i| {
+                    let (ni, c) = strip_inactive(i);
+                    changed |= c;
+                    ni
+                })
+                .collect();
+            (Value::List(new_items), changed)
+        }
+        other => (other, false),
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Extract the held expression from a `HoldAll` argument.
@@ -488,5 +647,176 @@ mod tests {
     fn test_throw_wrong_arity_unevaluated() {
         let v = builtin_throw(&[int(1), int(2), int(3)]).unwrap_err();
         assert!(matches!(v, EvalError::NoMatch { .. }));
+    }
+
+    fn assert_unevaluated(v: Value, head: &str) {
+        match v {
+            Value::Call { head: h, .. } => assert_eq!(h, head),
+            other => panic!("expected unevaluated {head}, got {other:?}"),
+        }
+    }
+
+    // ── Piecewise ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_piecewise_first_true_branch() {
+        assert_eq!(
+            eval_str("Piecewise[{{1, False}, {2, True}, {3, True}}]"),
+            int(2)
+        );
+        assert_eq!(eval_str("Piecewise[{{5, True}}]"), int(5));
+    }
+
+    #[test]
+    fn test_piecewise_default() {
+        assert_eq!(eval_str("Piecewise[{{1, False}, {2, False}}, 99]"), int(99));
+        // No true branch and no default yields 0.
+        assert_eq!(eval_str("Piecewise[{{1, False}}]"), int(0));
+    }
+
+    #[test]
+    fn test_piecewise_only_selected_branch_evaluated() {
+        assert_eq!(
+            eval_str("Piecewise[{{10, True}, {Error[\"boom\"], True}}]"),
+            int(10)
+        );
+    }
+
+    #[test]
+    fn test_piecewise_symbolic_condition_unevaluated() {
+        let v = eval_str("Piecewise[{{a, b > 0}}]");
+        assert_unevaluated(v, "Piecewise");
+        // A default does not let a symbolic condition reduce.
+        let v = eval_str("Piecewise[{{a, b > 0}}, 0]");
+        assert_unevaluated(v, "Piecewise");
+    }
+
+    #[test]
+    fn test_piecewise_malformed_unevaluated() {
+        let v = eval_str("Piecewise[1]");
+        assert_unevaluated(v, "Piecewise");
+        let v = eval_str("Piecewise[{{1, True, False}}]");
+        assert_unevaluated(v, "Piecewise");
+    }
+
+    // ── Unless ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unless_false_runs_body() {
+        assert_eq!(eval_str("Unless[False, 7]"), int(7));
+        assert_eq!(eval_str("Unless[1 > 2, 7]"), int(7));
+    }
+
+    #[test]
+    fn test_unless_true_returns_null() {
+        assert_eq!(eval_str("Unless[True, 7]"), Value::Null);
+        assert_eq!(eval_str("Unless[True, Error[\"boom\"]]"), Value::Null);
+    }
+
+    #[test]
+    fn test_unless_body_side_effect() {
+        assert_eq!(eval_str("Unless[False, x = 2]; x"), int(2));
+    }
+
+    #[test]
+    fn test_unless_wrong_arity_unevaluated() {
+        let v = eval_str("Unless[True]");
+        assert_unevaluated(v, "Unless");
+    }
+
+    // ── WithCleanup ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_cleanup_runs_and_returns_body() {
+        assert_eq!(
+            eval_str("{WithCleanup[y = 5, y = 9], y}"),
+            Value::List(vec![int(5), int(9)])
+        );
+    }
+
+    #[test]
+    fn test_with_cleanup_runs_on_error() {
+        assert_eq!(eval_str("Catch[WithCleanup[Throw[1], z = 3]]; z"), int(3));
+    }
+
+    #[test]
+    fn test_with_cleanup_wrong_arity_unevaluated() {
+        let v = eval_str("WithCleanup[1]");
+        assert_unevaluated(v, "WithCleanup");
+    }
+
+    // ── IgnoringInactive ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ignoring_inactive_activates_head() {
+        assert_eq!(eval_str("IgnoringInactive[Inactive[Plus][1, 2]]"), int(3));
+        assert_eq!(eval_str("IgnoringInactive[Inactive[Sin][0]]"), int(0));
+    }
+
+    #[test]
+    fn test_ignoring_inactive_plain_expr() {
+        assert_eq!(eval_str("IgnoringInactive[1 + 1]"), int(2));
+    }
+
+    #[test]
+    fn test_ignoring_inactive_nested() {
+        assert_eq!(
+            eval_str("IgnoringInactive[{Inactive[Plus][1, 1], Inactive[Times][2, 3]}]"),
+            Value::List(vec![int(2), int(6)])
+        );
+    }
+
+    #[test]
+    fn test_inactive_alone_stays_inactive() {
+        let v = eval_str("Inactive[Plus][1, 2]");
+        match v {
+            Value::Call { head, .. } => assert_eq!(head, "Inactive[Plus]"),
+            other => panic!("expected inactive call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ignoring_inactive_wrong_arity_unevaluated() {
+        let v = eval_str("IgnoringInactive[1, 2]");
+        assert_unevaluated(v, "IgnoringInactive");
+    }
+
+    // ── Check / TimeConstrained interactions ─────────────────────────────────
+
+    #[test]
+    fn test_check_does_not_catch_time_constrained_abort() {
+        // TimeConstrained turns the abort into the plain value $Aborted, which
+        // Check must pass through rather than treating as an error.
+        assert_eq!(
+            eval_str("Check[TimeConstrained[Abort[], 0], 42]"),
+            Value::Symbol("$Aborted".to_string())
+        );
+        assert_eq!(
+            eval_str("CheckAbort[TimeConstrained[Abort[], 0], 7]"),
+            Value::Symbol("$Aborted".to_string())
+        );
+    }
+
+    #[test]
+    fn test_time_constrained_wraps_check() {
+        // The inner Check handles the error and TimeConstrained returns it.
+        assert_eq!(
+            eval_str("TimeConstrained[Check[Error[\"x\"], 5], 100]"),
+            int(5)
+        );
+    }
+
+    #[test]
+    fn test_check_time_constrained_error_uses_fail_expr() {
+        // With a zero budget the TimeConstrained fail expression wins over the
+        // error raised inside, so Check sees the successful fail value.
+        assert_eq!(
+            eval_str("Check[TimeConstrained[Error[\"x\"], 0], 42]"),
+            Value::Symbol("$Aborted".to_string())
+        );
+        assert_eq!(
+            eval_str("Check[TimeConstrained[Error[\"x\"], 0, 5], 42]"),
+            int(5)
+        );
     }
 }

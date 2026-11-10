@@ -1139,15 +1139,540 @@ fn bell_number(n: usize) -> Integer {
     prev_row[0].clone()
 }
 
+// ── BellNumber ───────────────────────────────────────────────────────────────
+
+/// BellNumber[n] — the n-th Bell number (an alias for BellB[n]).
+pub fn builtin_bell_number(args: &[Value]) -> Result<Value, EvalError> {
+    builtin_bell_b(args)
+}
+
+// ── Derangements ─────────────────────────────────────────────────────────────
+
+/// Derangements[n] — the number of derangements of n elements (!n).
+/// Derangements[list] — all derangements (permutations with no fixed position) of list.
+pub fn builtin_derangements(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Derangements requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("Derangements: n too large".to_string()))?;
+            Ok(Value::Integer(subfactorial_val(n_val)))
+        }
+        Value::List(items) => {
+            let mut result = Vec::new();
+            let used = vec![false; items.len()];
+            let mut current = Vec::with_capacity(items.len());
+            derange(items, &used, &mut current, &mut result);
+            Ok(Value::List(result))
+        }
+        _ => Ok(Value::Call {
+            head: "Derangements".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Subfactorial value: !n, the number of derangements of n objects.
+fn subfactorial_val(n: usize) -> Integer {
+    let mut curr = Integer::from(0); // !1
+    match n {
+        0 => Integer::from(1),
+        1 => Integer::from(0),
+        _ => {
+            for i in 2..=n {
+                let sign = if i % 2 == 0 { 1 } else { -1 };
+                curr = Integer::from(i) * curr + sign;
+            }
+            curr
+        }
+    }
+}
+
+/// Backtracking generation of derangements of `items`: position `p` receives an
+/// element from index `i` with `i != p`.
+fn derange(items: &[Value], used: &[bool], current: &mut Vec<Value>, result: &mut Vec<Value>) {
+    let pos = current.len();
+    if pos == items.len() {
+        result.push(Value::List(current.clone()));
+        return;
+    }
+    for i in 0..items.len() {
+        if !used[i] && i != pos {
+            let mut used2 = used.to_vec();
+            used2[i] = true;
+            current.push(items[i].clone());
+            derange(items, &used2, current, result);
+            current.pop();
+        }
+    }
+}
+
+// ── EulerE ───────────────────────────────────────────────────────────────────
+
+/// EulerE[n] — the n-th Euler (secant) number E_n:
+/// E_0 = 1, E_n = 0 for odd n, and E_n = -sum_{even k<n} C(n,k) E_k.
+pub fn builtin_euler_e(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "EulerE requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("EulerE: n too large".to_string()))?;
+            Ok(Value::Integer(euler_number_e(n_val)))
+        }
+        _ => Ok(Value::Call {
+            head: "EulerE".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Euler (secant) number E_n; zero for odd n.
+fn euler_number_e(n: usize) -> Integer {
+    if n % 2 == 1 {
+        return Integer::from(0);
+    }
+    let mut e = vec![Integer::from(0); n + 1];
+    e[0] = Integer::from(1);
+    for m in (2..=n).step_by(2) {
+        let mut sum = Integer::from(0);
+        for k in (0..m).step_by(2) {
+            sum += binomial_val(m, k) * e[k].clone();
+        }
+        e[m] = -sum;
+    }
+    e[n].clone()
+}
+
+/// Exact binomial coefficient C(n, k) for plain `usize` inputs.
+fn binomial_val(n: usize, k: usize) -> Integer {
+    if k > n {
+        return Integer::from(0);
+    }
+    let k = k.min(n - k);
+    let mut result = Integer::from(1);
+    for i in 0..k {
+        result *= Integer::from(n - i);
+        result /= Integer::from(i + 1);
+    }
+    result
+}
+
+// ── EulerNumber ──────────────────────────────────────────────────────────────
+
+/// EulerNumber[n] — the n-th Euler zigzag (up/down) number A000111:
+/// 1, 1, 1, 2, 5, 16, 61, 272, 1385, 7936, ...
+pub fn builtin_euler_number(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "EulerNumber requires exactly 1 argument".to_string(),
+        ));
+    }
+    match &args[0] {
+        Value::Integer(n) if !n.is_negative() => {
+            let n_val = n
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("EulerNumber: n too large".to_string()))?;
+            Ok(Value::Integer(euler_zigzag(n_val)))
+        }
+        _ => Ok(Value::Call {
+            head: "EulerNumber".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
+/// Euler zigzag (up/down) number A_n built from the Entringer triangle:
+/// E(0,0) = 1, E(n,0) = 0, E(n,k) = E(n,k-1) + E(n-1,n-k); A_n = E(n,n).
+fn euler_zigzag(n: usize) -> Integer {
+    if n == 0 {
+        return Integer::from(1);
+    }
+    let mut prev = vec![Integer::from(1)]; // E(0, 0)
+    for m in 1..=n {
+        let mut row = vec![Integer::from(0); m + 1];
+        for k in 1..=m {
+            row[k] = row[k - 1].clone() + prev[m - k].clone();
+        }
+        prev = row;
+    }
+    prev[n].clone()
+}
+
+// ── Permutations as cycles / signatures / orders ─────────────────────────────
+
+/// Return the cycle list of a `Cycles[...]` value, if it is one.
+fn cycles_arg(val: &Value) -> Option<&[Value]> {
+    if let Value::Call { head, args } = val
+        && head == "Cycles"
+        && args.len() == 1
+        && let Value::List(cycles) = &args[0]
+    {
+        return Some(cycles.as_slice());
+    }
+    None
+}
+
+/// Build a canonical `Cycles[{{...}, ...}]` value from plain cycles.
+fn make_cycles(cycles: Vec<Vec<usize>>) -> Value {
+    let cycle_values = cycles
+        .into_iter()
+        .map(|c| {
+            Value::List(
+                c.into_iter()
+                    .map(|x| Value::Integer(Integer::from(x)))
+                    .collect(),
+            )
+        })
+        .collect();
+    Value::Call {
+        head: "Cycles".to_string(),
+        args: vec![Value::List(cycle_values)],
+    }
+}
+
+/// Parse a permutation image list (1-indexed positive integers) from a Value.
+fn parse_perm_list(val: &Value) -> Result<Vec<usize>, EvalError> {
+    let items = get_list(val)?;
+    let mut perm = Vec::with_capacity(items.len());
+    for it in items {
+        let x = to_int(it)?;
+        let xu = x.to_usize().filter(|&u| u >= 1).ok_or_else(|| {
+            EvalError::Error("expected a permutation of positive integers".to_string())
+        })?;
+        perm.push(xu);
+    }
+    Ok(perm)
+}
+
+/// Convert a list of cycles to the corresponding image list.
+fn cycles_to_perm(cycles: &[Value]) -> Result<Vec<usize>, EvalError> {
+    let mut parsed: Vec<Vec<usize>> = Vec::with_capacity(cycles.len());
+    let mut max = 0usize;
+    for cyc in cycles {
+        let items = get_list(cyc)?;
+        let mut c = Vec::with_capacity(items.len());
+        for it in items {
+            let x = to_int(it)?;
+            let xu = x
+                .to_usize()
+                .filter(|&u| u >= 1)
+                .ok_or_else(|| EvalError::Error("Cycle: expected positive integers".to_string()))?;
+            max = max.max(xu);
+            c.push(xu);
+        }
+        parsed.push(c);
+    }
+    let mut perm: Vec<usize> = (1..=max).collect();
+    for c in &parsed {
+        if c.is_empty() {
+            continue;
+        }
+        for i in 0..c.len() {
+            perm[c[i] - 1] = c[(i + 1) % c.len()];
+        }
+    }
+    Ok(perm)
+}
+
+/// Decompose a permutation image list into disjoint cycles (fixed points omitted).
+fn perm_to_cycles(perm: &[usize]) -> Vec<Vec<usize>> {
+    let n = perm.len();
+    let mut visited = vec![false; n];
+    let mut out = Vec::new();
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        if perm[start] == start + 1 {
+            visited[start] = true;
+            continue;
+        }
+        let mut cycle = Vec::new();
+        let mut j = start;
+        while !visited[j] {
+            visited[j] = true;
+            cycle.push(j + 1);
+            j = perm[j] - 1;
+        }
+        out.push(cycle);
+    }
+    out
+}
+
+/// Whether `perm` is a permutation of `1..=perm.len()`.
+fn valid_perm(perm: &[usize]) -> bool {
+    let n = perm.len();
+    let mut seen = vec![false; n];
+    for &p in perm {
+        if p == 0 || p > n || seen[p - 1] {
+            return false;
+        }
+        seen[p - 1] = true;
+    }
+    true
+}
+
+/// Smallest degree that can host `perm`: at least its length and its largest image.
+fn perm_degree(perm: &[usize]) -> usize {
+    perm.iter().copied().max().unwrap_or(0).max(perm.len())
+}
+
+/// Pad `perm` with fixed points so it acts on at least `perm_degree(perm)` points.
+fn pad_identity(mut perm: Vec<usize>) -> Vec<usize> {
+    let n = perm_degree(&perm);
+    while perm.len() < n {
+        perm.push(perm.len() + 1);
+    }
+    perm
+}
+
+/// Parse a permutation from either an image list or a `Cycles[...]` value.
+fn perm_from_value(val: &Value) -> Result<Vec<usize>, EvalError> {
+    if let Some(cycles) = cycles_arg(val) {
+        cycles_to_perm(cycles)
+    } else {
+        parse_perm_list(val)
+    }
+}
+
+/// Sign of a permutation: (-1)^(n - number of cycles), or 0 if not a permutation.
+fn perm_sign(perm: &[usize]) -> Integer {
+    if !valid_perm(perm) {
+        return Integer::from(0);
+    }
+    let n = perm.len();
+    let cycles = perm_to_cycles(perm);
+    let in_cycles: usize = cycles.iter().map(|c| c.len()).sum();
+    let num_cycles = cycles.len() + (n - in_cycles);
+    if (n - num_cycles).is_multiple_of(2) {
+        Integer::from(1)
+    } else {
+        Integer::from(-1)
+    }
+}
+
+/// Order of a permutation: LCM of its cycle lengths.
+fn perm_order(perm: &[usize]) -> Integer {
+    let mut l = Integer::from(1);
+    for c in perm_to_cycles(perm) {
+        l = lcm_int(l, Integer::from(c.len()));
+    }
+    l
+}
+
+/// Least common multiple of two non-negative integers.
+fn lcm_int(a: Integer, b: Integer) -> Integer {
+    if a.is_zero() || b.is_zero() {
+        return Integer::from(0);
+    }
+    let g = gcd_int(a.clone(), b.clone());
+    (a / g) * b
+}
+
+/// Compose two permutations: apply `a` then `b`.
+fn compose_perms(a: &[usize], b: &[usize]) -> Vec<usize> {
+    a.iter().map(|&x| b[x - 1]).collect()
+}
+
+/// Size of the permutation group generated by `gens` (closure enumeration).
+fn group_order(gens: &[Value]) -> Result<Integer, EvalError> {
+    let perms: Vec<Vec<usize>> = gens.iter().map(perm_from_value).collect::<Result<_, _>>()?;
+    let n = perms.iter().map(|p| perm_degree(p)).max().unwrap_or(0);
+    let mut generators: Vec<Vec<usize>> = Vec::with_capacity(perms.len());
+    for mut p in perms {
+        while p.len() < n {
+            p.push(p.len() + 1);
+        }
+        generators.push(p);
+    }
+    let identity: Vec<usize> = (1..=n).collect();
+    let mut seen = vec![identity.clone()];
+    let mut queue = vec![identity];
+    while let Some(p) = queue.pop() {
+        for g in &generators {
+            let q = compose_perms(&p, g);
+            if !seen.contains(&q) {
+                seen.push(q.clone());
+                queue.push(q);
+            }
+        }
+    }
+    Ok(Integer::from(seen.len()))
+}
+
+/// Cycles[{{...}, ...}] — a permutation in disjoint-cycle notation.
+pub fn builtin_cycles(args: &[Value]) -> Result<Value, EvalError> {
+    let raw: Vec<Value> = if args.len() == 1 {
+        match &args[0] {
+            Value::List(items) if items.iter().all(|x| matches!(x, Value::List(_))) => {
+                items.clone()
+            }
+            other => vec![other.clone()],
+        }
+    } else {
+        args.to_vec()
+    };
+    let mut norm: Vec<Vec<usize>> = Vec::with_capacity(raw.len());
+    for c in &raw {
+        let items = get_list(c)?;
+        let mut v = Vec::with_capacity(items.len());
+        for it in items {
+            let x = to_int(it)?;
+            let xu = x.to_usize().filter(|&u| u >= 1).ok_or_else(|| {
+                EvalError::Error("Cycles: expected positive integers".to_string())
+            })?;
+            v.push(xu);
+        }
+        if !v.is_empty() {
+            norm.push(v);
+        }
+    }
+    Ok(make_cycles(norm))
+}
+
+/// PermutationCycles[perm] — convert a permutation (image list or Cycles) to Cycles form.
+pub fn builtin_permutation_cycles(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PermutationCycles requires exactly 1 argument".to_string(),
+        ));
+    }
+    if cycles_arg(&args[0]).is_some() {
+        return Ok(args[0].clone());
+    }
+    let perm = parse_perm_list(&args[0])?;
+    if !valid_perm(&perm) {
+        return Ok(Value::Call {
+            head: "PermutationCycles".to_string(),
+            args: args.to_vec(),
+        });
+    }
+    Ok(make_cycles(perm_to_cycles(&perm)))
+}
+
+/// PermutationList[perm] / PermutationList[perm, n] — Cycles (or list) to image list.
+pub fn builtin_permutation_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "PermutationList requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let mut perm = perm_from_value(&args[0])?;
+    if args.len() == 2 {
+        let n = non_neg_int(&args[1])?
+            .to_usize()
+            .ok_or_else(|| EvalError::Error("PermutationList: length too large".to_string()))?;
+        if n > perm.len() {
+            perm.resize(n, 0);
+            for (i, slot) in perm.iter_mut().enumerate() {
+                if *slot == 0 {
+                    *slot = i + 1;
+                }
+            }
+        }
+    }
+    Ok(Value::List(
+        perm.into_iter()
+            .map(|x| Value::Integer(Integer::from(x)))
+            .collect(),
+    ))
+}
+
+/// Signature[perm] — the sign (+1/-1) of a permutation; 0 for a non-permutation list.
+pub fn builtin_signature(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "Signature requires exactly 1 argument".to_string(),
+        ));
+    }
+    if let Value::List(_) = &args[0] {
+        let perm = parse_perm_list(&args[0])?;
+        return Ok(Value::Integer(perm_sign(&perm)));
+    }
+    if let Some(cycles) = cycles_arg(&args[0]) {
+        let perm = cycles_to_perm(cycles)?;
+        return Ok(Value::Integer(perm_sign(&perm)));
+    }
+    Ok(Value::Call {
+        head: "Signature".to_string(),
+        args: args.to_vec(),
+    })
+}
+
+/// PermutationSignature[perm] — an alias for Signature.
+pub fn builtin_permutation_signature(args: &[Value]) -> Result<Value, EvalError> {
+    builtin_signature(args)
+}
+
+/// PermutationOrder[perm] — the order (LCM of cycle lengths) of a permutation.
+pub fn builtin_permutation_order(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "PermutationOrder requires exactly 1 argument".to_string(),
+        ));
+    }
+    if matches!(&args[0], Value::List(_)) || cycles_arg(&args[0]).is_some() {
+        let perm = pad_identity(perm_from_value(&args[0])?);
+        return Ok(Value::Integer(perm_order(&perm)));
+    }
+    Ok(Value::Call {
+        head: "PermutationOrder".to_string(),
+        args: args.to_vec(),
+    })
+}
+
+/// Whether a value looks like a permutation (image list or Cycles).
+fn is_perm_value(v: &Value) -> bool {
+    matches!(v, Value::List(_)) || cycles_arg(v).is_some()
+}
+
+/// GroupOrder[perm] — order of a permutation, or size of the group generated by
+/// a list of permutations.
+pub fn builtin_group_order(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "GroupOrder requires exactly 1 argument".to_string(),
+        ));
+    }
+    let v = &args[0];
+    if let Value::List(items) = v
+        && items.iter().all(is_perm_value)
+    {
+        return Ok(Value::Integer(group_order(items)?));
+    }
+    if matches!(v, Value::List(_)) || cycles_arg(v).is_some() {
+        let perm = pad_identity(perm_from_value(v)?);
+        return Ok(Value::Integer(perm_order(&perm)));
+    }
+    Ok(Value::Call {
+        head: "GroupOrder".to_string(),
+        args: args.to_vec(),
+    })
+}
+
 // ── IntegerPartitions ────────────────────────────────────────────────────────
 
 /// IntegerPartitions[n] — all partitions of integer n as a list of lists,
 /// sorted in reverse lexicographic order (Mathematica convention).
 /// IntegerPartitions[n, k] — partitions with at most k parts.
+/// IntegerPartitions[n, {k}] — partitions with exactly k parts.
+/// IntegerPartitions[n, {kmin, kmax}] — partitions with between kmin and kmax parts.
+/// IntegerPartitions[n, spec, pmax] — additionally bound the part sizes.
+/// IntegerPartitions[n, spec, {pmin, pmax}] — part sizes between pmin and pmax.
 pub fn builtin_integer_partitions(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() || args.len() > 3 {
         return Err(EvalError::Error(
-            "IntegerPartitions requires 1 or 2 arguments".to_string(),
+            "IntegerPartitions requires 1 to 3 arguments".to_string(),
         ));
     }
     match &args[0] {
@@ -1155,25 +1680,26 @@ pub fn builtin_integer_partitions(args: &[Value]) -> Result<Value, EvalError> {
             let n_val = n
                 .to_usize()
                 .ok_or_else(|| EvalError::Error("IntegerPartitions: n too large".to_string()))?;
-            let max_parts = if args.len() == 2 {
-                match &args[1] {
-                    Value::Integer(k) if k.is_positive() => {
-                        Some(k.to_usize().ok_or_else(|| {
-                            EvalError::Error("IntegerPartitions: k too large".to_string())
-                        })?)
-                    }
-                    _ => {
-                        return Err(EvalError::TypeError {
-                            expected: "positive Integer".to_string(),
-                            got: args[1].type_name().to_string(),
-                        });
-                    }
-                }
+            let (min_parts, max_parts) = if args.len() >= 2 {
+                parse_parts_spec(&args[1])?
             } else {
-                None
+                (0, None)
+            };
+            let (min_allowed, max_allowed) = if args.len() >= 3 {
+                parse_size_spec(&args[2], n_val)?
+            } else {
+                (1, n_val)
             };
             let mut partitions = Vec::new();
-            generate_partitions(n_val, max_parts, n_val, &mut Vec::new(), &mut partitions);
+            generate_partitions(
+                n_val,
+                max_parts,
+                min_parts,
+                max_allowed,
+                min_allowed,
+                &mut Vec::new(),
+                &mut partitions,
+            );
             Ok(Value::List(partitions))
         }
         _ => Err(EvalError::TypeError {
@@ -1183,23 +1709,104 @@ pub fn builtin_integer_partitions(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-/// Recursively generate partitions of `remaining` into parts <= `max_allowed`,
-/// with at most `max_parts` parts (if Some). Results are collected in reverse
-/// lexicographic order by construction (we try largest parts first).
+/// Parse the optional part-count specification: `k`, `{k}` or `{kmin, kmax}`.
+fn parse_parts_spec(spec: &Value) -> Result<(usize, Option<usize>), EvalError> {
+    match spec {
+        Value::Integer(k) if k.is_positive() => {
+            let ku = k
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("IntegerPartitions: k too large".to_string()))?;
+            Ok((0, Some(ku)))
+        }
+        Value::List(items) => match items.as_slice() {
+            [k] => {
+                let ku = to_non_neg_usize(k, "IntegerPartitions")?;
+                Ok((ku, Some(ku)))
+            }
+            [kmin, kmax] => {
+                let lo = to_non_neg_usize(kmin, "IntegerPartitions")?;
+                let hi = to_non_neg_usize(kmax, "IntegerPartitions")?;
+                Ok((lo, Some(hi)))
+            }
+            _ => Err(EvalError::TypeError {
+                expected: "k or {kmin, kmax}".to_string(),
+                got: spec.type_name().to_string(),
+            }),
+        },
+        Value::Symbol(s) if s == "All" => Ok((0, None)),
+        _ => Err(EvalError::TypeError {
+            expected: "positive Integer or {kmin, kmax}".to_string(),
+            got: spec.type_name().to_string(),
+        }),
+    }
+}
+
+/// Parse the optional part-size specification: `p`, `{p}` or `{pmin, pmax}`.
+fn parse_size_spec(spec: &Value, n: usize) -> Result<(usize, usize), EvalError> {
+    match spec {
+        Value::Integer(p) if p.is_positive() => {
+            let pu = p
+                .to_usize()
+                .ok_or_else(|| EvalError::Error("IntegerPartitions: part too large".to_string()))?;
+            Ok((1, pu))
+        }
+        Value::List(items) => match items.as_slice() {
+            [pmax] => {
+                let hi = to_non_neg_usize(pmax, "IntegerPartitions")?;
+                Ok((1, hi))
+            }
+            [pmin, pmax] => {
+                let lo = to_non_neg_usize(pmin, "IntegerPartitions")?;
+                let hi = to_non_neg_usize(pmax, "IntegerPartitions")?;
+                Ok((lo, hi))
+            }
+            _ => Err(EvalError::TypeError {
+                expected: "p or {pmin, pmax}".to_string(),
+                got: spec.type_name().to_string(),
+            }),
+        },
+        Value::Symbol(s) if s == "All" => Ok((1, n)),
+        _ => Err(EvalError::TypeError {
+            expected: "positive Integer or {pmin, pmax}".to_string(),
+            got: spec.type_name().to_string(),
+        }),
+    }
+}
+
+/// Extract a non-negative `usize` from a Value, erroring on other types.
+fn to_non_neg_usize(val: &Value, fname: &str) -> Result<usize, EvalError> {
+    match val {
+        Value::Integer(i) if !i.is_negative() => i
+            .to_usize()
+            .ok_or_else(|| EvalError::Error(format!("{fname}: value too large"))),
+        _ => Err(EvalError::TypeError {
+            expected: "non-negative Integer".to_string(),
+            got: val.type_name().to_string(),
+        }),
+    }
+}
+
+/// Recursively generate partitions of `remaining` into parts in
+/// `[min_allowed, max_allowed]`, with a number of parts in `[min_parts, max_parts]`.
+/// Results are collected in reverse lexicographic order by construction.
 fn generate_partitions(
     remaining: usize,
     max_parts: Option<usize>,
+    min_parts: usize,
     max_allowed: usize,
+    min_allowed: usize,
     current: &mut Vec<usize>,
     result: &mut Vec<Value>,
 ) {
     if remaining == 0 {
-        result.push(Value::List(
-            current
-                .iter()
-                .map(|&p| Value::Integer(Integer::from(p)))
-                .collect(),
-        ));
+        if current.len() >= min_parts {
+            result.push(Value::List(
+                current
+                    .iter()
+                    .map(|&p| Value::Integer(Integer::from(p)))
+                    .collect(),
+            ));
+        }
         return;
     }
     if let Some(k) = max_parts
@@ -1207,11 +1814,23 @@ fn generate_partitions(
     {
         return;
     }
-    // Try parts from min(remaining, max_allowed) down to 1 to get reverse lex order.
     let upper = remaining.min(max_allowed);
-    for part in (1..=upper).rev() {
+    let lower = min_allowed.max(1);
+    if lower > upper {
+        return;
+    }
+    // Try parts from largest to smallest to get reverse lexicographic order.
+    for part in (lower..=upper).rev() {
         current.push(part);
-        generate_partitions(remaining - part, max_parts, part, current, result);
+        generate_partitions(
+            remaining - part,
+            max_parts,
+            min_parts,
+            part,
+            min_allowed,
+            current,
+            result,
+        );
         current.pop();
     }
 }
@@ -1242,6 +1861,17 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "StirlingS1", builtin_stirling_s1);
     super::register_builtin(env, "LucasL", builtin_lucas_l);
     super::register_builtin(env, "BellB", builtin_bell_b);
+    super::register_builtin(env, "BellNumber", builtin_bell_number);
+    super::register_builtin(env, "Derangements", builtin_derangements);
+    super::register_builtin(env, "EulerE", builtin_euler_e);
+    super::register_builtin(env, "EulerNumber", builtin_euler_number);
+    super::register_builtin(env, "Cycles", builtin_cycles);
+    super::register_builtin(env, "PermutationCycles", builtin_permutation_cycles);
+    super::register_builtin(env, "PermutationList", builtin_permutation_list);
+    super::register_builtin(env, "PermutationSignature", builtin_permutation_signature);
+    super::register_builtin(env, "Signature", builtin_signature);
+    super::register_builtin(env, "PermutationOrder", builtin_permutation_order);
+    super::register_builtin(env, "GroupOrder", builtin_group_order);
     super::register_builtin(env, "CatalanNumber", builtin_catalan_number);
     super::register_builtin(env, "Fibonacci", builtin_fibonacci);
     super::register_builtin(env, "HarmonicNumber", builtin_harmonic_number);
@@ -1777,6 +2407,349 @@ mod tests {
         let result = builtin_integer_partitions(&[int(10)]).unwrap();
         if let Value::List(parts) = &result {
             assert_eq!(parts.len(), 42);
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    // ── New helpers ─────────────────────────────────────────────────────────
+
+    /// Build a `Cycles[{{...}, ...}]` value for tests.
+    fn cycles(cs: &[&[i64]]) -> Value {
+        Value::Call {
+            head: "Cycles".to_string(),
+            args: vec![list(
+                cs.iter()
+                    .map(|c| list(c.iter().map(|&x| int(x)).collect()))
+                    .collect(),
+            )],
+        }
+    }
+
+    // ── BellNumber ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bell_number() {
+        for (n, expected) in [
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 5),
+            (4, 15),
+            (5, 52),
+            (10, 115975),
+        ] {
+            assert_eq!(builtin_bell_number(&[int(n)]).unwrap(), int(expected));
+        }
+        // BellNumber is the same as BellB, including the two-argument form.
+        assert_eq!(builtin_bell_number(&[int(5), int(2)]).unwrap(), int(15));
+    }
+
+    // ── Derangements ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_derangements_count() {
+        assert_eq!(builtin_derangements(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_derangements(&[int(1)]).unwrap(), int(0));
+        assert_eq!(builtin_derangements(&[int(2)]).unwrap(), int(1));
+        assert_eq!(builtin_derangements(&[int(3)]).unwrap(), int(2));
+        assert_eq!(builtin_derangements(&[int(4)]).unwrap(), int(9));
+        assert_eq!(builtin_derangements(&[int(5)]).unwrap(), int(44));
+        assert_eq!(builtin_derangements(&[int(6)]).unwrap(), int(265));
+        // Large value is exact.
+        assert_eq!(
+            builtin_derangements(&[int(20)]).unwrap(),
+            int(895014631192902121)
+        );
+    }
+
+    #[test]
+    fn test_derangements_list() {
+        let result = builtin_derangements(&[list(vec![int(1), int(2), int(3)])]).unwrap();
+        if let Value::List(perms) = result {
+            assert_eq!(perms.len(), 2);
+            assert!(perms.contains(&list(vec![int(2), int(3), int(1)])));
+            assert!(perms.contains(&list(vec![int(3), int(1), int(2)])));
+        } else {
+            panic!("Expected List");
+        }
+        // An empty list has exactly one (empty) derangement.
+        let result = builtin_derangements(&[list(vec![])]).unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+    }
+
+    // ── EulerE ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_euler_e() {
+        assert_eq!(builtin_euler_e(&[int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_euler_e(&[int(1)]).unwrap(), int(0));
+        assert_eq!(builtin_euler_e(&[int(2)]).unwrap(), int(-1));
+        assert_eq!(builtin_euler_e(&[int(3)]).unwrap(), int(0));
+        assert_eq!(builtin_euler_e(&[int(4)]).unwrap(), int(5));
+        assert_eq!(builtin_euler_e(&[int(6)]).unwrap(), int(-61));
+        assert_eq!(builtin_euler_e(&[int(8)]).unwrap(), int(1385));
+        assert_eq!(builtin_euler_e(&[int(10)]).unwrap(), int(-50521));
+        assert_eq!(builtin_euler_e(&[int(12)]).unwrap(), int(2702765));
+    }
+
+    // ── EulerNumber (zigzag) ────────────────────────────────────────────────
+
+    #[test]
+    fn test_euler_number() {
+        let expected = [
+            1, 1, 1, 2, 5, 16, 61, 272, 1385, 7936, 50521, 353792, 2702765,
+        ];
+        for (n, &e) in expected.iter().enumerate() {
+            assert_eq!(builtin_euler_number(&[int(n as i64)]).unwrap(), int(e));
+        }
+    }
+
+    // ── Cycles / PermutationCycles / PermutationList ────────────────────────
+
+    #[test]
+    fn test_cycles_normalization() {
+        // Cycles[{{1, 2}}] stays canonical.
+        let expected = cycles(&[&[1, 2]]);
+        assert_eq!(
+            builtin_cycles(&[list(vec![list(vec![int(1), int(2)])])]).unwrap(),
+            expected
+        );
+        // A bare list of cycles is also accepted.
+        assert_eq!(
+            builtin_cycles(&[list(vec![int(1), int(2)])]).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_permutation_cycles() {
+        assert_eq!(
+            builtin_permutation_cycles(&[list(vec![int(2), int(3), int(1)])]).unwrap(),
+            cycles(&[&[1, 2, 3]])
+        );
+        assert_eq!(
+            builtin_permutation_cycles(&[list(vec![int(2), int(1), int(3)])]).unwrap(),
+            cycles(&[&[1, 2]])
+        );
+        // Identity has no nontrivial cycles.
+        assert_eq!(
+            builtin_permutation_cycles(&[list(vec![int(1), int(2), int(3)])]).unwrap(),
+            cycles(&[])
+        );
+        // Already-cyclic input is passed through.
+        let c = cycles(&[&[1, 2]]);
+        assert_eq!(builtin_permutation_cycles(&[c.clone()]).unwrap(), c);
+    }
+
+    #[test]
+    fn test_permutation_list() {
+        assert_eq!(
+            builtin_permutation_list(&[cycles(&[&[1, 2, 3]])]).unwrap(),
+            list(vec![int(2), int(3), int(1)])
+        );
+        assert_eq!(
+            builtin_permutation_list(&[cycles(&[&[1, 2]])]).unwrap(),
+            list(vec![int(2), int(1)])
+        );
+        // With an explicit length the permutation is padded with identities.
+        assert_eq!(
+            builtin_permutation_list(&[cycles(&[&[1, 2]]), int(4)]).unwrap(),
+            list(vec![int(2), int(1), int(3), int(4)])
+        );
+        // A plain image list round-trips.
+        assert_eq!(
+            builtin_permutation_list(&[list(vec![int(2), int(3), int(1)])]).unwrap(),
+            list(vec![int(2), int(3), int(1)])
+        );
+    }
+
+    // ── Signature ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_signature() {
+        // Even permutation (3-cycle).
+        assert_eq!(
+            builtin_signature(&[list(vec![int(2), int(3), int(1)])]).unwrap(),
+            int(1)
+        );
+        // Odd permutation (transposition).
+        assert_eq!(
+            builtin_signature(&[list(vec![int(2), int(1), int(3)])]).unwrap(),
+            int(-1)
+        );
+        assert_eq!(
+            builtin_signature(&[list(vec![int(1), int(2), int(3)])]).unwrap(),
+            int(1)
+        );
+        // A repeated element is not a permutation → 0.
+        assert_eq!(
+            builtin_signature(&[list(vec![int(2), int(1), int(1)])]).unwrap(),
+            int(0)
+        );
+        // Cycles input.
+        assert_eq!(builtin_signature(&[cycles(&[&[1, 2]])]).unwrap(), int(-1));
+        assert_eq!(
+            builtin_permutation_signature(&[list(vec![int(2), int(3), int(1)])]).unwrap(),
+            int(1)
+        );
+    }
+
+    // ── PermutationOrder / GroupOrder ───────────────────────────────────────
+
+    #[test]
+    fn test_permutation_order() {
+        assert_eq!(
+            builtin_permutation_order(&[list(vec![int(2), int(3), int(1)])]).unwrap(),
+            int(3)
+        );
+        assert_eq!(
+            builtin_permutation_order(&[cycles(&[&[1, 2], &[3, 4]])]).unwrap(),
+            int(2)
+        );
+        assert_eq!(
+            builtin_permutation_order(&[cycles(&[&[1, 2, 3], &[4, 5]])]).unwrap(),
+            int(6)
+        );
+        assert_eq!(
+            builtin_permutation_order(&[list(vec![int(1), int(2), int(3)])]).unwrap(),
+            int(1)
+        );
+        // A short image list is padded to a valid degree: {2,3} acts as the 3-cycle.
+        assert_eq!(
+            builtin_permutation_order(&[list(vec![int(2), int(3)])]).unwrap(),
+            int(3)
+        );
+    }
+
+    #[test]
+    fn test_group_order() {
+        // Single permutation.
+        assert_eq!(
+            builtin_group_order(&[cycles(&[&[1, 2, 3]])]).unwrap(),
+            int(3)
+        );
+        // Group generated by (1 2) and (2 3) is S_3, of order 6.
+        assert_eq!(
+            builtin_group_order(&[list(vec![cycles(&[&[1, 2]]), cycles(&[&[2, 3]])])]).unwrap(),
+            int(6)
+        );
+        // Trivial group.
+        assert_eq!(builtin_group_order(&[list(vec![])]).unwrap(), int(1));
+        // Raw image-list generators are padded to a common degree.
+        assert_eq!(
+            builtin_group_order(&[list(vec![
+                list(vec![int(1), int(2)]),
+                list(vec![int(2), int(3)]),
+            ])])
+            .unwrap(),
+            int(3)
+        );
+    }
+
+    // ── IntegerPartitions extras ────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_partitions_exact_parts() {
+        // Exactly 2 parts.
+        let result = builtin_integer_partitions(&[int(5), list(vec![int(2)])]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0], list(vec![int(4), int(1)]));
+            assert_eq!(parts[1], list(vec![int(3), int(2)]));
+        } else {
+            panic!("Expected List");
+        }
+        // Between 2 and 3 parts.
+        let result = builtin_integer_partitions(&[int(5), list(vec![int(2), int(3)])]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 4);
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_integer_partitions_bounded_sizes() {
+        // At most 3 parts, each part between 2 and 4.
+        let result =
+            builtin_integer_partitions(&[int(6), int(3), list(vec![int(2), int(4)])]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 3);
+            assert!(parts.contains(&list(vec![int(4), int(2)])));
+            assert!(parts.contains(&list(vec![int(3), int(3)])));
+            assert!(parts.contains(&list(vec![int(2), int(2), int(2)])));
+        } else {
+            panic!("Expected List");
+        }
+        // At most 2 parts, each part ≤ 3: only {3, 2}.
+        let result = builtin_integer_partitions(&[int(5), int(2), int(3)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0], list(vec![int(3), int(2)]));
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_integer_partitions_all_and_pmax() {
+        // `All` for both specs reproduces the unrestricted partition count.
+        let all = Value::Symbol("All".to_string());
+        let result = builtin_integer_partitions(&[int(4), all.clone(), all]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 5);
+        } else {
+            panic!("Expected List");
+        }
+        // A bare pmax bounds the largest part.
+        let result = builtin_integer_partitions(&[int(4), int(3), int(2)]).unwrap();
+        if let Value::List(parts) = &result {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0], list(vec![int(2), int(2)]));
+            assert_eq!(parts[1], list(vec![int(2), int(1), int(1)]));
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    // ── Subsets / Tuples edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_subsets_edge_cases() {
+        // Length-0 subsets.
+        let result = builtin_subsets(&[list(vec![int(1), int(2), int(3)]), int(0)]).unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+        // Subsets of the empty list.
+        let result = builtin_subsets(&[list(vec![]), int(1)]).unwrap();
+        assert_eq!(result, list(vec![]));
+        // Range collapsing to just length 0.
+        let result = builtin_subsets(&[
+            list(vec![int(1), int(2), int(3)]),
+            list(vec![int(0), int(0)]),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+        // Empty input, unrestricted.
+        let result = builtin_subsets(&[list(vec![])]).unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+    }
+
+    #[test]
+    fn test_tuples_edge_cases() {
+        // Tuples from the empty set is empty for n > 0.
+        let result = builtin_tuples(&[list(vec![]), int(2)]).unwrap();
+        assert_eq!(result, list(vec![]));
+        // Length-0 tuples.
+        let result = builtin_tuples(&[list(vec![int(1), int(2)]), int(0)]).unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+        // Empty set with n = 0 still yields the empty tuple.
+        let result = builtin_tuples(&[list(vec![]), int(0)]).unwrap();
+        assert_eq!(result, list(vec![list(vec![])]));
+        // Cardinality check.
+        let result = builtin_tuples(&[list(vec![int(1), int(2)]), int(4)]).unwrap();
+        if let Value::List(t) = result {
+            assert_eq!(t.len(), 16);
         } else {
             panic!("Expected List");
         }

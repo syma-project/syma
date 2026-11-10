@@ -1437,6 +1437,473 @@ pub fn builtin_qpochhammer(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── Bessel Y / Hankel functions ─────────────────────────────────────────────
+
+/// `J_n(z)` for real order `n` and real `z` via the ascending series, with the
+/// integer-parity reflection `J_{-n} = (-1)^n J_n` and `J_n(-z) = (-1)^n J_n`.
+fn bessel_j_real(n: f64, z: f64) -> f64 {
+    if n < 0.0 && (n - n.round()).abs() < 1e-12 {
+        let m = -n.round();
+        let sign = if (m as i64) % 2 == 0 { 1.0 } else { -1.0 };
+        return sign * bessel_j_real(m, z);
+    }
+    if z == 0.0 {
+        return if n == 0.0 {
+            1.0
+        } else if n > 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        };
+    }
+    if z < 0.0 && (n - n.round()).abs() < 1e-12 {
+        let sign = if (n.round() as i64) % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        return sign * bessel_j_real(n, -z);
+    }
+    let half = z / 2.0;
+    let mut term = half.powf(n) / gamma_fn(n + 1.0);
+    let mut sum = term;
+    let mut k = 1u32;
+    while k <= 1000 {
+        term *= -(half * half) / (k as f64 * (n + k as f64));
+        sum += term;
+        if term.abs() < 1e-19 * sum.abs().max(1e-300) {
+            break;
+        }
+        k += 1;
+    }
+    sum
+}
+
+/// `Y_n(z)` for non-negative integer `n` via DLMF 10.8.2, valid for `z > 0`.
+fn bessel_y_integer(n: u32, z: f64) -> f64 {
+    let nf = n as f64;
+    let half = z / 2.0;
+    let jn = bessel_j_real(nf, z);
+    let mut finite = 0.0_f64;
+    for k in 0..n {
+        finite += factorial_small(n - k - 1) / factorial_small(k) * half.powf(2.0 * k as f64 - nf);
+    }
+    let mut term = half.powi(n as i32) / factorial_small(n);
+    let mut acc = 0.0_f64;
+    let mut k = 0u32;
+    while k <= 1000 {
+        let bracket = digamma_fn(k as f64 + 1.0) + digamma_fn(nf + k as f64 + 1.0);
+        let t = term * bracket;
+        acc += t;
+        term *= -(half * half) / ((k + 1) as f64 * (nf + k as f64 + 1.0));
+        k += 1;
+        if t.abs() < 1e-19 * acc.abs().max(1e-300) {
+            break;
+        }
+    }
+    (2.0 / std::f64::consts::PI) * half.ln() * jn
+        - finite / std::f64::consts::PI
+        - acc / std::f64::consts::PI
+}
+
+/// `Y_n(z)` for real order `n` and `z > 0`: integer orders use the explicit
+/// series, other orders the limit formula `(J_n cos nπ − J_{-n}) / sin nπ`.
+fn bessel_y_real(n: f64, z: f64) -> f64 {
+    if n < 0.0 && (n - n.round()).abs() < 1e-12 {
+        let m = -n.round();
+        let sign = if (m as i64) % 2 == 0 { 1.0 } else { -1.0 };
+        return sign * bessel_y_real(m, z);
+    }
+    if z < 0.0 && (n - n.round()).abs() < 1e-12 {
+        let sign = if (n.round() as i64) % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        return sign * bessel_y_real(n, -z);
+    }
+    let ni = n.round();
+    if (n - ni).abs() < 1e-10 && ni >= 0.0 {
+        return bessel_y_integer(ni as u32, z);
+    }
+    (bessel_j_real(n, z) * (n * std::f64::consts::PI).cos() - bessel_j_real(-n, z))
+        / (n * std::f64::consts::PI).sin()
+}
+
+/// Build a `Value::Complex`, collapsing a zero imaginary part to a real.
+fn complex(re: f64, im: f64) -> Value {
+    if im == 0.0 {
+        super::real(re)
+    } else {
+        Value::Complex { re, im }
+    }
+}
+
+/// BesselH1[n, z] = HankelH1[n, z] = `J_n(z) + i Y_n(z)`.
+pub fn builtin_bessel_h1(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselH1", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselH1", args));
+    };
+    let (j, y) = (bessel_j_real(n, z), bessel_y_real(n, z));
+    if j.is_finite() && y.is_finite() {
+        Ok(complex(j, y))
+    } else {
+        Ok(unevaluated("BesselH1", args))
+    }
+}
+
+/// BesselH2[n, z] = HankelH2[n, z] = `J_n(z) - i Y_n(z)`.
+pub fn builtin_bessel_h2(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("BesselH2", args, 2)?;
+    let (Some(n), Some(z)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("BesselH2", args));
+    };
+    let (j, y) = (bessel_j_real(n, z), bessel_y_real(n, z));
+    if j.is_finite() && y.is_finite() {
+        Ok(complex(j, -y))
+    } else {
+        Ok(unevaluated("BesselH2", args))
+    }
+}
+
+// ── Chebyshev polynomials ───────────────────────────────────────────────────
+
+/// `T_n(x)` for integer `n` via the recurrence `T_{n+1} = 2x T_n − T_{n-1}`.
+fn chebyshev_t_int(n: i64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    match n {
+        0 => 1.0,
+        1 => x,
+        _ => {
+            let (mut a, mut b) = (1.0_f64, x);
+            for _ in 2..=n {
+                let c = 2.0 * x * b - a;
+                a = b;
+                b = c;
+            }
+            b
+        }
+    }
+}
+
+/// `U_n(x)` for integer `n` via the recurrence `U_{n+1} = 2x U_n − U_{n-1}`.
+fn chebyshev_u_int(n: i64, x: f64) -> f64 {
+    match n {
+        -1 => 0.0,
+        n if n < 0 => -chebyshev_u_int(-n - 2, x),
+        0 => 1.0,
+        1 => 2.0 * x,
+        _ => {
+            let (mut a, mut b) = (1.0_f64, 2.0 * x);
+            for _ in 2..=n {
+                let c = 2.0 * x * b - a;
+                a = b;
+                b = c;
+            }
+            b
+        }
+    }
+}
+
+/// `T_n(x)` for real order `n` and `|x| ≤ 1`: `cos(n arccos x)`.
+fn chebyshev_t_real(n: f64, x: f64) -> f64 {
+    if x.abs() <= 1.0 {
+        (n * x.acos()).cos()
+    } else {
+        let t = x.abs().acosh();
+        let v = (n * t).cosh();
+        if x < 0.0 && (n - n.round()).abs() < 1e-12 && (n.round() as i64) % 2 != 0 {
+            -v
+        } else {
+            v
+        }
+    }
+}
+
+/// `U_n(x)` for real order `n` and `|x| ≤ 1`: `sin((n+1) arccos x)/sin(arccos x)`.
+fn chebyshev_u_real(n: f64, x: f64) -> f64 {
+    if x.abs() < 1.0 {
+        let th = x.acos();
+        ((n + 1.0) * th).sin() / th.sin()
+    } else {
+        let t = x.abs().acosh();
+        let v = ((n + 1.0) * t).sinh() / t.sinh();
+        if x < 0.0 && (n - n.round()).abs() < 1e-12 && (n.round() as i64) % 2 != 0 {
+            -v
+        } else {
+            v
+        }
+    }
+}
+
+/// ChebyshevT[n, x] — Chebyshev polynomial of the first kind.
+pub fn builtin_chebyshev_t(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ChebyshevT", args, 2)?;
+    let (Some(n), Some(x)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("ChebyshevT", args));
+    };
+    let ni = n.round();
+    let v = if (n - ni).abs() < 1e-12 {
+        chebyshev_t_int(ni as i64, x)
+    } else {
+        chebyshev_t_real(n, x)
+    };
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("ChebyshevT", args))
+    }
+}
+
+/// ChebyshevU[n, x] — Chebyshev polynomial of the second kind.
+pub fn builtin_chebyshev_u(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ChebyshevU", args, 2)?;
+    let (Some(n), Some(x)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("ChebyshevU", args));
+    };
+    let ni = n.round();
+    let v = if (n - ni).abs() < 1e-12 {
+        chebyshev_u_int(ni as i64, x)
+    } else {
+        chebyshev_u_real(n, x)
+    };
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("ChebyshevU", args))
+    }
+}
+
+// ── Gegenbauer polynomials ──────────────────────────────────────────────────
+
+/// `C_n^a(x)` via `(n+1) C_{n+1} = 2(n+a) x C_n − (n+2a−1) C_{n-1}`.
+fn gegenbauer_c(n: i64, a: f64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    match n {
+        0 => 1.0,
+        1 => 2.0 * a * x,
+        _ => {
+            let (mut p0, mut p1) = (1.0_f64, 2.0 * a * x);
+            for k in 1..n {
+                let kf = k as f64;
+                let p2 = (2.0 * (kf + a) * x * p1 - (kf + 2.0 * a - 1.0) * p0) / (kf + 1.0);
+                p0 = p1;
+                p1 = p2;
+            }
+            p1
+        }
+    }
+}
+
+/// GegenbauerC[n, a, x] — Gegenbauer (ultraspherical) polynomial.
+pub fn builtin_gegenbauer_c(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("GegenbauerC", args, 3)?;
+    let vals: Option<Vec<f64>> = args.iter().map(super::to_f64).collect::<Option<Vec<_>>>();
+    let Some(v) = vals else {
+        return Ok(unevaluated("GegenbauerC", args));
+    };
+    let (n, a, x) = (v[0], v[1], v[2]);
+    if (n - n.round()).abs() > 1e-12 {
+        return Ok(unevaluated("GegenbauerC", args));
+    }
+    let val = gegenbauer_c(n.round() as i64, a, x);
+    if val.is_finite() {
+        Ok(super::real(val))
+    } else {
+        Ok(unevaluated("GegenbauerC", args))
+    }
+}
+
+/// GegenbauerCP[n, a, x] = `d/dx C_n^a(x) = 2a C_{n-1}^{a+1}(x)`.
+pub fn builtin_gegenbauer_cp(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("GegenbauerCP", args, 3)?;
+    let vals: Option<Vec<f64>> = args.iter().map(super::to_f64).collect::<Option<Vec<_>>>();
+    let Some(v) = vals else {
+        return Ok(unevaluated("GegenbauerCP", args));
+    };
+    let (n, a, x) = (v[0], v[1], v[2]);
+    if (n - n.round()).abs() > 1e-12 {
+        return Ok(unevaluated("GegenbauerCP", args));
+    }
+    let val = 2.0 * a * gegenbauer_c(n.round() as i64 - 1, a + 1.0, x);
+    if val.is_finite() {
+        Ok(super::real(val))
+    } else {
+        Ok(unevaluated("GegenbauerCP", args))
+    }
+}
+
+// ── Jacobi polynomials ──────────────────────────────────────────────────────
+
+/// `P_n^{(a,b)}(x)` via the three-term recurrence (DLMF 18.9.2).
+fn jacobi_p(n: i64, a: f64, b: f64, x: f64) -> f64 {
+    let n = n.unsigned_abs();
+    if n == 0 {
+        return 1.0;
+    }
+    let p1 = 0.5 * ((a - b) + (a + b + 2.0) * x);
+    if n == 1 {
+        return p1;
+    }
+    let (mut p0, mut p1) = (1.0_f64, p1);
+    for k in 1..n {
+        let kf = k as f64;
+        let s = 2.0 * kf + a + b;
+        let p2 = ((s + 1.0) * (s * (s + 2.0) * x + a * a - b * b) * p1
+            - 2.0 * (kf + a) * (kf + b) * (s + 2.0) * p0)
+            / (2.0 * (kf + 1.0) * (kf + a + b + 1.0) * s);
+        p0 = p1;
+        p1 = p2;
+    }
+    p1
+}
+
+/// JacobiP[n, a, b, x] — Jacobi polynomial.
+pub fn builtin_jacobi_p(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("JacobiP", args, 4)?;
+    let vals: Option<Vec<f64>> = args.iter().map(super::to_f64).collect::<Option<Vec<_>>>();
+    let Some(v) = vals else {
+        return Ok(unevaluated("JacobiP", args));
+    };
+    let (n, a, b, x) = (v[0], v[1], v[2], v[3]);
+    if (n - n.round()).abs() > 1e-12 {
+        return Ok(unevaluated("JacobiP", args));
+    }
+    let val = jacobi_p(n.round() as i64, a, b, x);
+    if val.is_finite() {
+        Ok(super::real(val))
+    } else {
+        Ok(unevaluated("JacobiP", args))
+    }
+}
+
+// ── Spherical harmonics ─────────────────────────────────────────────────────
+
+/// Associated Legendre function `P_l^m(x)` (Condon–Shortley phase), `0 ≤ m ≤ l`.
+fn assoc_legendre(l: i64, m: i64, x: f64) -> f64 {
+    let mut pmm = 1.0_f64;
+    if m > 0 {
+        let somx2 = ((1.0 - x) * (1.0 + x)).sqrt();
+        let mut fact = 1.0_f64;
+        for _ in 1..=m {
+            pmm *= -fact * somx2;
+            fact += 2.0;
+        }
+    }
+    if l == m {
+        return pmm;
+    }
+    let mut pmmp1 = x * (2 * m + 1) as f64 * pmm;
+    if l == m + 1 {
+        return pmmp1;
+    }
+    let mut pll = 0.0_f64;
+    for ll in (m + 2)..=l {
+        pll = ((2 * ll - 1) as f64 * x * pmmp1 - (ll + m - 1) as f64 * pmm) / (ll - m) as f64;
+        pmm = pmmp1;
+        pmmp1 = pll;
+    }
+    pll
+}
+
+/// SphericalHarmonicY[l, m, theta, phi] — spherical harmonic `Y_l^m(θ, φ)`.
+pub fn builtin_spherical_harmonic_y(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("SphericalHarmonicY", args, 4)?;
+    let vals: Option<Vec<f64>> = args.iter().map(super::to_f64).collect::<Option<Vec<_>>>();
+    let Some(v) = vals else {
+        return Ok(unevaluated("SphericalHarmonicY", args));
+    };
+    let (l, m, theta, phi) = (v[0], v[1], v[2], v[3]);
+    if (l - l.round()).abs() > 1e-12 || (m - m.round()).abs() > 1e-12 {
+        return Ok(unevaluated("SphericalHarmonicY", args));
+    }
+    let (li, mi) = (l.round() as i64, m.round() as i64);
+    if li < 0 || mi.abs() > li {
+        return Ok(unevaluated("SphericalHarmonicY", args));
+    }
+    let ma = mi.abs();
+    let p = assoc_legendre(li, ma, theta.cos());
+    let fact_ratio = factorial_small((li - ma) as u32) / factorial_small((li + ma) as u32);
+    let norm = ((2 * li + 1) as f64 / (4.0 * std::f64::consts::PI) * fact_ratio).sqrt();
+    let mut re = norm * p * (mi as f64 * phi).cos();
+    let mut im = norm * p * (mi as f64 * phi).sin();
+    if mi < 0 {
+        let sign = if ma % 2 == 0 { 1.0 } else { -1.0 };
+        re *= sign;
+        im *= sign;
+    }
+    if re.is_finite() && im.is_finite() {
+        Ok(complex(re, im))
+    } else {
+        Ok(unevaluated("SphericalHarmonicY", args))
+    }
+}
+
+// ── Airy function derivatives ───────────────────────────────────────────────
+
+/// `Ai'(z)` (`bi = false`) and `Bi'(z)` (`bi = true`) via the two power
+/// series of DLMF 9.4.1/9.4.2 differentiated term by term.
+fn airy_prime(z: f64, bi: bool) -> f64 {
+    let c0 = 1.0 / (3f64.powf(2.0 / 3.0) * gamma_fn(2.0 / 3.0));
+    let c1 = 1.0 / (3f64.powf(1.0 / 3.0) * gamma_fn(1.0 / 3.0));
+    let mut a = 1.0_f64;
+    let mut f = 1.0_f64;
+    let mut fp = 0.0_f64;
+    let mut b = 1.0_f64;
+    let mut g = z;
+    let mut gp = 1.0_f64;
+    let mut k = 0u32;
+    loop {
+        k += 1;
+        let kf = k as f64;
+        a *= 3.0 * (1.0 / 3.0 + kf - 1.0) / ((3.0 * kf - 2.0) * (3.0 * kf - 1.0) * (3.0 * kf));
+        f += a * z.powf(3.0 * kf);
+        fp += 3.0 * kf * a * z.powf(3.0 * kf - 1.0);
+        b *= 3.0 * (2.0 / 3.0 + kf - 1.0) / ((3.0 * kf - 1.0) * (3.0 * kf) * (3.0 * kf + 1.0));
+        g += b * z.powf(3.0 * kf + 1.0);
+        gp += (3.0 * kf + 1.0) * b * z.powf(3.0 * kf);
+        let fa = (a * z.powf(3.0 * kf)).abs();
+        let gb = (b * z.powf(3.0 * kf + 1.0)).abs();
+        if (fa < 1e-22 * f.abs().max(1.0) && gb < 1e-22 * g.abs().max(1.0)) || k > 2000 {
+            break;
+        }
+    }
+    if bi {
+        3f64.sqrt() * (c0 * fp + c1 * gp)
+    } else {
+        c0 * fp - c1 * gp
+    }
+}
+
+/// AiryAiPrime[z] — derivative of the Airy function `Ai`.
+pub fn builtin_airy_ai_prime(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("AiryAiPrime", args, 1)?;
+    let Some(z) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("AiryAiPrime", args));
+    };
+    let v = airy_prime(z, false);
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("AiryAiPrime", args))
+    }
+}
+
+/// AiryBiPrime[z] — derivative of the Airy function `Bi`.
+pub fn builtin_airy_bi_prime(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("AiryBiPrime", args, 1)?;
+    let Some(z) = super::to_f64(&args[0]) else {
+        return Ok(unevaluated("AiryBiPrime", args));
+    };
+    let v = airy_prime(z, true);
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("AiryBiPrime", args))
+    }
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -1474,6 +1941,25 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "KelvinKei", builtin_kelvin_kei);
     super::register_builtin(env, "AppellF1", builtin_appell_f1);
     super::register_builtin(env, "QPochhammer", builtin_qpochhammer);
+    super::register_builtin(env, "BesselH1", builtin_bessel_h1);
+    super::register_builtin(env, "BesselH2", builtin_bessel_h2);
+    super::register_builtin(env, "HankelH1", builtin_bessel_h1);
+    super::register_builtin(env, "HankelH2", builtin_bessel_h2);
+    super::register_builtin(env, "ChebyshevT", builtin_chebyshev_t);
+    super::register_builtin(env, "ChebyshevU", builtin_chebyshev_u);
+    super::register_builtin(env, "GegenbauerC", builtin_gegenbauer_c);
+    super::register_builtin(env, "GegenbauerCP", builtin_gegenbauer_cp);
+    super::register_builtin(env, "JacobiP", builtin_jacobi_p);
+    super::register_builtin(env, "SphericalHarmonicY", builtin_spherical_harmonic_y);
+    super::register_builtin(env, "AiryAiPrime", builtin_airy_ai_prime);
+    super::register_builtin(env, "AiryBiPrime", builtin_airy_bi_prime);
+    // Aliases onto sibling implementations in `specialfunctions`.
+    super::register_builtin(
+        env,
+        "ProductLog",
+        super::specialfunctions::builtin_lambert_w,
+    );
+    super::register_builtin(env, "ErfInv", super::specialfunctions::builtin_inverse_erf);
 }
 
 #[cfg(test)]
@@ -1500,6 +1986,19 @@ mod tests {
             );
         } else {
             panic!("expected Real, got {a:?}");
+        }
+    }
+
+    fn close_cx(a: &Value, wre: f64, wim: f64, tol: f64) {
+        match a {
+            Value::Complex { re, im } => assert!(
+                (re - wre).abs() < tol && (im - wim).abs() < tol,
+                "got {re}+{im}i, want {wre}+{wim}i (tol {tol})"
+            ),
+            Value::Real(r) if wim == 0.0 => {
+                assert!((r.to_f64() - wre).abs() < tol, "got {r}, want {wre}");
+            }
+            _ => panic!("expected Complex, got {a:?}"),
         }
     }
 
@@ -1544,6 +2043,20 @@ mod tests {
             "KelvinKei",
             "AppellF1",
             "QPochhammer",
+            "BesselH1",
+            "BesselH2",
+            "HankelH1",
+            "HankelH2",
+            "ChebyshevT",
+            "ChebyshevU",
+            "GegenbauerC",
+            "GegenbauerCP",
+            "JacobiP",
+            "SphericalHarmonicY",
+            "AiryAiPrime",
+            "AiryBiPrime",
+            "ProductLog",
+            "ErfInv",
         ] {
             assert!(
                 matches!(env.get(name), Some(Value::Builtin(..))),
@@ -1995,5 +2508,213 @@ mod tests {
         assert!(builtin_hypergeometric_1f1(&[]).is_err());
         assert!(builtin_appell_f1(&[i(1)]).is_err());
         assert!(builtin_qpochhammer(&[i(1), i(2), i(3), i(4)]).is_err());
+    }
+
+    #[test]
+    fn test_bessel_hankel() {
+        // H_n^(1)(z) = J_n(z) + i Y_n(z).
+        close_cx(
+            &builtin_bessel_h1(&[i(0), i(1)]).unwrap(),
+            0.7651976865579666,
+            0.088256964215677,
+            1e-9,
+        );
+        close_cx(
+            &builtin_bessel_h1(&[i(1), i(1)]).unwrap(),
+            0.4400505857449336,
+            -0.7812128213002888,
+            1e-9,
+        );
+        // H_n^(2)(z) = conj H_n^(1)(z) for real z.
+        close_cx(
+            &builtin_bessel_h2(&[i(0), i(1)]).unwrap(),
+            0.7651976865579666,
+            -0.088256964215677,
+            1e-9,
+        );
+        close_cx(
+            &builtin_bessel_h2(&[i(1), i(1)]).unwrap(),
+            0.4400505857449336,
+            0.7812128213002888,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_chebyshev() {
+        // T_3(x) = 4x^3 - 3x, so T_3(1/2) = -1 exactly.
+        close(&builtin_chebyshev_t(&[i(3), r(0.5)]).unwrap(), -1.0, 1e-12);
+        // T_2(x) = 2x^2 - 1.
+        close(&builtin_chebyshev_t(&[i(2), r(0.3)]).unwrap(), -0.82, 1e-12);
+        // Non-integer order: T_{1/2}(1/2) = cos(acos(1/2)/2) = sqrt(3)/2.
+        close(
+            &builtin_chebyshev_t(&[r(0.5), r(0.5)]).unwrap(),
+            0.5 * 3.0_f64.sqrt(),
+            1e-12,
+        );
+        // U_3(x) = 8x^3 - 4x, so U_3(1/2) = -1 exactly.
+        close(&builtin_chebyshev_u(&[i(3), r(0.5)]).unwrap(), -1.0, 1e-12);
+        // U_2(x) = 4x^2 - 1.
+        close(&builtin_chebyshev_u(&[i(2), r(0.3)]).unwrap(), -0.64, 1e-12);
+    }
+
+    #[test]
+    fn test_gegenbauer() {
+        // C_n^1(x) = U_n(x).
+        close(
+            &builtin_gegenbauer_c(&[i(3), i(1), r(0.5)]).unwrap(),
+            -1.0,
+            1e-12,
+        );
+        // C_2^a(x) = 2a(a+1) x^2 - a; with a = 3/2 this is 7.5 x^2 - 1.5.
+        close(
+            &builtin_gegenbauer_c(&[i(2), r(1.5), r(0.4)]).unwrap(),
+            -0.3,
+            1e-12,
+        );
+        // d/dx C_2^{3/2}(x) = 15x, so at x = 0.4 the value is 6.
+        close(
+            &builtin_gegenbauer_cp(&[i(2), r(1.5), r(0.4)]).unwrap(),
+            6.0,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_jacobi() {
+        // P_n^{(0,0)} is the Legendre polynomial: P_3(x) = (5x^3 - 3x)/2.
+        close(
+            &builtin_jacobi_p(&[i(3), i(0), i(0), r(0.3)]).unwrap(),
+            -0.3825,
+            1e-12,
+        );
+        close(
+            &builtin_jacobi_p(&[i(2), r(0.5), r(0.5), r(0.3)]).unwrap(),
+            -0.4,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_spherical_harmonic_y() {
+        // Y_0^0 = 1/(2 sqrt(pi)).
+        close(
+            &builtin_spherical_harmonic_y(&[i(0), i(0), r(0.7), r(0.3)]).unwrap(),
+            1.0 / (2.0 * std::f64::consts::PI.sqrt()),
+            1e-12,
+        );
+        // Y_1^0(theta, phi) = sqrt(3/(4 pi)) cos(theta).
+        close(
+            &builtin_spherical_harmonic_y(&[i(1), i(0), r(0.5), i(0)]).unwrap(),
+            0.4287890441418358,
+            1e-12,
+        );
+        // Y_1^1(pi/2, pi/2) = -sqrt(3/(8 pi)) i.
+        close_cx(
+            &builtin_spherical_harmonic_y(&[
+                i(1),
+                i(1),
+                r(std::f64::consts::FRAC_PI_2),
+                r(std::f64::consts::FRAC_PI_2),
+            ])
+            .unwrap(),
+            0.0,
+            -0.3454941494713355,
+            1e-12,
+        );
+        // Y_l^{-m} = (-1)^m conj Y_l^m.
+        close_cx(
+            &builtin_spherical_harmonic_y(&[i(2), i(-1), r(0.8), r(0.2)]).unwrap(),
+            {
+                let up = builtin_spherical_harmonic_y(&[i(2), i(1), r(0.8), r(0.2)]).unwrap();
+                match up {
+                    Value::Complex { re, .. } => -re,
+                    _ => panic!(),
+                }
+            },
+            {
+                let up = builtin_spherical_harmonic_y(&[i(2), i(1), r(0.8), r(0.2)]).unwrap();
+                match up {
+                    Value::Complex { im, .. } => im,
+                    _ => panic!(),
+                }
+            },
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_airy_primes() {
+        // Ai'(0) = -1/(3^{1/3} Gamma(1/3)).
+        close(
+            &builtin_airy_ai_prime(&[i(0)]).unwrap(),
+            -0.25881940379280677,
+            1e-12,
+        );
+        close(
+            &builtin_airy_ai_prime(&[i(1)]).unwrap(),
+            -0.15914744129679323,
+            1e-9,
+        );
+        // Bi'(0) = sqrt(3)/(3^{1/3} Gamma(1/3)).
+        close(
+            &builtin_airy_bi_prime(&[i(0)]).unwrap(),
+            0.4482883573538263,
+            1e-12,
+        );
+        close(
+            &builtin_airy_bi_prime(&[i(1)]).unwrap(),
+            0.9324359333927752,
+            1e-8,
+        );
+    }
+
+    #[test]
+    fn test_product_log_alias() {
+        assert!(matches!(
+            builtin_product_log_check(&[i(0)]).unwrap(),
+            Value::Integer(ref n) if *n == 0
+        ));
+        close(
+            &builtin_product_log_check(&[i(1)]).unwrap(),
+            0.5671432904097838,
+            1e-9,
+        );
+    }
+
+    /// Evaluate `ProductLog` through the same alias the registry uses.
+    fn builtin_product_log_check(args: &[Value]) -> Result<Value, EvalError> {
+        super::super::specialfunctions::builtin_lambert_w(args)
+    }
+
+    #[test]
+    fn test_erf_inv_alias() {
+        // The sibling `erf_approx` is accurate to ~1e-7, so allow for that.
+        close(
+            &super::super::specialfunctions::builtin_inverse_erf(&[r(0.5)]).unwrap(),
+            0.4769362762044699,
+            1e-6,
+        );
+        close(
+            &super::super::specialfunctions::builtin_inverse_erfc(&[r(0.5)]).unwrap(),
+            0.4769362762044699,
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn test_new_symbolic_fallbacks() {
+        let s = Value::Symbol("z".to_string());
+        is_unevaluated(&builtin_bessel_h1(&[i(0), s.clone()]).unwrap(), "BesselH1");
+        is_unevaluated(
+            &builtin_chebyshev_t(&[s.clone(), s.clone()]).unwrap(),
+            "ChebyshevT",
+        );
+        is_unevaluated(&builtin_airy_ai_prime(&[s.clone()]).unwrap(), "AiryAiPrime");
+        // |m| > l is out of range.
+        is_unevaluated(
+            &builtin_spherical_harmonic_y(&[i(1), i(2), r(0.5), i(0)]).unwrap(),
+            "SphericalHarmonicY",
+        );
     }
 }

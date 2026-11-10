@@ -240,7 +240,9 @@ pub fn builtin_end(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         return Err(EvalError::Error("End takes no arguments".to_string()));
     }
     let ctx = env.pop_context().unwrap_or_else(|| "Global`".to_string());
-    env.set_propagate("$Context".to_string(), Value::Str(ctx.clone()));
+    // `$Context` should reflect the context that is now current, not the one
+    // just popped.
+    env.set_propagate("$Context".to_string(), Value::Str(env.current_context()));
     Ok(Value::Str(ctx))
 }
 
@@ -268,7 +270,7 @@ pub fn builtin_end_package(args: &[Value], env: &Env) -> Result<Value, EvalError
         ));
     }
     let ctx = env.pop_context().unwrap_or_else(|| "Global`".to_string());
-    env.set_propagate("$Context".to_string(), Value::Str(ctx.clone()));
+    env.set_propagate("$Context".to_string(), Value::Str(env.current_context()));
     Ok(Value::Str(ctx))
 }
 

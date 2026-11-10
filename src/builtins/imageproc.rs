@@ -1,7 +1,9 @@
 //! image processing: ImageCrop, ImageTake, ImagePad, ImageTrim, ImageEffect,
 //! ImageFilter, ColorNegate, Colorize, ColorSeparate/ColorCombine, Dilation,
-//! Erosion, Thinning, MeanFilter, MedianFilter, Blur, Sharpen, DominantColors,
-//! ComponentMeasurements.
+//! Erosion, Thinning, Thicken, MeanFilter, MedianFilter, Blur, Sharpen,
+//! DominantColors, ColorQuantize, ComponentMeasurements, DistanceTransform,
+//! CornerFilter, LaplacianFilter, EdgeFilter, FillingTransform,
+//! MorphologicalBinarize.
 //!
 //! Gap-fill module; see the individual builtin docs for semantics.
 //!
@@ -423,36 +425,59 @@ pub fn builtin_image_pad(args: &[Value]) -> Result<Value, EvalError> {
     Ok(make_image(DynamicImage::ImageRgba8(canvas)))
 }
 
+/// ImageTrim[image]
 /// ImageTrim[image, {x, y, w, h}]
 /// ImageTrim[image, {{x1, y1}, {x2, y2}}]
+/// ImageTrim[image, {x1, y1}, {x2, y2}]
 ///
-/// Trim the image to a bounding region (top-left coordinates).
+/// Trim the image to a bounding region (top-left coordinates). With a single
+/// argument, trim the uniform border whose colour matches the top-left pixel.
 pub fn builtin_image_trim(args: &[Value]) -> Result<Value, EvalError> {
     let Some(img) = get_image(args, 0) else {
         return Ok(unevaluated("ImageTrim", args));
     };
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 3 {
         return Ok(unevaluated("ImageTrim", args));
     }
     let (iw, ih) = (img.width() as i64, img.height() as i64);
 
-    let (x0, y0, w, h) = match &args[1] {
-        Value::List(items) if items.len() == 4 => {
-            let v: Vec<i64> = items.iter().filter_map(to_i64).collect();
-            if v.len() != 4 {
-                return Ok(unevaluated("ImageTrim", args));
+    let region = if args.len() == 1 {
+        trim_uniform_border(&img)
+    } else if args.len() == 3 {
+        match (parse_dims(&args[1]), parse_dims(&args[2])) {
+            (Some(p1), Some(p2)) => Some((
+                p1.0.min(p2.0),
+                p1.1.min(p2.1),
+                (p1.0 - p2.0).abs() + 1,
+                (p1.1 - p2.1).abs() + 1,
+            )),
+            _ => return Ok(unevaluated("ImageTrim", args)),
+        }
+    } else {
+        match &args[1] {
+            Value::List(items) if items.len() == 4 => {
+                let v: Vec<i64> = items.iter().filter_map(to_i64).collect();
+                if v.len() != 4 {
+                    return Ok(unevaluated("ImageTrim", args));
+                }
+                Some((v[0], v[1], v[2].max(1), v[3].max(1)))
             }
-            (v[0], v[1], v[2].max(1), v[3].max(1))
+            Value::List(pts) if pts.len() == 2 => {
+                let (Some(p1), Some(p2)) = (parse_dims(&pts[0]), parse_dims(&pts[1])) else {
+                    return Ok(unevaluated("ImageTrim", args));
+                };
+                Some((
+                    p1.0.min(p2.0),
+                    p1.1.min(p2.1),
+                    (p1.0 - p2.0).abs() + 1,
+                    (p1.1 - p2.1).abs() + 1,
+                ))
+            }
+            _ => return Ok(unevaluated("ImageTrim", args)),
         }
-        Value::List(pts) if pts.len() == 2 => {
-            let (Some(p1), Some(p2)) = (parse_dims(&pts[0]), parse_dims(&pts[1])) else {
-                return Ok(unevaluated("ImageTrim", args));
-            };
-            let x0 = p1.0.min(p2.0);
-            let y0 = p1.1.min(p2.1);
-            (x0, y0, (p1.0 - p2.0).abs() + 1, (p1.1 - p2.1).abs() + 1)
-        }
-        _ => return Ok(unevaluated("ImageTrim", args)),
+    };
+    let Some((x0, y0, w, h)) = region else {
+        return Ok(unevaluated("ImageTrim", args));
     };
 
     let x0 = x0.clamp(0, (iw - 1).max(0));
@@ -464,12 +489,83 @@ pub fn builtin_image_trim(args: &[Value]) -> Result<Value, EvalError> {
     ))
 }
 
+/// Bounding rectangle `{x, y, w, h}` of the non-border-coloured content, or
+/// `None` if the image is empty.
+fn trim_uniform_border(img: &DynamicImage) -> Option<(i64, i64, i64, i64)> {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let src = img.to_rgba8();
+    let bg = src.get_pixel(0, 0);
+    let is_bg = |x: i64, y: i64| -> bool {
+        let p = src.get_pixel(x as u32, y as u32);
+        (0..3).all(|c| (p[c] as i32 - bg[c] as i32).abs() <= 16)
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, -1i64, -1i64);
+    for y in 0..h {
+        for x in 0..w {
+            if !is_bg(x, y) {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x1 < x0 || y1 < y0 {
+        // Fully uniform image: keep a single pixel.
+        return Some((0, 0, 1, 1));
+    }
+    Some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
 // ── Effect / colour builtins ──────────────────────────────────────────────────
+
+/// Round a channel value to the nearest of `levels` evenly spaced levels.
+fn posterize_channel(c: u8, levels: u32) -> u8 {
+    let levels = levels.max(2) as f64;
+    let step = 255.0 / (levels - 1.0);
+    ((c as f64 / step).round() * step).round().clamp(0.0, 255.0) as u8
+}
+
+/// Emboss the image with a directional `3x3` kernel and a mid-grey bias.
+fn emboss_image(img: &DynamicImage) -> DynamicImage {
+    let kernel = [[-2.0, -1.0, 0.0], [-1.0, 1.0, 1.0], [0.0, 1.0, 2.0]];
+    let src = img.to_rgba8();
+    let (w, h) = src.dimensions();
+    if w == 0 || h == 0 {
+        return DynamicImage::ImageRgba8(src);
+    }
+    let at = |x: i64, y: i64, c: usize| -> f64 {
+        let xx = x.clamp(0, w as i64 - 1) as u32;
+        let yy = y.clamp(0, h as i64 - 1) as u32;
+        src.get_pixel(xx, yy)[c] as f64
+    };
+    let mut out = image::RgbaImage::new(w, h);
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let mut px = [0u8; 4];
+            for (c, slot) in px.iter_mut().enumerate().take(3) {
+                let mut sum = 0.0;
+                for ky in 0..3i64 {
+                    for kx in 0..3i64 {
+                        sum += kernel[ky as usize][kx as usize] * at(x + kx - 1, y + ky - 1, c);
+                    }
+                }
+                *slot = (sum + 128.0).round().clamp(0.0, 255.0) as u8;
+            }
+            px[3] = src.get_pixel(x as u32, y as u32)[3];
+            out.put_pixel(x as u32, y as u32, image::Rgba(px));
+        }
+    }
+    DynamicImage::ImageRgba8(out)
+}
 
 /// ImageEffect[image, "effect"]
 ///
 /// Apply a named colour effect. Supported: "GrayLevel"/"Grayscale", "Negate",
-/// "Sepia", "Red", "Green", "Blue".
+/// "Sepia", "Red", "Green", "Blue", "Posterize", "Solarize", "Emboss".
 pub fn builtin_image_effect(args: &[Value]) -> Result<Value, EvalError> {
     let Some(img) = get_image(args, 0) else {
         return Ok(unevaluated("ImageEffect", args));
@@ -504,6 +600,23 @@ pub fn builtin_image_effect(args: &[Value]) -> Result<Value, EvalError> {
         "blue" => map_color_type(&img, |r, g, b| {
             ((r as f64 * 0.3) as u8, (g as f64 * 0.3) as u8, b)
         }),
+        "posterize" | "posterise" | "posterization" | "posterisation" => {
+            map_color_type(&img, |r, g, b| {
+                (
+                    posterize_channel(r, 4),
+                    posterize_channel(g, 4),
+                    posterize_channel(b, 4),
+                )
+            })
+        }
+        "solarize" | "solarise" => map_color_type(&img, |r, g, b| {
+            (
+                if r >= 128 { 255 - r } else { r },
+                if g >= 128 { 255 - g } else { g },
+                if b >= 128 { 255 - b } else { b },
+            )
+        }),
+        "emboss" => emboss_image(&img),
         _ => return Ok(unevaluated("ImageEffect", args)),
     };
     Ok(make_image(out))
@@ -894,15 +1007,31 @@ pub fn builtin_thinning(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Colour analysis ───────────────────────────────────────────────────────────
 
-/// DominantColors[image]  or  DominantColors[image, n]
+/// DominantColors[image]
+/// DominantColors[image, n]
+/// DominantColors[image, n, "Coverage"]
+/// DominantColors[image, n, "Count"]
 ///
 /// Return up to `n` (default 5) dominant colours as `RGBColor[...]` values,
 /// ordered by pixel frequency. Colours are quantised to 4 bits per channel.
+/// With a third argument, each colour is paired with its pixel `"Coverage"`
+/// (fraction of the image, in `[0, 1]`) or `"Count"` instead.
 pub fn builtin_dominant_colors(args: &[Value]) -> Result<Value, EvalError> {
     let Some(img) = get_image(args, 0) else {
         return Ok(unevaluated("DominantColors", args));
     };
-    if args.len() > 2 {
+    if args.len() > 3 {
+        return Ok(unevaluated("DominantColors", args));
+    }
+    let mode = match args.get(2) {
+        None => None,
+        Some(Value::Str(s)) => Some(s.to_ascii_lowercase()),
+        Some(Value::Symbol(s)) => Some(s.to_ascii_lowercase()),
+        Some(_) => return Ok(unevaluated("DominantColors", args)),
+    };
+    if let Some(m) = &mode
+        && !matches!(m.as_str(), "coverage" | "count")
+    {
         return Ok(unevaluated("DominantColors", args));
     }
     let n = args
@@ -917,23 +1046,33 @@ pub fn builtin_dominant_colors(args: &[Value]) -> Result<Value, EvalError> {
         let key = ((p[0] as u32 >> 4) << 8) | ((p[1] as u32 >> 4) << 4) | (p[2] as u32 >> 4);
         *counts.entry(key).or_insert(0) += 1;
     }
+    let total: u64 = counts.values().map(|&c| c as u64).sum();
     let mut entries: Vec<(u32, u32)> = counts.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     let colors = entries
         .into_iter()
         .take(n)
-        .map(|(key, _)| {
+        .map(|(key, count)| {
             let r = ((key >> 8) & 0xF) * 16 + 8;
             let g = ((key >> 4) & 0xF) * 16 + 8;
             let b = (key & 0xF) * 16 + 8;
-            Value::Call {
+            let color = Value::Call {
                 head: "RGBColor".to_string(),
                 args: vec![
                     chan_value(r as u8),
                     chan_value(g as u8),
                     chan_value(b as u8),
                 ],
+            };
+            match mode.as_deref() {
+                None => color,
+                Some("count") => {
+                    Value::List(vec![color, Value::Integer(rug::Integer::from(count))])
+                }
+                Some(_) => {
+                    Value::List(vec![color, super::real(count as f64 / total.max(1) as f64)])
+                }
             }
         })
         .collect();
@@ -1069,6 +1208,547 @@ fn measure_component(prop: &str, pixels: &[(u32, u32)], gray: &image::GrayImage)
     }
 }
 
+// ── Extended morphology / feature detection ───────────────────────────────────
+
+/// Convert an image to a row-major `f64` luma buffer with its dimensions.
+fn luma_f64(img: &DynamicImage) -> (u32, u32, Vec<f64>) {
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    (w, h, gray.pixels().map(|p| p[0] as f64).collect())
+}
+
+/// Build a grayscale image by normalising a non-negative response buffer so that
+/// its largest value maps to 255.
+fn response_image(w: u32, h: u32, data: &[f64]) -> image::GrayImage {
+    let max = data.iter().copied().fold(0.0f64, f64::max);
+    let mut buf = image::GrayImage::new(w, h);
+    for (p, &v) in buf.pixels_mut().zip(data.iter()) {
+        *p = image::Luma([if max > 0.0 {
+            norm_to_u8(v.max(0.0) / max)
+        } else {
+            0
+        }]);
+    }
+    buf
+}
+
+/// A large finite cost used in place of infinity by the distance transform.
+const EDT_BIG: f64 = 1.0e7;
+
+/// Exact 1-D squared Euclidean distance transform of `f` into `d`.
+///
+/// Felzenszwalb & Huttenlocher's lower-envelope algorithm. `f` holds the squared
+/// sample cost (`0` at background samples, a large finite value elsewhere).
+fn edt_1d(f: &[f64], d: &mut [f64]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f64; n + 1];
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+    for q in 1..n {
+        let qf = q as f64;
+        let s = loop {
+            let r = v[k];
+            let rf = r as f64;
+            let s = ((f[q] + qf * qf) - (f[r] + rf * rf)) / (2.0 * qf - 2.0 * rf);
+            if s <= z[k] {
+                if k == 0 {
+                    break s;
+                }
+                k -= 1;
+            } else {
+                break s;
+            }
+        };
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+    k = 0;
+    for (q, dv) in d.iter_mut().enumerate().take(n) {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let r = v[k];
+        *dv = (q as f64 - r as f64) * (q as f64 - r as f64) + f[r];
+    }
+}
+
+/// Euclidean distance transform of the binarised image (distance to the nearest
+/// background pixel), normalised so the largest distance maps to 255.
+fn distance_transform(img: &DynamicImage) -> image::GrayImage {
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    let (wi, hi) = (w as usize, h as usize);
+    if wi == 0 || hi == 0 {
+        return gray;
+    }
+    let mut f = vec![EDT_BIG; wi * hi];
+    let mut has_bg = false;
+    for (i, p) in gray.pixels().enumerate() {
+        if p[0] < 128 {
+            f[i] = 0.0;
+            has_bg = true;
+        }
+    }
+    if !has_bg {
+        // Treat the frame as background so an all-foreground image measures the
+        // distance from the border instead of producing a flat result.
+        for x in 0..wi {
+            f[x] = 0.0;
+            f[(hi - 1) * wi + x] = 0.0;
+        }
+        for y in 0..hi {
+            f[y * wi] = 0.0;
+            f[y * wi + wi - 1] = 0.0;
+        }
+    }
+    let mut d = vec![0.0f64; wi * hi];
+    for y in 0..hi {
+        let row = y * wi;
+        edt_1d(&f[row..row + wi], &mut d[row..row + wi]);
+    }
+    let mut column = vec![0.0f64; hi];
+    let mut scratch = vec![0.0f64; hi];
+    for x in 0..wi {
+        for y in 0..hi {
+            column[y] = d[y * wi + x];
+        }
+        edt_1d(&column, &mut scratch);
+        for y in 0..hi {
+            d[y * wi + x] = scratch[y];
+        }
+    }
+    let max = d.iter().copied().fold(0.0f64, f64::max).sqrt();
+    let mut buf = image::GrayImage::new(w, h);
+    for (p, &v) in buf.pixels_mut().zip(d.iter()) {
+        *p = image::Luma([if max > 0.0 {
+            norm_to_u8(v.sqrt() / max)
+        } else {
+            0
+        }]);
+    }
+    buf
+}
+
+/// Harris corner response of the image (structure-tensor determinant minus
+/// `k * trace²`, clamped to non-negative values).
+fn corner_response(img: &DynamicImage) -> image::GrayImage {
+    let (w, h, g) = luma_f64(img);
+    let (wi, hi) = (w as usize, h as usize);
+    if wi == 0 || hi == 0 {
+        return image::GrayImage::new(w, h);
+    }
+    let at = |x: i64, y: i64| -> f64 {
+        let xx = x.clamp(0, wi as i64 - 1) as usize;
+        let yy = y.clamp(0, hi as i64 - 1) as usize;
+        g[yy * wi + xx]
+    };
+    let sobel = |x: i64, y: i64| -> (f64, f64) {
+        let gx = (at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1))
+            - (at(x - 1, y - 1) + 2.0 * at(x - 1, y) + at(x - 1, y + 1));
+        let gy = (at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1))
+            - (at(x - 1, y - 1) + 2.0 * at(x, y - 1) + at(x + 1, y - 1));
+        (gx, gy)
+    };
+    let k = 0.04f64;
+    let mut resp = vec![0.0f64; wi * hi];
+    for y in 0..hi as i64 {
+        for x in 0..wi as i64 {
+            let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    let (gx, gy) = sobel(x + dx, y + dy);
+                    sxx += gx * gx;
+                    syy += gy * gy;
+                    sxy += gx * gy;
+                }
+            }
+            let det = sxx * syy - sxy * sxy;
+            let trace = sxx + syy;
+            resp[y as usize * wi + x as usize] = (det - k * trace * trace).max(0.0);
+        }
+    }
+    response_image(w, h, &resp)
+}
+
+/// Absolute Laplacian response, optionally after Gaussian smoothing with `sigma`.
+fn laplacian_response(img: &DynamicImage, sigma: f32) -> image::GrayImage {
+    let smoothed = if sigma > 0.0 {
+        img.blur(sigma)
+    } else {
+        img.clone()
+    };
+    let (w, h, g) = luma_f64(&smoothed);
+    let (wi, hi) = (w as usize, h as usize);
+    if wi == 0 || hi == 0 {
+        return image::GrayImage::new(w, h);
+    }
+    let at = |x: i64, y: i64| -> f64 {
+        let xx = x.clamp(0, wi as i64 - 1) as usize;
+        let yy = y.clamp(0, hi as i64 - 1) as usize;
+        g[yy * wi + xx]
+    };
+    let mut resp = vec![0.0f64; wi * hi];
+    for y in 0..hi as i64 {
+        for x in 0..wi as i64 {
+            let v = at(x, y - 1) + at(x, y + 1) + at(x - 1, y) + at(x + 1, y) - 4.0 * at(x, y);
+            resp[y as usize * wi + x as usize] = v.abs();
+        }
+    }
+    response_image(w, h, &resp)
+}
+
+/// Scharr gradient magnitude, optionally after Gaussian smoothing with `sigma`.
+fn edge_response(img: &DynamicImage, sigma: f32) -> image::GrayImage {
+    let smoothed = if sigma > 0.0 {
+        img.blur(sigma)
+    } else {
+        img.clone()
+    };
+    let (w, h, g) = luma_f64(&smoothed);
+    let (wi, hi) = (w as usize, h as usize);
+    if wi == 0 || hi == 0 {
+        return image::GrayImage::new(w, h);
+    }
+    let at = |x: i64, y: i64| -> f64 {
+        let xx = x.clamp(0, wi as i64 - 1) as usize;
+        let yy = y.clamp(0, hi as i64 - 1) as usize;
+        g[yy * wi + xx]
+    };
+    let mut resp = vec![0.0f64; wi * hi];
+    for y in 0..hi as i64 {
+        for x in 0..wi as i64 {
+            let gx = 3.0 * (at(x + 1, y - 1) - at(x - 1, y - 1))
+                + 10.0 * (at(x + 1, y) - at(x - 1, y))
+                + 3.0 * (at(x + 1, y + 1) - at(x - 1, y + 1));
+            let gy = 3.0 * (at(x - 1, y + 1) - at(x - 1, y - 1))
+                + 10.0 * (at(x, y + 1) - at(x, y - 1))
+                + 3.0 * (at(x + 1, y + 1) - at(x + 1, y - 1));
+            resp[y as usize * wi + x as usize] = (gx * gx + gy * gy).sqrt();
+        }
+    }
+    response_image(w, h, &resp)
+}
+
+/// Fill background regions that are not 4-connected to the image border.
+fn fill_holes(binary: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let mut reachable = vec![false; w * h];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for x in 0..w {
+        for y in [0usize, h - 1] {
+            let i = y * w + x;
+            if !binary[i] && !reachable[i] {
+                reachable[i] = true;
+                stack.push((x, y));
+            }
+        }
+    }
+    for y in 0..h {
+        for x in [0usize, w - 1] {
+            let i = y * w + x;
+            if !binary[i] && !reachable[i] {
+                reachable[i] = true;
+                stack.push((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = stack.pop() {
+        let neighbors = [
+            (x as i64 - 1, y as i64),
+            (x as i64 + 1, y as i64),
+            (x as i64, y as i64 - 1),
+            (x as i64, y as i64 + 1),
+        ];
+        for (nx, ny) in neighbors {
+            if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            let i = ny * w + nx;
+            if !binary[i] && !reachable[i] {
+                reachable[i] = true;
+                stack.push((nx, ny));
+            }
+        }
+    }
+    (0..w * h).map(|i| binary[i] || !reachable[i]).collect()
+}
+
+/// DistanceTransform[image]
+///
+/// For each foreground (pixel ≥ 0.5) pixel, the Euclidean distance to the
+/// nearest background pixel, normalised so the largest distance is white. An
+/// all-foreground image measures distance from the frame.
+pub fn builtin_distance_transform(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("DistanceTransform", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("DistanceTransform", args));
+    }
+    if let Some(v) = args.get(1)
+        && super::to_f64(v).is_none()
+        && !matches!(v, Value::Str(_) | Value::Symbol(_))
+    {
+        return Ok(unevaluated("DistanceTransform", args));
+    }
+    Ok(make_image(DynamicImage::ImageLuma8(distance_transform(
+        &img,
+    ))))
+}
+
+/// CornerFilter[image]
+///
+/// Harris corner response, normalised to `[0, 1]`.
+pub fn builtin_corner_filter(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("CornerFilter", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("CornerFilter", args));
+    }
+    Ok(make_image(DynamicImage::ImageLuma8(corner_response(&img))))
+}
+
+/// LaplacianFilter[image]
+/// LaplacianFilter[image, r]
+///
+/// Absolute Laplacian (Laplacian-of-Gaussian when `r > 0`), normalised to
+/// `[0, 1]`.
+pub fn builtin_laplacian_filter(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("LaplacianFilter", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("LaplacianFilter", args));
+    }
+    let sigma = args.get(1).and_then(super::to_f64).unwrap_or(0.0).max(0.0);
+    Ok(make_image(DynamicImage::ImageLuma8(laplacian_response(
+        &img,
+        sigma as f32,
+    ))))
+}
+
+/// EdgeFilter[image]
+/// EdgeFilter[image, r]
+///
+/// Scharr gradient magnitude (optionally of a Gaussian-smoothed image),
+/// normalised to `[0, 1]`. Complements the Sobel-based `EdgeDetect`.
+pub fn builtin_edge_filter(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("EdgeFilter", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("EdgeFilter", args));
+    }
+    let sigma = args.get(1).and_then(super::to_f64).unwrap_or(0.0).max(0.0);
+    Ok(make_image(DynamicImage::ImageLuma8(edge_response(
+        &img,
+        sigma as f32,
+    ))))
+}
+
+/// FillingTransform[image]
+///
+/// Fill the holes of a binary image: background regions not connected to the
+/// border become foreground.
+pub fn builtin_filling_transform(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("FillingTransform", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("FillingTransform", args));
+    }
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    let (wi, hi) = (w as usize, h as usize);
+    if wi == 0 || hi == 0 {
+        return Ok(make_image(DynamicImage::ImageLuma8(gray)));
+    }
+    let binary: Vec<bool> = gray.pixels().map(|p| p[0] >= 128).collect();
+    let filled = fill_holes(&binary, wi, hi);
+    let mut buf = image::GrayImage::new(w, h);
+    for (p, &b) in buf.pixels_mut().zip(filled.iter()) {
+        *p = image::Luma([if b { 255 } else { 0 }]);
+    }
+    Ok(make_image(DynamicImage::ImageLuma8(buf)))
+}
+
+/// MorphologicalBinarize[image]
+/// MorphologicalBinarize[image, t]
+///
+/// Adaptive local-mean binarisation: a pixel is foreground when it exceeds its
+/// neighbourhood mean by a relative margin `t` (default 0.04).
+pub fn builtin_morphological_binarize(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("MorphologicalBinarize", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("MorphologicalBinarize", args));
+    }
+    let t = match args.get(1) {
+        None => 0.04,
+        Some(v) => match super::to_f64(v) {
+            Some(x) => x,
+            None => return Ok(unevaluated("MorphologicalBinarize", args)),
+        },
+    };
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    if w == 0 || h == 0 {
+        return Ok(make_image(DynamicImage::ImageLuma8(gray)));
+    }
+    let r = (w.min(h) / 4).clamp(1, 15);
+    let local = box_blur(&DynamicImage::ImageLuma8(gray.clone()), r, r).to_luma8();
+    let mut buf = image::GrayImage::new(w, h);
+    for (p, (v, m)) in buf.pixels_mut().zip(gray.pixels().zip(local.pixels())) {
+        let threshold = m[0] as f64 * (1.0 + t);
+        *p = image::Luma([if v[0] as f64 > threshold { 255 } else { 0 }]);
+    }
+    Ok(make_image(DynamicImage::ImageLuma8(buf)))
+}
+
+/// Thicken[image]
+/// Thicken[image, r]
+///
+/// Grow the foreground of a binary image by a square structuring element of
+/// radius `r` (default 1), the counterpart to `Thinning`.
+pub fn builtin_thicken(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("Thicken", args));
+    };
+    if args.len() > 2 {
+        return Ok(unevaluated("Thicken", args));
+    }
+    let r = radius_arg(args, 1);
+    let gray = img.to_luma8();
+    let mut bin = image::GrayImage::new(gray.width(), gray.height());
+    for (p, s) in bin.pixels_mut().zip(gray.pixels()) {
+        *p = image::Luma([if s[0] >= 128 { 255 } else { 0 }]);
+    }
+    Ok(make_image(morph(
+        &DynamicImage::ImageLuma8(bin),
+        r,
+        r,
+        true,
+    )))
+}
+
+/// Split `pixels` into at most `n` boxes by median cut and return box averages.
+fn median_cut(pixels: Vec<[u8; 3]>, n: usize) -> Vec<[u8; 3]> {
+    if pixels.is_empty() {
+        return vec![[0, 0, 0]];
+    }
+    let mut boxes: Vec<Vec<[u8; 3]>> = vec![pixels];
+    while boxes.len() < n {
+        let mut best: Option<usize> = None;
+        let mut best_score = 0usize;
+        for (i, b) in boxes.iter().enumerate() {
+            if b.len() < 2 {
+                continue;
+            }
+            let mut lo = [255u8; 3];
+            let mut hi = [0u8; 3];
+            for p in b {
+                for c in 0..3 {
+                    lo[c] = lo[c].min(p[c]);
+                    hi[c] = hi[c].max(p[c]);
+                }
+            }
+            let range = (0..3).map(|c| (hi[c] - lo[c]) as usize).max().unwrap_or(0);
+            let score = range * b.len();
+            if score >= best_score {
+                best_score = score;
+                best = Some(i);
+            }
+        }
+        let Some(i) = best else {
+            break;
+        };
+        let mut b = boxes.swap_remove(i);
+        let mut lo = [255u8; 3];
+        let mut hi = [0u8; 3];
+        for p in &b {
+            for c in 0..3 {
+                lo[c] = lo[c].min(p[c]);
+                hi[c] = hi[c].max(p[c]);
+            }
+        }
+        let ch = (0..3).max_by_key(|&c| hi[c] - lo[c]).unwrap_or(0);
+        b.sort_by_key(|p| p[ch]);
+        let right = b.split_off(b.len() / 2);
+        boxes.push(b);
+        boxes.push(right);
+    }
+    boxes
+        .iter()
+        .filter(|b| !b.is_empty())
+        .map(|b| {
+            let mut sum = [0u64; 3];
+            for p in b {
+                for c in 0..3 {
+                    sum[c] += p[c] as u64;
+                }
+            }
+            let len = b.len() as u64;
+            [
+                (sum[0] / len) as u8,
+                (sum[1] / len) as u8,
+                (sum[2] / len) as u8,
+            ]
+        })
+        .collect()
+}
+
+/// ColorQuantize[image]
+/// ColorQuantize[image, n]
+///
+/// Reduce an image to at most `n` (default 8) colours using median-cut
+/// quantisation.
+pub fn builtin_color_quantize(args: &[Value]) -> Result<Value, EvalError> {
+    let Some(img) = get_image(args, 0) else {
+        return Ok(unevaluated("ColorQuantize", args));
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated("ColorQuantize", args));
+    }
+    let n = match args.get(1) {
+        None => 8usize,
+        Some(v) => match to_i64(v) {
+            Some(x) if x >= 1 => (x as usize).min(256),
+            _ => return Ok(unevaluated("ColorQuantize", args)),
+        },
+    };
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let pixels: Vec<[u8; 3]> = rgb.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+    let palette = median_cut(pixels, n);
+    let mut out = image::RgbImage::new(w, h);
+    for (o, p) in out.pixels_mut().zip(rgb.pixels()) {
+        let mut best = palette[0];
+        let mut best_d = u32::MAX;
+        for c in &palette {
+            let dr = p[0] as i32 - c[0] as i32;
+            let dg = p[1] as i32 - c[1] as i32;
+            let db = p[2] as i32 - c[2] as i32;
+            let d = (dr * dr + dg * dg + db * db) as u32;
+            if d < best_d {
+                best_d = d;
+                best = *c;
+            }
+        }
+        *o = image::Rgb(best);
+    }
+    Ok(make_image(DynamicImage::ImageRgb8(out)))
+}
+
 // ── Registration ──────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
@@ -1091,7 +1771,15 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "Blur", builtin_blur);
     super::register_builtin(env, "Sharpen", builtin_sharpen);
     super::register_builtin(env, "DominantColors", builtin_dominant_colors);
+    super::register_builtin(env, "ColorQuantize", builtin_color_quantize);
     super::register_builtin(env, "ComponentMeasurements", builtin_component_measurements);
+    super::register_builtin(env, "DistanceTransform", builtin_distance_transform);
+    super::register_builtin(env, "CornerFilter", builtin_corner_filter);
+    super::register_builtin(env, "LaplacianFilter", builtin_laplacian_filter);
+    super::register_builtin(env, "EdgeFilter", builtin_edge_filter);
+    super::register_builtin(env, "FillingTransform", builtin_filling_transform);
+    super::register_builtin(env, "MorphologicalBinarize", builtin_morphological_binarize);
+    super::register_builtin(env, "Thicken", builtin_thicken);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1502,6 +2190,216 @@ mod tests {
         assert!(is_unevaluated(&out, "ComponentMeasurements"));
     }
 
+    // ── DistanceTransform ──
+
+    #[test]
+    fn test_distance_transform_point() {
+        let img = gray_img(5, 5, |x, y| if x == 2 && y == 2 { 0 } else { 255 });
+        let out = builtin_distance_transform(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        // The background pixel itself is zero; the immediate neighbour is the
+        // smallest non-zero distance.
+        assert_eq!(o.get_pixel(2, 2)[0], 0);
+        assert!(o.get_pixel(2, 3)[0] > 0);
+        assert!(o.get_pixel(2, 3)[0] < 128);
+        // The corner is farthest from the single background pixel.
+        assert!(o.get_pixel(0, 0)[0] > o.get_pixel(2, 3)[0]);
+    }
+
+    #[test]
+    fn test_distance_transform_all_foreground_uses_frame() {
+        let img = gray_img(5, 5, |_, _| 255);
+        let out = builtin_distance_transform(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        // Border pixels are at distance 0 from the frame; centre is largest.
+        assert_eq!(o.get_pixel(0, 0)[0], 0);
+        assert!(o.get_pixel(2, 2)[0] > o.get_pixel(1, 1)[0]);
+    }
+
+    #[test]
+    fn test_distance_transform_inapplicable() {
+        let out = builtin_distance_transform(&[Value::Integer(rug::Integer::from(1))]).unwrap();
+        assert!(is_unevaluated(&out, "DistanceTransform"));
+    }
+
+    // ── Corner / edge / laplacian filters ──
+
+    #[test]
+    fn test_corner_filter_finds_corner() {
+        // A single right-angle corner.
+        let img = gray_img(8, 8, |x, y| if x < 4 && y < 4 { 255 } else { 0 });
+        let out = builtin_corner_filter(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!((o.width(), o.height()), (8, 8));
+        let peak = o.pixels().map(|p| p[0]).max().unwrap();
+        assert!(peak > 0, "expected a non-zero corner response");
+    }
+
+    #[test]
+    fn test_laplacian_filter_edge() {
+        // Vertical step edge: the Laplacian is non-zero only at the seam.
+        let img = gray_img(6, 6, |x, _| if x < 3 { 0 } else { 255 });
+        let out = builtin_laplacian_filter(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!((o.width(), o.height()), (6, 6));
+        assert!(o.get_pixel(3, 2)[0] > 0);
+        assert_eq!(o.get_pixel(0, 2)[0], 0);
+    }
+
+    #[test]
+    fn test_edge_filter_step() {
+        let img = gray_img(6, 6, |x, _| if x < 3 { 0 } else { 255 });
+        let out = builtin_edge_filter(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert!(o.get_pixel(2, 3)[0] > 0 || o.get_pixel(3, 3)[0] > 0);
+        assert_eq!(o.get_pixel(0, 3)[0], 0);
+    }
+
+    // ── FillingTransform ──
+
+    #[test]
+    fn test_filling_transform_fills_ring() {
+        let img = gray_img(5, 5, |x, y| {
+            if x == 0 || y == 0 || x == 4 || y == 4 {
+                255
+            } else {
+                0
+            }
+        });
+        let out = builtin_filling_transform(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!(o.get_pixel(2, 2)[0], 255, "interior hole should be filled");
+    }
+
+    #[test]
+    fn test_filling_transform_keeps_open_region() {
+        // The left two columns are background and touch the border.
+        let img = gray_img(5, 5, |x, _| if x < 2 { 0 } else { 255 });
+        let out = builtin_filling_transform(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!(o.get_pixel(0, 0)[0], 0);
+        assert_eq!(o.get_pixel(4, 4)[0], 255);
+    }
+
+    // ── MorphologicalBinarize / Thicken ──
+
+    #[test]
+    fn test_morphological_binarize_square() {
+        let img = gray_img(9, 9, |x, y| {
+            if (3..6).contains(&x) && (3..6).contains(&y) {
+                255
+            } else {
+                0
+            }
+        });
+        let out = builtin_morphological_binarize(&[img]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!(o.get_pixel(4, 4)[0], 255);
+        assert_eq!(o.get_pixel(0, 0)[0], 0);
+    }
+
+    #[test]
+    fn test_thicken_grows_foreground() {
+        let img = gray_img(5, 5, |x, y| if x == 2 && y == 2 { 255 } else { 0 });
+        let out = builtin_thicken(&[img, Value::Integer(rug::Integer::from(1))]).unwrap();
+        let o = extract(&out).to_luma8();
+        assert_eq!(o.get_pixel(2, 2)[0], 255);
+        assert_eq!(o.get_pixel(2, 3)[0], 255);
+        assert_eq!(o.get_pixel(0, 0)[0], 0);
+    }
+
+    // ── ColorQuantize ──
+
+    #[test]
+    fn test_color_quantize_limits_palette() {
+        let img = rgb_img(8, 8, |x, _| {
+            [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]][(x / 2) as usize % 4]
+        });
+        let out = builtin_color_quantize(&[img, Value::Integer(rug::Integer::from(2))]).unwrap();
+        let o = extract(&out).to_rgb8();
+        assert_eq!((o.width(), o.height()), (8, 8));
+        let mut distinct: Vec<[u8; 3]> = o.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() <= 2, "got {} colours", distinct.len());
+    }
+
+    // ── DominantColors extras ──
+
+    #[test]
+    fn test_dominant_colors_coverage() {
+        let img = rgb_img(4, 4, |x, _| if x < 1 { [255, 0, 0] } else { [0, 0, 255] });
+        let out = builtin_dominant_colors(&[
+            img,
+            Value::Integer(rug::Integer::from(2)),
+            Value::Str("Coverage".to_string()),
+        ])
+        .unwrap();
+        let Value::List(list) = &out else {
+            panic!("expected list");
+        };
+        assert_eq!(list.len(), 2);
+        let Some(Value::List(pair)) = Some(&list[0]) else {
+            panic!("expected pair");
+        };
+        assert!(matches!(&pair[0], Value::Call { head, .. } if head == "RGBColor"));
+        let coverage = crate::builtins::to_f64(&pair[1]).unwrap();
+        assert!((0.0..=1.0).contains(&coverage) && coverage > 0.0);
+    }
+
+    // ── ImageEffect extras ──
+
+    #[test]
+    fn test_image_effect_solarize() {
+        let img = gray_img(2, 2, |_, _| 200);
+        let out = builtin_image_effect(&[img, Value::Str("Solarize".to_string())]).unwrap();
+        assert_eq!(extract(&out).to_luma8().get_pixel(0, 0)[0], 55);
+    }
+
+    #[test]
+    fn test_image_effect_posterize() {
+        let img = gray_img(2, 2, |_, _| 200);
+        let out = builtin_image_effect(&[img, Value::Str("Posterize".to_string())]).unwrap();
+        // 200 rounds to the nearest of {0, 85, 170, 255}.
+        assert_eq!(extract(&out).to_luma8().get_pixel(0, 0)[0], 170);
+    }
+
+    #[test]
+    fn test_image_effect_emboss() {
+        let img = gray_img(4, 4, |_, _| 128);
+        let out = builtin_image_effect(&[img, Value::Str("Emboss".to_string())]).unwrap();
+        assert_eq!(dims(&out), (4, 4));
+    }
+
+    // ── ImageTrim extras ──
+
+    #[test]
+    fn test_image_trim_uniform_border() {
+        let img = gray_img(8, 8, |x, y| {
+            if (2..6).contains(&x) && (2..6).contains(&y) {
+                255
+            } else {
+                0
+            }
+        });
+        let out = builtin_image_trim(&[img]).unwrap();
+        assert_eq!(dims(&out), (4, 4));
+    }
+
+    #[test]
+    fn test_image_trim_two_points_three_args() {
+        let img = gray_img(8, 8, |_, _| 10);
+        let pt = |a: i64, b: i64| {
+            Value::List(vec![
+                Value::Integer(rug::Integer::from(a)),
+                Value::Integer(rug::Integer::from(b)),
+            ])
+        };
+        let out = builtin_image_trim(&[img, pt(2, 2), pt(5, 6)]).unwrap();
+        let o = extract(&out);
+        assert_eq!((o.width(), o.height()), (4, 5));
+    }
+
     // ── Registration ──
 
     #[test]
@@ -1527,7 +2425,15 @@ mod tests {
             "Blur",
             "Sharpen",
             "DominantColors",
+            "ColorQuantize",
             "ComponentMeasurements",
+            "DistanceTransform",
+            "CornerFilter",
+            "LaplacianFilter",
+            "EdgeFilter",
+            "FillingTransform",
+            "MorphologicalBinarize",
+            "Thicken",
         ] {
             assert!(env.get(name).is_some(), "{name} not registered");
         }

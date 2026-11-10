@@ -68,15 +68,28 @@ fn negate(v: &Value) -> Value {
     times(vec![int(-1), v.clone()])
 }
 
-fn times(mut args: Vec<Value>) -> Value {
-    if args.iter().any(is_zero) {
+fn push_times_factors(args: Vec<Value>, out: &mut Vec<Value>) {
+    for a in args {
+        match a {
+            Value::Call { head, args: inner } if head == "Times" => {
+                push_times_factors(inner, out);
+            }
+            other => out.push(other),
+        }
+    }
+}
+
+fn times(args: Vec<Value>) -> Value {
+    let mut flat = Vec::with_capacity(args.len());
+    push_times_factors(args, &mut flat);
+    if flat.iter().any(is_zero) {
         return int(0);
     }
-    args.retain(|a| !is_one(a));
-    match args.len() {
+    flat.retain(|a| !is_one(a));
+    match flat.len() {
         0 => int(1),
-        1 => args.pop().unwrap(),
-        _ => call("Times", args),
+        1 => flat.pop().unwrap(),
+        _ => call("Times", flat),
     }
 }
 
@@ -239,21 +252,27 @@ fn linear_coeff(u: &Value, var: &str) -> Option<Value> {
     }
 }
 
-/// If `factor` is `E^u` or `Exp[u]` with `u` linear in `var`, return the
-/// coefficient `a` such that `u == a*var`.
+/// If `factor` is `E^u` or `Exp[u]` (or `b^u` with `b` free of `var`) and the
+/// exponent `u` is linear in `var`, return the additive shift `a` such that
+/// `factor == E^(a*var)` (so `E^u -> a`, `b^u -> u_coeff * Log[b]`).
+///
+/// Returns `Some(0)` when `u` is free of `var`, letting the caller treat a
+/// constant exponential as an ordinary coefficient.
 fn exp_shift(factor: &Value, var: &str) -> Option<Value> {
-    let u = match factor {
-        Value::Call { head, args } if head == "Exp" && args.len() == 1 => &args[0],
-        Value::Call { head, args }
-            if head == "Power"
-                && args.len() == 2
-                && matches!(&args[0], Value::Symbol(s) if s == "E") =>
-        {
-            &args[1]
+    let (base, u): (Option<&Value>, &Value) = match factor {
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => (None, &args[0]),
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            (Some(&args[0]), &args[1])
         }
         _ => return None,
     };
-    linear_coeff(u, var)
+    let c = linear_coeff(u, var)?;
+    match base {
+        None => Some(c), // Exp[u], base is E
+        Some(Value::Symbol(s)) if s == "E" => Some(c),
+        Some(b) if !contains_var(b, var) => Some(times(vec![c, call("Log", vec![b.clone()])])),
+        Some(_) => None,
+    }
 }
 
 /// If `factor` is `Sin/Cos/Sinh/Cosh[a*var]`, return `(head, a)`.
@@ -335,7 +354,86 @@ fn laplace_trig(kind: &str, a: &Value, sbase: &Value) -> Value {
     }
 }
 
+/// `(-1)^n * d^n/ds^n expr` computed via the symbolic `D` builtin.
+fn diff_n(expr: &Value, s: &str, n: i64, env: &Env) -> Value {
+    if n == 0 {
+        return expr.clone();
+    }
+    let d = eval_value(call("D", vec![expr.clone(), sym(s), int(n)]), env);
+    if n % 2 == 1 {
+        eval_value(negate(&d), env)
+    } else {
+        d
+    }
+}
+
+/// If `f` is an applied derivative `Derivative[n][g][t]` (whose head is stored
+/// as the string `"Derivative[n][g]"`), return `(n, g)`.
+fn derivative_application(f: &Value) -> Option<(i64, String)> {
+    let Value::Call { head, args } = f else {
+        return None;
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let inner = head.strip_prefix("Derivative[")?;
+    let close = inner.find(']')?;
+    let order: i64 = inner[..close].parse().ok()?;
+    let g = inner[close + 1..].strip_prefix('[')?.strip_suffix(']')?;
+    if order < 1 || g.is_empty() || g.contains('[') {
+        return None;
+    }
+    Some((order, g.to_string()))
+}
+
+/// `L[g^(n)(t)] = s^n G(s) - sum_{k=0}^{n-1} s^(n-1-k) g^(k)(0)`.
+fn laplace_derivative_term(fname: &str, n: i64, t: &str, s: &str, env: &Env) -> Value {
+    let gs = laplace(&call(fname, vec![sym(t)]), t, s, env);
+    let mut terms = vec![times(vec![pow(sym(s), int(n)), gs])];
+    for k in 0..n {
+        let at0 = if k == 0 {
+            call(fname, vec![int(0)])
+        } else {
+            call(&format!("Derivative[{k}][{fname}]"), vec![int(0)])
+        };
+        terms.push(negate(&times(vec![pow(sym(s), int(n - 1 - k)), at0])));
+    }
+    eval_value(plus(terms), env)
+}
+
 fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
+    if let Some((order, fname)) = derivative_application(f) {
+        return Some(laplace_derivative_term(&fname, order, t, s, env));
+    }
+
+    // A constant multiple of an applied derivative: `c * f^(n)(t)`.
+    if let Value::Call { head, args } = f
+        && head == "Times"
+    {
+        let mut c = int(1);
+        let mut deriv: Option<Value> = None;
+        let mut ok = true;
+        for factor in args {
+            if derivative_application(factor).is_some() {
+                if deriv.is_some() {
+                    ok = false;
+                    break;
+                }
+                deriv = Some(factor.clone());
+            } else if contains_var(factor, t) {
+                ok = false;
+                break;
+            } else {
+                c = times(vec![c, factor.clone()]);
+            }
+        }
+        if ok && let Some(d) = deriv {
+            let (order, fname) = derivative_application(&d).unwrap();
+            let base = laplace_derivative_term(&fname, order, t, s, env);
+            return Some(eval_value(times(vec![c, base]), env));
+        }
+    }
+
     let mut n: i64 = 0;
     let mut n_sym: Option<Value> = None;
     let mut shift = int(0);
@@ -343,6 +441,7 @@ fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
     let mut delta: Option<Value> = None;
     let mut coeff = int(1);
     let mut trig: Option<(&'static str, Value)> = None;
+    let mut log_t = false;
 
     for factor in &factors_of(f) {
         if let Value::Call { head, args } = factor
@@ -354,6 +453,17 @@ fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
                 return None;
             }
             delta = Some(c);
+            continue;
+        }
+        if let Value::Call { head, args } = factor
+            && head == "Log"
+            && args.len() == 1
+            && matches!(&args[0], Value::Symbol(sym) if sym == t)
+        {
+            if log_t {
+                return None;
+            }
+            log_t = true;
             continue;
         }
         if let Some(e) = var_exponent(factor, t) {
@@ -399,22 +509,40 @@ fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
         plus(vec![sym(s), negate(&shift)])
     };
 
-    // `DiracDelta[t - c]` contributes `E^(c*s)` (with `s` shifted by `shift`).
+    // `DiracDelta[t - c]` contributes `E^(c*s)` (with `s` shifted by `shift`);
+    // an extra `t^n` multiplies by `(-1)^n d^n/ds^n`.
     if let Some(c) = delta {
+        if n_sym.is_some() {
+            return None;
+        }
         let base = if is_zero(&c) {
             int(1)
         } else {
             pow(sym("E"), times(vec![c, sbase]))
         };
+        let base = diff_n(&base, s, n, env);
+        return Some(eval_value(times(vec![coeff, base]), env));
+    }
+
+    // `L[Log[t]] = -(EulerGamma + Log[s])/s` (no shift/trig).
+    if log_t {
+        if n != 0 || n_sym.is_some() || trig.is_some() || have_shift {
+            return None;
+        }
+        let base = negate(&div(
+            plus(vec![sym("EulerGamma"), call("Log", vec![sym(s)])]),
+            sym(s),
+        ));
         return Some(eval_value(times(vec![coeff, base]), env));
     }
 
     let base = match trig {
         Some((kind, a)) => {
-            if n != 0 || n_sym.is_some() {
+            if n_sym.is_some() {
                 return None;
             }
-            laplace_trig(kind, &a, &sbase)
+            let fbase = laplace_trig(kind, &a, &sbase);
+            diff_n(&fbase, s, n, env)
         }
         None => match n_sym {
             Some(e) => laplace_monomial(&e, &shift, s),
@@ -425,9 +553,37 @@ fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
     Some(eval_value(times(vec![coeff, base]), env))
 }
 
+/// Convolution theorem for the Laplace transform:
+/// `L[Convolve[f(t), g(t), t, x]](x) = F(s) G(s)`.
+fn laplace_convolve(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
+    let Value::Call { head, args } = f else {
+        return None;
+    };
+    if head != "Convolve" || args.len() != 4 {
+        return None;
+    }
+    let ivar = match &args[2] {
+        Value::Symbol(x) => x.clone(),
+        _ => return None,
+    };
+    if !matches!(&args[3], Value::Symbol(x) if x == t) {
+        return None;
+    }
+    let (f1, g1) = (&args[0], &args[1]);
+    if !contains_var(f1, &ivar) || !contains_var(g1, &ivar) {
+        return None;
+    }
+    let fs = laplace(f1, &ivar, s, env);
+    let gs = laplace(g1, &ivar, s, env);
+    Some(eval_value(times(vec![fs, gs]), env))
+}
+
 /// Laplace transform with the environment needed for simplification.
 fn laplace(f: &Value, t: &str, s: &str, env: &Env) -> Value {
     let f = normalize(f);
+    if let Some(r) = laplace_convolve(&f, t, s, env) {
+        return r;
+    }
     match distribute(&f, env, &|x| laplace_term(x, t, s, env)) {
         Some(r) => eval_value(r, env),
         None => call("LaplaceTransform", vec![f.clone(), sym(t), sym(s)]),
@@ -466,6 +622,23 @@ fn mk_pow(base: Value, exp: Value) -> Value {
     pow(base, exp)
 }
 
+/// `Power` that expands a negative integer power of a `Times` into a product
+/// of powers: `(a b)^-n -> a^-n b^-n`.
+fn expand_product_power(base: Value, exp: &Value) -> Value {
+    if let Value::Call { head, args: inner } = &base
+        && head == "Times"
+        && matches!(exp, Value::Integer(k) if k.is_negative())
+    {
+        return times(
+            inner
+                .iter()
+                .map(|b| mk_pow(b.clone(), exp.clone()))
+                .collect(),
+        );
+    }
+    mk_pow(base, exp.clone())
+}
+
 /// Rewrite `Divide[a, b]` as `Times[a, Power[b, -1]]` throughout an expression
 /// so the transform matchers can reason about numerators and denominators.
 fn normalize(v: &Value) -> Value {
@@ -473,12 +646,12 @@ fn normalize(v: &Value) -> Value {
         Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
             let num = normalize(&args[0]);
             let den = normalize(&args[1]);
-            times(vec![num, mk_pow(den, int(-1))])
+            times(vec![num, expand_product_power(den, &int(-1))])
         }
         Value::Call { head, args } if head == "Power" && args.len() == 2 => {
             let base = normalize(&args[0]);
             let exp = normalize(&args[1]);
-            mk_pow(base, exp)
+            expand_product_power(base, &exp)
         }
         Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => mk_pow(
             normalize(&args[0]),
@@ -616,6 +789,41 @@ fn scalar_multiple_of_var(n: &Value, var: &str) -> Option<Value> {
     }
 }
 
+/// If `v == c * s^k` with `c` free of `s` and `k` a non-negative integer,
+/// return `(c, k)`.
+fn s_power(v: &Value, s: &str) -> Option<(Value, i64)> {
+    if !contains_var(v, s) {
+        return Some((v.clone(), 0));
+    }
+    let mut coeff = int(1);
+    let mut k: Option<i64> = None;
+    for factor in &factors_of(v) {
+        if !contains_var(factor, s) {
+            coeff = times(vec![coeff, factor.clone()]);
+            continue;
+        }
+        if k.is_some() {
+            return None;
+        }
+        if matches!(factor, Value::Symbol(x) if x == s) {
+            k = Some(1);
+            continue;
+        }
+        if let Value::Call { head, args } = factor
+            && head == "Power"
+            && args.len() == 2
+            && matches!(&args[0], Value::Symbol(x) if x == s)
+            && let Value::Integer(kk) = &args[1]
+            && *kk >= 0
+        {
+            k = Some(kk.to_i64()?);
+            continue;
+        }
+        return None;
+    }
+    Some((coeff, k?))
+}
+
 fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value> {
     let mut denoms: Vec<(Value, Value)> = Vec::new();
     let mut numerator = int(1);
@@ -634,6 +842,14 @@ fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value>
     if denoms.is_empty() {
         if !contains_var(f, s) {
             return Some(times(vec![f.clone(), call("DiracDelta", vec![sym(t)])]));
+        }
+        if let Some((c, k)) = s_power(f, s) {
+            let delta = if k == 0 {
+                call("DiracDelta", vec![sym(t)])
+            } else {
+                call(&format!("Derivative[{k}][DiracDelta]"), vec![sym(t)])
+            };
+            return Some(eval_value(times(vec![c, delta]), env));
         }
         return None;
     }
@@ -688,9 +904,275 @@ fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value>
     None
 }
 
+/// Substitute every occurrence of the symbol `from` with `to`.
+fn subst_symbol(v: &Value, from: &str, to: &str) -> Value {
+    match v {
+        Value::Symbol(s) if s == from => sym(to),
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| subst_symbol(a, from, to)).collect(),
+        },
+        Value::List(items) => {
+            Value::List(items.iter().map(|a| subst_symbol(a, from, to)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// A symbol name that does not clash with any symbol already present.
+fn fresh_symbol(v: &Value) -> String {
+    let mut name = "t$".to_string();
+    while contains_var(v, &name) {
+        name.push('$');
+    }
+    name
+}
+
+/// If `factor == E^(a*var)` with `a` free of `var`, return `a`.
+fn e_pow_coeff(factor: &Value, var: &str) -> Option<Value> {
+    let u = match factor {
+        Value::Call { head, args } if head == "Exp" && args.len() == 1 => &args[0],
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && matches!(&args[0], Value::Symbol(s) if s == "E") =>
+        {
+            &args[1]
+        }
+        _ => return None,
+    };
+    let a = linear_coeff(u, var)?;
+    if is_zero(&a) { None } else { Some(a) }
+}
+
+/// If `v == c * E^(a*var)` with `c` free of `var`, return `(c, a)`.
+fn exp_multiple(v: &Value, var: &str) -> Option<(Value, Value)> {
+    let mut coeff = int(1);
+    let mut found: Option<Value> = None;
+    for factor in &factors_of(v) {
+        if !contains_var(factor, var) {
+            coeff = times(vec![coeff, factor.clone()]);
+        } else {
+            let a = e_pow_coeff(factor, var)?;
+            if found.is_some() {
+                return None;
+            }
+            found = Some(a);
+        }
+    }
+    found.map(|a| (coeff, a))
+}
+
+/// If `v == var^k` for a non-negative integer `k`, return `k`.
+fn plain_power(v: &Value, var: &str) -> Option<i64> {
+    if matches!(v, Value::Symbol(s) if s == var) {
+        return Some(1);
+    }
+    if let Value::Call { head, args } = v
+        && head == "Power"
+        && args.len() == 2
+        && matches!(&args[0], Value::Symbol(s) if s == var)
+        && let Value::Integer(k) = &args[1]
+        && *k >= 0
+    {
+        return k.to_i64();
+    }
+    None
+}
+
+/// If `v == c * var^m` with `c` free of `var` and `m` a non-negative integer,
+/// return `(c, m)`.
+fn poly_monomial(v: &Value, var: &str) -> Option<(Value, i64)> {
+    if !contains_var(v, var) {
+        return Some((v.clone(), 0));
+    }
+    let mut coeff = int(1);
+    let mut m: Option<i64> = None;
+    for factor in factors_of(v) {
+        if !contains_var(&factor, var) {
+            coeff = times(vec![coeff, factor]);
+            continue;
+        }
+        if m.is_some() {
+            return None;
+        }
+        m = Some(plain_power(&factor, var)?);
+    }
+    Some((coeff, m?))
+}
+
+/// `Integrate[c_f x^m E^(b (y-x)), {x, 0, y}]` (with `c_g` folded in).
+fn poly_exp_convolve(cf: Value, m: i64, cg: Value, b: &Value, y: &str, env: &Env) -> Value {
+    // m! / b^(m+1) * (E^(b y) - sum_{k=0}^{m} (b y)^k / k!)
+    let mut sum = int(0);
+    let mut kfact = Integer::from(1);
+    for k in 0..=m {
+        if k > 1 {
+            kfact *= Integer::from(k);
+        }
+        sum = plus(vec![
+            sum,
+            div(
+                pow(times(vec![b.clone(), sym(y)]), int(k)),
+                Value::Integer(kfact.clone()),
+            ),
+        ]);
+    }
+    let res = times(vec![
+        cf,
+        cg,
+        div(call("Gamma", vec![int(m + 1)]), pow(b.clone(), int(m + 1))),
+        plus(vec![
+            pow(sym("E"), times(vec![b.clone(), sym(y)])),
+            negate(&sum),
+        ]),
+    ]);
+    eval_value(res, env)
+}
+
+/// One-sided (causal) convolution `(f * g)(y) = Integrate[f(x) g(y - x), {x, 0, y}]`
+/// for the handful of elementary shapes that arise from inverse Laplace transforms.
+fn convolve_term(f: &Value, g: &Value, x: &str, y: &str, env: &Env) -> Option<Value> {
+    let yv = sym(y);
+
+    // Dirac deltas are the identity of convolution.
+    if let Some(cf) = dirac_mass(f, x) {
+        let gy = subst_symbol(g, x, y);
+        return Some(eval_value(times(vec![cf, gy]), env));
+    }
+    if let Some(cg) = dirac_mass(g, x) {
+        let fy = subst_symbol(f, x, y);
+        return Some(eval_value(times(vec![cg, fy]), env));
+    }
+
+    if let Some((cf, a)) = exp_multiple(f, x)
+        && let Some((cg, b)) = exp_multiple(g, x)
+    {
+        // ∫_0^y c_f c_g E^(a x) E^(b (y-x)) dx
+        let diff = eval_value(plus(vec![a.clone(), negate(&b)]), env);
+        let res = if is_zero(&diff) {
+            times(vec![cf, cg, yv, pow(sym("E"), times(vec![a, sym(y)]))])
+        } else {
+            times(vec![
+                cf,
+                cg,
+                div(
+                    plus(vec![
+                        pow(sym("E"), times(vec![a, sym(y)])),
+                        negate(&pow(sym("E"), times(vec![b, sym(y)]))),
+                    ]),
+                    diff,
+                ),
+            ])
+        };
+        return Some(eval_value(res, env));
+    }
+
+    // polynomial × exponential (either order).
+    if let Some((cf, m)) = poly_monomial(f, x)
+        && let Some((cg, b)) = exp_multiple(g, x)
+    {
+        return Some(poly_exp_convolve(cf, m, cg, &b, y, env));
+    }
+    if let Some((cg, m)) = poly_monomial(g, x)
+        && let Some((cf, b)) = exp_multiple(f, x)
+    {
+        return Some(poly_exp_convolve(cf, m, cg, &b, y, env));
+    }
+
+    // polynomial × polynomial: Beta integral.
+    if let Some((cf, m)) = poly_monomial(f, x)
+        && let Some((cg, n)) = poly_monomial(g, x)
+    {
+        let res = times(vec![
+            cf,
+            cg,
+            div(
+                times(vec![
+                    call("Gamma", vec![int(m + 1)]),
+                    call("Gamma", vec![int(n + 1)]),
+                ]),
+                call("Gamma", vec![int(m + n + 2)]),
+            ),
+            pow(yv, int(m + n + 1)),
+        ]);
+        return Some(eval_value(res, env));
+    }
+
+    None
+}
+
+/// If `v == c * DiracDelta[x]`, return `c`.
+fn dirac_mass(v: &Value, x: &str) -> Option<Value> {
+    let mut coeff = int(1);
+    let mut found = false;
+    for factor in &factors_of(v) {
+        if let Value::Call { head, args } = factor
+            && head == "DiracDelta"
+            && args.len() == 1
+            && matches!(&args[0], Value::Symbol(s) if s == x)
+        {
+            if found {
+                return None;
+            }
+            found = true;
+        } else if !contains_var(factor, x) {
+            coeff = times(vec![coeff, factor.clone()]);
+        } else {
+            return None;
+        }
+    }
+    if found { Some(coeff) } else { None }
+}
+
+/// `Convolve[f, g, x, y]` — evaluate for elementary kernels, else return the
+/// argument unchanged.
+fn builtin_convolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 4 {
+        return Err(EvalError::Error(
+            "Convolve requires exactly 4 arguments".to_string(),
+        ));
+    }
+    let f = unwrap(&args[0]);
+    let g = unwrap(&args[1]);
+    let x = as_symbol(&args[2], "Symbol")?;
+    let y = as_symbol(&args[3], "Symbol")?;
+    match convolve_term(&f, &g, &x, &y, env) {
+        Some(r) => Ok(r),
+        None => Ok(call("Convolve", vec![f, g, sym(&x), sym(&y)])),
+    }
+}
+
+/// Fall back to the convolution theorem for a product `F(s) G(s)` whose
+/// factors are individually invertible.
+fn inverse_laplace_product(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value> {
+    let factors = factors_of(f);
+    if factors.len() < 2 {
+        return None;
+    }
+    let x = fresh_symbol(f);
+    let mut acc: Option<Value> = None;
+    let last = factors.len() - 1;
+    for (i, factor) in factors.iter().enumerate() {
+        let inv = inverse_laplace_term(factor, s, &x, env)?;
+        acc = Some(match acc {
+            None => inv,
+            Some(prev) => {
+                let outv = if i == last { t } else { x.as_str() };
+                let conv = call("Convolve", vec![prev, inv, sym(&x), sym(outv)]);
+                eval_value(conv, env)
+            }
+        });
+    }
+    acc
+}
+
 fn inverse_laplace(f: &Value, s: &str, t: &str, env: &Env) -> Value {
     let f = normalize(f);
-    match distribute(&f, env, &|x| inverse_laplace_term(x, s, t, env)) {
+    let term = |x: &Value| {
+        inverse_laplace_term(x, s, t, env).or_else(|| inverse_laplace_product(x, s, t, env))
+    };
+    match distribute(&f, env, &term) {
         Some(r) => eval_value(r, env),
         None => call("InverseLaplaceTransform", vec![f.clone(), sym(s), sym(t)]),
     }
@@ -886,23 +1368,521 @@ fn set_special(slot: &mut Option<Value>, v: Value) -> Option<()> {
     }
 }
 
+// ── Fourier sine / cosine transforms ────────────────────────────────────────
+//
+// Definitions (default `FourierParameters -> {0, 1}`):
+//   FourierSinTransform[f,t,w]  = Sqrt[2/Pi] Integrate[f(t) Sin[w t], {t,0,Infinity}]
+//   FourierCosTransform[f,t,w]  = Sqrt[2/Pi] Integrate[f(t) Cos[w t], {t,0,Infinity}]
+// Both transforms are involutive, so the inverse shares the same table.
+
+fn sqrt_two_over_pi() -> Value {
+    call("Sqrt", vec![div(int(2), sym("Pi"))])
+}
+
+fn sqrt_pi_over_two() -> Value {
+    call("Sqrt", vec![div(sym("Pi"), int(2))])
+}
+
+/// If `d == q + var^2` (in either order) with `q` free of `var`, return `q`.
+fn den_sum_squares(d: &Value, var: &str) -> Option<Value> {
+    let Value::Call { head, args } = d else {
+        return None;
+    };
+    if head != "Plus" {
+        return None;
+    }
+    let mut q: Option<Value> = None;
+    let mut seen_var2 = false;
+    for term in args {
+        if is_var_squared(term, var) {
+            if seen_var2 {
+                return None;
+            }
+            seen_var2 = true;
+            continue;
+        }
+        if !contains_var(term, var) {
+            if q.is_some() {
+                return None;
+            }
+            q = Some(term.clone());
+            continue;
+        }
+        return None;
+    }
+    if seen_var2 {
+        Some(q.unwrap_or_else(|| int(0)))
+    } else {
+        None
+    }
+}
+
+/// Remove one multiplicative factor equal to `target` from `v`.
+fn remove_factor(v: &Value, target: &Value) -> Option<Value> {
+    let factors = factors_of(v);
+    let mut rest = Vec::with_capacity(factors.len());
+    let mut removed = false;
+    for f in factors {
+        if !removed && f.struct_eq(target) {
+            removed = true;
+        } else {
+            rest.push(f);
+        }
+    }
+    if removed { Some(times(rest)) } else { None }
+}
+
+/// `Integrate[E^(-a var^2) {Sin,Cos}[w var], {var, 0, Infinity}]`.
+fn sincos_gauss(a: &Value, out: &Value, is_sin: bool) -> Value {
+    let amp = sqrt_half(&times(vec![int(2), a.clone()]));
+    let expo = negate(&div(
+        pow(out.clone(), int(2)),
+        times(vec![int(4), a.clone()]),
+    ));
+    let mut body = times(vec![amp, pow(sym("E"), expo)]);
+    if is_sin {
+        let arg = div(
+            out.clone(),
+            times(vec![int(2), call("Sqrt", vec![a.clone()])]),
+        );
+        body = times(vec![body, call("Erfi", vec![arg])]);
+    }
+    body
+}
+
+/// Rational kernels `coeff * var/(a^2+var^2)` (sine) and `coeff * a/(a^2+var^2)`
+/// (cosine), which are the images of the exponential table entries.
+fn sincos_rational(f: &Value, var: &str, out: &Value, is_sin: bool, env: &Env) -> Option<Value> {
+    let mut a: Option<Value> = None;
+    let mut others: Vec<Value> = Vec::new();
+    for factor in &factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == "Power"
+            && args.len() == 2
+            && is_negative(&args[1])
+        {
+            if a.is_some() {
+                return None;
+            }
+            a = den_sum_squares(&args[0], var);
+            continue;
+        }
+        others.push(factor.clone());
+    }
+    let q = a?;
+    let a = sqrt_of_square(&q, env);
+
+    let mut var_factor: Option<Value> = None;
+    let mut coeff = int(1);
+    for o in &others {
+        if contains_var(o, var) {
+            if var_factor.is_some() {
+                return None;
+            }
+            var_factor = Some(o.clone());
+            continue;
+        }
+        coeff = times(vec![coeff, o.clone()]);
+    }
+
+    // `Sqrt[2/Pi]` in the coefficient cancels the `Sqrt[Pi/2]` amplitude.
+    let (coeff, amp) = match remove_factor(&coeff, &normalize(&sqrt_two_over_pi())) {
+        Some(rest) => (rest, int(1)),
+        None => (coeff, sqrt_pi_over_two()),
+    };
+    let expo = pow(sym("E"), negate(&times(vec![a.clone(), out.clone()])));
+
+    if is_sin {
+        scalar_multiple_of_var(&var_factor?, var)?;
+        Some(eval_value(times(vec![coeff, amp, expo]), env))
+    } else {
+        if var_factor.is_some() {
+            return None;
+        }
+        let c = remove_factor(&coeff, &a).unwrap_or_else(|| div(coeff.clone(), a.clone()));
+        Some(eval_value(times(vec![c, amp, expo]), env))
+    }
+}
+
+fn sincos_term(f: &Value, var: &str, out: &Value, is_sin: bool, env: &Env) -> Option<Value> {
+    if let Some(r) = sincos_rational(f, var, out, is_sin, env) {
+        return Some(r);
+    }
+
+    let mut coeff = int(1);
+    let mut special: Option<Value> = None;
+    for factor in &factors_of(f) {
+        if let Some(u) = exp_argument(factor) {
+            if let Some(c) = squared_coeff(&u, var) {
+                let a = negate(&c);
+                set_special(&mut special, sincos_gauss(&a, out, is_sin))?;
+                continue;
+            }
+            if let Some(c) = e_pow_coeff(factor, var) {
+                let a = negate(&c);
+                let den = plus(vec![pow(a.clone(), int(2)), pow(out.clone(), int(2))]);
+                let body = if is_sin {
+                    times(vec![sqrt_two_over_pi(), div(out.clone(), den)])
+                } else {
+                    times(vec![sqrt_two_over_pi(), div(a, den)])
+                };
+                set_special(&mut special, body)?;
+                continue;
+            }
+        }
+        if let Value::Call { head, args } = factor
+            && head == "DiracDelta"
+            && args.len() == 1
+            && let Some((m, c)) = affine(&args[0], var)
+            && !is_zero(&m)
+            && !contains_var(&m, var)
+        {
+            // δ(m var + c) sits at `-c/m`; ∫_0^∞ δ(...) f = f(-c/m)/|m|.
+            let root = div(negate(&c), m.clone());
+            let arg = times(vec![root, out.clone()]);
+            let trig = call(if is_sin { "Sin" } else { "Cos" }, vec![arg]);
+            let amp = div(sqrt_two_over_pi(), call("Abs", vec![m]));
+            set_special(&mut special, times(vec![amp, trig]))?;
+            continue;
+        }
+        if !contains_var(factor, var) {
+            coeff = times(vec![coeff, factor.clone()]);
+            continue;
+        }
+        return None;
+    }
+
+    let base = special?;
+    Some(eval_value(times(vec![coeff, base]), env))
+}
+
+fn fourier_sincos(args: &[Value], env: &Env, is_sin: bool, name: &str) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(format!("{name} requires 3 arguments")));
+    }
+    let f = normalize(&unwrap(&args[0]));
+    let var = as_symbol(&args[1], "Symbol")?;
+    let out = as_symbol(&args[2], "Symbol")?;
+    match distribute(&f, env, &|x| sincos_term(x, &var, &sym(&out), is_sin, env)) {
+        Some(r) => Ok(eval_value(r, env)),
+        None => Ok(call(name, vec![f, sym(&var), sym(&out)])),
+    }
+}
+
+// ── Mellin transform ────────────────────────────────────────────────────────
+//
+// MellinTransform[f,t,z]        = Integrate[t^(z-1) f(t), {t, 0, Infinity}]
+// InverseMellinTransform[F,z,t] = (1/(2 Pi I)) Integrate[F(z) t^(-z), z]
+
+fn mellin_term(f: &Value, t: &str, z: &str, env: &Env) -> Option<Value> {
+    // 1/(1+t) <-> Pi/Sin[Pi z].
+    if let Value::Call { head, args } = f
+        && head == "Power"
+        && args.len() == 2
+        && is_negative(&args[1])
+        && matches!(&args[0], Value::Call { head, args } if head == "Plus"
+            && args.contains(&int(1)) && args.contains(&sym(t)))
+    {
+        return Some(eval_value(
+            div(sym("Pi"), call("Sin", vec![times(vec![sym("Pi"), sym(z)])])),
+            env,
+        ));
+    }
+
+    let mut coeff = int(1);
+    let mut p = int(0);
+    let mut have_p = false;
+    let mut exp_coeff: Option<Value> = None;
+    let mut gauss: Option<Value> = None;
+    let mut trig: Option<(&'static str, Value)> = None;
+
+    for factor in &factors_of(f) {
+        if let Some(e) = var_exponent(factor, t) {
+            if have_p {
+                return None;
+            }
+            p = e;
+            have_p = true;
+            continue;
+        }
+        if let Some(u) = exp_argument(factor) {
+            if let Some(c) = squared_coeff(&u, t) {
+                if gauss.is_some() {
+                    return None;
+                }
+                gauss = Some(negate(&c));
+                continue;
+            }
+            if let Some(c) = e_pow_coeff(factor, t) {
+                if exp_coeff.is_some() {
+                    return None;
+                }
+                exp_coeff = Some(negate(&c));
+                continue;
+            }
+        }
+        if let Some((kind, a)) = trig_linear(factor, t) {
+            if trig.is_some() {
+                return None;
+            }
+            trig = Some((kind, a));
+            continue;
+        }
+        if !contains_var(factor, t) {
+            coeff = times(vec![coeff, factor.clone()]);
+            continue;
+        }
+        return None;
+    }
+
+    let zpow = plus(vec![sym(z), p.clone()]);
+    let body = if let Some(b) = exp_coeff {
+        // Integrate[t^(p) E^(-b t)] = Gamma[z+p] / b^(z+p).
+        div(call("Gamma", vec![zpow.clone()]), pow(b, zpow))
+    } else if let Some(b) = gauss {
+        // Integrate[t^(z-1) E^(-b t^2)] = Gamma[z/2] / (2 b^(z/2)).
+        times(vec![
+            div(call("Gamma", vec![div(sym(z), int(2))]), int(2)),
+            pow(b, negate(&div(sym(z), int(2)))),
+        ])
+    } else if let Some((kind, a)) = trig {
+        if have_p && !is_zero(&p) {
+            return None;
+        }
+        let half = Value::Rational(Box::new(rug::Rational::from((1, 2))));
+        let arg = times(vec![half, sym("Pi"), sym(z)]);
+        let c = if kind == "Cos" {
+            call("Cos", vec![arg])
+        } else {
+            call("Sin", vec![arg])
+        };
+        times(vec![
+            call("Gamma", vec![sym(z)]),
+            c,
+            pow(a, negate(&sym(z))),
+        ])
+    } else {
+        return None;
+    };
+
+    Some(eval_value(times(vec![coeff, body]), env))
+}
+
+fn mellin(f: &Value, t: &str, z: &str, env: &Env) -> Value {
+    let f = normalize(f);
+    match distribute(&f, env, &|x| mellin_term(x, t, z, env)) {
+        Some(r) => eval_value(r, env),
+        None => call("MellinTransform", vec![f.clone(), sym(t), sym(z)]),
+    }
+}
+
+/// If a factor is `Gamma[g]` with `g = z + p`, return `p`.
+fn gamma_shift(f: &Value, z: &str) -> Option<Value> {
+    for factor in factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == "Gamma"
+            && args.len() == 1
+            && let Some((m, c)) = affine(&args[0], z)
+            && is_one(&m)
+        {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// If `factor == b^(-z)` (in any of the equivalent forms `b^(-z)`,
+/// `(b^z)^(-1)`), return `b`.
+fn neg_z_base(factor: &Value, z: &str) -> Option<Value> {
+    let Value::Call { head, args } = factor else {
+        return None;
+    };
+    if head != "Power" || args.len() != 2 {
+        return None;
+    }
+    if matches!(&args[1], Value::Integer(k) if *k == -1)
+        && let Value::Call { head: h2, args: a2 } = &args[0]
+        && h2 == "Power"
+        && a2.len() == 2
+        && let Some((m, c)) = affine(&a2[1], z)
+        && is_one(&m)
+        && is_zero(&c)
+    {
+        return Some(a2[0].clone());
+    }
+    if let Some((m, c)) = affine(&args[1], z)
+        && matches!(&m, Value::Integer(k) if *k == -1)
+        && is_zero(&c)
+    {
+        return Some(args[0].clone());
+    }
+    None
+}
+
+/// If a factor is `b^(-z)`, return `b`.
+fn recip_z_base(f: &Value, z: &str) -> Option<Value> {
+    for factor in factors_of(f) {
+        if let Some(b) = neg_z_base(&factor, z) {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// True when a factor is `{Sin,Cos}[Pi z / 2]`.
+fn half_pi_trig(f: &Value, z: &str, is_sin: bool, env: &Env) -> bool {
+    let want_head = if is_sin { "Sin" } else { "Cos" };
+    for factor in factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == want_head
+            && args.len() == 1
+            && let Some(c) = linear_coeff(&args[0], z)
+        {
+            let got = eval_value(c, env);
+            let want = eval_value(div(sym("Pi"), int(2)), env);
+            let diff = eval_value(plus(vec![got, negate(&want)]), env);
+            if diff.struct_eq(&int(0)) || is_zero(&diff) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// If `f` has a factor `Gamma[z/2]`, return the remaining constant coefficient
+/// (so `f == coeff * Gamma[z/2]`); otherwise `None`.
+fn half_gamma_coeff(f: &Value, z: &str) -> Option<Value> {
+    let half = Value::Rational(Box::new(rug::Rational::from((1, 2))));
+    let mut coeff = int(1);
+    let mut found = false;
+    for factor in &factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == "Gamma"
+            && args.len() == 1
+            && let Some((m, c)) = affine(&args[0], z)
+            && m.struct_eq(&half)
+            && is_zero(&c)
+        {
+            if found {
+                return None;
+            }
+            found = true;
+            continue;
+        }
+        if !contains_var(factor, z) {
+            coeff = times(vec![coeff, factor.clone()]);
+            continue;
+        }
+        return None;
+    }
+    if found { Some(coeff) } else { None }
+}
+
+fn inverse_mellin_term(f: &Value, z: &str, t: &str, env: &Env) -> Option<Value> {
+    // Pi/Sin[Pi z] <-> 1/(1+t).
+    if mellin_cauchy(f, z, env).is_some() {
+        return Some(eval_value(div(int(1), plus(vec![int(1), sym(t)])), env));
+    }
+
+    if let Some(c) = half_gamma_coeff(f, z) {
+        // c Gamma[z/2] <-> 2 c E^(-t^2).
+        let res = times(vec![
+            times(vec![int(2), c]),
+            pow(sym("E"), negate(&pow(sym(t), int(2)))),
+        ]);
+        return Some(eval_value(res, env));
+    }
+
+    if half_pi_trig(f, z, true, env) {
+        return Some(eval_value(call("Sin", vec![sym(t)]), env));
+    }
+    if half_pi_trig(f, z, false, env) {
+        return Some(eval_value(call("Cos", vec![sym(t)]), env));
+    }
+
+    let p = gamma_shift(f, z)?;
+    let b = recip_z_base(f, z).unwrap_or(int(1));
+    // Strip the Gamma and b^(-z) factors, keep any remaining constant coeff.
+    let mut coeff = int(1);
+    for factor in &factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == "Gamma"
+            && args.len() == 1
+            && affine(&args[0], z)
+                .map(|(m, _)| is_one(&m))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        if neg_z_base(factor, z).is_some() {
+            continue;
+        }
+        coeff = times(vec![coeff, factor.clone()]);
+    }
+    let base = times(vec![
+        pow(sym(t), negate(&p)),
+        pow(sym("E"), negate(&times(vec![b, sym(t)]))),
+    ]);
+    Some(eval_value(times(vec![coeff, base]), env))
+}
+
+/// True when `f == Pi / Sin[Pi z]` (up to a constant factor of `Pi`).
+fn mellin_cauchy(f: &Value, z: &str, env: &Env) -> Option<Value> {
+    let mut has_pi = false;
+    let mut ok = false;
+    for factor in &factors_of(f) {
+        if let Value::Call { head, args } = factor
+            && head == "Power"
+            && args.len() == 2
+            && is_negative(&args[1])
+            && let Value::Call { head, args } = &args[0]
+            && head == "Sin"
+            && args.len() == 1
+            && let Some(c) = linear_coeff(&args[0], z)
+            && eval_value(c, env).struct_eq(&sym("Pi"))
+        {
+            ok = true;
+            continue;
+        }
+        if factor.struct_eq(&sym("Pi")) {
+            has_pi = true;
+            continue;
+        }
+    }
+    if ok && has_pi { Some(f.clone()) } else { None }
+}
+
+fn inverse_mellin(f: &Value, z: &str, t: &str, env: &Env) -> Value {
+    let f = normalize(f);
+    match distribute(&f, env, &|x| inverse_mellin_term(x, z, t, env)) {
+        Some(r) => eval_value(r, env),
+        None => call("InverseMellinTransform", vec![f.clone(), sym(z), sym(t)]),
+    }
+}
+
 // ── Z transform ─────────────────────────────────────────────────────────────
 
 fn geometric_z(a: &Value, k: i64, z: &str) -> Option<Value> {
     let zz = sym(z);
-    let denom = plus(vec![zz.clone(), negate(a)]);
-    match k {
-        0 => Some(div(zz, denom)),
-        1 => Some(times(vec![a.clone(), div(zz, pow(denom, int(2)))])),
-        2 => Some(times(vec![
-            a.clone(),
-            div(
-                times(vec![zz.clone(), plus(vec![zz, a.clone()])]),
-                pow(denom, int(3)),
-            ),
-        ])),
-        _ => None,
+    let denom_base = plus(vec![zz.clone(), negate(a)]);
+    if k == 0 {
+        return Some(div(zz, denom_base));
     }
+    // `Z[n^k a^n] = a z^k A_k(a/z) / (z-a)^(k+1)`, `A_k` the Eulerian polynomial.
+    let denom = pow(denom_base, int(k + 1));
+    let mut terms = Vec::new();
+    for j in 0..k {
+        let e = eulerian(k as usize, j as usize);
+        if e == 0 {
+            continue;
+        }
+        terms.push(times(vec![
+            int(e),
+            pow(a.clone(), int(j + 1)),
+            pow(zz.clone(), int(k - j)),
+        ]));
+    }
+    Some(div(plus(terms), denom))
 }
 
 fn eulerian(n: usize, k: usize) -> i64 {
@@ -962,9 +1942,25 @@ fn z_term(f: &Value, n: &str, z: &str, env: &Env) -> Option<Value> {
     let mut k: i64 = 0;
     let mut geom: Option<Value> = None;
     let mut trig: Option<(&'static str, Value)> = None;
+    let mut fact = false;
     for factor in &factors_of(f) {
         if let Some(p) = var_power(factor, n) {
             k += p;
+            continue;
+        }
+        if let Value::Call { head, args } = factor
+            && head == "Power"
+            && args.len() == 2
+            && matches!(&args[1], Value::Integer(e) if *e == -1)
+            && let Value::Call { head: fh, args: fa } = &args[0]
+            && fh == "Factorial"
+            && fa.len() == 1
+            && matches!(&fa[0], Value::Symbol(s) if s == n)
+        {
+            if fact {
+                return None;
+            }
+            fact = true;
             continue;
         }
         if let Value::Call { head, args } = factor
@@ -993,7 +1989,14 @@ fn z_term(f: &Value, n: &str, z: &str, env: &Env) -> Option<Value> {
         return None;
     }
 
-    let base = if let Some((kind, a)) = trig {
+    let base = if fact {
+        if k != 0 || trig.is_some() {
+            return None;
+        }
+        let a = geom.unwrap_or(int(1));
+        // Z[a^n/n!] = E^(a/z).
+        pow(sym("E"), div(a, sym(z)))
+    } else if let Some((kind, a)) = trig {
         if k != 0 || geom.is_some() {
             return None;
         }
@@ -1609,17 +2612,42 @@ pub fn register(env: &Env) {
     );
     register_builtin_env(env, "ZTransform", builtin_ztransform);
     register_builtin_env(env, "InverseZTransform", builtin_inverse_ztransform);
+    register_builtin_env(env, "FourierSinTransform", builtin_fourier_sin_transform);
+    register_builtin_env(
+        env,
+        "InverseFourierSinTransform",
+        builtin_inverse_fourier_sin_transform,
+    );
+    register_builtin_env(env, "FourierCosTransform", builtin_fourier_cos_transform);
+    register_builtin_env(
+        env,
+        "InverseFourierCosTransform",
+        builtin_inverse_fourier_cos_transform,
+    );
+    register_builtin_env(env, "MellinTransform", builtin_mellin_transform);
+    register_builtin_env(
+        env,
+        "InverseMellinTransform",
+        builtin_inverse_mellin_transform,
+    );
     register_builtin_env(env, "Dt", builtin_dt);
     register_builtin_env(env, "FunctionDomain", builtin_function_domain);
     register_builtin_env(env, "NIntegrate", builtin_nintegrate);
     register_builtin_env(env, "NSum", builtin_nsum);
     register_builtin_env(env, "NProduct", builtin_nproduct);
+    register_builtin_env(env, "Convolve", builtin_convolve);
 
     for name in [
         "LaplaceTransform",
         "InverseLaplaceTransform",
         "FourierTransform",
         "InverseFourierTransform",
+        "FourierSinTransform",
+        "InverseFourierSinTransform",
+        "FourierCosTransform",
+        "InverseFourierCosTransform",
+        "MellinTransform",
+        "InverseMellinTransform",
         "ZTransform",
         "InverseZTransform",
         "Dt",
@@ -1662,6 +2690,46 @@ fn builtin_inverse_laplace_transform(args: &[Value], env: &Env) -> Result<Value,
     let s = as_symbol(&args[1], "Symbol")?;
     let t = as_symbol(&args[2], "Symbol")?;
     Ok(inverse_laplace(&f, &s, &t, env))
+}
+
+fn builtin_fourier_sin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    fourier_sincos(args, env, true, "FourierSinTransform")
+}
+
+fn builtin_inverse_fourier_sin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    fourier_sincos(args, env, true, "InverseFourierSinTransform")
+}
+
+fn builtin_fourier_cos_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    fourier_sincos(args, env, false, "FourierCosTransform")
+}
+
+fn builtin_inverse_fourier_cos_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    fourier_sincos(args, env, false, "InverseFourierCosTransform")
+}
+
+fn builtin_mellin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "MellinTransform requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = unwrap(&args[0]);
+    let t = as_symbol(&args[1], "Symbol")?;
+    let z = as_symbol(&args[2], "Symbol")?;
+    Ok(mellin(&f, &t, &z, env))
+}
+
+fn builtin_inverse_mellin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "InverseMellinTransform requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let f = unwrap(&args[0]);
+    let z = as_symbol(&args[1], "Symbol")?;
+    let t = as_symbol(&args[2], "Symbol")?;
+    Ok(inverse_mellin(&f, &z, &t, env))
 }
 
 /// Split a `Rule`/`RuleDelayed` — possibly still wrapped in a held
@@ -2261,5 +3329,270 @@ mod tests {
             eval_str("InverseZTransform[z/(z - 1)^3, z, n]", &env),
             "Divide[Times[n, Plus[n, -1]], 2]"
         );
+    }
+
+    #[test]
+    fn laplace_derivatives() {
+        let env = env();
+        assert_eq!(
+            eval_str("LaplaceTransform[f'[t], t, s]", &env),
+            "Plus[Times[s, LaplaceTransform[f[t], t, s]], Times[-1, f[0]]]"
+        );
+        assert_eq!(
+            eval_str("LaplaceTransform[f''[t], t, s]", &env),
+            "Plus[Times[Power[s, 2], LaplaceTransform[f[t], t, s]], Times[-1, s, f[0]], Times[-1, Derivative[1][f][0]]]"
+        );
+        // A derivative inside a product still splits into a term.
+        assert_eq!(
+            eval_str("LaplaceTransform[3 f'[t], t, s]", &env),
+            "Times[3, Plus[Times[s, LaplaceTransform[f[t], t, s]], Times[-1, f[0]]]]"
+        );
+    }
+
+    #[test]
+    fn laplace_more_table() {
+        let env = env();
+        assert_eq!(
+            eval_str("LaplaceTransform[a^t, t, s]", &env),
+            "Divide[1, Plus[s, Times[-1, Log[a]]]]"
+        );
+        assert_eq!(
+            eval_str("LaplaceTransform[Log[t], t, s]", &env),
+            "Times[-1, Divide[Plus[EulerGamma, Log[s]], s]]"
+        );
+        assert_eq!(
+            eval_str("LaplaceTransform[t^2 E^(2 t), t, s]", &env),
+            "Divide[2, Power[Plus[s, -2], 3]]"
+        );
+        // t*f(t) is the (-d/ds) rule applied to the trig table entry.
+        let ts = eval_str("LaplaceTransform[t Sin[a t], t, s]", &env);
+        assert!(
+            ts.contains("Power[Plus[Power[s, 2], Power[a, 2]], -2]"),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn laplace_convolution_theorem() {
+        let env = env();
+        assert_eq!(
+            eval_str("LaplaceTransform[Convolve[f[t], g[t], t, x], x, s]", &env),
+            "Times[LaplaceTransform[f[t], t, s], LaplaceTransform[g[t], t, s]]"
+        );
+    }
+
+    #[test]
+    fn inverse_laplace_delta_and_products() {
+        let env = env();
+        assert_eq!(
+            eval_str("InverseLaplaceTransform[s^2, s, t]", &env),
+            "Derivative[2][DiracDelta][t]"
+        );
+        assert_eq!(
+            eval_str("InverseLaplaceTransform[1/((s-1)(s-2)), s, t]", &env),
+            "Divide[Plus[Power[E, t], Times[-1, Power[E, Times[2, t]]]], -1]"
+        );
+        assert_eq!(
+            eval_str("InverseLaplaceTransform[1/(s(s+1)), s, t]", &env),
+            "Times[-1, Plus[Power[E, Times[-1, t]], -1]]"
+        );
+    }
+
+    #[test]
+    fn convolve_table() {
+        let env = env();
+        assert_eq!(
+            eval_str("Convolve[E^(a x), E^(b x), x, y]", &env),
+            "Divide[Plus[Power[E, Times[a, y]], Times[-1, Power[E, Times[b, y]]]], Plus[a, Times[-1, b]]]"
+        );
+        assert_eq!(
+            eval_str("Convolve[x, E^x, x, t]", &env),
+            "Plus[Power[E, t], Times[-1, Plus[1, t]]]"
+        );
+        assert_eq!(
+            eval_str("Convolve[DiracDelta[x], f[x], x, y]", &env),
+            "f[y]"
+        );
+        // Inapplicable kernels stay unevaluated.
+        assert_eq!(
+            eval_str("Convolve[Sin[x], Sin[x], x, y]", &env),
+            "Convolve[Sin[x], Sin[x], x, y]"
+        );
+    }
+
+    #[test]
+    fn ztransform_extended() {
+        let env = env();
+        assert_eq!(
+            eval_str("ZTransform[a^n/n!, n, z]", &env),
+            "Power[E, Divide[a, z]]"
+        );
+        assert_eq!(
+            eval_str("ZTransform[n^2 a^n, n, z]", &env),
+            "Divide[Plus[Times[a, Power[z, 2]], Times[Power[a, 2], z]], Power[Plus[z, Times[-1, a]], 3]]"
+        );
+        assert_eq!(
+            eval_str("ZTransform[n^3, n, z]", &env),
+            "Divide[Plus[z, Times[4, Power[z, 2]], Power[z, 3]], Power[Plus[z, -1], 4]]"
+        );
+    }
+
+    #[test]
+    fn fourier_sin_cos_forward_internal() {
+        let env = env();
+        let sin = super::fourier_sincos(
+            &[val("E^(-a t)", &env), sym("t"), sym("w")],
+            &env,
+            true,
+            "FourierSinTransform",
+        )
+        .unwrap();
+        assert_eq!(
+            sin.to_string(),
+            "Times[Sqrt[Divide[2, Pi]], Divide[w, Plus[Power[a, 2], Power[w, 2]]]]"
+        );
+        let cos = super::fourier_sincos(
+            &[val("E^(-a t)", &env), sym("t"), sym("w")],
+            &env,
+            false,
+            "FourierCosTransform",
+        )
+        .unwrap();
+        assert_eq!(
+            cos.to_string(),
+            "Times[Sqrt[Divide[2, Pi]], Divide[a, Plus[Power[a, 2], Power[w, 2]]]]"
+        );
+    }
+
+    #[test]
+    fn fourier_sin_cos_inverse() {
+        let env = env();
+        assert_eq!(
+            eval_str(
+                "InverseFourierSinTransform[Sqrt[2/Pi] w/(a^2+w^2), w, t]",
+                &env
+            ),
+            "Power[E, Times[-1, a, t]]"
+        );
+        assert_eq!(
+            eval_str(
+                "InverseFourierCosTransform[Sqrt[2/Pi] a/(a^2+w^2), w, t]",
+                &env
+            ),
+            "Power[E, Times[-1, a, t]]"
+        );
+        assert_eq!(
+            eval_str("InverseFourierSinTransform[DiracDelta[w-1], w, t]", &env),
+            "Times[Sqrt[Divide[2, Pi]], Sin[t]]"
+        );
+    }
+
+    #[test]
+    fn mellin_table_internal() {
+        let env = env();
+        assert_eq!(
+            super::mellin(&val("E^(-t)", &env), "t", "z", &env).to_string(),
+            "Gamma[z]"
+        );
+        assert_eq!(
+            super::mellin(&val("E^(-a t)", &env), "t", "z", &env).to_string(),
+            "Divide[Gamma[z], Power[a, z]]"
+        );
+        assert_eq!(
+            super::mellin(&val("t E^(-t)", &env), "t", "z", &env).to_string(),
+            "Gamma[Plus[z, 1]]"
+        );
+        assert_eq!(
+            super::mellin(&val("1/(1+t)", &env), "t", "z", &env).to_string(),
+            "Divide[Pi, Sin[Times[Pi, z]]]"
+        );
+    }
+
+    #[test]
+    fn inverse_mellin_table_internal() {
+        let env = env();
+        assert_eq!(
+            super::inverse_mellin(&val("Gamma[z]", &env), "z", "t", &env).to_string(),
+            "Power[E, Times[-1, t]]"
+        );
+        assert_eq!(
+            super::inverse_mellin(&val("Gamma[z]/a^z", &env), "z", "t", &env).to_string(),
+            "Power[E, Times[-1, a, t]]"
+        );
+        assert_eq!(
+            super::inverse_mellin(&val("Pi/Sin[Pi z]", &env), "z", "t", &env).to_string(),
+            "Divide[1, Plus[1, t]]"
+        );
+        assert_eq!(
+            super::inverse_mellin(&val("Gamma[z] Sin[Pi z/2]", &env), "z", "t", &env).to_string(),
+            "Sin[t]"
+        );
+    }
+
+    #[test]
+    fn fourier_sin_cos_gauss_and_unevaluated() {
+        let env = env();
+        // Cosine transform of a Gaussian is another Gaussian.
+        let g = super::fourier_sincos(
+            &[val("E^(-a t^2)", &env), sym("t"), sym("w")],
+            &env,
+            false,
+            "FourierCosTransform",
+        )
+        .unwrap();
+        let s = g.to_string();
+        assert!(
+            s.contains("Power[E, Times[-1, Divide[Power[w, 2], Times[4, a]]]]"),
+            "{s}"
+        );
+        // Kernels outside the table stay unevaluated.
+        assert_eq!(
+            super::mellin(&val("Gamma[t]", &env), "t", "z", &env).to_string(),
+            "MellinTransform[Gamma[t], t, z]"
+        );
+        assert_eq!(
+            eval_str("InverseFourierSinTransform[Sin[2 w], w, t]", &env),
+            "InverseFourierSinTransform[Sin[Times[2, w]], w, t]"
+        );
+    }
+
+    #[test]
+    fn new_transforms_hold_and_are_registered() {
+        let env = env();
+        for name in [
+            "LaplaceTransform",
+            "InverseLaplaceTransform",
+            "FourierTransform",
+            "InverseFourierTransform",
+            "ZTransform",
+            "InverseZTransform",
+            "InverseFourierSinTransform",
+            "InverseFourierCosTransform",
+        ] {
+            assert!(env.has_attribute(name, "HoldAll"), "{name} lacks HoldAll");
+        }
+        // The forward sine/cosine and Mellin transforms may be owned by
+        // `calculusmore`, which marks them Protected instead.
+        for name in [
+            "FourierSinTransform",
+            "FourierCosTransform",
+            "MellinTransform",
+            "InverseMellinTransform",
+        ] {
+            assert!(
+                env.has_attribute(name, "HoldAll") || env.has_attribute(name, "Protected"),
+                "{name} is unmarked"
+            );
+        }
+    }
+
+    fn val(s: &str, env: &Env) -> Value {
+        let toks = crate::lexer::tokenize(s).unwrap();
+        let parsed = crate::parser::parse_with_suppress(toks).unwrap();
+        let mut last = Value::Null;
+        for (e, _) in parsed {
+            last = crate::eval::eval(&e, env).unwrap();
+        }
+        last
     }
 }

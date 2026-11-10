@@ -1424,6 +1424,1050 @@ pub fn apply_color_function(color_fn: &Value, t: f64) -> String {
     }
 }
 
+// ── Extended chart helpers ─────────────────────────────────────────────────────
+
+/// Parse a value as an `(x, y)` pair: accepts `{x, y}` lists or bare numbers
+/// (bare numbers receive an automatic 1-based index as their x coordinate).
+fn to_xy_pairs(data: &[Value]) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let pairs = matches!(data.first(), Some(Value::List(p)) if p.len() >= 2);
+    for (i, item) in data.iter().enumerate() {
+        if pairs {
+            if let Value::List(p) = item
+                && let (Some(x), Some(y)) = (super::to_f64(&p[0]), super::to_f64(&p[1]))
+            {
+                out.push((x, y));
+            }
+        } else if let Some(y) = super::to_f64(item) {
+            out.push((i as f64 + 1.0, y));
+        }
+    }
+    out
+}
+
+/// Parse a value as a complex number: accepts `Complex`, `{re, im}` or a scalar.
+fn to_complex(v: &Value) -> Option<(f64, f64)> {
+    match v {
+        Value::Complex { re, im } => Some((*re, *im)),
+        Value::List(l) if l.len() >= 2 => Some((super::to_f64(&l[0])?, super::to_f64(&l[1])?)),
+        other => super::to_f64(other).map(|x| (x, 0.0)),
+    }
+}
+
+/// Bounds of a point set with small relative padding on each axis.
+fn padded_bounds(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    let x_min = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let x_max = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    let y_min = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let y_max = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let xr = if (x_max - x_min).abs() > 1e-12 {
+        x_max - x_min
+    } else {
+        2.0
+    };
+    let yr = if (y_max - y_min).abs() > 1e-12 {
+        y_max - y_min
+    } else {
+        2.0
+    };
+    (
+        x_min - xr * 0.06,
+        x_max + xr * 0.06,
+        y_min - yr * 0.08,
+        y_max + yr * 0.08,
+    )
+}
+
+/// Render a series of points as an optional polyline plus optional markers.
+#[allow(clippy::too_many_arguments)]
+fn render_series(
+    points: &[(f64, f64)],
+    bounds: (f64, f64, f64, f64),
+    width: f64,
+    height: f64,
+    color: &str,
+    connect: bool,
+    markers: bool,
+) -> String {
+    let (x_min, x_max, y_min, y_max) = bounds;
+    let mut content = String::new();
+
+    if connect && points.len() >= 2 {
+        let coords: Vec<String> = points
+            .iter()
+            .map(|&(x, y)| {
+                let (sx, sy) = map_to_svg(x, y, x_min, x_max, y_min, y_max, width, height);
+                format!("{:.1},{:.1}", sx, sy)
+            })
+            .collect();
+        content.push_str(&format!(
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"/>\n",
+            coords.join(" "),
+            color
+        ));
+    }
+
+    if markers {
+        for &(x, y) in points {
+            let (sx, sy) = map_to_svg(x, y, x_min, x_max, y_min, y_max, width, height);
+            content.push_str(&format!(
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3\" fill=\"{}\"/>\n",
+                sx, sy, color
+            ));
+        }
+    }
+
+    content
+}
+
+/// Apply optional per-axis base-10 log transforms, dropping non-positive samples.
+fn log_transform(points: &[(f64, f64)], xlog: bool, ylog: bool) -> Vec<(f64, f64)> {
+    points
+        .iter()
+        .filter_map(|&(x, y)| {
+            if xlog && x <= 0.0 {
+                return None;
+            }
+            if ylog && y <= 0.0 {
+                return None;
+            }
+            Some((
+                if xlog { x.log10() } else { x },
+                if ylog { y.log10() } else { y },
+            ))
+        })
+        .collect()
+}
+
+/// Convert a color value (string, RGBColor, RGB triple or named color) to hex.
+fn color_value_to_hex(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Symbol(s) => named_color(s).unwrap_or("#888888").to_string(),
+        Value::Call { head, .. } if head == "RGBColor" => apply_color_function(v, 0.5),
+        Value::List(l) if l.len() >= 3 => {
+            let r = super::to_f64(&l[0]).unwrap_or(0.0);
+            let g = super::to_f64(&l[1]).unwrap_or(0.0);
+            let b = super::to_f64(&l[2]).unwrap_or(0.0);
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8
+            )
+        }
+        _ => "#888888".to_string(),
+    }
+}
+
+/// Resolve a small set of named colors to hex.
+fn named_color(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Red" => "#ff0000",
+        "Green" => "#008000",
+        "Blue" => "#0000ff",
+        "Black" => "#000000",
+        "White" => "#ffffff",
+        "Orange" => "#ffa500",
+        "Purple" => "#800080",
+        "Cyan" => "#00ffff",
+        "Magenta" => "#ff00ff",
+        "Yellow" => "#ffff00",
+        "Gray" | "Grey" => "#808080",
+        _ => return None,
+    })
+}
+
+/// Convert an HSV triple to a hex color.
+fn hsv_to_hex(h: f64, s: f64, v: f64) -> String {
+    let h = (h.rem_euclid(1.0)) * 6.0;
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match h as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8
+    )
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> f64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) as f64
+}
+
+/// Parse a date-like value (`{y, m, d, ...}`, `"YYYY-MM-DD"` or a number) to a
+/// serial day number.
+fn date_to_serial(v: &Value) -> Option<f64> {
+    match v {
+        Value::List(parts) if !parts.is_empty() => {
+            let nums: Vec<f64> = parts
+                .iter()
+                .map(super::to_f64)
+                .collect::<Option<Vec<_>>>()?;
+            if nums.len() < 3 {
+                return None;
+            }
+            let base = days_from_civil(nums[0] as i64, nums[1] as i64, nums[2] as i64);
+            let frac = nums.get(3).copied().unwrap_or(0.0) / 24.0
+                + nums.get(4).copied().unwrap_or(0.0) / 1440.0
+                + nums.get(5).copied().unwrap_or(0.0) / 86400.0;
+            Some(base + frac)
+        }
+        Value::Str(s) => {
+            let sep = if s.contains('-') { '-' } else { '/' };
+            let parts: Vec<i64> = s
+                .split(sep)
+                .filter_map(|p| p.trim().parse::<i64>().ok())
+                .collect();
+            if parts.len() < 3 {
+                return None;
+            }
+            Some(days_from_civil(parts[0], parts[1], parts[2]))
+        }
+        other => super::to_f64(other),
+    }
+}
+
+/// Linear-interpolated quantile (type-7) of an already sorted slice.
+fn quantile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let h = (sorted.len() - 1) as f64 * p.clamp(0.0, 1.0);
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    let frac = h - lo as f64;
+    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+}
+
+/// Parse a rectangular numeric grid, rejecting ragged input.
+fn parse_grid(v: &Value) -> Result<Vec<Vec<f64>>, EvalError> {
+    let rows = get_list(v)?;
+    if rows.is_empty() {
+        return Err(EvalError::Error("expected a non-empty 2D grid".to_string()));
+    }
+    let mut grid = Vec::with_capacity(rows.len());
+    let mut width = 0usize;
+    for row in rows {
+        let cells = get_list(row)?;
+        let nums: Vec<f64> = cells.iter().filter_map(super::to_f64).collect();
+        if nums.len() != cells.len() {
+            return Err(EvalError::Error(
+                "grid must contain only numbers".to_string(),
+            ));
+        }
+        if width == 0 {
+            width = nums.len();
+        } else if nums.len() != width {
+            return Err(EvalError::Error(
+                "grid rows must all have the same length".to_string(),
+            ));
+        }
+        grid.push(nums);
+    }
+    Ok(grid)
+}
+
+/// Extract the `ColorFunction` option, if present and not `Automatic`.
+fn option_color_function(opts: &Value) -> Option<Value> {
+    if let Value::Assoc(map) = opts
+        && let Some(cf) = map.get("ColorFunction")
+        && !matches!(cf, Value::Symbol(s) if s == "Automatic")
+    {
+        return Some(cf.clone());
+    }
+    None
+}
+
+/// Pick a color for a normalized value using a color function or default ramp.
+fn ramp_color(color_fn: &Option<Value>, t: f64) -> String {
+    match color_fn {
+        Some(cf) => apply_color_function(cf, t),
+        None => apply_color_function(&Value::Symbol("Gradient".to_string()), t),
+    }
+}
+
+// ── DateListPlot ───────────────────────────────────────────────────────────────
+
+pub fn builtin_date_list_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "DateListPlot requires at least 1 argument".to_string(),
+        ));
+    }
+    let data = get_list(&args[0])?;
+    if data.is_empty() {
+        return Err(EvalError::Error(
+            "DateListPlot: data must not be empty".to_string(),
+        ));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    let points: Vec<(f64, f64)> = data
+        .iter()
+        .filter_map(|item| {
+            if let Value::List(p) = item
+                && p.len() >= 2
+            {
+                let x = date_to_serial(&p[0])?;
+                let y = super::to_f64(&p[1])?;
+                Some((x, y))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if points.is_empty() {
+        return Err(EvalError::Error(
+            "DateListPlot: no valid {date, value} points".to_string(),
+        ));
+    }
+
+    let bounds = padded_bounds(&points);
+    let content = render_series(&points, bounds, width, height, "#1a73e8", true, true);
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, bounds.0, bounds.1, bounds.2, bounds.3, "Date", "", grid_lines,
+    )))
+}
+
+// ── BoxWhiskerChart ────────────────────────────────────────────────────────────
+
+pub fn builtin_box_whisker_chart(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "BoxWhiskerChart requires at least 1 argument".to_string(),
+        ));
+    }
+    let data = get_list(&args[0])?;
+    if data.is_empty() {
+        return Err(EvalError::Error(
+            "BoxWhiskerChart: data must not be empty".to_string(),
+        ));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    // A list of lists yields multiple boxes; otherwise treat as a single dataset.
+    let multiple = matches!(data.first(), Some(Value::List(_)));
+    let mut datasets: Vec<Vec<f64>> = Vec::new();
+    if multiple {
+        for item in data {
+            if let Value::List(vals) = item {
+                let nums: Vec<f64> = vals.iter().filter_map(super::to_f64).collect();
+                if !nums.is_empty() {
+                    datasets.push(nums);
+                }
+            }
+        }
+    } else {
+        let nums: Vec<f64> = data.iter().filter_map(super::to_f64).collect();
+        if !nums.is_empty() {
+            datasets.push(nums);
+        }
+    }
+
+    if datasets.is_empty() {
+        return Err(EvalError::Error(
+            "BoxWhiskerChart: no numeric data".to_string(),
+        ));
+    }
+
+    let all_min = datasets
+        .iter()
+        .flat_map(|d| d.iter())
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let all_max = datasets
+        .iter()
+        .flat_map(|d| d.iter())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let span = if (all_max - all_min).abs() > 1e-12 {
+        all_max - all_min
+    } else {
+        2.0
+    };
+    let y_min = all_min - span * 0.1;
+    let y_max = all_max + span * 0.1;
+    let x_min = 0.4_f64;
+    let x_max = datasets.len() as f64 + 0.6;
+
+    let mut content = String::new();
+    let box_w = 0.5_f64;
+
+    for (i, dataset) in datasets.iter().enumerate() {
+        let mut sorted = dataset.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let q1 = quantile(&sorted, 0.25);
+        let median = quantile(&sorted, 0.5);
+        let q3 = quantile(&sorted, 0.75);
+        let iqr = q3 - q1;
+        let low_fence = q1 - 1.5 * iqr;
+        let high_fence = q3 + 1.5 * iqr;
+        let whisker_lo = sorted
+            .iter()
+            .cloned()
+            .filter(|&v| v >= low_fence)
+            .fold(f64::INFINITY, f64::min);
+        let whisker_hi = sorted
+            .iter()
+            .cloned()
+            .filter(|&v| v <= high_fence)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let color = palette_color(i);
+        let cx = i as f64 + 1.0;
+
+        let mapx = |x: f64| map_to_svg(x, 0.0, x_min, x_max, y_min, y_max, width, height).0;
+        let mapy = |y: f64| map_to_svg(0.0, y, x_min, x_max, y_min, y_max, width, height).1;
+
+        let bx = mapx(cx - box_w / 2.0);
+        let bw = (mapx(cx + box_w / 2.0) - bx).abs();
+        let by = mapy(q3);
+        let bh = (mapy(q1) - by).abs().max(1.0);
+        content.push_str(&format!(
+            "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.5\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+            bx, by, bw, bh, color, color
+        ));
+
+        let mid = mapx(cx);
+        content.push_str(&format!(
+            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"2\"/>\n",
+            mapx(cx - box_w / 2.0),
+            mapy(median),
+            mapx(cx + box_w / 2.0),
+            mapy(median),
+            color
+        ));
+
+        if whisker_hi.is_finite() {
+            content.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+                mid, mapy(q3), mid, mapy(whisker_hi), color
+            ));
+            content.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+                mapx(cx - box_w / 4.0), mapy(whisker_hi), mapx(cx + box_w / 4.0), mapy(whisker_hi), color
+            ));
+        }
+        if whisker_lo.is_finite() {
+            content.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+                mid, mapy(q1), mid, mapy(whisker_lo), color
+            ));
+            content.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n",
+                mapx(cx - box_w / 4.0), mapy(whisker_lo), mapx(cx + box_w / 4.0), mapy(whisker_lo), color
+            ));
+        }
+
+        for &v in &sorted {
+            if v < low_fence || v > high_fence {
+                content.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.5\" fill=\"{}\" fill-opacity=\"0.8\"/>\n",
+                    mid, mapy(v), color
+                ));
+            }
+        }
+    }
+
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, x_min, x_max, y_min, y_max, "", "", grid_lines,
+    )))
+}
+
+// ── ComplexPlot ────────────────────────────────────────────────────────────────
+
+pub fn builtin_complex_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "ComplexPlot requires at least 1 argument".to_string(),
+        ));
+    }
+
+    // A list of samples is rendered directly; a function symbol is returned
+    // unevaluated for the evaluator to handle.
+    let Some(data) = (match &args[0] {
+        Value::List(items) if !items.is_empty() => Some(items),
+        _ => None,
+    }) else {
+        return Ok(Value::Call {
+            head: "ComplexPlot".to_string(),
+            args: args.to_vec(),
+        });
+    };
+
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    struct CPoint {
+        re: f64,
+        im: f64,
+    }
+    let mut points: Vec<CPoint> = Vec::new();
+    for item in data {
+        if let Some((re, im)) = to_complex(item)
+            && re.is_finite()
+            && im.is_finite()
+        {
+            points.push(CPoint { re, im });
+        }
+    }
+    if points.is_empty() {
+        return Err(EvalError::Error(
+            "ComplexPlot: no valid complex data points".to_string(),
+        ));
+    }
+
+    let xy: Vec<(f64, f64)> = points.iter().map(|p| (p.re, p.im)).collect();
+    let bounds = padded_bounds(&xy);
+
+    let mut content = String::new();
+    for p in &points {
+        let phase = p.im.atan2(p.re).rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU;
+        let color = hsv_to_hex(phase, 0.85, 0.9);
+        let (sx, sy) = map_to_svg(
+            p.re, p.im, bounds.0, bounds.1, bounds.2, bounds.3, width, height,
+        );
+        content.push_str(&format!(
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\"0.75\"/>\n",
+            sx, sy, color, DARK_TEXT
+        ));
+    }
+
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, bounds.0, bounds.1, bounds.2, bounds.3, "Re", "Im", grid_lines,
+    )))
+}
+
+// ── ListLogPlot / ListLogLogPlot ───────────────────────────────────────────────
+
+fn log_plot_impl(name: &str, args: &[Value], xlog: bool, ylog: bool) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(format!(
+            "{} requires at least 1 argument",
+            name
+        )));
+    }
+    let data = get_list(&args[0])?;
+    if data.is_empty() {
+        return Err(EvalError::Error(format!(
+            "{}: data must not be empty",
+            name
+        )));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    let raw = to_xy_pairs(data);
+    let points = log_transform(&raw, xlog, ylog);
+    if points.is_empty() {
+        return Err(EvalError::Error(format!(
+            "{}: no positive data points for log scale",
+            name
+        )));
+    }
+
+    let bounds = padded_bounds(&points);
+    let content = render_series(&points, bounds, width, height, "#1a73e8", true, true);
+    Ok(Value::Str(svg_with_axes(
+        &content,
+        width,
+        height,
+        bounds.0,
+        bounds.1,
+        bounds.2,
+        bounds.3,
+        if xlog { "Log x" } else { "" },
+        if ylog { "Log y" } else { "" },
+        grid_lines,
+    )))
+}
+
+pub fn builtin_list_log_plot(args: &[Value]) -> Result<Value, EvalError> {
+    log_plot_impl("ListLogPlot", args, false, true)
+}
+
+pub fn builtin_list_log_log_plot(args: &[Value]) -> Result<Value, EvalError> {
+    log_plot_impl("ListLogLogPlot", args, true, true)
+}
+
+// ── ListPolarPlot ──────────────────────────────────────────────────────────────
+
+pub fn builtin_list_polar_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "ListPolarPlot requires at least 1 argument".to_string(),
+        ));
+    }
+    let data = get_list(&args[0])?;
+    if data.is_empty() {
+        return Err(EvalError::Error(
+            "ListPolarPlot: data must not be empty".to_string(),
+        ));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    // Each item is {r, theta}; a bare number is a radius with zero angle steps.
+    let mut theta_acc = 0.0_f64;
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for item in data {
+        let (r, theta) = if let Value::List(p) = item {
+            if p.len() < 2 {
+                continue;
+            }
+            match (super::to_f64(&p[0]), super::to_f64(&p[1])) {
+                (Some(r), Some(t)) => (r, t),
+                _ => continue,
+            }
+        } else if let Some(r) = super::to_f64(item) {
+            theta_acc += std::f64::consts::TAU / data.len() as f64;
+            (r, theta_acc)
+        } else {
+            continue;
+        };
+        points.push((r * theta.cos(), r * theta.sin()));
+    }
+    if points.is_empty() {
+        return Err(EvalError::Error(
+            "ListPolarPlot: no valid {r, theta} points".to_string(),
+        ));
+    }
+
+    let bounds = padded_bounds(&points);
+    let content = render_series(&points, bounds, width, height, "#4285F4", true, true);
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, bounds.0, bounds.1, bounds.2, bounds.3, "", "", grid_lines,
+    )))
+}
+
+// ── ListStreamPlot ─────────────────────────────────────────────────────────────
+
+pub fn builtin_list_stream_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "ListStreamPlot requires at least 1 argument".to_string(),
+        ));
+    }
+    let data = get_list(&args[0])?;
+    if data.is_empty() {
+        return Err(EvalError::Error(
+            "ListStreamPlot: data must not be empty".to_string(),
+        ));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    struct Field {
+        x: f64,
+        y: f64,
+        vx: f64,
+        vy: f64,
+    }
+    let mut field: Vec<Field> = Vec::new();
+    for item in data {
+        if let Value::List(pair) = item
+            && pair.len() >= 2
+            && let (Value::List(pos), Value::List(vec)) = (&pair[0], &pair[1])
+            && pos.len() >= 2
+            && vec.len() >= 2
+            && let (Some(x), Some(y), Some(vx), Some(vy)) = (
+                super::to_f64(&pos[0]),
+                super::to_f64(&pos[1]),
+                super::to_f64(&vec[0]),
+                super::to_f64(&vec[1]),
+            )
+        {
+            field.push(Field { x, y, vx, vy });
+        }
+    }
+    if field.is_empty() {
+        return Err(EvalError::Error(
+            "ListStreamPlot: no valid {{x, y}, {vx, vy}} samples".to_string(),
+        ));
+    }
+
+    let xy: Vec<(f64, f64)> = field.iter().map(|f| (f.x, f.y)).collect();
+    let bounds = padded_bounds(&xy);
+    let (bx0, bx1, by0, by1) = bounds;
+    let spacing = ((bx1 - bx0).min(by1 - by0) / (field.len() as f64).sqrt()).max(1e-6);
+    let arrow_len = spacing * 0.7;
+
+    let scale = |v: f64| (v - 1.0) / 4.0;
+
+    let mut content = String::new();
+    for f in &field {
+        let mag = (f.vx * f.vx + f.vy * f.vy).sqrt();
+        if mag < 1e-12 {
+            continue;
+        }
+        let ux = f.vx / mag;
+        let uy = f.vy / mag;
+        let ex = f.x + ux * arrow_len;
+        let ey = f.y + uy * arrow_len;
+        let (sx1, sy1) = map_to_svg(f.x, f.y, bx0, bx1, by0, by1, width, height);
+        let (sx2, sy2) = map_to_svg(ex, ey, bx0, bx1, by0, by1, width, height);
+        let color = ramp_color(&None, scale(mag));
+        content.push_str(&format!(
+            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.2\"/>\n",
+            sx1, sy1, sx2, sy2, color
+        ));
+        // Arrow head: two short lines back from the tip.
+        let head = (arrow_len * 0.35).max(1.0);
+        let angle = (sy2 - sy1).atan2(sx2 - sx1);
+        for da in [angle + 2.6, angle - 2.6] {
+            let hx = sx2 + head * da.cos();
+            let hy = sy2 + head * da.sin();
+            content.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1.2\"/>\n",
+                sx2, sy2, hx, hy, color
+            ));
+        }
+    }
+
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, bx0, bx1, by0, by1, "", "", grid_lines,
+    )))
+}
+
+// ── ListContourPlot ────────────────────────────────────────────────────────────
+
+pub fn builtin_list_contour_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "ListContourPlot requires at least 1 argument".to_string(),
+        ));
+    }
+    let grid = parse_grid(&args[0])?;
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+
+    let ny = grid.len();
+    let nx = grid[0].len();
+    let x_min = 1.0_f64;
+    let x_max = nx as f64;
+    let y_min = 1.0_f64;
+    let y_max = ny as f64;
+
+    let val_min = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let val_max = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let range = val_max - val_min;
+
+    let mut content = String::new();
+    if range > 1e-15 && nx >= 2 && ny >= 2 {
+        let num_levels = 5usize;
+        let colors = ["#1a73e8", "#ea4335", "#34a853", "#ff6d01", "#9c27b0"];
+        for li in 0..num_levels {
+            let level = val_min + (li as f64 + 0.5) * range / num_levels as f64;
+            marching_squares(
+                &grid,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                level,
+                &mut content,
+                colors[li % colors.len()],
+                width,
+                height,
+            );
+        }
+    }
+
+    Ok(Value::Str(svg_with_axes(
+        &content, width, height, x_min, x_max, y_min, y_max, "", "", grid_lines,
+    )))
+}
+
+// ── ListDensityPlot ────────────────────────────────────────────────────────────
+
+pub fn builtin_list_density_plot(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "ListDensityPlot requires at least 1 argument".to_string(),
+        ));
+    }
+    let grid = parse_grid(&args[0])?;
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
+    let color_fn = option_color_function(&options);
+
+    let ny = grid.len();
+    let nx = grid[0].len();
+    let x_min = 1.0_f64;
+    let x_max = nx as f64;
+    let y_min = 1.0_f64;
+    let y_max = ny as f64;
+
+    let val_min = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let val_max = grid
+        .iter()
+        .flat_map(|r| r.iter())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let range = val_max - val_min;
+
+    let mut content = String::new();
+    for (j, row) in grid.iter().enumerate() {
+        for (i, &v) in row.iter().enumerate() {
+            let t = if range > 1e-15 {
+                (v - val_min) / range
+            } else {
+                0.5
+            };
+            let color = ramp_color(&color_fn, t);
+            let (sx, sy) = map_to_svg(
+                i as f64 + 1.0,
+                j as f64 + 1.0,
+                x_min - 0.5,
+                x_max + 0.5,
+                y_min - 0.5,
+                y_max + 0.5,
+                width,
+                height,
+            );
+            let (sx2, sy2) = map_to_svg(
+                i as f64 + 2.0,
+                j as f64 + 2.0,
+                x_min - 0.5,
+                x_max + 0.5,
+                y_min - 0.5,
+                y_max + 0.5,
+                width,
+                height,
+            );
+            let sw = (sx2 - sx).abs().max(1.0);
+            let sh = (sy2 - sy).abs().max(1.0);
+            let sy_top = sy.min(sy2);
+            content.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" stroke=\"none\"/>\n",
+                sx, sy_top, sw, sh, color
+            ));
+        }
+    }
+
+    Ok(Value::Str(svg_with_axes(
+        &content,
+        width,
+        height,
+        x_min - 0.5,
+        x_max + 0.5,
+        y_min - 0.5,
+        y_max + 0.5,
+        "",
+        "",
+        grid_lines,
+    )))
+}
+
+// ── BarLegend / SwatchLegend ───────────────────────────────────────────────────
+
+/// Parse a `{min, max}` numeric range.
+fn range_of(v: &Value) -> Option<(f64, f64)> {
+    if let Value::List(l) = v
+        && l.len() == 2
+        && let (Some(a), Some(b)) = (super::to_f64(&l[0]), super::to_f64(&l[1]))
+    {
+        Some((a, b))
+    } else {
+        None
+    }
+}
+
+/// Build normalized gradient stops for a legend color source.
+fn legend_stops(source: &Value) -> Vec<(f64, String)> {
+    match source {
+        Value::List(items) if !items.is_empty() => {
+            let n = items.len();
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let pos = if n == 1 {
+                        0.0
+                    } else {
+                        i as f64 / (n - 1) as f64
+                    };
+                    (pos, color_value_to_hex(c))
+                })
+                .collect()
+        }
+        Value::Call { head, .. } if head == "RGBColor" => {
+            let hex = apply_color_function(source, 0.5);
+            vec![(0.0, hex.clone()), (1.0, hex)]
+        }
+        _ => (0..=8)
+            .map(|i| {
+                let t = i as f64 / 8.0;
+                (
+                    t,
+                    apply_color_function(&Value::Symbol("Gradient".to_string()), t),
+                )
+            })
+            .collect(),
+    }
+}
+
+pub fn builtin_bar_legend(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "BarLegend requires at least 1 argument".to_string(),
+        ));
+    }
+    let options = super::graphics::merge_options(&args[1..]);
+    let (ow, oh, _) = parse_chart_options(&options);
+    let width = if (ow - DEFAULT_WIDTH).abs() < 1e-9 {
+        140.0
+    } else {
+        ow
+    };
+    let height = if (oh - DEFAULT_HEIGHT).abs() < 1e-9 {
+        380.0
+    } else {
+        oh
+    };
+
+    // Accept {colorSource, {min, max}} or a bare color source, with the range
+    // optionally supplied as a separate argument.
+    let parsed = match &args[0] {
+        Value::List(items) if items.len() == 2 => {
+            range_of(&items[1]).map(|r| (items[0].clone(), r))
+        }
+        _ => None,
+    };
+    let (source, (min, max)) = match parsed {
+        Some((source, range)) => (source, range),
+        None => {
+            let range = args.get(1).and_then(range_of).unwrap_or((0.0, 1.0));
+            (args[0].clone(), range)
+        }
+    };
+
+    let bar_x = 40.0_f64;
+    let bar_w = 30.0_f64;
+    let top = 20.0_f64;
+    let bar_h = (height - 60.0).max(20.0);
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" style=\"background:white\">\n",
+        width as i32, height as i32, width as i32, height as i32
+    ));
+    svg.push_str("<defs><linearGradient id=\"legend_grad\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">\n");
+    for (pos, color) in legend_stops(&source) {
+        svg.push_str(&format!(
+            "<stop offset=\"{:.3}\" stop-color=\"{}\"/>\n",
+            pos, color
+        ));
+    }
+    svg.push_str("</linearGradient></defs>\n");
+    svg.push_str(&format!(
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"url(#legend_grad)\" stroke=\"{}\" stroke-width=\"1\"/>\n",
+        bar_x, top, bar_w, bar_h, AXIS_COLOR
+    ));
+    // Range labels at top, middle and bottom.
+    for (frac, value) in [(0.0, max), (0.5, (min + max) / 2.0), (1.0, min)] {
+        let y = top + frac * bar_h;
+        svg.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\" dominant-baseline=\"middle\">{}</text>\n",
+            bar_x + bar_w + 6.0,
+            y,
+            DARK_TEXT,
+            format_tick(value)
+        ));
+    }
+    svg.push_str("</svg>\n");
+    Ok(Value::Str(svg))
+}
+
+pub fn builtin_swatch_legend(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "SwatchLegend requires at least 1 argument".to_string(),
+        ));
+    }
+    let colors = get_list(&args[0])?;
+    if colors.is_empty() {
+        return Err(EvalError::Error(
+            "SwatchLegend: colors must not be empty".to_string(),
+        ));
+    }
+    let labels: Option<&Vec<Value>> = match args.get(1) {
+        Some(Value::List(l)) => Some(l),
+        _ => None,
+    };
+
+    let row_h = 26.0_f64;
+    let count = colors.len();
+    let width = 180.0_f64;
+    let height = (count as f64 * row_h + 20.0).max(40.0);
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" style=\"background:white\">\n",
+        width as i32, height as i32, width as i32, height as i32
+    ));
+    for (i, color) in colors.iter().enumerate() {
+        let y = 10.0 + i as f64 * row_h;
+        let hex = color_value_to_hex(color);
+        svg.push_str(&format!(
+            "<rect x=\"8\" y=\"{:.1}\" width=\"18\" height=\"18\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
+            y, hex, AXIS_COLOR
+        ));
+        let label = labels
+            .and_then(|l| l.get(i))
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| format!("{}", i + 1));
+        svg.push_str(&format!(
+            "<text x=\"34\" y=\"{:.1}\" font-size=\"12\" fill=\"{}\" dominant-baseline=\"middle\">{}</text>\n",
+            y + 14.0,
+            DARK_TEXT,
+            escape_xml(&label)
+        ));
+    }
+    svg.push_str("</svg>\n");
+    Ok(Value::Str(svg))
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 
 /// Register all Charting builtins.
@@ -1441,6 +2485,17 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Dendrogram", builtin_dendrogram);
     register_builtin(env, "RegionPlot", builtin_region_plot);
     register_builtin(env, "ContourPlot", builtin_contour_plot);
+    register_builtin(env, "DateListPlot", builtin_date_list_plot);
+    register_builtin(env, "BoxWhiskerChart", builtin_box_whisker_chart);
+    register_builtin(env, "ComplexPlot", builtin_complex_plot);
+    register_builtin(env, "ListLogPlot", builtin_list_log_plot);
+    register_builtin(env, "ListLogLogPlot", builtin_list_log_log_plot);
+    register_builtin(env, "ListPolarPlot", builtin_list_polar_plot);
+    register_builtin(env, "ListStreamPlot", builtin_list_stream_plot);
+    register_builtin(env, "ListContourPlot", builtin_list_contour_plot);
+    register_builtin(env, "ListDensityPlot", builtin_list_density_plot);
+    register_builtin(env, "BarLegend", builtin_bar_legend);
+    register_builtin(env, "SwatchLegend", builtin_swatch_legend);
 }
 
 /// Symbol names exported by the Charting package.
@@ -1457,6 +2512,17 @@ pub const SYMBOLS: &[&str] = &[
     "Dendrogram",
     "RegionPlot",
     "ContourPlot",
+    "DateListPlot",
+    "BoxWhiskerChart",
+    "ComplexPlot",
+    "ListLogPlot",
+    "ListLogLogPlot",
+    "ListPolarPlot",
+    "ListStreamPlot",
+    "ListContourPlot",
+    "ListDensityPlot",
+    "BarLegend",
+    "SwatchLegend",
     "ChartLayout",
     "ChartElements",
     "BarOrigin",
@@ -1908,5 +2974,323 @@ mod tests {
             Value::Str(svg) => assert!(svg.contains(EEE), "grid lines expected"),
             _ => panic!("Expected SVG string"),
         }
+    }
+
+    // ── Extended charts ─────────────────────────────────────────────────────
+
+    fn complex_val(re: f64, im: f64) -> Value {
+        Value::Complex { re, im }
+    }
+
+    #[test]
+    fn test_date_list_plot_basic() {
+        let data = Value::List(vec![
+            Value::List(vec![
+                Value::List(vec![int_val(2020), int_val(1), int_val(1)]),
+                real_val(10.0),
+            ]),
+            Value::List(vec![
+                Value::List(vec![int_val(2020), int_val(6), int_val(1)]),
+                real_val(20.0),
+            ]),
+        ]);
+        let result = builtin_date_list_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<polyline"), "expected connecting line");
+                assert!(svg.contains("Date"), "expected Date axis label");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_date_list_plot_string_dates() {
+        let data = Value::List(vec![
+            Value::List(vec![Value::Str("2020-01-01".to_string()), real_val(1.0)]),
+            Value::List(vec![Value::Str("2020-02-01".to_string()), real_val(2.0)]),
+        ]);
+        let result = builtin_date_list_plot(&[data]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<svg")));
+    }
+
+    #[test]
+    fn test_date_list_plot_empty() {
+        assert!(builtin_date_list_plot(&[Value::List(vec![])]).is_err());
+    }
+
+    #[test]
+    fn test_days_from_civil_epoch() {
+        assert!((days_from_civil(1970, 1, 1) - 0.0).abs() < 1e-9);
+        assert!(days_from_civil(1970, 1, 2) > days_from_civil(1970, 1, 1));
+    }
+
+    #[test]
+    fn test_box_whisker_chart_single() {
+        let data = Value::List(vec![
+            real_val(1.0),
+            real_val(2.0),
+            real_val(3.0),
+            real_val(4.0),
+            real_val(100.0),
+        ]);
+        let result = builtin_box_whisker_chart(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<rect"), "expected box");
+                assert!(svg.contains("<line"), "expected whiskers/median");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_box_whisker_chart_multiple_datasets() {
+        let data = Value::List(vec![
+            Value::List(vec![real_val(1.0), real_val(2.0), real_val(3.0)]),
+            Value::List(vec![real_val(5.0), real_val(6.0), real_val(7.0)]),
+        ]);
+        let result = builtin_box_whisker_chart(&[data]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<rect")));
+    }
+
+    #[test]
+    fn test_box_whisker_chart_empty() {
+        assert!(builtin_box_whisker_chart(&[Value::List(vec![])]).is_err());
+    }
+
+    #[test]
+    fn test_quantile() {
+        let sorted = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((quantile(&sorted, 0.5) - 3.0).abs() < 1e-12);
+        assert!((quantile(&sorted, 0.0) - 1.0).abs() < 1e-12);
+        assert!((quantile(&sorted, 1.0) - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_complex_plot_basic() {
+        let data = Value::List(vec![
+            complex_val(1.0, 1.0),
+            complex_val(-1.0, 0.5),
+            complex_val(0.0, -2.0),
+        ]);
+        let result = builtin_complex_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<circle"), "expected complex plane points");
+                assert!(svg.contains(">Re<"), "expected Re axis label");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_complex_plot_symbolic_fallback() {
+        let result = builtin_complex_plot(&[Value::Symbol("f".to_string())]).unwrap();
+        assert!(matches!(result, Value::Call { head, .. } if head == "ComplexPlot"));
+    }
+
+    #[test]
+    fn test_list_log_plot_basic() {
+        let data = Value::List(vec![int_val(1), int_val(10), int_val(100), int_val(1000)]);
+        let result = builtin_list_log_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<polyline"), "expected log line plot");
+                assert!(svg.contains("Log y"), "expected log axis label");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_list_log_plot_drops_nonpositive() {
+        let data = Value::List(vec![int_val(0), int_val(10), int_val(100)]);
+        let result = builtin_list_log_plot(&[data]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<polyline")));
+    }
+
+    #[test]
+    fn test_list_log_log_plot_basic() {
+        let data = Value::List(vec![
+            Value::List(vec![real_val(1.0), real_val(1.0)]),
+            Value::List(vec![real_val(10.0), real_val(100.0)]),
+            Value::List(vec![real_val(100.0), real_val(10000.0)]),
+        ]);
+        let result = builtin_list_log_log_plot(&[data]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<polyline")));
+    }
+
+    #[test]
+    fn test_list_polar_plot_basic() {
+        let data = Value::List(vec![
+            Value::List(vec![real_val(1.0), real_val(0.0)]),
+            Value::List(vec![real_val(1.0), real_val(std::f64::consts::FRAC_PI_2)]),
+        ]);
+        let result = builtin_list_polar_plot(&[data]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<circle")));
+    }
+
+    #[test]
+    fn test_list_polar_plot_empty() {
+        assert!(builtin_list_polar_plot(&[Value::List(vec![])]).is_err());
+    }
+
+    #[test]
+    fn test_list_stream_plot_basic() {
+        let data = Value::List(vec![
+            Value::List(vec![
+                Value::List(vec![real_val(0.0), real_val(0.0)]),
+                Value::List(vec![real_val(1.0), real_val(0.0)]),
+            ]),
+            Value::List(vec![
+                Value::List(vec![real_val(1.0), real_val(1.0)]),
+                Value::List(vec![real_val(0.0), real_val(1.0)]),
+            ]),
+        ]);
+        let result = builtin_list_stream_plot(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => assert!(svg.contains("<line"), "expected arrow segments"),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_list_stream_plot_bad_data() {
+        let data = Value::List(vec![int_val(1), int_val(2)]);
+        assert!(builtin_list_stream_plot(&[data]).is_err());
+    }
+
+    #[test]
+    fn test_list_contour_plot_basic() {
+        let grid = Value::List(vec![
+            Value::List(vec![real_val(0.0), real_val(1.0), real_val(2.0)]),
+            Value::List(vec![real_val(1.0), real_val(2.0), real_val(3.0)]),
+            Value::List(vec![real_val(2.0), real_val(3.0), real_val(4.0)]),
+        ]);
+        let result = builtin_list_contour_plot(&[grid]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<line")));
+    }
+
+    #[test]
+    fn test_list_contour_plot_ragged_error() {
+        let grid = Value::List(vec![
+            Value::List(vec![real_val(0.0), real_val(1.0)]),
+            Value::List(vec![real_val(0.0)]),
+        ]);
+        assert!(builtin_list_contour_plot(&[grid]).is_err());
+    }
+
+    #[test]
+    fn test_list_density_plot_basic() {
+        let grid = Value::List(vec![
+            Value::List(vec![real_val(0.0), real_val(0.5)]),
+            Value::List(vec![real_val(0.5), real_val(1.0)]),
+        ]);
+        let result = builtin_list_density_plot(&[grid]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("<rect")));
+    }
+
+    #[test]
+    fn test_list_density_plot_empty_error() {
+        assert!(builtin_list_density_plot(&[Value::List(vec![])]).is_err());
+    }
+
+    #[test]
+    fn test_bar_legend_gradient() {
+        let spec = Value::List(vec![
+            Value::Symbol("ColorFunction".to_string()),
+            Value::List(vec![real_val(0.0), real_val(100.0)]),
+        ]);
+        let result = builtin_bar_legend(&[spec]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("linearGradient"), "expected gradient");
+                assert!(svg.contains("100"), "expected range label");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_bar_legend_color_list() {
+        let colors = Value::List(vec![
+            Value::Str("#0000ff".to_string()),
+            Value::Str("#ff0000".to_string()),
+        ]);
+        let result = builtin_bar_legend(&[colors]).unwrap();
+        assert!(matches!(result, Value::Str(svg) if svg.contains("stop-color")));
+    }
+
+    #[test]
+    fn test_bar_legend_empty() {
+        assert!(builtin_bar_legend(&[]).is_err());
+    }
+
+    #[test]
+    fn test_swatch_legend_basic() {
+        let colors = Value::List(vec![
+            Value::Str("#ff0000".to_string()),
+            Value::Str("#00ff00".to_string()),
+        ]);
+        let labels = Value::List(vec![
+            Value::Str("A".to_string()),
+            Value::Str("B".to_string()),
+        ]);
+        let result = builtin_swatch_legend(&[colors, labels]).unwrap();
+        match result {
+            Value::Str(svg) => {
+                assert!(svg.contains("<rect"), "expected swatches");
+                assert!(
+                    svg.contains(">A<") && svg.contains(">B<"),
+                    "expected labels"
+                );
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_swatch_legend_empty() {
+        assert!(builtin_swatch_legend(&[Value::List(vec![])]).is_err());
+    }
+
+    #[test]
+    fn test_color_value_to_hex_variants() {
+        assert_eq!(
+            color_value_to_hex(&Value::Str("#abcdef".to_string())),
+            "#abcdef"
+        );
+        assert_eq!(
+            color_value_to_hex(&Value::Symbol("Red".to_string())),
+            "#ff0000"
+        );
+        let rgb = Value::Call {
+            head: "RGBColor".to_string(),
+            args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+        };
+        assert_eq!(color_value_to_hex(&rgb), "#ff0000");
+    }
+
+    #[test]
+    fn test_named_color_unknown() {
+        assert_eq!(named_color("Chartreuse"), None);
+    }
+
+    #[test]
+    fn test_to_complex_forms() {
+        assert_eq!(to_complex(&complex_val(2.0, -3.0)), Some((2.0, -3.0)));
+        assert_eq!(
+            to_complex(&Value::List(vec![real_val(1.0), real_val(2.0)])),
+            Some((1.0, 2.0))
+        );
+        assert_eq!(to_complex(&int_val(5)), Some((5.0, 0.0)));
+    }
+
+    #[test]
+    fn test_date_to_serial_numeric_and_list() {
+        assert_eq!(date_to_serial(&real_val(3.5)), Some(3.5));
+        let d = Value::List(vec![int_val(1970), int_val(1), int_val(1)]);
+        assert!(date_to_serial(&d).unwrap().abs() < 1e-9);
     }
 }

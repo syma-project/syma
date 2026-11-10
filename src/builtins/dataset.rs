@@ -11,11 +11,32 @@
 ///   ds[1]              -> first row
 ///   ds[1, "field"]     -> cell value
 ///   ds[All, {"a","b"}] -> column subset
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
+
+/// Build an unevaluated `head[args...]` result.
+fn unevaluated(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    Ok(Value::Call {
+        head: name.to_string(),
+        args: args.to_vec(),
+    })
+}
+
+/// String form of a value when used as an association key.
+fn value_to_key(v: &Value) -> String {
+    match v {
+        Value::Str(s) | Value::Symbol(s) => s.clone(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(r) => r.to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// Normalize a 1-indexed position to a 0-indexed usize.
 /// Supports negative indices (count from end).
@@ -375,6 +396,115 @@ pub fn builtin_join_across(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::List(result))
+}
+
+// ── Query ──
+
+/// `Query[target, spec...]` runs a Dataset/association query using the same
+/// specification language as `ds[spec...]` (e.g. `Query[ds, All, "col"]`).
+///
+/// A `Dataset` target yields a `Dataset` result; an association or list target
+/// yields its bare result. Returns unevaluated when the target is inapplicable.
+pub fn builtin_query(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return unevaluated("Query", args);
+    }
+    let (inner, wrap_in_dataset) = match &args[0] {
+        Value::Dataset(data) => (data.as_ref().clone(), true),
+        Value::Assoc(_) | Value::List(_) => (args[0].clone(), false),
+        _ => return unevaluated("Query", args),
+    };
+    let result = if args.len() == 1 {
+        inner
+    } else {
+        dataset_query(&inner, &args[1..], env)?
+    };
+    if wrap_in_dataset {
+        Ok(Value::Dataset(Arc::new(result)))
+    } else {
+        Ok(result)
+    }
+}
+
+// ── Dataset accessors (Dimensions / Part / All) ────────────────────────────
+
+/// `Dimensions[...]` that unwraps a `Dataset` (and handles associations) before
+/// delegating to the linear-algebra implementation.
+pub fn builtin_dataset_dimensions(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 1 {
+        match &args[0] {
+            Value::Dataset(inner) => {
+                return builtin_dataset_dimensions(std::slice::from_ref(inner));
+            }
+            Value::Assoc(map) => return Ok(Value::List(vec![Value::Integer(map.len().into())])),
+            _ => {}
+        }
+    }
+    crate::builtins::linalg::builtin_dimensions(args)
+}
+
+/// `Part[...]` that understands `Dataset` and association targets.
+///
+/// For a `Dataset`, the remaining specifications are interpreted exactly like a
+/// query (`All`, integers, key strings and key lists all work); for an
+/// association, a key yields the value (or `Missing["KeyAbsent", key]`) and a
+/// list of keys yields a sub-association. Everything else delegates to
+/// `list::builtin_part`.
+pub fn builtin_dataset_part(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() >= 2 {
+        if let Value::Dataset(inner) = &args[0] {
+            return dataset_query(inner, &args[1..], env);
+        }
+        if let Value::Assoc(map) = &args[0] {
+            return assoc_part(map, &args[1..]);
+        }
+    }
+    crate::builtins::list::builtin_part(args)
+}
+
+/// Index into an association by a key or list of keys, recursing for
+/// multi-part specifications.
+fn assoc_part(map: &HashMap<String, Value>, specs: &[Value]) -> Result<Value, EvalError> {
+    if specs.is_empty() {
+        return Ok(Value::Assoc(map.clone()));
+    }
+    let spec = &specs[0];
+    let selected = match spec {
+        Value::List(keys) => {
+            let mut new_map = HashMap::with_capacity(keys.len());
+            for key in keys {
+                let k = value_to_key(key);
+                let v = map.get(&k).cloned().unwrap_or_else(|| missing_key(&k));
+                new_map.insert(k, v);
+            }
+            Value::Assoc(new_map)
+        }
+        other => {
+            let k = value_to_key(other);
+            map.get(&k).cloned().unwrap_or_else(|| missing_key(&k))
+        }
+    };
+    if specs.len() == 1 {
+        return Ok(selected);
+    }
+    match selected {
+        Value::Assoc(inner) => assoc_part(&inner, &specs[1..]),
+        Value::List(_) => {
+            let mut sub_args = vec![selected];
+            sub_args.extend(specs[1..].iter().cloned());
+            crate::builtins::list::builtin_part(&sub_args)
+        }
+        other => Ok(other),
+    }
+}
+
+// ── Registration ───────────────────────────────────────────────────────────
+
+/// Register the Dataset/query builtins implemented in this module.
+pub fn register(env: &Env) {
+    super::register_builtin_env(env, "Query", builtin_query);
+    super::register_builtin(env, "Dimensions", builtin_dataset_dimensions);
+    super::register_builtin_env(env, "Part", builtin_dataset_part);
 }
 
 #[cfg(test)]
@@ -737,5 +867,124 @@ mod tests {
         );
         let candles = Value::List(vec![int(1), int(2)]);
         assert!(builtin_sort_by(&[candles, f], &env).is_err());
+    }
+
+    // ── Query ──
+
+    #[test]
+    fn test_query_dataset_column_returns_dataset() {
+        let result = eval_str(
+            "Query[Dataset[{<|\"a\"->10, \"b\"->20|>, <|\"a\"->30, \"b\"->40|>}], All, \"a\"]",
+        );
+        assert_eq!(
+            result,
+            Value::Dataset(std::sync::Arc::new(Value::List(vec![int(10), int(30)])))
+        );
+    }
+
+    #[test]
+    fn test_query_dataset_row_selection() {
+        let result = eval_str("Query[Dataset[{<|\"a\"->10|>, <|\"a\"->30|>}], 2]");
+        assert_eq!(
+            result,
+            Value::Dataset(std::sync::Arc::new(assoc(vec![("a", int(30))])))
+        );
+    }
+
+    #[test]
+    fn test_query_assoc_basic() {
+        assert_eq!(eval_str("Query[<|\"a\"->1, \"b\"->2|>, \"a\"]"), int(1));
+        assert_eq!(
+            eval_str("Query[<|\"a\"->1, \"b\"->2|>, All]"),
+            assoc(vec![("a", int(1)), ("b", int(2))])
+        );
+        assert_eq!(
+            eval_str("Query[<|\"a\"->1|>, {\"a\"}]"),
+            assoc(vec![("a", int(1))])
+        );
+    }
+
+    #[test]
+    fn test_query_missing_key_produces_missing() {
+        let result = eval_str("Query[<|\"a\"->1|>, \"z\"]");
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Str("KeyAbsent".to_string()),
+                    Value::Str("z".to_string())
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_query_unevaluated_on_inapplicable_target() {
+        assert_eq!(
+            eval_str("Query[5, All]"),
+            Value::Call {
+                head: "Query".to_string(),
+                args: vec![int(5), Value::Symbol("All".to_string())],
+            }
+        );
+    }
+
+    // ── Dataset accessors: Dimensions / Part / All ──
+
+    #[test]
+    fn test_dimensions_dataset_and_assoc() {
+        assert_eq!(
+            eval_str("Dimensions[Dataset[{{1, 2, 3}, {4, 5, 6}}]]"),
+            Value::List(vec![int(2), int(3)])
+        );
+        assert_eq!(
+            eval_str("Dimensions[<|\"a\"->1, \"b\"->2|>]"),
+            Value::List(vec![int(2)])
+        );
+        // Non-Dataset values still delegate to the linear-algebra version.
+        assert_eq!(eval_str("Dimensions[{1, 2, 3}]"), Value::List(vec![int(3)]));
+    }
+
+    #[test]
+    fn test_part_dataset_row_and_all() {
+        let result = eval_str("Part[Dataset[{<|\"a\"->10|>, <|\"a\"->30|>}], 1]");
+        assert_eq!(result, assoc(vec![("a", int(10))]));
+        let all = eval_str("Part[Dataset[{<|\"a\"->10|>, <|\"a\"->30|>}], All]");
+        assert_eq!(
+            all,
+            Value::List(vec![
+                assoc(vec![("a", int(10))]),
+                assoc(vec![("a", int(30))])
+            ])
+        );
+        // ds[[All, "a"]]-style nested access is routed through the query engine.
+        let col = eval_str("Part[Dataset[{<|\"a\"->10|>, <|\"a\"->30|>}], All, \"a\"]");
+        assert_eq!(col, Value::List(vec![int(10), int(30)]));
+    }
+
+    #[test]
+    fn test_part_assoc_key_and_list() {
+        assert_eq!(eval_str("Part[<|\"a\"->1, \"b\"->2|>, \"b\"]"), int(2));
+        assert_eq!(
+            eval_str("Part[<|\"a\"->1, \"b\"->2|>, {\"a\"}]"),
+            assoc(vec![("a", int(1))])
+        );
+        assert_eq!(
+            eval_str("Part[<|\"a\"->1|>, \"z\"]"),
+            Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Str("KeyAbsent".to_string()),
+                    Value::Str("z".to_string())
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_part_still_delegates_for_plain_lists() {
+        assert_eq!(eval_str("Part[{10, 20, 30}, 2]"), int(20));
+        assert_eq!(eval_str("Part[{10, 20, 30}, -1]"), int(30));
     }
 }

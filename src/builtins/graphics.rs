@@ -85,6 +85,30 @@ pub(crate) fn merge_options(args: &[Value]) -> Value {
     Value::Assoc(map)
 }
 
+/// Return `expr` unchanged as an unevaluated `Call` with the given head.
+///
+/// Used by the style/container builtins that are rendered by the SVG pipeline
+/// rather than folded at evaluation time.
+fn inert_call(head: &str, args: &[Value]) -> Value {
+    Value::Call {
+        head: head.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+/// Expand a `GraphicsRow`/`GraphicsColumn` argument list into child values.
+///
+/// Accepts either a single list argument (`GraphicsRow[{g1, g2}]`) or a flat
+/// sequence (`GraphicsRow[g1, g2]`).
+fn layout_children(args: &[Value]) -> Vec<Value> {
+    if args.len() == 1
+        && let Value::List(items) = &args[0]
+    {
+        return items.clone();
+    }
+    args.to_vec()
+}
+
 // ── Graphics Style State ────────────────────────────────────────────────────
 
 /// Accumulated rendering state from graphics directives.
@@ -138,6 +162,8 @@ fn is_directive(val: &Value) -> bool {
                 | "AbsolutePointSize"
                 | "Dashing"
                 | "AbsoluteDashing"
+                | "Dashed"
+                | "Dotted"
                 | "Opacity"
                 | "Directive"
                 | "EdgeForm"
@@ -255,6 +281,27 @@ fn apply_directive(style: &mut GraphicsStyle, directive: &Value) {
                         style.dash_array = Some(v);
                     }
                 }
+            }
+            "Dashed" => {
+                // Dashed[] uses a default pattern; Dashed[{...}] overrides it.
+                let pattern = match args.first() {
+                    Some(Value::List(dashes)) => {
+                        let v: Vec<f64> = dashes.iter().filter_map(super::to_f64).collect();
+                        if v.is_empty() { vec![4.0, 3.0] } else { v }
+                    }
+                    _ => vec![4.0, 3.0],
+                };
+                style.dash_array = Some(pattern);
+            }
+            "Dotted" => {
+                let pattern = match args.first() {
+                    Some(Value::List(dashes)) => {
+                        let v: Vec<f64> = dashes.iter().filter_map(super::to_f64).collect();
+                        if v.is_empty() { vec![1.0, 2.0] } else { v }
+                    }
+                    _ => vec![1.0, 2.0],
+                };
+                style.dash_array = Some(pattern);
             }
             "AbsoluteDashing" if !args.is_empty() => {
                 if let Value::List(dashes) = &args[0] {
@@ -520,6 +567,14 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
     let opts = parse_options(options)?;
     let (width, height) = (opts.width, opts.height);
 
+    // Row/column layouts are composed from their nested Graphics objects.
+    if let [Value::Call { head, args }] = prims.as_slice()
+        && (head == "GraphicsRow" || head == "GraphicsColumn")
+    {
+        let children = layout_children(args);
+        return Ok(render_layout(head == "GraphicsColumn", &children, &opts));
+    }
+
     // Compute data bounds for auto-ranging (skip directives)
     let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &opts.plot_range {
         (xr.0, xr.1, yr.0, yr.1)
@@ -588,13 +643,7 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
 
     // Draw primitives with directive state (PlotStyle seeds the initial style)
     let mut style = opts.plot_style.clone();
-    for prim in prims {
-        if is_directive(prim) {
-            apply_directive(&mut style, prim);
-        } else {
-            svg.push_str(&render_primitive(prim, &tx, &ty, &style)?);
-        }
-    }
+    svg.push_str(&render_prim_list(prims, &opts, &tx, &ty, &mut style)?);
 
     // Plot label / axis labels / legend
     svg.push_str(&render_decorations(
@@ -843,18 +892,39 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
     let mut y_max = f64::NEG_INFINITY;
 
     for prim in prims {
-        if is_directive(prim) {
-            continue;
-        }
+        expand_bounds_from_prim(prim, &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+    }
+
+    // Fallback if no points found
+    if x_min == f64::INFINITY {
+        return Ok((-1.0, 1.0, -1.0, 1.0));
+    }
+
+    Ok((x_min, x_max, y_min, y_max))
+}
+
+/// Accumulate the data-space bounding box of a single primitive (recursing
+/// through style/layout wrappers).
+fn expand_bounds_from_prim(
+    prim: &Value,
+    x_min: &mut f64,
+    x_max: &mut f64,
+    y_min: &mut f64,
+    y_max: &mut f64,
+) -> Result<(), EvalError> {
+    if is_directive(prim) {
+        return Ok(());
+    }
+    {
         match prim {
             Value::Call { head, args } if head == "Line" => {
                 if let Some(pts) = args.first() {
-                    expand_bounds_from_points(pts, &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+                    expand_bounds_from_points(pts, x_min, x_max, y_min, y_max)?;
                 }
             }
             Value::Call { head, args } if head == "Point" => {
                 if let Some(pt) = args.first() {
-                    expand_bounds_from_point(pt, &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+                    expand_bounds_from_point(pt, x_min, x_max, y_min, y_max)?;
                 }
             }
             Value::Call { head, args } if head == "Circle" => {
@@ -869,10 +939,10 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
                     {
                         let cx = super::to_f64(&c[0]).unwrap_or(0.0);
                         let cy = super::to_f64(&c[1]).unwrap_or(0.0);
-                        x_min = x_min.min(cx - rx.abs());
-                        x_max = x_max.max(cx + rx.abs());
-                        y_min = y_min.min(cy - ry.abs());
-                        y_max = y_max.max(cy + ry.abs());
+                        *x_min = x_min.min(cx - rx.abs());
+                        *x_max = x_max.max(cx + rx.abs());
+                        *y_min = y_min.min(cy - ry.abs());
+                        *y_max = y_max.max(cy + ry.abs());
                     }
                 }
             }
@@ -888,25 +958,23 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
                     {
                         let cx = super::to_f64(&c[0]).unwrap_or(0.0);
                         let cy = super::to_f64(&c[1]).unwrap_or(0.0);
-                        x_min = x_min.min(cx - rx.abs());
-                        x_max = x_max.max(cx + rx.abs());
-                        y_min = y_min.min(cy - ry.abs());
-                        y_max = y_max.max(cy + ry.abs());
+                        *x_min = x_min.min(cx - rx.abs());
+                        *x_max = x_max.max(cx + rx.abs());
+                        *y_min = y_min.min(cy - ry.abs());
+                        *y_max = y_max.max(cy + ry.abs());
                     }
                 }
             }
             Value::Call { head, args } if head == "Polygon" => {
                 if let Some(Value::List(pts)) = args.first() {
                     for pt in pts {
-                        expand_bounds_from_point(
-                            pt, &mut x_min, &mut x_max, &mut y_min, &mut y_max,
-                        )?;
+                        expand_bounds_from_point(pt, x_min, x_max, y_min, y_max)?;
                     }
                 }
             }
             Value::Call { head, args } if head == "Rectangle" && args.len() >= 2 => {
-                expand_bounds_from_point(&args[0], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
-                expand_bounds_from_point(&args[1], &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+                expand_bounds_from_point(&args[0], x_min, x_max, y_min, y_max)?;
+                expand_bounds_from_point(&args[1], x_min, x_max, y_min, y_max)?;
             }
             Value::Call { head, args } if head == "DensityRaster" && args.len() >= 4 => {
                 // DensityRaster[vals, {xmin,xmax}, {ymin,ymax}, {nx,ny}, ...]
@@ -914,28 +982,169 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
                     && xr.len() >= 2
                     && yr.len() >= 2
                 {
-                    x_min = x_min.min(super::to_f64(&xr[0]).unwrap_or(x_min));
-                    x_max = x_max.max(super::to_f64(&xr[1]).unwrap_or(x_max));
-                    y_min = y_min.min(super::to_f64(&yr[0]).unwrap_or(y_min));
-                    y_max = y_max.max(super::to_f64(&yr[1]).unwrap_or(y_max));
+                    *x_min = x_min.min(super::to_f64(&xr[0]).unwrap_or(*x_min));
+                    *x_max = x_max.max(super::to_f64(&xr[1]).unwrap_or(*x_max));
+                    *y_min = y_min.min(super::to_f64(&yr[0]).unwrap_or(*y_min));
+                    *y_max = y_max.max(super::to_f64(&yr[1]).unwrap_or(*y_max));
                 }
             }
             Value::List(items) => {
-                // Could be a flat list of points
-                for item in items {
-                    expand_bounds_from_point(item, &mut x_min, &mut x_max, &mut y_min, &mut y_max)?;
+                // A flat list of points contributes each coordinate; otherwise
+                // treat it as a nested primitive list.
+                let is_point_list = matches!(
+                    items.first(),
+                    Some(Value::List(coords)) if coords.len() >= 2
+                ) && items.iter().all(|p| matches!(p, Value::List(_)));
+                if is_point_list {
+                    for item in items {
+                        expand_bounds_from_point(item, x_min, x_max, y_min, y_max)?;
+                    }
+                } else {
+                    for item in items {
+                        expand_bounds_from_prim(item, x_min, x_max, y_min, y_max)?;
+                    }
+                }
+            }
+            // Style / Labeled / Legended wrap a single primitive.
+            Value::Call { head, args }
+                if matches!(head.as_str(), "Style" | "Labeled" | "Legended")
+                    && !args.is_empty() =>
+            {
+                expand_bounds_from_prim(&args[0], x_min, x_max, y_min, y_max)?;
+            }
+            // Text / Inset anchor at their position argument.
+            Value::Call { head, args }
+                if matches!(head.as_str(), "Text" | "Inset") && args.len() >= 2 =>
+            {
+                expand_bounds_from_point(&args[1], x_min, x_max, y_min, y_max)?;
+                if let Some((a, b, c, d)) = inset_bounds(&args[0]) {
+                    *x_min = x_min.min(a);
+                    *x_max = x_max.max(b);
+                    *y_min = y_min.min(c);
+                    *y_max = y_max.max(d);
+                }
+            }
+            // GraphicsComplex[points, prims] — resolve indices, then recurse.
+            Value::Call { head, args } if head == "GraphicsComplex" && args.len() >= 2 => {
+                if let Value::List(points) = &args[0] {
+                    let resolved = resolve_complex_prims(&args[1], points);
+                    match &resolved {
+                        Value::List(rp) => {
+                            for p in rp {
+                                expand_bounds_from_prim(p, x_min, x_max, y_min, y_max)?;
+                            }
+                        }
+                        single => {
+                            expand_bounds_from_prim(single, x_min, x_max, y_min, y_max)?;
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    // Fallback if no points found
-    if x_min == f64::INFINITY {
-        return Ok((-1.0, 1.0, -1.0, 1.0));
-    }
+    Ok(())
+}
 
-    Ok((x_min, x_max, y_min, y_max))
+/// Bounding box of an `Inset` object when it is a `Graphics[...]` value.
+fn inset_bounds(obj: &Value) -> Option<(f64, f64, f64, f64)> {
+    let inner = match obj {
+        Value::Call { head, args } if head == "Graphics" && !args.is_empty() => &args[0],
+        _ => return None,
+    };
+    match inner {
+        Value::List(prims) => compute_bounds(prims).ok(),
+        single => compute_bounds(std::slice::from_ref(single)).ok(),
+    }
+}
+
+/// Resolve integer point indices in a `GraphicsComplex` primitive list.
+fn resolve_complex_prims(prims: &Value, points: &[Value]) -> Value {
+    match prims {
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|p| resolve_complex_prim(p, points))
+                .collect(),
+        ),
+        single => resolve_complex_prim(single, points),
+    }
+}
+
+/// Resolve point indices in a single primitive. Integers in geometry heads are
+/// replaced by the referenced `points` entry (1-based, Wolfram style).
+fn resolve_complex_prim(prim: &Value, points: &[Value]) -> Value {
+    match prim {
+        Value::Call { head, args } if is_point_index_head(head) => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| resolve_arg(a, points)).collect(),
+        },
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|p| resolve_complex_prim(p, points))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Heads whose arguments are point lists/indices inside a `GraphicsComplex`.
+fn is_point_index_head(head: &str) -> bool {
+    matches!(
+        head,
+        "Line"
+            | "Point"
+            | "Polygon"
+            | "Triangle"
+            | "Rectangle"
+            | "Circle"
+            | "Disk"
+            | "Tube"
+            | "Arrow"
+            | "Cuboid"
+            | "BSplineCurve"
+            | "BezierCurve"
+            | "BSplineSurface"
+            | "BezierSurface"
+            | "GraphicsComplex"
+    )
+}
+
+/// Resolve a geometry-head argument, replacing indices by coordinates.
+///
+/// A bare integer is one point; a list of integers is a list of points; a
+/// single-element list wrapping a list (`{{1, 2}}`) collapses so the common
+/// `Line[{{1, 2}}]` form resolves to a two-point line.
+fn resolve_arg(v: &Value, points: &[Value]) -> Value {
+    match v {
+        Value::Integer(n) => {
+            if let Some(idx) = n.to_usize()
+                && idx >= 1
+                && idx <= points.len()
+            {
+                return points[idx - 1].clone();
+            }
+            v.clone()
+        }
+        Value::List(items) if !items.is_empty() => {
+            if items.iter().all(|i| matches!(i, Value::Integer(_))) {
+                Value::List(items.iter().map(|i| resolve_arg(i, points)).collect())
+            } else if items.len() == 1
+                && let Value::List(inner) = &items[0]
+            {
+                resolve_arg(&Value::List(inner.clone()), points)
+            } else {
+                Value::List(items.iter().map(|i| resolve_arg(i, points)).collect())
+            }
+        }
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| resolve_arg(a, points)).collect(),
+        },
+        other => other.clone(),
+    }
 }
 
 fn expand_bounds_from_points(
@@ -1158,8 +1367,404 @@ fn nice_step(range: f64) -> f64 {
     nice * base
 }
 
+/// Render a primitive list, threading directive state through the list.
+fn render_prim_list(
+    prims: &[Value],
+    opts: &RenderOptions,
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &mut GraphicsStyle,
+) -> Result<String, EvalError> {
+    let mut out = String::new();
+    for prim in prims {
+        match prim {
+            Value::Call { head, args } if head == "GraphicsComplex" && args.len() >= 2 => {
+                if let Value::List(points) = &args[0] {
+                    let resolved = resolve_complex_prims(&args[1], points);
+                    match &resolved {
+                        Value::List(rp) => {
+                            out.push_str(&render_prim_list(rp, opts, tx, ty, style)?)
+                        }
+                        single => out.push_str(&render_prim_list(
+                            std::slice::from_ref(single),
+                            opts,
+                            tx,
+                            ty,
+                            style,
+                        )?),
+                    }
+                }
+            }
+            _ if is_directive(prim) => apply_directive(style, prim),
+            _ => out.push_str(&render_primitive(prim, opts, tx, ty, style)?),
+        }
+    }
+    Ok(out)
+}
+
+/// Map a `{x, y}` value to SVG pixel coordinates.
+fn point_pixels(v: &Value, tx: &dyn Fn(f64) -> f64, ty: &dyn Fn(f64) -> f64) -> Option<(f64, f64)> {
+    let Value::List(coords) = v else {
+        return None;
+    };
+    if coords.len() < 2 {
+        return None;
+    }
+    let x = super::to_f64(&coords[0])?;
+    let y = super::to_f64(&coords[1])?;
+    Some((tx(x), ty(y)))
+}
+
+/// Render an SVG `<text>` label at a data-space anchor.
+fn text_at(content: &str, sx: f64, sy: f64, fill: &str) -> String {
+    format!(
+        "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"12\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>\n",
+        sx,
+        sy,
+        fill,
+        escape_xml(content)
+    )
+}
+
+/// Render `Text[expr, {x, y}]` / `Text[expr, {x, y}, {dx, dy}]`.
+fn render_text(
+    args: &[Value],
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> Result<String, EvalError> {
+    if args.len() < 2 {
+        return Ok(String::new());
+    }
+    let content = label_text(&args[0]).unwrap_or_default();
+    if content.is_empty() {
+        return Ok(String::new());
+    }
+    let Some((mut sx, mut sy)) = point_pixels(&args[1], tx, ty) else {
+        return Ok(String::new());
+    };
+    if let Some(Value::List(off)) = args.get(2)
+        && off.len() >= 2
+    {
+        sx += super::to_f64(&off[0]).unwrap_or(0.0);
+        sy += super::to_f64(&off[1]).unwrap_or(0.0);
+    }
+    Ok(text_at(&content, sx, sy, &style.color))
+}
+
+/// Render `Inset[obj, {x, y}, ...]` — embed a Graphics object or a text label.
+fn render_inset(
+    args: &[Value],
+    _opts: &RenderOptions,
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> Result<String, EvalError> {
+    if args.len() < 2 {
+        return Ok(String::new());
+    }
+    let Some((sx, sy)) = point_pixels(&args[1], tx, ty) else {
+        return Ok(String::new());
+    };
+    if let Value::Call { head, args: inner } = &args[0]
+        && matches!(head.as_str(), "Graphics" | "GraphicsRow" | "GraphicsColumn")
+        && !inner.is_empty()
+    {
+        let body = if head == "Graphics" {
+            let inner_opts = inner
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| Value::Assoc(std::collections::HashMap::new()));
+            render_svg(&inner[0], &inner_opts)?
+        } else {
+            let layout = Value::Call {
+                head: head.clone(),
+                args: inner.clone(),
+            };
+            let empty = Value::Assoc(std::collections::HashMap::new());
+            render_svg(&Value::List(vec![layout]), &empty)?
+        };
+        return Ok(body.replacen(
+            "<svg ",
+            &format!("<svg x=\"{:.2}\" y=\"{:.2}\" ", sx, sy),
+            1,
+        ));
+    }
+    let content = label_text(&args[0]).unwrap_or_default();
+    if content.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(text_at(&content, sx, sy, &style.color))
+}
+
+/// Render `Labeled[expr, label, pos]` — draw the primitive plus a text label.
+fn render_labeled(
+    args: &[Value],
+    opts: &RenderOptions,
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> Result<String, EvalError> {
+    let mut s = render_primitive(&args[0], opts, tx, ty, style)?;
+    if args.len() < 2 {
+        return Ok(s);
+    }
+    let label = label_text(&args[1]).unwrap_or_default();
+    if label.is_empty() {
+        return Ok(s);
+    }
+    let (x_min, x_max, y_min, y_max) =
+        compute_bounds(std::slice::from_ref(&args[0])).unwrap_or((-1.0, 1.0, -1.0, 1.0));
+    let cx = (x_min + x_max) / 2.0;
+    let cy = (y_min + y_max) / 2.0;
+    let (lx, ly, anchor) = match args.get(2) {
+        Some(Value::Symbol(p)) if p == "Below" => (tx(cx), ty(y_min) + 14.0, "middle"),
+        Some(Value::Symbol(p)) if p == "Left" => (tx(x_min) - 4.0, ty(cy) + 4.0, "end"),
+        Some(Value::Symbol(p)) if p == "Right" => (tx(x_max) + 4.0, ty(cy) + 4.0, "start"),
+        Some(Value::List(off)) if off.len() >= 2 => (
+            tx(cx) + super::to_f64(&off[0]).unwrap_or(0.0),
+            ty(cy) + super::to_f64(&off[1]).unwrap_or(0.0),
+            "middle",
+        ),
+        _ => (tx(cx), ty(y_max) - 6.0, "middle"),
+    };
+    s.push_str(&format!(
+        "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"12\" fill=\"#333\" text-anchor=\"{}\">{}</text>\n",
+        lx,
+        ly,
+        anchor,
+        escape_xml(&label)
+    ));
+    Ok(s)
+}
+
+/// Resolve a color value (named symbol or `RGBColor`/`Hue`) to an SVG hex string.
+fn any_color_to_svg(v: &Value) -> Option<String> {
+    match v {
+        Value::Symbol(s) => named_color_to_svg(s).map(|c| c.to_string()),
+        Value::Call { .. } => color_call_to_svg(v),
+        _ => None,
+    }
+}
+
+/// Render a legend primitive into an SVG fragment anchored at the top-right.
+fn render_legend(legend: &Value, opts: &RenderOptions) -> String {
+    let (head, args) = match legend {
+        Value::Call { head, args } => (head.as_str(), args.as_slice()),
+        Value::List(labels) => {
+            let texts: Vec<String> = labels.iter().filter_map(label_text).collect();
+            return render_legend_box(&texts, None, true, opts);
+        }
+        _ => return String::new(),
+    };
+    match head {
+        "LineLegend" | "SwatchLegend" => {
+            let colors = match args.first() {
+                Some(Value::List(cs)) => cs.clone(),
+                _ => Vec::new(),
+            };
+            let labels: Vec<String> = match args.get(1) {
+                Some(Value::List(ls)) => ls.iter().filter_map(label_text).collect(),
+                _ => Vec::new(),
+            };
+            render_legend_box(&labels, Some(&colors), head == "SwatchLegend", opts)
+        }
+        "BarLegend" => render_bar_legend(args, opts),
+        _ => String::new(),
+    }
+}
+
+/// Draw a bordered legend box with swatches (filled) or line markers.
+fn render_legend_box(
+    labels: &[String],
+    colors: Option<&[Value]>,
+    filled: bool,
+    opts: &RenderOptions,
+) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let box_w = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64 * 7.0 + 40.0;
+    let box_h = labels.len() as f64 * 18.0 + 12.0;
+    let x0 = (opts.width - MARGIN - box_w - 6.0).max(MARGIN + 6.0);
+    let y0 = MARGIN + 6.0;
+    let mut s = format!(
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#ffffff\" fill-opacity=\"0.85\" stroke=\"#888\" stroke-width=\"1\"/>\n",
+        x0, y0, box_w, box_h
+    );
+    for (i, label) in labels.iter().enumerate() {
+        let cy = y0 + 6.0 + i as f64 * 18.0 + 6.0;
+        let color = colors
+            .and_then(|c| c.get(i))
+            .and_then(any_color_to_svg)
+            .unwrap_or_else(|| LEGEND_COLORS[i % LEGEND_COLORS.len()].to_string());
+        if filled {
+            s.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"12\" height=\"9\" fill=\"{}\" stroke=\"none\"/>\n",
+                x0 + 8.0,
+                cy - 5.0,
+                color
+            ));
+        } else {
+            s.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"2\"/>\n",
+                x0 + 6.0,
+                cy,
+                x0 + 22.0,
+                cy,
+                color
+            ));
+        }
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"start\" font-size=\"11\" fill=\"#333\" dominant-baseline=\"middle\">{}</text>\n",
+            x0 + 28.0,
+            cy,
+            escape_xml(label)
+        ));
+    }
+    s
+}
+
+/// Sample a color palette at position `t` ∈ [0, 1].
+fn sample_palette(pal: &[String], t: f64) -> String {
+    if pal.is_empty() {
+        return "#1a73e8".to_string();
+    }
+    if pal.len() == 1 {
+        return pal[0].clone();
+    }
+    let scaled = t.clamp(0.0, 1.0) * (pal.len() - 1) as f64;
+    pal[scaled.round() as usize].clone()
+}
+
+/// Render `BarLegend[{colors, {min, max}}, ...]` as a graded color bar.
+fn render_bar_legend(args: &[Value], opts: &RenderOptions) -> String {
+    let (colors, min, max) = match args.first() {
+        Some(Value::List(spec)) if spec.len() >= 2 => {
+            let colors = match &spec[0] {
+                Value::List(cs) => cs.clone(),
+                other => vec![other.clone()],
+            };
+            let (min, max) = match &spec[1] {
+                Value::List(r) if r.len() >= 2 => (
+                    super::to_f64(&r[0]).unwrap_or(0.0),
+                    super::to_f64(&r[1]).unwrap_or(1.0),
+                ),
+                _ => (0.0, 1.0),
+            };
+            (colors, min, max)
+        }
+        _ => (Vec::new(), 0.0, 1.0),
+    };
+    let bar_w = 18.0;
+    let bar_h = 120.0;
+    let x0 = (opts.width - MARGIN - bar_w - 44.0).max(MARGIN + 6.0);
+    let y0 = MARGIN + 6.0;
+    let mut s = format!(
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#ffffff\" fill-opacity=\"0.85\" stroke=\"#888\" stroke-width=\"1\"/>\n",
+        x0 - 4.0,
+        y0 - 4.0,
+        bar_w + 44.0,
+        bar_h + 8.0
+    );
+    let pal: Vec<String> = if colors.is_empty() {
+        LEGEND_COLORS.iter().map(|c| c.to_string()).collect()
+    } else {
+        colors.iter().filter_map(any_color_to_svg).collect()
+    };
+    let n = 32;
+    for i in 0..n {
+        let t = i as f64 / (n - 1) as f64;
+        let color = sample_palette(&pal, t);
+        let seg_h = bar_h / n as f64 + 0.5;
+        let y = y0 + (1.0 - t) * bar_h;
+        s.push_str(&format!(
+            "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" stroke=\"none\"/>\n",
+            x0, y, bar_w, seg_h, color
+        ));
+    }
+    s.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#333\" text-anchor=\"start\">{}</text>\n",
+        x0 + bar_w + 4.0,
+        y0 + bar_h,
+        min
+    ));
+    s.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#333\" text-anchor=\"start\">{}</text>\n",
+        x0 + bar_w + 4.0,
+        y0 + 8.0,
+        max
+    ));
+    s
+}
+
+/// Compose a `GraphicsRow`/`GraphicsColumn` into a single SVG document.
+fn render_layout(vertical: bool, children: &[Value], opts: &RenderOptions) -> String {
+    let gap = 10.0;
+    let parts: Vec<(String, f64, f64)> = children.iter().filter_map(render_child).collect();
+    if parts.is_empty() {
+        return format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" style=\"background:white\"></svg>\n",
+            opts.width as i32, opts.height as i32
+        );
+    }
+    let (width, height) = if vertical {
+        (
+            parts.iter().map(|p| p.1).fold(0.0, f64::max),
+            parts.iter().map(|p| p.2).sum::<f64>() + gap * (parts.len() as f64 - 1.0),
+        )
+    } else {
+        (
+            parts.iter().map(|p| p.1).sum::<f64>() + gap * (parts.len() as f64 - 1.0),
+            parts.iter().map(|p| p.2).fold(0.0, f64::max),
+        )
+    };
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" style=\"background:white\">\n",
+        width as i32, height as i32
+    );
+    let mut off = 0.0;
+    for (child, w, h) in parts {
+        let (cx, cy) = if vertical { (0.0, off) } else { (off, 0.0) };
+        svg.push_str(&child.replacen(
+            "<svg ",
+            &format!("<svg x=\"{:.1}\" y=\"{:.1}\" ", cx, cy),
+            1,
+        ));
+        off += if vertical { h } else { w } + gap;
+    }
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Render one layout child to `(svg, width, height)`.
+fn render_child(v: &Value) -> Option<(String, f64, f64)> {
+    match v {
+        Value::Call { head, args } if head == "Graphics" && !args.is_empty() => {
+            let options = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| Value::Assoc(std::collections::HashMap::new()));
+            let o = parse_options(&options).ok()?;
+            let svg = render_svg(&args[0], &options).ok()?;
+            Some((svg, o.width, o.height))
+        }
+        Value::Call { head, args }
+            if (head == "GraphicsRow" || head == "GraphicsColumn") && !args.is_empty() =>
+        {
+            let o = RenderOptions::default();
+            let kids = layout_children(args);
+            let svg = render_layout(head == "GraphicsColumn", &kids, &o);
+            Some((svg, o.width, o.height))
+        }
+        Value::Str(s) if s.contains("<svg") => Some((s.clone(), DEFAULT_WIDTH, DEFAULT_HEIGHT)),
+        _ => None,
+    }
+}
+
 fn render_primitive(
     prim: &Value,
+    opts: &RenderOptions,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
     style: &GraphicsStyle,
@@ -1221,6 +1826,36 @@ fn render_primitive(
                 }
             }
             "DensityRaster" => render_density_raster(args, tx, ty),
+            "Style" if !args.is_empty() => {
+                let mut local = style.clone();
+                for d in &args[1..] {
+                    apply_directive(&mut local, d);
+                }
+                render_primitive(&args[0], opts, tx, ty, &local)
+            }
+            "Text" => render_text(args, tx, ty, style),
+            "Inset" => render_inset(args, opts, tx, ty, style),
+            "Labeled" if !args.is_empty() => render_labeled(args, opts, tx, ty, style),
+            "Legended" if args.len() >= 2 => {
+                let mut s = render_primitive(&args[0], opts, tx, ty, style)?;
+                s.push_str(&render_legend(&args[1], opts));
+                Ok(s)
+            }
+            "LineLegend" | "SwatchLegend" | "BarLegend" => Ok(render_legend(prim, opts)),
+            "GraphicsComplex" if args.len() >= 2 => {
+                if let Value::List(points) = &args[0] {
+                    let resolved = resolve_complex_prims(&args[1], points);
+                    let mut local = style.clone();
+                    match &resolved {
+                        Value::List(rp) => render_prim_list(rp, opts, tx, ty, &mut local),
+                        single => {
+                            render_prim_list(std::slice::from_ref(single), opts, tx, ty, &mut local)
+                        }
+                    }
+                } else {
+                    Ok(String::new())
+                }
+            }
             _ => Ok(String::new()),
         },
         // Handle bare lists of points (e.g., from ListPlot)
@@ -1235,7 +1870,9 @@ fn render_primitive(
                 }
                 return Ok(s);
             }
-            Ok(String::new())
+            // Otherwise treat the list as a nested primitive list.
+            let mut local = style.clone();
+            render_prim_list(items, opts, tx, ty, &mut local)
         }
         _ => Ok(String::new()),
     }
@@ -2260,6 +2897,128 @@ pub fn builtin_cylinder(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+// ── Style, annotation & legend primitives ────────────────────────────────────
+
+/// Style[expr, directives...] — wrap a primitive with style directives.
+pub fn builtin_style(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("Style", args, 1)?;
+    Ok(inert_call("Style", args))
+}
+
+/// Text[expr, {x, y}] — text label anchored at a data-space position.
+pub fn builtin_text(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("Text", args, 2)?;
+    Ok(inert_call("Text", args))
+}
+
+/// Inset[obj, {x, y}] — inset an object (graphics or label) at a position.
+pub fn builtin_inset(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("Inset", args, 2)?;
+    Ok(inert_call("Inset", args))
+}
+
+/// Dashed[] / Dashed[{d1, d2, ...}] — dashed-line directive.
+pub fn builtin_dashed(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(inert_call("Dashed", args))
+}
+
+/// Dotted[] / Dotted[{d1, d2, ...}] — dotted-line directive.
+pub fn builtin_dotted(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(inert_call("Dotted", args))
+}
+
+/// Thickness[t] — relative line-thickness directive.
+pub fn builtin_thickness(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("Thickness", args, 1)?;
+    Ok(inert_call("Thickness", args))
+}
+
+/// Directive[d1, d2, ...] — composite style directive.
+pub fn builtin_directive(args: &[Value]) -> Result<Value, EvalError> {
+    Ok(inert_call("Directive", args))
+}
+
+/// Labeled[expr, label, pos] — annotate a primitive with a text label.
+pub fn builtin_labeled(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("Labeled", args, 2)?;
+    Ok(inert_call("Labeled", args))
+}
+
+/// LineLegend[colors, labels] — legend with line swatches.
+pub fn builtin_line_legend(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("LineLegend", args, 1)?;
+    Ok(inert_call("LineLegend", args))
+}
+
+/// SwatchLegend[colors, labels] — legend with filled swatches.
+pub fn builtin_swatch_legend(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("SwatchLegend", args, 1)?;
+    Ok(inert_call("SwatchLegend", args))
+}
+
+/// BarLegend[{colors, {min, max}}, ...] — graded color-bar legend.
+pub fn builtin_bar_legend(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("BarLegend", args, 1)?;
+    Ok(inert_call("BarLegend", args))
+}
+
+/// Legended[expr, legend] — attach a legend to an expression.
+pub fn builtin_legended(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("Legended", args, 2)?;
+    Ok(inert_call("Legended", args))
+}
+
+// ── Containers ───────────────────────────────────────────────────────────────
+
+/// GraphicsComplex[points, primitives] — geometry referencing shared points by index.
+///
+/// Point indices are resolved to coordinates and returned as a flat primitive
+/// list so the result renders through the existing SVG pipeline. Returns an
+/// unevaluated `Call` when the arguments cannot be resolved.
+pub fn builtin_graphics_complex(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Ok(inert_call("GraphicsComplex", args));
+    }
+    let Value::List(points) = &args[0] else {
+        return Ok(inert_call("GraphicsComplex", args));
+    };
+    let resolved = resolve_complex_prims(&args[1], points);
+    Ok(match resolved {
+        Value::List(items) => Value::List(items),
+        other => Value::List(vec![other]),
+    })
+}
+
+/// GraphicsRow[{...}] — arrange graphics horizontally.
+pub fn builtin_graphics_row(args: &[Value]) -> Result<Value, EvalError> {
+    builtin_layout("GraphicsRow", args)
+}
+
+/// GraphicsColumn[{...}] — arrange graphics vertically.
+pub fn builtin_graphics_column(args: &[Value]) -> Result<Value, EvalError> {
+    builtin_layout("GraphicsColumn", args)
+}
+
+/// Wrap a row/column layout in a `Graphics` value so the SVG pipeline renders it.
+///
+/// Empty argument lists fall through as an unevaluated `Call`.
+fn builtin_layout(head: &str, args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(inert_call(head, args));
+    }
+    let node = Value::Call {
+        head: head.to_string(),
+        args: layout_children(args),
+    };
+    Ok(Value::Call {
+        head: "Graphics".to_string(),
+        args: vec![
+            Value::List(vec![node]),
+            Value::Assoc(std::collections::HashMap::new()),
+        ],
+    })
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Stub for `Plot` — the real implementation is in eval.rs (requires Env access).
@@ -2298,6 +3057,25 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Polygon", builtin_polygon);
     register_builtin(env, "Sphere", builtin_sphere);
     register_builtin(env, "Cylinder", builtin_cylinder);
+
+    // Style, annotation & legend primitives
+    register_builtin(env, "Style", builtin_style);
+    register_builtin(env, "Text", builtin_text);
+    register_builtin(env, "Inset", builtin_inset);
+    register_builtin(env, "Dashed", builtin_dashed);
+    register_builtin(env, "Dotted", builtin_dotted);
+    register_builtin(env, "Thickness", builtin_thickness);
+    register_builtin(env, "Directive", builtin_directive);
+    register_builtin(env, "Labeled", builtin_labeled);
+    register_builtin(env, "LineLegend", builtin_line_legend);
+    register_builtin(env, "SwatchLegend", builtin_swatch_legend);
+    register_builtin(env, "BarLegend", builtin_bar_legend);
+    register_builtin(env, "Legended", builtin_legended);
+
+    // Containers
+    register_builtin(env, "GraphicsComplex", builtin_graphics_complex);
+    register_builtin(env, "GraphicsRow", builtin_graphics_row);
+    register_builtin(env, "GraphicsColumn", builtin_graphics_column);
 }
 
 /// Symbol names exported by the Graphics package.
@@ -2341,12 +3119,28 @@ pub const SYMBOLS: &[&str] = &[
     "PointSize",
     "Opacity",
     "Directive",
+    // New style / annotation / legend primitives
+    "Style",
+    "Text",
+    "Inset",
+    "Dashed",
+    "Dotted",
+    "Labeled",
+    "LineLegend",
+    "SwatchLegend",
+    "BarLegend",
+    "Legended",
+    // Containers
+    "GraphicsComplex",
+    "GraphicsRow",
+    "GraphicsColumn",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rug::Float;
+    use rug::Integer;
 
     fn real_val(v: f64) -> Value {
         Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
@@ -3403,5 +4197,213 @@ mod tests {
             },
             _ => panic!("expected Graphics"),
         }
+    }
+
+    // ── Style / annotation / legend primitives ────────────────────────────────
+
+    fn empty_opts() -> Value {
+        Value::Assoc(std::collections::HashMap::new())
+    }
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+
+    #[test]
+    fn test_annotation_builtins_return_calls() {
+        assert!(
+            matches!(builtin_thickness(&[real_val(0.02)]).unwrap(), Value::Call { head, .. } if head == "Thickness")
+        );
+        assert!(
+            matches!(builtin_directive(&[Value::Symbol("Red".into())]).unwrap(), Value::Call { head, .. } if head == "Directive")
+        );
+        assert!(
+            matches!(builtin_style(&[line_prim()]).unwrap(), Value::Call { head, .. } if head == "Style")
+        );
+        assert!(
+            matches!(builtin_text(&[Value::Str("t".into()), point(0.0, 0.0)]).unwrap(), Value::Call { head, .. } if head == "Text")
+        );
+    }
+
+    #[test]
+    fn test_style_applies_directives() {
+        let red = Value::Call {
+            head: "RGBColor".into(),
+            args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+        };
+        let styled = builtin_style(&[line_prim(), red]).unwrap();
+        assert!(matches!(&styled, Value::Call { head, .. } if head == "Style"));
+        let svg = render_svg(&Value::List(vec![styled]), &empty_opts()).unwrap();
+        assert!(
+            svg.contains("stroke=\"#ff0000\""),
+            "style color applied: {}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_thickness_builtin_renders() {
+        let th = builtin_thickness(&[real_val(0.1)]).unwrap();
+        let svg = render_svg(&Value::List(vec![th, line_prim()]), &empty_opts()).unwrap();
+        assert!(
+            svg.contains("stroke-width=\"1.0\""),
+            "thickness applied: {}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_dashed_and_dotted_directives() {
+        let dashed = builtin_dashed(&[]).unwrap();
+        let svg = render_svg(&Value::List(vec![dashed, line_prim()]), &empty_opts()).unwrap();
+        assert!(svg.contains("stroke-dasharray"), "dashed: {}", svg);
+
+        let dotted = builtin_dotted(&[]).unwrap();
+        let svg = render_svg(&Value::List(vec![dotted, line_prim()]), &empty_opts()).unwrap();
+        assert!(svg.contains("stroke-dasharray"), "dotted: {}", svg);
+    }
+
+    #[test]
+    fn test_text_renders_at_position() {
+        let t = builtin_text(&[Value::Str("hello".into()), point(1.0, 2.0)]).unwrap();
+        let svg = render_svg(&Value::List(vec![t]), &empty_opts()).unwrap();
+        assert!(svg.contains("<text"), "text element: {}", svg);
+        assert!(svg.contains("hello"), "text content: {}", svg);
+    }
+
+    #[test]
+    fn test_inset_text_and_graphics() {
+        let txt = builtin_inset(&[Value::Str("X".into()), point(0.0, 1.0)]).unwrap();
+        let svg = render_svg(&Value::List(vec![txt]), &empty_opts()).unwrap();
+        assert!(svg.contains(">X</text>"), "inset text: {}", svg);
+
+        let inner = Value::Call {
+            head: "Graphics".into(),
+            args: vec![Value::List(vec![line_prim()]), empty_opts()],
+        };
+        let ins = builtin_inset(&[inner, point(0.0, 0.0)]).unwrap();
+        let svg = render_svg(&Value::List(vec![ins]), &empty_opts()).unwrap();
+        assert!(svg.matches("<svg").count() >= 2, "nested svg: {}", svg);
+    }
+
+    #[test]
+    fn test_labeled_renders_label_and_primitive() {
+        let lab = builtin_labeled(&[
+            line_prim(),
+            Value::Str("L1".into()),
+            Value::Symbol("Above".into()),
+        ])
+        .unwrap();
+        assert!(matches!(&lab, Value::Call { head, .. } if head == "Labeled"));
+        let svg = render_svg(&Value::List(vec![lab]), &empty_opts()).unwrap();
+        assert!(svg.contains("<polyline"), "primitive kept: {}", svg);
+        assert!(svg.contains("L1"), "label rendered: {}", svg);
+    }
+
+    #[test]
+    fn test_legends_render_swatches_and_labels() {
+        let red = make_rgb(1.0, 0.0, 0.0);
+        let blue = make_rgb(0.0, 0.0, 1.0);
+        let colors = list(vec![red, blue]);
+        let labels = list(vec![Value::Str("a".into()), Value::Str("b".into())]);
+
+        let ll = builtin_line_legend(&[colors.clone(), labels.clone()]).unwrap();
+        let svg = render_svg(&Value::List(vec![ll, line_prim()]), &empty_opts()).unwrap();
+        assert!(svg.contains(">a</text>"), "line legend label: {}", svg);
+
+        let sl = builtin_swatch_legend(&[colors.clone(), labels.clone()]).unwrap();
+        let svg = render_svg(&Value::List(vec![sl]), &empty_opts()).unwrap();
+        assert!(svg.contains(">b</text>"), "swatch legend label: {}", svg);
+
+        let spec = list(vec![
+            colors.clone(),
+            list(vec![real_val(0.0), real_val(10.0)]),
+        ]);
+        let bl = builtin_bar_legend(&[spec]).unwrap();
+        let svg = render_svg(&Value::List(vec![bl]), &empty_opts()).unwrap();
+        assert!(svg.contains("<rect"), "bar legend bar: {}", svg);
+        assert!(svg.contains(">10</text>"), "bar legend max: {}", svg);
+    }
+
+    #[test]
+    fn test_legended_wraps_primitive_and_legend() {
+        let red = make_rgb(1.0, 0.0, 0.0);
+        let legend =
+            builtin_line_legend(&[list(vec![red]), list(vec![Value::Str("series".into())])])
+                .unwrap();
+        let leg = builtin_legended(&[line_prim(), legend]).unwrap();
+        match &leg {
+            Value::Call { head, args } if head == "Legended" && args.len() == 2 => {}
+            _ => panic!("expected Legended call, got {:?}", leg),
+        }
+        let svg = render_svg(&Value::List(vec![leg]), &empty_opts()).unwrap();
+        assert!(svg.contains("<polyline"), "primitive rendered: {}", svg);
+        assert!(svg.contains("series"), "legend rendered: {}", svg);
+    }
+
+    #[test]
+    fn test_graphics_complex_resolves_point_indices() {
+        let pts = list(vec![point(0.0, 0.0), point(1.0, 2.0), point(2.0, 0.0)]);
+        let prims = list(vec![
+            Value::Call {
+                head: "Line".into(),
+                args: vec![list(vec![int(1), int(2), int(3)])],
+            },
+            Value::Call {
+                head: "Point".into(),
+                args: vec![int(2)],
+            },
+        ]);
+        let gc = builtin_graphics_complex(&[pts, prims]).unwrap();
+        assert!(matches!(&gc, Value::List(_)), "resolved to a flat list");
+        let svg = render_svg(&gc, &empty_opts()).unwrap();
+        assert!(svg.contains("<polyline"), "resolved line: {}", svg);
+        assert!(svg.contains("<circle"), "resolved point: {}", svg);
+
+        // Non-list points fall back to an unevaluated Call.
+        assert!(
+            matches!(builtin_graphics_complex(&[real_val(1.0), line_prim()]).unwrap(), Value::Call { head, .. } if head == "GraphicsComplex")
+        );
+    }
+
+    fn tiny_graphics(x: f64) -> Value {
+        Value::Call {
+            head: "Graphics".into(),
+            args: vec![
+                Value::List(vec![Value::Call {
+                    head: "Point".into(),
+                    args: vec![point(x, 0.0)],
+                }]),
+                empty_opts(),
+            ],
+        }
+    }
+
+    #[test]
+    fn test_graphics_row_and_column_compose_layout() {
+        let row =
+            builtin_graphics_row(&[Value::List(vec![tiny_graphics(0.0), tiny_graphics(1.0)])])
+                .unwrap();
+        match &row {
+            Value::Call { head, args } if head == "Graphics" => {
+                let svg = render_svg(&args[0], &args[1]).unwrap();
+                assert!(svg.matches("<svg").count() >= 3, "row children: {}", svg);
+                assert!(svg.contains("</svg>"));
+            }
+            _ => panic!("expected Graphics wrapper for GraphicsRow"),
+        }
+
+        let col = builtin_graphics_column(&[tiny_graphics(0.0), tiny_graphics(1.0)]).unwrap();
+        match &col {
+            Value::Call { head, args } if head == "Graphics" => {
+                let svg = render_svg(&args[0], &args[1]).unwrap();
+                assert!(svg.matches("<svg").count() >= 3, "column children: {}", svg);
+            }
+            _ => panic!("expected Graphics wrapper for GraphicsColumn"),
+        }
+
+        assert!(
+            matches!(builtin_graphics_row(&[]).unwrap(), Value::Call { head, .. } if head == "GraphicsRow")
+        );
     }
 }

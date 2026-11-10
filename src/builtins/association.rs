@@ -1,11 +1,25 @@
 use crate::ast::Expr;
 use crate::env::Env;
 use crate::eval::apply_function;
+use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::EvalError;
 use crate::value::Value;
 use std::collections::HashMap;
 
 use super::list::compare_values;
+
+/// Build an unevaluated `head[args...]` result.
+fn unevaluated(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    Ok(Value::Call {
+        head: name.to_string(),
+        args: args.to_vec(),
+    })
+}
+
+/// True when every element of a (non-empty) slice is an association.
+fn all_assocs(items: &[Value]) -> bool {
+    !items.is_empty() && items.iter().all(|x| matches!(x, Value::Assoc(_)))
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -856,6 +870,252 @@ pub fn builtin_association_thread(args: &[Value], env: &Env) -> Result<Value, Ev
     Ok(Value::Assoc(map))
 }
 
+// ── Association ────────────────────────────────────────────────────────────
+
+/// `Association[rules...]` / `Association[{rules...}]` — construct an
+/// association from a rule or list of rules. An already-built association is
+/// returned unchanged. When an element is not a rule (or the argument shape is
+/// otherwise inapplicable) the call is returned unevaluated, mirroring the
+/// Wolfram Language convention.
+pub fn builtin_association(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let elements: &[Value] = match args {
+        [] => return Ok(Value::Assoc(HashMap::new())),
+        [Value::Assoc(_)] => return Ok(args[0].clone()),
+        [Value::List(items)] => items.as_slice(),
+        _ => args,
+    };
+    let mut map = HashMap::with_capacity(elements.len());
+    for element in elements {
+        match rule_entry(element, env) {
+            Some((key, value)) => {
+                map.insert(key, value);
+            }
+            None => return unevaluated("Association", args),
+        }
+    }
+    Ok(Value::Assoc(map))
+}
+
+// ── ValueCount ─────────────────────────────────────────────────────────────
+
+/// `ValueCount[assoc]` — the number of distinct values in an association.
+/// `ValueCount[assoc, pattern]` — the number of values matching `pattern`.
+/// Returns unevaluated when the first argument is not an association.
+pub fn builtin_value_count(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated("ValueCount", args);
+    }
+    let map = match &args[0] {
+        Value::Assoc(map) => map,
+        _ => return unevaluated("ValueCount", args),
+    };
+    let mut count: i64 = 0;
+    match args.get(1) {
+        None => {
+            let mut seen: Vec<&Value> = Vec::new();
+            for value in map.values() {
+                if !seen.iter().any(|s| s.struct_eq(value)) {
+                    seen.push(value);
+                    count += 1;
+                }
+            }
+        }
+        Some(held_pattern) => {
+            let checker = AttributeChecker::new(env.attributes.clone());
+            let pattern = match held_pattern {
+                Value::Pattern(expr) => expr.clone(),
+                other => crate::eval::table::value_to_expr(other),
+            };
+            for value in map.values() {
+                if matches!(
+                    match_pattern(&pattern, value, Some(&checker)),
+                    MatchResult::Match(_)
+                ) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(Value::Integer(count.into()))
+}
+
+// ── KeyValueSelect ─────────────────────────────────────────────────────────
+
+/// `KeyValueSelect[assoc, crit]` keeps the entries whose `key -> value` rule
+/// satisfies `crit`. Also maps over a list of associations. Returns
+/// unevaluated when inapplicable.
+pub fn builtin_key_value_select(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KeyValueSelect", args);
+    }
+    if let Value::List(items) = &args[0]
+        && all_assocs(items)
+    {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(builtin_key_value_select(
+                &[item.clone(), args[1].clone()],
+                env,
+            )?);
+        }
+        return Ok(Value::List(out));
+    }
+    let map = match &args[0] {
+        Value::Assoc(map) => map,
+        _ => return unevaluated("KeyValueSelect", args),
+    };
+    let pred = &args[1];
+    let mut new_map = HashMap::new();
+    for (k, v) in map.iter() {
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Str(k.clone())),
+            rhs: Box::new(v.clone()),
+            delayed: false,
+        };
+        if apply_function(pred, std::slice::from_ref(&rule), env)?.to_bool() {
+            new_map.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(Value::Assoc(new_map))
+}
+
+// ── AssociationMap ─────────────────────────────────────────────────────────
+
+/// `AssociationMap[f, list]` maps each element to `<|f[item] -> item|>`;
+/// `AssociationMap[f, k1, ..., kn]` maps `<|f[k1, ..., kn] -> {k1, ..., kn}|>`.
+/// Returns unevaluated when the shape is inapplicable (e.g. the second argument
+/// is neither a list nor a key sequence).
+pub fn builtin_association_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return unevaluated("AssociationMap", args);
+    }
+    let f = &args[0];
+    if args.len() == 2 {
+        let items = match &args[1] {
+            Value::List(items) => items,
+            _ => return unevaluated("AssociationMap", args),
+        };
+        let mut map = HashMap::with_capacity(items.len());
+        for item in items {
+            let key = apply_function(f, std::slice::from_ref(item), env)?;
+            map.insert(value_to_key(&key), item.clone());
+        }
+        Ok(Value::Assoc(map))
+    } else {
+        let keys = &args[1..];
+        let key = apply_function(f, keys, env)?;
+        let mut map = HashMap::with_capacity(1);
+        map.insert(value_to_key(&key), Value::List(keys.to_vec()));
+        Ok(Value::Assoc(map))
+    }
+}
+
+// ── KeyTake / KeyDrop / KeySelect extras ───────────────────────────────────
+
+/// `KeyTake[assoc, keys]` extended to map over a list of associations and to
+/// return unevaluated when the argument is not an association (or list thereof).
+pub fn builtin_key_take_ext(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KeyTake", args);
+    }
+    if let Value::List(items) = &args[0]
+        && all_assocs(items)
+    {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(builtin_key_take(&[item.clone(), args[1].clone()])?);
+        }
+        return Ok(Value::List(out));
+    }
+    match builtin_key_take(args) {
+        Ok(v) => Ok(v),
+        Err(EvalError::TypeError { .. }) => unevaluated("KeyTake", args),
+        Err(e) => Err(e),
+    }
+}
+
+/// `KeyDrop[assoc, keys]` extended to map over a list of associations and to
+/// return unevaluated when the argument is not an association (or list thereof).
+pub fn builtin_key_drop_ext(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KeyDrop", args);
+    }
+    if let Value::List(items) = &args[0]
+        && all_assocs(items)
+    {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(builtin_key_drop(&[item.clone(), args[1].clone()])?);
+        }
+        return Ok(Value::List(out));
+    }
+    match builtin_key_drop(args) {
+        Ok(v) => Ok(v),
+        Err(EvalError::TypeError { .. }) => unevaluated("KeyDrop", args),
+        Err(e) => Err(e),
+    }
+}
+
+/// `KeySelect[assoc, pred]` extended to map over a list of associations and to
+/// return unevaluated when the argument is not an association (or list thereof).
+pub fn builtin_key_select_ext(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KeySelect", args);
+    }
+    if let Value::List(items) = &args[0]
+        && all_assocs(items)
+    {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(builtin_key_select(&[item.clone(), args[1].clone()], env)?);
+        }
+        return Ok(Value::List(out));
+    }
+    match builtin_key_select(args, env) {
+        Ok(v) => Ok(v),
+        Err(EvalError::TypeError { .. }) => unevaluated("KeySelect", args),
+        Err(e) => Err(e),
+    }
+}
+
+// ── MissingQ ───────────────────────────────────────────────────────────────
+
+/// `MissingQ[x]` is `True` when `x` is a `Missing[...]` expression.
+pub fn builtin_missing_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return unevaluated("MissingQ", args);
+    }
+    Ok(Value::Bool(
+        matches!(&args[0], Value::Call { head, .. } if head == "Missing"),
+    ))
+}
+
+// ── Registration ───────────────────────────────────────────────────────────
+
+/// Register the association builtins implemented in this module.
+pub fn register(env: &Env) {
+    super::register_builtin_env(env, "Association", builtin_association);
+    env.set_attributes("Association", vec!["Protected".to_string()]);
+
+    // Re-register with list-mapping / unevaluated-fallback semantics.
+    super::register_builtin(env, "KeyTake", builtin_key_take_ext);
+    super::register_builtin(env, "KeyDrop", builtin_key_drop_ext);
+    super::register_builtin_env(env, "KeySelect", builtin_key_select_ext);
+    super::register_builtin_env(env, "KeyValueSelect", builtin_key_value_select);
+
+    // A pattern second argument must stay held for structural matching.
+    super::register_builtin_env(env, "ValueCount", builtin_value_count);
+    env.set_attributes(
+        "ValueCount",
+        vec!["HoldRest".to_string(), "Protected".to_string()],
+    );
+
+    // Overrides the datamore definition with an identical-but-defensive version.
+    super::register_builtin_env(env, "AssociationMap", builtin_association_map);
+
+    super::register_builtin(env, "MissingQ", builtin_missing_q);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1572,6 +1832,272 @@ mod tests {
                 list(vec![string("a"), integer(1)]),
                 list(vec![string("c"), integer(1)]),
             ])
+        );
+    }
+
+    // ── Association constructor ──
+
+    #[test]
+    fn test_association_variadic_and_list_form() {
+        let expected = assoc(vec![("a", integer(1)), ("b", integer(2))]);
+        assert_eq!(eval_str("Association[\"a\"->1, \"b\"->2]"), expected);
+        assert_eq!(eval_str("Association[{\"a\"->1, \"b\"->2}]"), expected);
+    }
+
+    #[test]
+    fn test_association_empty_and_identity() {
+        assert_eq!(eval_str("Association[]"), assoc(vec![]));
+        let a = assoc(vec![("a", integer(1))]);
+        assert_eq!(
+            builtin_association(&[a.clone()], &make_env()).unwrap(),
+            a.clone()
+        );
+        assert_eq!(eval_str("Association[<|\"a\"->1|>]"), a);
+    }
+
+    #[test]
+    fn test_association_unevaluated_on_non_rule() {
+        assert_eq!(
+            eval_str("Association[1, 2]"),
+            Value::Call {
+                head: "Association".to_string(),
+                args: vec![integer(1), integer(2)],
+            }
+        );
+        let env = make_env();
+        assert_eq!(
+            builtin_association(&[integer(7)], &env).unwrap(),
+            Value::Call {
+                head: "Association".to_string(),
+                args: vec![integer(7)],
+            }
+        );
+    }
+
+    // ── ValueCount ──
+
+    #[test]
+    fn test_value_count_distinct() {
+        assert_eq!(
+            eval_str("ValueCount[<|\"a\"->1, \"b\"->1, \"c\"->2|>]"),
+            integer(2)
+        );
+        assert_eq!(eval_str("ValueCount[<||>]"), integer(0));
+    }
+
+    #[test]
+    fn test_value_count_with_pattern() {
+        assert_eq!(
+            eval_str("ValueCount[<|\"a\"->1, \"b\"->2, \"c\"->2|>, _Integer]"),
+            integer(3)
+        );
+        assert_eq!(
+            eval_str("ValueCount[<|\"a\"->1, \"b\"->2|>, 2]"),
+            integer(1)
+        );
+        assert_eq!(
+            eval_str("ValueCount[<|\"a\"->\"x\", \"b\"->2|>, _String]"),
+            integer(1)
+        );
+    }
+
+    #[test]
+    fn test_value_count_unevaluated() {
+        assert_eq!(
+            eval_str("ValueCount[5]"),
+            Value::Call {
+                head: "ValueCount".to_string(),
+                args: vec![integer(5)],
+            }
+        );
+    }
+
+    // ── KeyValueSelect ──
+
+    #[test]
+    fn test_key_value_select() {
+        let env = make_env();
+        let a = assoc(vec![
+            ("a", integer(1)),
+            ("b", integer(2)),
+            ("c", integer(3)),
+        ]);
+        // Keep entries whose value (the rule rhs) is greater than 1.
+        let pred = Value::Builtin(
+            "_gt1".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
+                Value::Rule { rhs, .. } => Ok(Value::Bool(
+                    matches!(&**rhs, Value::Integer(n) if n.to_i64().unwrap_or(0) > 1),
+                )),
+                _ => Ok(Value::Bool(false)),
+            }),
+        );
+        let result = builtin_key_value_select(&[a, pred], &env).unwrap();
+        match result {
+            Value::Assoc(map) => {
+                assert_eq!(map.len(), 2);
+                assert_eq!(map.get("b"), Some(&integer(2)));
+                assert_eq!(map.get("c"), Some(&integer(3)));
+                assert!(!map.contains_key("a"));
+            }
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_key_value_select_unevaluated() {
+        let env = make_env();
+        assert_eq!(
+            builtin_key_value_select(&[integer(1), Value::Bool(true)], &env).unwrap(),
+            Value::Call {
+                head: "KeyValueSelect".to_string(),
+                args: vec![integer(1), Value::Bool(true)],
+            }
+        );
+    }
+
+    // ── AssociationMap edge cases ──
+
+    #[test]
+    fn test_association_map_via_eval() {
+        let result = eval_str("AssociationMap[StringLength, {\"a\", \"bb\"}]");
+        assert_eq!(result, assoc(vec![("1", string("a")), ("2", string("bb"))]));
+    }
+
+    #[test]
+    fn test_association_map_edge_cases() {
+        let env = make_env();
+        let f = Value::Builtin(
+            "id".to_string(),
+            crate::value::BuiltinFn::Pure(|args| Ok(args[0].clone())),
+        );
+        // Empty list -> empty association.
+        assert_eq!(
+            builtin_association_map(&[f.clone(), list(vec![])], &env).unwrap(),
+            assoc(vec![])
+        );
+        // Key-sequence form.
+        let result = builtin_association_map(&[f.clone(), string("k")], &env).unwrap();
+        // Note: two-arg form requires a list, so a bare key is inapplicable.
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "AssociationMap".to_string(),
+                args: vec![f.clone(), string("k")],
+            }
+        );
+        let seq = builtin_association_map(&[f.clone(), string("k1"), string("k2")], &env).unwrap();
+        match seq {
+            Value::Assoc(map) => {
+                assert_eq!(map.get("k1"), Some(&list(vec![string("k1"), string("k2")])));
+            }
+            _ => panic!("Expected Assoc"),
+        }
+        // Too few arguments -> unevaluated.
+        assert_eq!(
+            builtin_association_map(&[f], &env).unwrap(),
+            Value::Call {
+                head: "AssociationMap".to_string(),
+                args: vec![Value::Builtin(
+                    "id".to_string(),
+                    crate::value::BuiltinFn::Pure(|args| Ok(args[0].clone())),
+                )],
+            }
+        );
+    }
+
+    // ── KeyTake / KeyDrop / KeySelect extras ──
+
+    #[test]
+    fn test_key_take_ext_maps_over_list() {
+        let a1 = assoc(vec![("a", integer(1)), ("b", integer(2))]);
+        let a2 = assoc(vec![("a", integer(3)), ("b", integer(4))]);
+        let result = builtin_key_take_ext(&[list(vec![a1, a2]), string("a")]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                assoc(vec![("a", integer(1))]),
+                assoc(vec![("a", integer(3))]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_key_take_ext_unevaluated() {
+        assert_eq!(
+            builtin_key_take_ext(&[integer(5), string("a")]).unwrap(),
+            Value::Call {
+                head: "KeyTake".to_string(),
+                args: vec![integer(5), string("a")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_drop_ext_maps_over_list() {
+        let a1 = assoc(vec![("a", integer(1)), ("b", integer(2))]);
+        let a2 = assoc(vec![("a", integer(3)), ("b", integer(4))]);
+        let result = builtin_key_drop_ext(&[list(vec![a1, a2]), string("b")]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                assoc(vec![("a", integer(1))]),
+                assoc(vec![("a", integer(3))]),
+            ])
+        );
+        assert_eq!(
+            builtin_key_drop_ext(&[integer(5), string("a")]).unwrap(),
+            Value::Call {
+                head: "KeyDrop".to_string(),
+                args: vec![integer(5), string("a")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_select_ext_maps_over_list_and_unevaluated() {
+        let env = make_env();
+        let pred = Value::Builtin(
+            "_long".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
+                Value::Str(s) => Ok(Value::Bool(s.len() > 1)),
+                _ => Ok(Value::Bool(false)),
+            }),
+        );
+        let a1 = assoc(vec![("a", integer(1)), ("bb", integer(2))]);
+        let result = builtin_key_select_ext(&[list(vec![a1]), pred.clone()], &env).unwrap();
+        assert_eq!(result, list(vec![assoc(vec![("bb", integer(2))])]));
+
+        assert_eq!(
+            builtin_key_select_ext(&[integer(5), pred], &env).unwrap(),
+            Value::Call {
+                head: "KeySelect".to_string(),
+                args: vec![
+                    integer(5),
+                    Value::Builtin(
+                        "_long".to_string(),
+                        crate::value::BuiltinFn::Pure(|args| match &args[0] {
+                            Value::Str(s) => Ok(Value::Bool(s.len() > 1)),
+                            _ => Ok(Value::Bool(false)),
+                        }),
+                    ),
+                ],
+            }
+        );
+    }
+
+    // ── MissingQ ──
+
+    #[test]
+    fn test_missing_q() {
+        assert_eq!(
+            eval_str("MissingQ[Missing[\"KeyAbsent\", \"x\"]]"),
+            Value::Bool(true)
+        );
+        assert_eq!(eval_str("MissingQ[1]"), Value::Bool(false));
+        assert_eq!(
+            builtin_missing_q(&[missing_key(&string("x"))]).unwrap(),
+            Value::Bool(true)
         );
     }
 }

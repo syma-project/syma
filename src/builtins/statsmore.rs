@@ -2,10 +2,15 @@
 //!
 //! Gap-fill module; see the individual builtin docs for semantics.
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::ast::Expr;
 use crate::builtins::statistics as st;
+use crate::env::Env;
 use crate::value::EvalError;
 use crate::value::Value;
+use crate::value::rational_value;
+use rug::Integer;
 use std::collections::HashMap;
 
 /// Convert an AST `Expr` to a structural `Value` without evaluating it.
@@ -1162,11 +1167,532 @@ pub fn builtin_estimated_distribution(args: &[Value]) -> Result<Value, EvalError
     }
 }
 
+// ── Survival, hazard, and inverse survival functions ────────────────────────
+
+/// Survival function P(X > x) = 1 − CDF(x).
+fn survival_f(dist: &HashMap<String, Value>, x: f64) -> Option<f64> {
+    Some((1.0 - cdf_at(dist, x)?).clamp(0.0, 1.0))
+}
+
+/// SurvivalFunction[dist, x] — probability that a variate exceeds `x`.
+pub fn builtin_survival_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("SurvivalFunction", args);
+    }
+    let dist = match &args[0] {
+        Value::Assoc(m) if m.contains_key("Distribution") => m,
+        _ => return unevaluated("SurvivalFunction", args),
+    };
+    let x = match as_f64(&args[1]) {
+        Some(x) => x,
+        None => return unevaluated("SurvivalFunction", args),
+    };
+    match survival_f(dist, x) {
+        Some(v) => Ok(num(v)),
+        None => unevaluated("SurvivalFunction", args),
+    }
+}
+
+/// HazardFunction[dist, x] — PDF(x) / SurvivalFunction(x).
+pub fn builtin_hazard_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("HazardFunction", args);
+    }
+    let dist = match &args[0] {
+        Value::Assoc(m) if m.contains_key("Distribution") => m,
+        _ => return unevaluated("HazardFunction", args),
+    };
+    let x = match as_f64(&args[1]) {
+        Some(x) => x,
+        None => return unevaluated("HazardFunction", args),
+    };
+    let (Some(pdf), Some(sf)) = (pmf_at(dist, x), survival_f(dist, x)) else {
+        return unevaluated("HazardFunction", args);
+    };
+    if sf <= 0.0 {
+        Ok(super::real(f64::INFINITY))
+    } else {
+        Ok(num(pdf / sf))
+    }
+}
+
+/// InverseSurvivalFunction[dist, q] — x with SurvivalFunction(x) = q.
+pub fn builtin_inverse_survival_function(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("InverseSurvivalFunction", args);
+    }
+    let dist = match &args[0] {
+        Value::Assoc(m) if m.contains_key("Distribution") => m,
+        _ => return unevaluated("InverseSurvivalFunction", args),
+    };
+    let q = match as_f64(&args[1]) {
+        Some(q) if (0.0..=1.0).contains(&q) => q,
+        _ => return unevaluated("InverseSurvivalFunction", args),
+    };
+    match inverse_cdf_f(dist, 1.0 - q) {
+        Some(v) => Ok(num(v)),
+        None => unevaluated("InverseSurvivalFunction", args),
+    }
+}
+
+// ── ConditionalProbability / ExpectedValue ──────────────────────────────────
+
+/// Evaluate a possibly held (`HoldAll`) argument with the environment.
+fn eval_arg(v: &Value, env: &Env) -> Value {
+    match v {
+        Value::Pattern(e) => crate::eval::eval(e, env).unwrap_or_else(|_| expr_to_value(e)),
+        other => other.clone(),
+    }
+}
+
+/// ConditionalProbability[e1, e2, dist] — P(e1 ∧ e2) / P(e2).
+pub fn builtin_conditional_probability(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return unevaluated("ConditionalProbability", args);
+    }
+    let e1 = held_value(&args[0]);
+    let e2 = held_value(&args[1]);
+    let dist = eval_arg(&args[2], env);
+    match &dist {
+        Value::Assoc(m) if m.contains_key("Distribution") => {}
+        _ => return unevaluated("ConditionalProbability", args),
+    }
+    let joint = Value::Call {
+        head: "And".to_string(),
+        args: vec![e1.clone(), e2.clone()],
+    };
+    let p_joint = match builtin_probability(&[joint, dist.clone()]) {
+        Ok(v) => match as_f64(&v) {
+            Some(p) => p,
+            None => return unevaluated("ConditionalProbability", args),
+        },
+        Err(_) => return unevaluated("ConditionalProbability", args),
+    };
+    let p_cond = match builtin_probability(&[e2, dist]) {
+        Ok(v) => match as_f64(&v) {
+            Some(p) => p,
+            None => return unevaluated("ConditionalProbability", args),
+        },
+        Err(_) => return unevaluated("ConditionalProbability", args),
+    };
+    if p_cond <= 0.0 {
+        return unevaluated("ConditionalProbability", args);
+    }
+    Ok(num(p_joint / p_cond))
+}
+
+/// ExpectedValue[expr, dist] — alias for Expectation.
+pub fn builtin_expected_value(args: &[Value]) -> Result<Value, EvalError> {
+    builtin_expectation(args)
+}
+
+// ── Commonest ───────────────────────────────────────────────────────────────
+
+/// Commonest[list] / Commonest[list, n] — most frequently occurring elements.
+pub fn builtin_commonest(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return unevaluated("Commonest", args);
+    }
+    let items = data_list("Commonest", args, 0)?;
+    if items.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    let take = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(n) => n.to_i64().unwrap_or(0).max(0) as usize,
+            Value::Real(r) => r.to_f64().max(0.0) as usize,
+            _ => return unevaluated("Commonest", args),
+        }
+    } else {
+        usize::MAX
+    };
+    let mut counts: Vec<(Value, usize)> = Vec::new();
+    'outer: for item in items {
+        for (val, c) in counts.iter_mut() {
+            if val == item {
+                *c += 1;
+                continue 'outer;
+            }
+        }
+        counts.push((item.clone(), 1));
+    }
+    counts.sort_by_key(|(_, c)| std::cmp::Reverse(*c)); // stable: ties keep first-occurrence order
+    let max_count = counts.first().map(|(_, c)| *c).unwrap_or(0);
+    let iter = counts.into_iter();
+    let out: Vec<Value> = if take == usize::MAX {
+        iter.filter(|(_, c)| *c == max_count)
+            .map(|(v, _)| v)
+            .collect()
+    } else {
+        iter.take(take).map(|(v, _)| v).collect()
+    };
+    Ok(Value::List(out))
+}
+
+// ── Rank correlations ───────────────────────────────────────────────────────
+
+/// Average ranks (1-based) of `nums`, ties sharing the mean rank.
+fn ranks_of(nums: &[f64]) -> Vec<f64> {
+    let n = nums.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| {
+        nums[a]
+            .partial_cmp(&nums[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut ranks = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && nums[idx[j + 1]] == nums[idx[i]] {
+            j += 1;
+        }
+        let avg = (i + j) as f64 / 2.0 + 1.0;
+        for k in i..=j {
+            ranks[idx[k]] = avg;
+        }
+        i = j + 1;
+    }
+    ranks
+}
+
+fn has_ties(sorted: &[f64]) -> bool {
+    sorted.windows(2).any(|w| w[0] == w[1])
+}
+
+/// SpearmanRho[list1, list2] — Spearman's rank correlation coefficient.
+pub fn builtin_spearman_rho(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("SpearmanRho", args);
+    }
+    let a = extract_nums(data_list("SpearmanRho", args, 0)?)?;
+    let b = extract_nums(data_list("SpearmanRho", args, 1)?)?;
+    if a.len() != b.len() || a.len() < 2 {
+        return unevaluated("SpearmanRho", args);
+    }
+    let mut sa = a.clone();
+    sa.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sb = b.clone();
+    sb.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let ra = ranks_of(&a);
+    let rb = ranks_of(&b);
+    if !has_ties(&sa) && !has_ties(&sb) {
+        // Closed form 1 − 6·Σd² / (n(n²−1)), exact for tied-free input.
+        let s: f64 = ra.iter().zip(&rb).map(|(x, y)| (x - y) * (x - y)).sum();
+        let nn = a.len() as i64;
+        let den = nn * (nn * nn - 1);
+        let numer = den - 6 * s.round() as i64;
+        return Ok(rational_value(Integer::from(numer), Integer::from(den)));
+    }
+    Ok(super::real(pearson(&ra, &rb)))
+}
+
+/// Pearson correlation of two equal-length samples.
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let ma = a.iter().sum::<f64>() / n;
+    let mb = b.iter().sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut da = 0.0;
+    let mut db = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        num += (x - ma) * (y - mb);
+        da += (x - ma) * (x - ma);
+        db += (y - mb) * (y - mb);
+    }
+    if da <= 0.0 || db <= 0.0 {
+        return 0.0;
+    }
+    num / (da * db).sqrt()
+}
+
+/// KendallTau[list1, list2] — Kendall's rank correlation (tau-b).
+pub fn builtin_kendall_tau(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KendallTau", args);
+    }
+    let a = extract_nums(data_list("KendallTau", args, 0)?)?;
+    let b = extract_nums(data_list("KendallTau", args, 1)?)?;
+    let n = a.len();
+    if b.len() != n || n < 2 {
+        return unevaluated("KendallTau", args);
+    }
+    let (mut conc, mut disc, mut tie_x, mut tie_y) = (0i64, 0i64, 0i64, 0i64);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = a[i] - a[j];
+            let dy = b[i] - b[j];
+            if dx == 0.0 {
+                if dy != 0.0 {
+                    tie_x += 1;
+                }
+            } else if dy == 0.0 {
+                tie_y += 1;
+            } else if (dx > 0.0) == (dy > 0.0) {
+                conc += 1;
+            } else {
+                disc += 1;
+            }
+        }
+    }
+    if tie_x == 0 && tie_y == 0 {
+        let nn = n as i64;
+        let den = nn * (nn - 1);
+        return Ok(rational_value(
+            Integer::from(2 * (conc - disc)),
+            Integer::from(den),
+        ));
+    }
+    let denom = (((conc + disc + tie_x) as f64) * ((conc + disc + tie_y) as f64)).sqrt();
+    if denom <= 0.0 {
+        return Ok(super::real(0.0));
+    }
+    Ok(super::real((conc - disc) as f64 / denom))
+}
+
+// ── FindDistributionParameters ──────────────────────────────────────────────
+
+fn rule(lhs: &str, rhs: Value) -> Value {
+    Value::Rule {
+        lhs: Box::new(Value::Symbol(lhs.to_string())),
+        rhs: Box::new(rhs),
+        delayed: false,
+    }
+}
+
+/// FindDistributionParameters[data, dist] — maximum-likelihood parameters.
+///
+/// Only `Normal` is supported: returns `{Mean -> μ, SD -> σ}` with the maximum
+/// likelihood estimates (sample mean and `÷n`-normalised standard deviation).
+pub fn builtin_find_distribution_parameters(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("FindDistributionParameters", args);
+    }
+    let template = match &args[1] {
+        Value::Assoc(m) if m.contains_key("Distribution") => m,
+        _ => return unevaluated("FindDistributionParameters", args),
+    };
+    if dist_type(template) != Some("Normal") {
+        return unevaluated("FindDistributionParameters", args);
+    }
+    let nums = extract_nums(data_list("FindDistributionParameters", args, 0)?)?;
+    if nums.is_empty() {
+        return Err(EvalError::Error(
+            "FindDistributionParameters: list must not be empty".to_string(),
+        ));
+    }
+    let n = nums.len() as f64;
+    let mean = nums.iter().sum::<f64>() / n;
+    let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    let sd = var.sqrt().max(1e-12);
+    Ok(Value::List(vec![
+        rule("Mean", super::real(mean)),
+        rule("SD", super::real(sd)),
+    ]))
+}
+
+// ── Goodness-of-fit tests ───────────────────────────────────────────────────
+
+/// CDF of a chi-square distribution with `df` degrees of freedom.
+fn chi_square_cdf(df: f64, x: f64) -> f64 {
+    let mut m = HashMap::new();
+    m.insert(
+        "Distribution".to_string(),
+        Value::Str("ChiSquare".to_string()),
+    );
+    m.insert("K".to_string(), super::real(df));
+    match st::builtin_cdf(&[Value::Assoc(m), super::real(x)]) {
+        Ok(v) => as_f64(&v).unwrap_or(0.0),
+        Err(_) => 0.0,
+    }
+}
+
+/// Asymptotic Kolmogorov–Smirnov survival function Q(λ).
+fn ks_pvalue(d: f64, n: f64) -> f64 {
+    if d <= 0.0 {
+        return 1.0;
+    }
+    let lambda = (n.sqrt() + 0.12 + 0.11 / n.sqrt()) * d;
+    let p = if lambda < 0.755 {
+        // Series converges quickly for small λ.
+        let mut sum = 0.0;
+        let mut k = 1u32;
+        loop {
+            let t = (-((2 * k - 1) as f64).powi(2) * std::f64::consts::PI.powi(2)
+                / (8.0 * lambda * lambda))
+                .exp();
+            sum += t;
+            if t < 1e-14 || k > 100 {
+                break;
+            }
+            k += 1;
+        }
+        1.0 - (2.0 * std::f64::consts::PI).sqrt() / lambda * sum
+    } else {
+        let mut sum = 0.0;
+        let mut sign = 1.0;
+        for j in 1..=100u32 {
+            let t = (-2.0 * (j as f64).powi(2) * lambda * lambda).exp();
+            sum += sign * t;
+            sign = -sign;
+            if t < 1e-14 {
+                break;
+            }
+        }
+        2.0 * sum
+    };
+    p.clamp(0.0, 1.0)
+}
+
+/// Anderson–Darling p-value (D'Agostino & Stephens 1986 approximation).
+fn ad_pvalue(a2: f64, n: f64) -> f64 {
+    let astar = a2 * (1.0 + 0.75 / n + 2.25 / (n * n));
+    let p = if astar >= 0.6 {
+        (1.2937 - 5.709 * astar + 0.0186 * astar * astar).exp()
+    } else if astar > 0.34 {
+        (0.9177 - 4.279 * astar - 1.38 * astar * astar).exp()
+    } else {
+        1.0 - (-8.318 + 42.796 * astar - 59.938 * astar * astar).exp()
+    };
+    p.clamp(0.0, 1.0)
+}
+
+/// Extract the distribution argument (`args[1]`) of a `<test>[data, dist]` call.
+fn dist_arg(args: &[Value]) -> Option<&HashMap<String, Value>> {
+    match args.get(1) {
+        Some(Value::Assoc(m)) if m.contains_key("Distribution") => Some(m),
+        _ => None,
+    }
+}
+
+/// ChiSquareTest[data, dist] — chi-square goodness-of-fit p-value.
+///
+/// Data are binned into `⌈√n⌉` equiprobable bins under `dist`; the statistic
+/// `Σ (O−E)²/E` is referred to a chi-square distribution with `bins − 1` df.
+pub fn builtin_chi_square_test(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("ChiSquareTest", args);
+    }
+    let Some(dist) = dist_arg(args) else {
+        return unevaluated("ChiSquareTest", args);
+    };
+    let mut nums = extract_nums(data_list("ChiSquareTest", args, 0)?)?;
+    let n = nums.len();
+    if n < 2 {
+        return unevaluated("ChiSquareTest", args);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let k = (n as f64).sqrt().ceil() as usize;
+    let k = k.clamp(2, n);
+    let mut edges = Vec::with_capacity(k + 1);
+    for i in 0..=k {
+        match inverse_cdf_f(dist, i as f64 / k as f64) {
+            Some(v) => edges.push(v),
+            None => return unevaluated("ChiSquareTest", args),
+        }
+    }
+    let mut obs = vec![0.0_f64; k];
+    for &x in &nums {
+        let idx = edges
+            .partition_point(|&e| e < x)
+            .saturating_sub(1)
+            .min(k - 1);
+        obs[idx] += 1.0;
+    }
+    let exp = n as f64 / k as f64;
+    let chi2: f64 = obs.iter().map(|o| (o - exp) * (o - exp) / exp).sum();
+    let p = 1.0 - chi_square_cdf((k - 1) as f64, chi2);
+    Ok(num(p.clamp(0.0, 1.0)))
+}
+
+/// KolmogorovSmirnovTest[data, dist] — KS goodness-of-fit p-value.
+pub fn builtin_kolmogorov_smirnov_test(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("KolmogorovSmirnovTest", args);
+    }
+    let Some(dist) = dist_arg(args) else {
+        return unevaluated("KolmogorovSmirnovTest", args);
+    };
+    let mut nums = extract_nums(data_list("KolmogorovSmirnovTest", args, 0)?)?;
+    let n = nums.len();
+    if n < 2 {
+        return unevaluated("KolmogorovSmirnovTest", args);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let nf = n as f64;
+    let mut d = 0.0_f64;
+    for (i, &x) in nums.iter().enumerate() {
+        let f = match cdf_at(dist, x) {
+            Some(f) => f,
+            None => return unevaluated("KolmogorovSmirnovTest", args),
+        };
+        let hi = (i + 1) as f64 / nf - f;
+        let lo = f - i as f64 / nf;
+        d = d.max(hi).max(lo);
+    }
+    Ok(num(ks_pvalue(d, nf)))
+}
+
+/// AndersonDarlingTest[data, dist] — Anderson–Darling goodness-of-fit p-value.
+pub fn builtin_anderson_darling_test(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return unevaluated("AndersonDarlingTest", args);
+    }
+    let Some(dist) = dist_arg(args) else {
+        return unevaluated("AndersonDarlingTest", args);
+    };
+    let mut nums = extract_nums(data_list("AndersonDarlingTest", args, 0)?)?;
+    let n = nums.len();
+    if n < 2 {
+        return unevaluated("AndersonDarlingTest", args);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let nf = n as f64;
+    let eps = 1e-12;
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let zi = match cdf_at(dist, nums[i]) {
+            Some(z) => z.clamp(eps, 1.0 - eps),
+            None => return unevaluated("AndersonDarlingTest", args),
+        };
+        let zj = match cdf_at(dist, nums[n - 1 - i]) {
+            Some(z) => z.clamp(eps, 1.0 - eps),
+            None => return unevaluated("AndersonDarlingTest", args),
+        };
+        s += (2.0 * i as f64 + 1.0) * (zi.ln() + (1.0 - zj).ln());
+    }
+    let a2 = -nf - s / nf;
+    Ok(num(ad_pvalue(a2, nf)))
+}
+
+/// DistributionFitTest[data, dist] — goodness-of-fit p-value (Anderson–Darling).
+pub fn builtin_distribution_fit_test(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        2 => builtin_anderson_darling_test(args),
+        3 => {
+            let name = match &args[2] {
+                Value::Str(s) => s.clone(),
+                _ => return unevaluated("DistributionFitTest", args),
+            };
+            let which = if name.contains("Kolmogorov") || name.contains("KS") {
+                builtin_kolmogorov_smirnov_test
+            } else if name.contains("ChiSquare") {
+                builtin_chi_square_test
+            } else {
+                builtin_anderson_darling_test
+            };
+            which(&args[..2])
+        }
+        _ => unevaluated("DistributionFitTest", args),
+    }
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
     use super::register_builtin;
+    use super::register_builtin_env;
     // These builtins take distribution objects, so make sure the distribution
     // constructors / PDF / CDF from the Statistics package are always available
     // (idempotent; the lazy provider for the Statistics package still works).
@@ -1197,13 +1723,47 @@ pub fn register(env: &Env) {
     register_builtin(env, "SmoothHistogram", builtin_smooth_histogram);
     register_builtin(env, "FindDistribution", builtin_find_distribution);
     register_builtin(env, "EstimatedDistribution", builtin_estimated_distribution);
+    // Survival / hazard / conditional / expected value
+    register_builtin(env, "SurvivalFunction", builtin_survival_function);
+    register_builtin(env, "HazardFunction", builtin_hazard_function);
+    register_builtin(
+        env,
+        "InverseSurvivalFunction",
+        builtin_inverse_survival_function,
+    );
+    register_builtin_env(
+        env,
+        "ConditionalProbability",
+        builtin_conditional_probability,
+    );
+    register_builtin(env, "ExpectedValue", builtin_expected_value);
+    // Descriptive / rank statistics
+    register_builtin(env, "Commonest", builtin_commonest);
+    register_builtin(env, "SpearmanRho", builtin_spearman_rho);
+    register_builtin(env, "KendallTau", builtin_kendall_tau);
+    // Parameter estimation and goodness-of-fit
+    register_builtin(
+        env,
+        "FindDistributionParameters",
+        builtin_find_distribution_parameters,
+    );
+    register_builtin(env, "ChiSquareTest", builtin_chi_square_test);
+    register_builtin(
+        env,
+        "KolmogorovSmirnovTest",
+        builtin_kolmogorov_smirnov_test,
+    );
+    register_builtin(env, "AndersonDarlingTest", builtin_anderson_darling_test);
+    register_builtin(env, "DistributionFitTest", builtin_distribution_fit_test);
     // Hold the event/integrand so free variables survive argument evaluation
     // (e.g. `x == 2` must not collapse to `False`).
     env.set_attributes("Expectation", vec!["HoldFirst".to_string()]);
     env.set_attributes("Probability", vec!["HoldFirst".to_string()]);
+    env.set_attributes("ExpectedValue", vec!["HoldFirst".to_string()]);
+    // All three arguments of ConditionalProbability are held; the distribution
+    // is evaluated explicitly inside the builtin.
+    env.set_attributes("ConditionalProbability", vec!["HoldAll".to_string()]);
 }
-
-use crate::env::Env;
 
 #[cfg(test)]
 mod tests {
@@ -1462,6 +2022,290 @@ mod tests {
         ));
         assert!(matches!(
             builtin_expectation(&[iv(1)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+    }
+
+    // ── Survival / hazard / inverse survival ─────────────────────────────────
+
+    fn uniform(lo: f64, hi: f64) -> Value {
+        let mut m = HashMap::new();
+        m.insert(
+            "Distribution".to_string(),
+            Value::Str("Uniform".to_string()),
+        );
+        m.insert("Min".to_string(), super::super::real(lo));
+        m.insert("Max".to_string(), super::super::real(hi));
+        Value::Assoc(m)
+    }
+
+    fn exponential(lambda: f64) -> Value {
+        let mut m = HashMap::new();
+        m.insert(
+            "Distribution".to_string(),
+            Value::Str("Exponential".to_string()),
+        );
+        m.insert("Lambda".to_string(), super::super::real(lambda));
+        Value::Assoc(m)
+    }
+
+    #[test]
+    fn test_survival_function_normal() {
+        let v = builtin_survival_function(&[normal(0.0, 1.0), super::super::real(0.0)]).unwrap();
+        approx(as_f(&v), 0.5);
+    }
+
+    #[test]
+    fn test_survival_function_uniform() {
+        let v = builtin_survival_function(&[uniform(0.0, 4.0), super::super::real(1.0)]).unwrap();
+        approx(as_f(&v), 0.75);
+    }
+
+    #[test]
+    fn test_hazard_function_exponential_constant() {
+        // The hazard rate of Exponential(λ) is the constant λ.
+        let v = builtin_hazard_function(&[exponential(2.0), super::super::real(1.0)]).unwrap();
+        approx(as_f(&v), 2.0);
+    }
+
+    #[test]
+    fn test_inverse_survival_function_normal_median() {
+        let v = builtin_inverse_survival_function(&[normal(0.0, 1.0), super::super::real(0.5)])
+            .unwrap();
+        approx(as_f(&v), 0.0);
+    }
+
+    #[test]
+    fn test_inverse_survival_function_roundtrip() {
+        // SF(InverseSurvivalFunction(dist, q)) ≈ q.
+        let q = 0.25;
+        let x =
+            builtin_inverse_survival_function(&[uniform(0.0, 4.0), super::super::real(q)]).unwrap();
+        let sf = builtin_survival_function(&[uniform(0.0, 4.0), x]).unwrap();
+        approx(as_f(&sf), q);
+    }
+
+    // ── ConditionalProbability / ExpectedValue ───────────────────────────────
+
+    #[test]
+    fn test_conditional_probability_normal() {
+        let env = Env::new();
+        let e1 = Value::Call {
+            head: "Less".to_string(),
+            args: vec![Value::Symbol("x".to_string()), iv(1)],
+        };
+        let e2 = Value::Call {
+            head: "Greater".to_string(),
+            args: vec![Value::Symbol("x".to_string()), iv(0)],
+        };
+        let v = builtin_conditional_probability(&[e1, e2, normal(0.0, 1.0)], &env).unwrap();
+        // P(x<1 | x>0) = (Φ(1) − 0.5) / 0.5 ≈ 0.6826895
+        let phi1 = 0.8413447460685429_f64;
+        approx(as_f(&v), (phi1 - 0.5) / 0.5);
+    }
+
+    #[test]
+    fn test_expected_value_alias() {
+        let v = builtin_expected_value(&[iv(5), normal(0.0, 1.0)]).unwrap();
+        approx(as_f(&v), 5.0);
+        let expr = Value::Call {
+            head: "Power".to_string(),
+            args: vec![Value::Symbol("x".to_string()), iv(2)],
+        };
+        let v = builtin_expected_value(&[expr, normal(0.0, 1.0)]).unwrap();
+        approx(as_f(&v), 1.0);
+    }
+
+    // ── Commonest ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_commonest_single_mode() {
+        let v = builtin_commonest(&[lst(vec![iv(1), iv(2), iv(2), iv(3)])]).unwrap();
+        match v {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0], iv(2));
+            }
+            _ => panic!("expected list"),
+        }
+    }
+
+    #[test]
+    fn test_commonest_tie_preserves_order() {
+        let v = builtin_commonest(&[lst(vec![iv(3), iv(3), iv(1), iv(1), iv(2)])]).unwrap();
+        match v {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], iv(3));
+                assert_eq!(items[1], iv(1));
+            }
+            _ => panic!("expected list"),
+        }
+    }
+
+    #[test]
+    fn test_commonest_take_n() {
+        let v = builtin_commonest(&[lst(vec![iv(1), iv(1), iv(2), iv(2), iv(3)]), iv(1)]).unwrap();
+        match v {
+            Value::List(items) => assert_eq!(items.len(), 1),
+            _ => panic!("expected list"),
+        }
+    }
+
+    // ── Rank correlations ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_spearman_rho_monotone() {
+        let inc = lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]);
+        let v = builtin_spearman_rho(&[inc.clone(), inc.clone()]).unwrap();
+        approx(as_f(&v), 1.0);
+        let dec = lst(vec![iv(5), iv(4), iv(3), iv(2), iv(1)]);
+        let v = builtin_spearman_rho(&[inc, dec]).unwrap();
+        approx(as_f(&v), -1.0);
+    }
+
+    #[test]
+    fn test_spearman_rho_known() {
+        let a = lst(vec![iv(1), iv(2), iv(3)]);
+        let b = lst(vec![iv(1), iv(3), iv(2)]);
+        let v = builtin_spearman_rho(&[a, b]).unwrap();
+        approx(as_f(&v), 0.5);
+    }
+
+    #[test]
+    fn test_kendall_tau_monotone() {
+        let inc = lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]);
+        let v = builtin_kendall_tau(&[inc.clone(), inc.clone()]).unwrap();
+        approx(as_f(&v), 1.0);
+        let dec = lst(vec![iv(5), iv(4), iv(3), iv(2), iv(1)]);
+        let v = builtin_kendall_tau(&[inc, dec]).unwrap();
+        approx(as_f(&v), -1.0);
+    }
+
+    #[test]
+    fn test_kendall_tau_known() {
+        let a = lst(vec![iv(1), iv(2), iv(3)]);
+        let b = lst(vec![iv(1), iv(3), iv(2)]);
+        let v = builtin_kendall_tau(&[a, b]).unwrap();
+        approx(as_f(&v), 1.0 / 3.0);
+    }
+
+    // ── FindDistributionParameters ───────────────────────────────────────────
+
+    #[test]
+    fn test_find_distribution_parameters_normal() {
+        let v = builtin_find_distribution_parameters(&[
+            lst(vec![iv(1), iv(2), iv(3), iv(4), iv(5)]),
+            normal(0.0, 1.0),
+        ])
+        .unwrap();
+        let items = match v {
+            Value::List(items) => items,
+            _ => panic!("expected list of rules"),
+        };
+        let mut mean = None;
+        let mut sd = None;
+        for r in items {
+            if let Value::Rule { lhs, rhs, .. } = r
+                && let Value::Symbol(s) = lhs.as_ref()
+            {
+                if s == "Mean" {
+                    mean = as_f64(rhs.as_ref());
+                } else if s == "SD" {
+                    sd = as_f64(rhs.as_ref());
+                }
+            }
+        }
+        approx(mean.unwrap(), 3.0);
+        approx(sd.unwrap(), 2.0_f64.sqrt());
+    }
+
+    // ── Goodness-of-fit tests ────────────────────────────────────────────────
+
+    fn grid(n: usize) -> Value {
+        // Midpoints of n equal-probability bins of Uniform(0, 1).
+        let items: Vec<Value> = (0..n)
+            .map(|i| super::super::real((i as f64 + 0.5) / n as f64))
+            .collect();
+        lst(items)
+    }
+
+    #[test]
+    fn test_chi_square_test_match() {
+        // Three equal bins each holding 3 points -> chi² = 0 -> p = 1.
+        let mut items = Vec::new();
+        for x in [0.5, 1.5, 2.5] {
+            for _ in 0..3 {
+                items.push(super::super::real(x));
+            }
+        }
+        let v = builtin_chi_square_test(&[lst(items), uniform(0.0, 3.0)]).unwrap();
+        approx(as_f(&v), 1.0);
+    }
+
+    #[test]
+    fn test_chi_square_test_mismatch() {
+        let items: Vec<Value> = (0..20).map(|_| super::super::real(0.1)).collect();
+        let v = builtin_chi_square_test(&[lst(items), uniform(0.0, 10.0)]).unwrap();
+        assert!(as_f(&v) < 0.01, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_kolmogorov_smirnov_test_match() {
+        let v = builtin_kolmogorov_smirnov_test(&[grid(10), uniform(0.0, 1.0)]).unwrap();
+        assert!(as_f(&v) > 0.9, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_kolmogorov_smirnov_test_mismatch() {
+        let v = builtin_kolmogorov_smirnov_test(&[grid(10), uniform(0.0, 2.0)]).unwrap();
+        assert!(as_f(&v) < 0.1, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_anderson_darling_test_match() {
+        let v = builtin_anderson_darling_test(&[grid(20), uniform(0.0, 1.0)]).unwrap();
+        assert!(as_f(&v) > 0.05, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_anderson_darling_test_mismatch() {
+        let v = builtin_anderson_darling_test(&[grid(20), uniform(0.0, 2.0)]).unwrap();
+        assert!(as_f(&v) < 0.05, "p = {}", as_f(&v));
+    }
+
+    #[test]
+    fn test_distribution_fit_test_default_and_named() {
+        let data = grid(20);
+        let ad = builtin_anderson_darling_test(&[data.clone(), uniform(0.0, 1.0)]).unwrap();
+        let default = builtin_distribution_fit_test(&[data.clone(), uniform(0.0, 1.0)]).unwrap();
+        approx(as_f(&default), as_f(&ad));
+        let ks = builtin_kolmogorov_smirnov_test(&[data.clone(), uniform(0.0, 1.0)]).unwrap();
+        let named = builtin_distribution_fit_test(&[
+            data,
+            uniform(0.0, 1.0),
+            Value::Str("KolmogorovSmirnovTest".to_string()),
+        ])
+        .unwrap();
+        approx(as_f(&named), as_f(&ks));
+    }
+
+    #[test]
+    fn test_new_builtins_unevaluated_on_bad_args() {
+        assert!(matches!(
+            builtin_survival_function(&[iv(1)]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_commonest(&[Value::Symbol("z".to_string())]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_spearman_rho(&[lst(vec![iv(1)])]),
+            Err(EvalError::NoMatch { .. })
+        ));
+        assert!(matches!(
+            builtin_find_distribution_parameters(&[lst(vec![iv(1)]), uniform(0.0, 1.0)]),
             Err(EvalError::NoMatch { .. })
         ));
     }

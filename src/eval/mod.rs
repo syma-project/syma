@@ -1583,7 +1583,7 @@ fn eval_call_inner(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalE
             // `Value::Symbol` so their names survive (the generic HoldAll path
             // would evaluate them to their values).
             "DownValues" | "OwnValues" | "UpValues" | "SubValues" | "Definition" | "Context"
-            | "Options" | "OptionValue" => {
+            | "SymbolName" | "Options" | "OptionValue" => {
                 let head_val = eval(head, env)?;
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {

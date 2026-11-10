@@ -15,7 +15,8 @@
 //! entity is unknown.
 
 use super::arithmetic;
-use crate::env::Env;
+use crate::ast::Expr;
+use crate::env::{Env, SubValue};
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
@@ -195,6 +196,21 @@ const UNITS: &[UnitDef] = &[
         name: "Kelvin",
         dims: &[("TemperatureUnit", 1)],
         factor: 1.0,
+    },
+    UnitDef {
+        name: "Celsius",
+        dims: &[("TemperatureUnit", 1)],
+        factor: 1.0,
+    },
+    UnitDef {
+        name: "Fahrenheit",
+        dims: &[("TemperatureUnit", 1)],
+        factor: 5.0 / 9.0,
+    },
+    UnitDef {
+        name: "Rankine",
+        dims: &[("TemperatureUnit", 1)],
+        factor: 5.0 / 9.0,
     },
     UnitDef {
         name: "Mole",
@@ -441,6 +457,12 @@ const ALIASES: &[(&str, &str)] = &[
     ("kilograms", "Kilogram"),
     ("amperes", "Ampere"),
     ("kelvins", "Kelvin"),
+    ("centigrade", "Celsius"),
+    ("celsius", "Celsius"),
+    ("fahrenheit", "Fahrenheit"),
+    ("degreescelsius", "Celsius"),
+    ("degreesfahrenheit", "Fahrenheit"),
+    ("rankine", "Rankine"),
     ("moles", "Mole"),
     ("candelas", "Candela"),
     ("radians", "Radian"),
@@ -726,6 +748,17 @@ fn is_quantity(v: &Value) -> bool {
     quantity_parts(v).is_some()
 }
 
+/// Parts of a `QuantityDistribution[dist, unit]` expression.
+fn quantity_distribution_parts(v: &Value) -> Option<(&Value, &Value)> {
+    if let Value::Call { head, args } = v
+        && head == "QuantityDistribution"
+        && args.len() == 2
+    {
+        return Some((&args[0], &args[1]));
+    }
+    None
+}
+
 fn make_quantity(mag: Value, unit: &UnitExpr) -> Value {
     if unit.is_empty() {
         mag
@@ -778,6 +811,64 @@ fn to_unit(mag: &Value, src: &UnitExpr, dst: &UnitExpr) -> Option<Value> {
     scale_mag(mag, src_factor / dst_factor).ok()
 }
 
+// ── Affine temperature scales ────────────────────────────────────────────────
+
+/// `(scale_to_kelvin, offset_to_kelvin)` so that `kelvin = magnitude * scale + offset`.
+/// Returns `None` for non-temperature unit names.
+fn temperature_affine(name: &str) -> Option<(f64, f64)> {
+    match name {
+        "Kelvin" => Some((1.0, 0.0)),
+        "Celsius" => Some((1.0, 273.15)),
+        "Fahrenheit" => Some((5.0 / 9.0, 459.67 * 5.0 / 9.0)),
+        "Rankine" => Some((5.0 / 9.0, 0.0)),
+        _ => None,
+    }
+}
+
+/// The bare temperature-unit name when `ue` is exactly one such unit.
+fn single_temperature(ue: &UnitExpr) -> Option<&str> {
+    if ue.factors.len() != 1 {
+        return None;
+    }
+    let (name, exp) = ue.factors.iter().next()?;
+    if *exp == 1 && temperature_affine(name).is_some() {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// True when a plain multiplicative conversion between `src` and `dst` would be
+/// wrong because one of them is an affine (offset) temperature scale.
+fn needs_affine_temp(src: &UnitExpr, dst: &UnitExpr) -> bool {
+    let affine = |ue: &UnitExpr| {
+        single_temperature(ue).is_some_and(|n| temperature_affine(n).is_some_and(|(_, o)| o != 0.0))
+    };
+    affine(src) || affine(dst)
+}
+
+/// Convert a magnitude between two temperature scales, honouring offsets.
+fn convert_temperature(mag: &Value, src: &UnitExpr, dst: &UnitExpr) -> Option<Value> {
+    let src_name = single_temperature(src)?;
+    let dst_name = single_temperature(dst)?;
+    let value = value_as_f64(mag)?;
+    let (src_scale, src_offset) = temperature_affine(src_name)?;
+    let (dst_scale, dst_offset) = temperature_affine(dst_name)?;
+    let kelvin = value * src_scale + src_offset;
+    Some(rf((kelvin - dst_offset) / dst_scale))
+}
+
+/// Convert `mag` from `src` to `dst`, applying affine temperature handling.
+fn convert_units(mag: &Value, src: &UnitExpr, dst: &UnitExpr) -> Option<Value> {
+    if src == dst {
+        return Some(mag.clone());
+    }
+    if needs_affine_temp(src, dst) {
+        return convert_temperature(mag, src, dst);
+    }
+    to_unit(mag, src, dst)
+}
+
 // ── Quantity constructors / accessors ────────────────────────────────────────
 
 pub fn builtin_quantity(args: &[Value]) -> Result<Value, EvalError> {
@@ -807,10 +898,15 @@ pub fn builtin_quantity_q(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_quantity_magnitude(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
-        1 => match quantity_parts(&args[0]) {
-            Some((mag, _)) => Ok(mag.clone()),
-            None => Ok(unevaluated("QuantityMagnitude", args)),
-        },
+        1 => {
+            if let Some((mag, _)) = quantity_parts(&args[0]) {
+                return Ok(mag.clone());
+            }
+            if let Some((dist, _)) = quantity_distribution_parts(&args[0]) {
+                return Ok(dist.clone());
+            }
+            Ok(unevaluated("QuantityMagnitude", args))
+        }
         2 => {
             let Some((mag, unit)) = quantity_parts(&args[0]) else {
                 return Ok(unevaluated("QuantityMagnitude", args));
@@ -818,7 +914,7 @@ pub fn builtin_quantity_magnitude(args: &[Value]) -> Result<Value, EvalError> {
             let (Some(src), Some(dst)) = (parse_unit(unit), parse_unit(&args[1])) else {
                 return Ok(unevaluated("QuantityMagnitude", args));
             };
-            match to_unit(mag, &src, &dst) {
+            match convert_units(mag, &src, &dst) {
                 Some(converted) => Ok(converted),
                 None => Ok(unevaluated("QuantityMagnitude", args)),
             }
@@ -831,10 +927,15 @@ pub fn builtin_quantity_magnitude(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_quantity_unit(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
-        1 => match quantity_parts(&args[0]) {
-            Some((_, unit)) => Ok(unit.clone()),
-            None => Ok(unevaluated("QuantityUnit", args)),
-        },
+        1 => {
+            if let Some((_, unit)) = quantity_parts(&args[0]) {
+                return Ok(unit.clone());
+            }
+            if let Some((_, unit)) = quantity_distribution_parts(&args[0]) {
+                return Ok(unit.clone());
+            }
+            Ok(unevaluated("QuantityUnit", args))
+        }
         2 => {
             let Some((mag, unit)) = quantity_parts(&args[0]) else {
                 return Ok(unevaluated("QuantityUnit", args));
@@ -842,7 +943,7 @@ pub fn builtin_quantity_unit(args: &[Value]) -> Result<Value, EvalError> {
             let (Some(src), Some(dst)) = (parse_unit(unit), parse_unit(&args[1])) else {
                 return Ok(unevaluated("QuantityUnit", args));
             };
-            match to_unit(mag, &src, &dst) {
+            match convert_units(mag, &src, &dst) {
                 Some(converted) => Ok(make_quantity(converted, &dst)),
                 None => Ok(unevaluated("QuantityUnit", args)),
             }
@@ -864,6 +965,16 @@ pub fn builtin_unit_convert(args: &[Value]) -> Result<Value, EvalError> {
             let Some(src) = parse_unit(unit) else {
                 return Ok(unevaluated("UnitConvert", args));
             };
+            // Affine temperature units convert to Kelvin base units.
+            if let Some(name) = single_temperature(&src)
+                && name != "Kelvin"
+            {
+                let kelvin = UnitExpr::single("Kelvin".to_string());
+                let Some(converted) = convert_temperature(mag, &src, &kelvin) else {
+                    return Ok(unevaluated("UnitConvert", args));
+                };
+                return Ok(make_quantity(converted, &kelvin));
+            }
             let (dims, factor) = dims_factor(&src);
             let converted = scale_mag(mag, factor)?;
             Ok(make_quantity(converted, &unit_from_dims(&dims)))
@@ -875,7 +986,7 @@ pub fn builtin_unit_convert(args: &[Value]) -> Result<Value, EvalError> {
             let (Some(src), Some(dst)) = (parse_unit(unit), parse_unit(&args[1])) else {
                 return Ok(unevaluated("UnitConvert", args));
             };
-            match to_unit(mag, &src, &dst) {
+            match convert_units(mag, &src, &dst) {
                 Some(converted) => Ok(make_quantity(converted, &dst)),
                 None => Ok(unevaluated("UnitConvert", args)),
             }
@@ -1148,6 +1259,12 @@ struct Element {
     symbol: &'static str,
     group: i64,
     period: i64,
+    block: &'static str,
+    density: f64,
+    melting_point: f64,
+    boiling_point: f64,
+    electronegativity: f64,
+    state: &'static str,
 }
 
 const ELEMENTS: &[Element] = &[
@@ -1158,6 +1275,12 @@ const ELEMENTS: &[Element] = &[
         symbol: "H",
         group: 1,
         period: 1,
+        block: "s",
+        density: 0.000_089_88,
+        melting_point: 13.99,
+        boiling_point: 20.271,
+        electronegativity: 2.20,
+        state: "Gas",
     },
     Element {
         name: "Helium",
@@ -1166,6 +1289,54 @@ const ELEMENTS: &[Element] = &[
         symbol: "He",
         group: 18,
         period: 1,
+        block: "s",
+        density: 0.000_178_5,
+        melting_point: 0.95,
+        boiling_point: 4.222,
+        electronegativity: 0.0,
+        state: "Gas",
+    },
+    Element {
+        name: "Lithium",
+        atomic_number: 3,
+        atomic_mass: 6.94,
+        symbol: "Li",
+        group: 1,
+        period: 2,
+        block: "s",
+        density: 0.534,
+        melting_point: 453.65,
+        boiling_point: 1603.0,
+        electronegativity: 0.98,
+        state: "Solid",
+    },
+    Element {
+        name: "Beryllium",
+        atomic_number: 4,
+        atomic_mass: 9.0122,
+        symbol: "Be",
+        group: 2,
+        period: 2,
+        block: "s",
+        density: 1.85,
+        melting_point: 1560.0,
+        boiling_point: 2742.0,
+        electronegativity: 1.57,
+        state: "Solid",
+    },
+    Element {
+        name: "Boron",
+        atomic_number: 5,
+        atomic_mass: 10.81,
+        symbol: "B",
+        group: 13,
+        period: 2,
+        block: "p",
+        density: 2.34,
+        melting_point: 2349.0,
+        boiling_point: 4200.0,
+        electronegativity: 2.04,
+        state: "Solid",
     },
     Element {
         name: "Carbon",
@@ -1174,6 +1345,12 @@ const ELEMENTS: &[Element] = &[
         symbol: "C",
         group: 14,
         period: 2,
+        block: "p",
+        density: 2.267,
+        melting_point: 3823.0,
+        boiling_point: 4098.0,
+        electronegativity: 2.55,
+        state: "Solid",
     },
     Element {
         name: "Nitrogen",
@@ -1182,6 +1359,12 @@ const ELEMENTS: &[Element] = &[
         symbol: "N",
         group: 15,
         period: 2,
+        block: "p",
+        density: 0.001_250_6,
+        melting_point: 63.15,
+        boiling_point: 77.355,
+        electronegativity: 3.04,
+        state: "Gas",
     },
     Element {
         name: "Oxygen",
@@ -1190,6 +1373,40 @@ const ELEMENTS: &[Element] = &[
         symbol: "O",
         group: 16,
         period: 2,
+        block: "p",
+        density: 0.001_429,
+        melting_point: 54.36,
+        boiling_point: 90.188,
+        electronegativity: 3.44,
+        state: "Gas",
+    },
+    Element {
+        name: "Fluorine",
+        atomic_number: 9,
+        atomic_mass: 18.998,
+        symbol: "F",
+        group: 17,
+        period: 2,
+        block: "p",
+        density: 0.001_696,
+        melting_point: 53.48,
+        boiling_point: 85.03,
+        electronegativity: 3.98,
+        state: "Gas",
+    },
+    Element {
+        name: "Neon",
+        atomic_number: 10,
+        atomic_mass: 20.180,
+        symbol: "Ne",
+        group: 18,
+        period: 2,
+        block: "p",
+        density: 0.000_899_9,
+        melting_point: 24.56,
+        boiling_point: 27.104,
+        electronegativity: 0.0,
+        state: "Gas",
     },
     Element {
         name: "Sodium",
@@ -1198,6 +1415,26 @@ const ELEMENTS: &[Element] = &[
         symbol: "Na",
         group: 1,
         period: 3,
+        block: "s",
+        density: 0.968,
+        melting_point: 370.944,
+        boiling_point: 1156.09,
+        electronegativity: 0.93,
+        state: "Solid",
+    },
+    Element {
+        name: "Magnesium",
+        atomic_number: 12,
+        atomic_mass: 24.305,
+        symbol: "Mg",
+        group: 2,
+        period: 3,
+        block: "s",
+        density: 1.738,
+        melting_point: 923.0,
+        boiling_point: 1363.0,
+        electronegativity: 1.31,
+        state: "Solid",
     },
     Element {
         name: "Aluminium",
@@ -1206,6 +1443,152 @@ const ELEMENTS: &[Element] = &[
         symbol: "Al",
         group: 13,
         period: 3,
+        block: "p",
+        density: 2.70,
+        melting_point: 933.47,
+        boiling_point: 2743.0,
+        electronegativity: 1.61,
+        state: "Solid",
+    },
+    Element {
+        name: "Silicon",
+        atomic_number: 14,
+        atomic_mass: 28.085,
+        symbol: "Si",
+        group: 14,
+        period: 3,
+        block: "p",
+        density: 2.329,
+        melting_point: 1687.0,
+        boiling_point: 3538.0,
+        electronegativity: 1.90,
+        state: "Solid",
+    },
+    Element {
+        name: "Phosphorus",
+        atomic_number: 15,
+        atomic_mass: 30.974,
+        symbol: "P",
+        group: 15,
+        period: 3,
+        block: "p",
+        density: 1.823,
+        melting_point: 317.3,
+        boiling_point: 553.7,
+        electronegativity: 2.19,
+        state: "Solid",
+    },
+    Element {
+        name: "Sulfur",
+        atomic_number: 16,
+        atomic_mass: 32.06,
+        symbol: "S",
+        group: 16,
+        period: 3,
+        block: "p",
+        density: 2.07,
+        melting_point: 388.36,
+        boiling_point: 717.8,
+        electronegativity: 2.58,
+        state: "Solid",
+    },
+    Element {
+        name: "Chlorine",
+        atomic_number: 17,
+        atomic_mass: 35.45,
+        symbol: "Cl",
+        group: 17,
+        period: 3,
+        block: "p",
+        density: 0.003_214,
+        melting_point: 171.6,
+        boiling_point: 239.11,
+        electronegativity: 3.16,
+        state: "Gas",
+    },
+    Element {
+        name: "Argon",
+        atomic_number: 18,
+        atomic_mass: 39.948,
+        symbol: "Ar",
+        group: 18,
+        period: 3,
+        block: "p",
+        density: 0.001_784,
+        melting_point: 83.81,
+        boiling_point: 87.302,
+        electronegativity: 0.0,
+        state: "Gas",
+    },
+    Element {
+        name: "Potassium",
+        atomic_number: 19,
+        atomic_mass: 39.098,
+        symbol: "K",
+        group: 1,
+        period: 4,
+        block: "s",
+        density: 0.862,
+        melting_point: 336.7,
+        boiling_point: 1032.0,
+        electronegativity: 0.82,
+        state: "Solid",
+    },
+    Element {
+        name: "Calcium",
+        atomic_number: 20,
+        atomic_mass: 40.078,
+        symbol: "Ca",
+        group: 2,
+        period: 4,
+        block: "s",
+        density: 1.55,
+        melting_point: 1115.0,
+        boiling_point: 1757.0,
+        electronegativity: 1.00,
+        state: "Solid",
+    },
+    Element {
+        name: "Titanium",
+        atomic_number: 22,
+        atomic_mass: 47.867,
+        symbol: "Ti",
+        group: 4,
+        period: 4,
+        block: "d",
+        density: 4.506,
+        melting_point: 1941.0,
+        boiling_point: 3560.0,
+        electronegativity: 1.54,
+        state: "Solid",
+    },
+    Element {
+        name: "Chromium",
+        atomic_number: 24,
+        atomic_mass: 51.996,
+        symbol: "Cr",
+        group: 6,
+        period: 4,
+        block: "d",
+        density: 7.15,
+        melting_point: 2180.0,
+        boiling_point: 2944.0,
+        electronegativity: 1.66,
+        state: "Solid",
+    },
+    Element {
+        name: "Manganese",
+        atomic_number: 25,
+        atomic_mass: 54.938,
+        symbol: "Mn",
+        group: 7,
+        period: 4,
+        block: "d",
+        density: 7.21,
+        melting_point: 1519.0,
+        boiling_point: 2334.0,
+        electronegativity: 1.55,
+        state: "Solid",
     },
     Element {
         name: "Iron",
@@ -1214,6 +1597,26 @@ const ELEMENTS: &[Element] = &[
         symbol: "Fe",
         group: 8,
         period: 4,
+        block: "d",
+        density: 7.874,
+        melting_point: 1811.0,
+        boiling_point: 3134.0,
+        electronegativity: 1.83,
+        state: "Solid",
+    },
+    Element {
+        name: "Nickel",
+        atomic_number: 28,
+        atomic_mass: 58.693,
+        symbol: "Ni",
+        group: 10,
+        period: 4,
+        block: "d",
+        density: 8.908,
+        melting_point: 1728.0,
+        boiling_point: 3186.0,
+        electronegativity: 1.91,
+        state: "Solid",
     },
     Element {
         name: "Copper",
@@ -1222,6 +1625,40 @@ const ELEMENTS: &[Element] = &[
         symbol: "Cu",
         group: 11,
         period: 4,
+        block: "d",
+        density: 8.96,
+        melting_point: 1357.77,
+        boiling_point: 2835.0,
+        electronegativity: 1.90,
+        state: "Solid",
+    },
+    Element {
+        name: "Zinc",
+        atomic_number: 30,
+        atomic_mass: 65.38,
+        symbol: "Zn",
+        group: 12,
+        period: 4,
+        block: "d",
+        density: 7.14,
+        melting_point: 692.68,
+        boiling_point: 1180.0,
+        electronegativity: 1.65,
+        state: "Solid",
+    },
+    Element {
+        name: "Bromine",
+        atomic_number: 35,
+        atomic_mass: 79.904,
+        symbol: "Br",
+        group: 17,
+        period: 4,
+        block: "p",
+        density: 3.1028,
+        melting_point: 265.8,
+        boiling_point: 332.0,
+        electronegativity: 2.96,
+        state: "Liquid",
     },
     Element {
         name: "Silver",
@@ -1230,6 +1667,40 @@ const ELEMENTS: &[Element] = &[
         symbol: "Ag",
         group: 11,
         period: 5,
+        block: "d",
+        density: 10.49,
+        melting_point: 1234.93,
+        boiling_point: 2435.0,
+        electronegativity: 1.93,
+        state: "Solid",
+    },
+    Element {
+        name: "Tungsten",
+        atomic_number: 74,
+        atomic_mass: 183.84,
+        symbol: "W",
+        group: 6,
+        period: 6,
+        block: "d",
+        density: 19.25,
+        melting_point: 3695.0,
+        boiling_point: 6203.0,
+        electronegativity: 2.36,
+        state: "Solid",
+    },
+    Element {
+        name: "Platinum",
+        atomic_number: 78,
+        atomic_mass: 195.08,
+        symbol: "Pt",
+        group: 10,
+        period: 6,
+        block: "d",
+        density: 21.45,
+        melting_point: 2041.4,
+        boiling_point: 4098.0,
+        electronegativity: 2.28,
+        state: "Solid",
     },
     Element {
         name: "Gold",
@@ -1238,6 +1709,54 @@ const ELEMENTS: &[Element] = &[
         symbol: "Au",
         group: 11,
         period: 6,
+        block: "d",
+        density: 19.3,
+        melting_point: 1337.33,
+        boiling_point: 3243.0,
+        electronegativity: 2.54,
+        state: "Solid",
+    },
+    Element {
+        name: "Mercury",
+        atomic_number: 80,
+        atomic_mass: 200.592,
+        symbol: "Hg",
+        group: 12,
+        period: 6,
+        block: "d",
+        density: 13.534,
+        melting_point: 234.321,
+        boiling_point: 629.88,
+        electronegativity: 2.00,
+        state: "Liquid",
+    },
+    Element {
+        name: "Lead",
+        atomic_number: 82,
+        atomic_mass: 207.2,
+        symbol: "Pb",
+        group: 14,
+        period: 6,
+        block: "p",
+        density: 11.34,
+        melting_point: 600.61,
+        boiling_point: 2022.0,
+        electronegativity: 2.33,
+        state: "Solid",
+    },
+    Element {
+        name: "Radon",
+        atomic_number: 86,
+        atomic_mass: 222.0,
+        symbol: "Rn",
+        group: 18,
+        period: 6,
+        block: "p",
+        density: 0.009_73,
+        melting_point: 202.0,
+        boiling_point: 211.5,
+        electronegativity: 0.0,
+        state: "Gas",
     },
     Element {
         name: "Uranium",
@@ -1246,6 +1765,12 @@ const ELEMENTS: &[Element] = &[
         symbol: "U",
         group: 3,
         period: 7,
+        block: "f",
+        density: 19.1,
+        melting_point: 1405.3,
+        boiling_point: 4404.0,
+        electronegativity: 1.38,
+        state: "Solid",
     },
 ];
 
@@ -1256,6 +1781,10 @@ struct Country {
     area: f64,
     currency: &'static str,
     language: &'static str,
+    continent: &'static str,
+    calling_code: i64,
+    internet_code: &'static str,
+    government_type: &'static str,
 }
 
 const COUNTRIES: &[Country] = &[
@@ -1266,6 +1795,10 @@ const COUNTRIES: &[Country] = &[
         area: 551_695.0,
         currency: "Euro",
         language: "French",
+        continent: "Europe",
+        calling_code: 33,
+        internet_code: "FR",
+        government_type: "Republic",
     },
     Country {
         name: "Germany",
@@ -1274,6 +1807,10 @@ const COUNTRIES: &[Country] = &[
         area: 357_022.0,
         currency: "Euro",
         language: "German",
+        continent: "Europe",
+        calling_code: 49,
+        internet_code: "DE",
+        government_type: "Republic",
     },
     Country {
         name: "Japan",
@@ -1282,6 +1819,10 @@ const COUNTRIES: &[Country] = &[
         area: 377_975.0,
         currency: "Yen",
         language: "Japanese",
+        continent: "Asia",
+        calling_code: 81,
+        internet_code: "JP",
+        government_type: "ConstitutionalMonarchy",
     },
     Country {
         name: "Brazil",
@@ -1290,6 +1831,10 @@ const COUNTRIES: &[Country] = &[
         area: 8_515_767.0,
         currency: "Real",
         language: "Portuguese",
+        continent: "SouthAmerica",
+        calling_code: 55,
+        internet_code: "BR",
+        government_type: "Republic",
     },
     Country {
         name: "Canada",
@@ -1298,6 +1843,10 @@ const COUNTRIES: &[Country] = &[
         area: 9_984_670.0,
         currency: "CanadianDollar",
         language: "English",
+        continent: "NorthAmerica",
+        calling_code: 1,
+        internet_code: "CA",
+        government_type: "ConstitutionalMonarchy",
     },
     Country {
         name: "Australia",
@@ -1306,6 +1855,10 @@ const COUNTRIES: &[Country] = &[
         area: 7_692_024.0,
         currency: "AustralianDollar",
         language: "English",
+        continent: "Oceania",
+        calling_code: 61,
+        internet_code: "AU",
+        government_type: "ConstitutionalMonarchy",
     },
     Country {
         name: "India",
@@ -1314,6 +1867,10 @@ const COUNTRIES: &[Country] = &[
         area: 3_287_263.0,
         currency: "Rupee",
         language: "Hindi",
+        continent: "Asia",
+        calling_code: 91,
+        internet_code: "IN",
+        government_type: "Republic",
     },
     Country {
         name: "UnitedStates",
@@ -1322,6 +1879,10 @@ const COUNTRIES: &[Country] = &[
         area: 9_833_517.0,
         currency: "USDollar",
         language: "English",
+        continent: "NorthAmerica",
+        calling_code: 1,
+        internet_code: "US",
+        government_type: "Republic",
     },
     Country {
         name: "Italy",
@@ -1330,6 +1891,10 @@ const COUNTRIES: &[Country] = &[
         area: 301_340.0,
         currency: "Euro",
         language: "Italian",
+        continent: "Europe",
+        calling_code: 39,
+        internet_code: "IT",
+        government_type: "Republic",
     },
     Country {
         name: "Egypt",
@@ -1338,6 +1903,118 @@ const COUNTRIES: &[Country] = &[
         area: 1_002_450.0,
         currency: "EgyptianPound",
         language: "Arabic",
+        continent: "Africa",
+        calling_code: 20,
+        internet_code: "EG",
+        government_type: "Republic",
+    },
+    Country {
+        name: "China",
+        capital: "Beijing",
+        population: 1_412_000_000,
+        area: 9_596_961.0,
+        currency: "Yuan",
+        language: "Mandarin",
+        continent: "Asia",
+        calling_code: 86,
+        internet_code: "CN",
+        government_type: "Republic",
+    },
+    Country {
+        name: "UnitedKingdom",
+        capital: "London",
+        population: 67_000_000,
+        area: 242_495.0,
+        currency: "PoundSterling",
+        language: "English",
+        continent: "Europe",
+        calling_code: 44,
+        internet_code: "GB",
+        government_type: "ConstitutionalMonarchy",
+    },
+    Country {
+        name: "Spain",
+        capital: "Madrid",
+        population: 47_000_000,
+        area: 505_990.0,
+        currency: "Euro",
+        language: "Spanish",
+        continent: "Europe",
+        calling_code: 34,
+        internet_code: "ES",
+        government_type: "ConstitutionalMonarchy",
+    },
+    Country {
+        name: "Russia",
+        capital: "Moscow",
+        population: 144_000_000,
+        area: 17_098_242.0,
+        currency: "Ruble",
+        language: "Russian",
+        continent: "Europe",
+        calling_code: 7,
+        internet_code: "RU",
+        government_type: "Republic",
+    },
+    Country {
+        name: "Mexico",
+        capital: "MexicoCity",
+        population: 129_000_000,
+        area: 1_964_375.0,
+        currency: "Peso",
+        language: "Spanish",
+        continent: "NorthAmerica",
+        calling_code: 52,
+        internet_code: "MX",
+        government_type: "Republic",
+    },
+    Country {
+        name: "SouthKorea",
+        capital: "Seoul",
+        population: 52_000_000,
+        area: 100_210.0,
+        currency: "Won",
+        language: "Korean",
+        continent: "Asia",
+        calling_code: 82,
+        internet_code: "KR",
+        government_type: "Republic",
+    },
+    Country {
+        name: "Nigeria",
+        capital: "Abuja",
+        population: 218_000_000,
+        area: 923_768.0,
+        currency: "Naira",
+        language: "English",
+        continent: "Africa",
+        calling_code: 234,
+        internet_code: "NG",
+        government_type: "Republic",
+    },
+    Country {
+        name: "SouthAfrica",
+        capital: "Pretoria",
+        population: 60_000_000,
+        area: 1_221_037.0,
+        currency: "Rand",
+        language: "English",
+        continent: "Africa",
+        calling_code: 27,
+        internet_code: "ZA",
+        government_type: "Republic",
+    },
+    Country {
+        name: "Argentina",
+        capital: "BuenosAires",
+        population: 46_000_000,
+        area: 2_780_400.0,
+        currency: "Peso",
+        language: "Spanish",
+        continent: "SouthAmerica",
+        calling_code: 54,
+        internet_code: "AR",
+        government_type: "Republic",
     },
 ];
 
@@ -1393,6 +2070,110 @@ fn entity_parts(v: &Value) -> Option<(&str, &str)> {
     None
 }
 
+/// Canonical entity type for a (possibly aliased) type name.
+fn canonical_entity_type(ty: &str) -> Option<&'static str> {
+    match ty {
+        "Element" | "ChemicalElement" => Some("Element"),
+        "Country" | "CountryEntity" => Some("Country"),
+        _ => None,
+    }
+}
+
+/// Known property names for an entity type.
+fn properties_for(ty: &str) -> &'static [&'static str] {
+    match ty {
+        "Element" => &[
+            "AtomicNumber",
+            "AtomicMass",
+            "AtomicWeight",
+            "Symbol",
+            "Abbreviation",
+            "Name",
+            "Group",
+            "Period",
+            "Block",
+            "Density",
+            "MeltingPoint",
+            "MeltingTemperature",
+            "BoilingPoint",
+            "BoilingTemperature",
+            "Electronegativity",
+            "State",
+            "Phase",
+        ],
+        "Country" => &[
+            "Name",
+            "Capital",
+            "Population",
+            "PopulationDensity",
+            "Area",
+            "Currency",
+            "Language",
+            "Languages",
+            "Continent",
+            "CallingCode",
+            "InternetCode",
+            "InternetCountryCode",
+            "GovernmentType",
+        ],
+        _ => &[],
+    }
+}
+
+/// Named entity classes and their member entity names.
+const ENTITY_CLASSES: &[(&str, &str, &[&str])] = &[
+    ("Element", "NobleGas", &["Helium", "Neon", "Argon", "Radon"]),
+    (
+        "Element",
+        "AlkaliMetal",
+        &["Lithium", "Sodium", "Potassium"],
+    ),
+    ("Element", "Halogen", &["Fluorine", "Chlorine", "Bromine"]),
+    (
+        "Element",
+        "TransitionMetal",
+        &[
+            "Titanium",
+            "Chromium",
+            "Manganese",
+            "Iron",
+            "Nickel",
+            "Copper",
+            "Zinc",
+            "Silver",
+            "Tungsten",
+            "Platinum",
+            "Gold",
+            "Mercury",
+        ],
+    ),
+    (
+        "Country",
+        "EuropeanUnion",
+        &["France", "Germany", "Italy", "Spain"],
+    ),
+    (
+        "Country",
+        "G7",
+        &[
+            "France",
+            "Germany",
+            "Italy",
+            "Japan",
+            "Canada",
+            "UnitedStates",
+            "UnitedKingdom",
+        ],
+    ),
+];
+
+fn entity_class_members(ty: &str, class: &str) -> Option<&'static [&'static str]> {
+    ENTITY_CLASSES
+        .iter()
+        .find(|(t, c, _)| *t == ty && c.eq_ignore_ascii_case(class))
+        .map(|(_, _, members)| *members)
+}
+
 fn element_property(el: &Element, prop: &str) -> Option<Value> {
     match prop {
         "AtomicNumber" => Some(int(el.atomic_number)),
@@ -1401,6 +2182,12 @@ fn element_property(el: &Element, prop: &str) -> Option<Value> {
         "Name" => Some(Value::Str(el.name.to_string())),
         "Group" => Some(int(el.group)),
         "Period" => Some(int(el.period)),
+        "Block" => Some(Value::Str(el.block.to_string())),
+        "Density" => Some(rf(el.density)),
+        "MeltingPoint" | "MeltingTemperature" => Some(rf(el.melting_point)),
+        "BoilingPoint" | "BoilingTemperature" => Some(rf(el.boiling_point)),
+        "Electronegativity" => Some(rf(el.electronegativity)),
+        "State" | "Phase" => Some(Value::Str(el.state.to_string())),
         _ => None,
     }
 }
@@ -1409,16 +2196,21 @@ fn country_property(c: &Country, prop: &str) -> Option<Value> {
     match prop {
         "Capital" => Some(Value::Str(c.capital.to_string())),
         "Population" => Some(int(c.population)),
+        "PopulationDensity" => Some(rf(c.population as f64 / c.area)),
         "Area" => Some(rf(c.area)),
         "Currency" => Some(Value::Str(c.currency.to_string())),
         "Language" | "Languages" => Some(Value::Str(c.language.to_string())),
         "Name" => Some(Value::Str(c.name.to_string())),
+        "Continent" => Some(Value::Str(c.continent.to_string())),
+        "CallingCode" => Some(int(c.calling_code)),
+        "InternetCode" | "InternetCountryCode" => Some(Value::Str(c.internet_code.to_string())),
+        "GovernmentType" => Some(Value::Str(c.government_type.to_string())),
         _ => None,
     }
 }
 
 fn entity_property(ty: &str, name: &str, prop: &str) -> Option<Value> {
-    match ty {
+    match canonical_entity_type(ty)? {
         "Element" => ELEMENTS
             .iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))
@@ -1497,31 +2289,327 @@ pub fn builtin_entity_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(entity_parts(&args[0]).is_some()))
 }
 
+fn entity_class_parts(v: &Value) -> Option<(&'static str, &str)> {
+    if let Value::Call { head, args } = v
+        && head == "EntityClass"
+        && args.len() == 2
+    {
+        let ty = canonical_entity_type(str_value(&args[0])?)?;
+        return Some((ty, str_value(&args[1])?));
+    }
+    None
+}
+
+fn entity_list_for(ty: &str, names: &[&str]) -> Value {
+    Value::List(
+        names
+            .iter()
+            .map(|n| Value::Call {
+                head: "Entity".to_string(),
+                args: vec![Value::Str(ty.to_string()), Value::Str((*n).to_string())],
+            })
+            .collect(),
+    )
+}
+
+pub fn builtin_entity_property(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(EvalError::Error(
+            "EntityProperty requires 2 or 3 arguments".to_string(),
+        ));
+    }
+    let (Some(a), Some(b)) = (str_value(&args[0]), str_value(&args[1])) else {
+        return Ok(unevaluated("EntityProperty", args));
+    };
+    let (ty, prop) = if canonical_entity_type(a).is_some() {
+        (a, b)
+    } else if canonical_entity_type(b).is_some() {
+        (b, a)
+    } else {
+        return Ok(unevaluated("EntityProperty", args));
+    };
+    let Some(ty) = canonical_entity_type(ty) else {
+        return Ok(unevaluated("EntityProperty", args));
+    };
+    if !properties_for(ty)
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(prop))
+    {
+        return Ok(unevaluated("EntityProperty", args));
+    }
+    let mut out = vec![Value::Str(ty.to_string()), Value::Str(prop.to_string())];
+    if args.len() == 3 {
+        out.push(args[2].clone());
+    }
+    Ok(Value::Call {
+        head: "EntityProperty".to_string(),
+        args: out,
+    })
+}
+
+pub fn builtin_entity_list(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() > 1 {
+        return Err(EvalError::Error(
+            "EntityList requires 0 or 1 arguments".to_string(),
+        ));
+    }
+    if args.is_empty() {
+        return Ok(Value::List(vec![
+            Value::Str("Element".to_string()),
+            Value::Str("Country".to_string()),
+        ]));
+    }
+    if let Some((ty, class)) = entity_class_parts(&args[0]) {
+        return match entity_class_members(ty, class) {
+            Some(members) => Ok(entity_list_for(ty, members)),
+            None => Ok(unevaluated("EntityList", args)),
+        };
+    }
+    let Some(ty) = str_value(&args[0]).and_then(canonical_entity_type) else {
+        return Ok(unevaluated("EntityList", args));
+    };
+    let members: Vec<&'static str> = match ty {
+        "Element" => ELEMENTS.iter().map(|e| e.name).collect(),
+        "Country" => COUNTRIES.iter().map(|c| c.name).collect(),
+        _ => Vec::new(),
+    };
+    Ok(entity_list_for(ty, &members))
+}
+
+pub fn builtin_entity_class(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "EntityClass requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    if args.len() == 1 {
+        let Some(class) = str_value(&args[0]) else {
+            return Ok(unevaluated("EntityClass", args));
+        };
+        let found = ENTITY_CLASSES
+            .iter()
+            .find(|(_, c, _)| c.eq_ignore_ascii_case(class));
+        return match found {
+            Some((ty, _, _)) => Ok(Value::Call {
+                head: "EntityClass".to_string(),
+                args: vec![Value::Str((*ty).to_string()), Value::Str(class.to_string())],
+            }),
+            None => Ok(unevaluated("EntityClass", args)),
+        };
+    }
+    let (Some(a), Some(b)) = (str_value(&args[0]), str_value(&args[1])) else {
+        return Ok(unevaluated("EntityClass", args));
+    };
+    let (ty, class) = if canonical_entity_type(a).is_some() {
+        (a, b)
+    } else if canonical_entity_type(b).is_some() {
+        (b, a)
+    } else {
+        return Ok(unevaluated("EntityClass", args));
+    };
+    let Some(ty) = canonical_entity_type(ty) else {
+        return Ok(unevaluated("EntityClass", args));
+    };
+    if entity_class_members(ty, class).is_none() {
+        return Ok(unevaluated("EntityClass", args));
+    }
+    Ok(Value::Call {
+        head: "EntityClass".to_string(),
+        args: vec![Value::Str(ty.to_string()), Value::Str(class.to_string())],
+    })
+}
+
+// ── QuantityDistribution ─────────────────────────────────────────────────────
+
+pub fn builtin_quantity_distribution(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        1 => Ok(Value::Call {
+            head: "QuantityDistribution".to_string(),
+            args: vec![args[0].clone(), int(1)],
+        }),
+        2 => {
+            let Some(ue) = parse_unit(&args[1]) else {
+                return Ok(unevaluated("QuantityDistribution", args));
+            };
+            Ok(Value::Call {
+                head: "QuantityDistribution".to_string(),
+                args: vec![args[0].clone(), ue.to_value()],
+            })
+        }
+        _ => Err(EvalError::Error(
+            "QuantityDistribution requires 1 or 2 arguments".to_string(),
+        )),
+    }
+}
+
+// ── Interpreter (basic offline coercion) ─────────────────────────────────────
+
+const INTERPRETER_TYPES: &[&str] = &["Integer", "Real", "Number", "String", "Boolean"];
+
+/// Resolve an interpreter spec to a canonical type name or unit name.
+fn interpreter_spec(spec: &str) -> Option<String> {
+    if let Some(t) = INTERPRETER_TYPES
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case(spec))
+    {
+        return Some((*t).to_string());
+    }
+    resolve_name(spec).map(|r| r.name)
+}
+
+fn parse_number(s: &str) -> Option<Value> {
+    let t = s.trim();
+    if let Ok(n) = t.parse::<i64>() {
+        return Some(int(n));
+    }
+    t.parse::<f64>().ok().map(rf)
+}
+
+fn interpret_unit(unit_name: &str, input: &Value) -> Option<Value> {
+    let ue = UnitExpr::single(unit_name.to_string());
+    if let Some((mag, u)) = quantity_parts(input) {
+        let src = parse_unit(u)?;
+        return convert_units(mag, &src, &ue).map(|c| make_quantity(c, &ue));
+    }
+    if value_as_f64(input).is_some() {
+        return Some(make_quantity(input.clone(), &ue));
+    }
+    if let Value::Str(text) = input {
+        return parse_number(text).map(|n| make_quantity(n, &ue));
+    }
+    None
+}
+
+fn interpret_input(spec: &str, input: &Value) -> Option<Value> {
+    match spec {
+        "Integer" => match input {
+            Value::Integer(_) => Some(input.clone()),
+            Value::Real(r) if r.is_integer() => r.to_integer().map(Value::Integer),
+            Value::Str(text) => text
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .map(|n| Value::Integer(Integer::from(n))),
+            _ => None,
+        },
+        "Real" => match input {
+            Value::Real(_) => Some(input.clone()),
+            Value::Integer(n) => Some(rf(n.to_f64())),
+            Value::Rational(r) => Some(rf(r.as_ref().to_f64())),
+            Value::Str(text) => text.trim().parse::<f64>().ok().map(rf),
+            _ => None,
+        },
+        "Number" => match input {
+            Value::Integer(_) | Value::Real(_) | Value::Rational(_) => Some(input.clone()),
+            Value::Str(text) => parse_number(text),
+            _ => None,
+        },
+        "String" => match input {
+            Value::Str(_) => Some(input.clone()),
+            Value::Integer(n) => Some(Value::Str(n.to_string())),
+            Value::Real(r) => Some(Value::Str(r.to_string())),
+            Value::Bool(b) => Some(Value::Str(b.to_string())),
+            _ => None,
+        },
+        "Boolean" => match input {
+            Value::Bool(_) => Some(input.clone()),
+            Value::Str(text) => match text.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(Value::Bool(true)),
+                "false" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => None,
+        },
+        unit => interpret_unit(unit, input),
+    }
+}
+
+pub fn builtin_interpreter(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        1 => {
+            let Some(spec) = str_value(&args[0]).and_then(interpreter_spec) else {
+                return Ok(unevaluated("Interpreter", args));
+            };
+            Ok(Value::Call {
+                head: "Interpreter".to_string(),
+                args: vec![Value::Str(spec)],
+            })
+        }
+        2 => {
+            let Some(spec) = str_value(&args[0]).and_then(interpreter_spec) else {
+                return Ok(unevaluated("Interpreter", args));
+            };
+            match interpret_input(&spec, &args[1]) {
+                Some(v) => Ok(v),
+                None => Ok(unevaluated("Interpreter", args)),
+            }
+        }
+        _ => Err(EvalError::Error(
+            "Interpreter requires 1 or 2 arguments".to_string(),
+        )),
+    }
+}
+
+fn blank(name: &str) -> Expr {
+    Expr::NamedBlank {
+        name: name.to_string(),
+        type_constraint: None,
+    }
+}
+
+fn apply_call(head: &str, names: &[&str]) -> Expr {
+    Expr::Call {
+        head: Box::new(Expr::Symbol(head.to_string())),
+        args: names
+            .iter()
+            .map(|n| Expr::Symbol((*n).to_string()))
+            .collect(),
+    }
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
-pub fn register(_env: &Env) {
+pub fn register(env: &Env) {
     use super::register_builtin;
-    register_builtin(_env, "Quantity", builtin_quantity);
-    register_builtin(_env, "QuantityQ", builtin_quantity_q);
-    register_builtin(_env, "QuantityMagnitude", builtin_quantity_magnitude);
-    register_builtin(_env, "QuantityUnit", builtin_quantity_unit);
-    register_builtin(_env, "UnitConvert", builtin_unit_convert);
-    register_builtin(_env, "UnitSimplify", builtin_unit_simplify);
-    register_builtin(_env, "CompatibleUnitQ", builtin_compatible_unit_q);
-    register_builtin(_env, "UnitDimensions", builtin_unit_dimensions);
-    register_builtin(_env, "KnownUnitQ", builtin_known_unit_q);
-    register_builtin(_env, "Entity", builtin_entity);
-    register_builtin(_env, "EntityValue", builtin_entity_value);
-    register_builtin(_env, "EntityQ", builtin_entity_q);
+    register_builtin(env, "Quantity", builtin_quantity);
+    register_builtin(env, "QuantityQ", builtin_quantity_q);
+    register_builtin(env, "QuantityMagnitude", builtin_quantity_magnitude);
+    register_builtin(env, "QuantityUnit", builtin_quantity_unit);
+    register_builtin(env, "QuantityDistribution", builtin_quantity_distribution);
+    register_builtin(env, "UnitConvert", builtin_unit_convert);
+    register_builtin(env, "UnitSimplify", builtin_unit_simplify);
+    register_builtin(env, "CompatibleUnitQ", builtin_compatible_unit_q);
+    register_builtin(env, "UnitDimensions", builtin_unit_dimensions);
+    register_builtin(env, "KnownUnitQ", builtin_known_unit_q);
+    register_builtin(env, "Entity", builtin_entity);
+    register_builtin(env, "EntityValue", builtin_entity_value);
+    register_builtin(env, "EntityQ", builtin_entity_q);
+    register_builtin(env, "EntityProperty", builtin_entity_property);
+    register_builtin(env, "EntityList", builtin_entity_list);
+    register_builtin(env, "EntityClass", builtin_entity_class);
+    register_builtin(env, "Interpreter", builtin_interpreter);
+
+    // `Interpreter["type"][input]` routes through a curried subvalue to the
+    // two-argument interpreter form.
+    env.add_subvalue(
+        "Interpreter",
+        SubValue {
+            outer: vec![blank("spec")],
+            inner: vec![blank("x")],
+            rhs: apply_call("Interpreter", &["spec", "x"]),
+            delayed: true,
+            guard: None,
+        },
+    );
 
     // Quantity-aware arithmetic (delegates to `arithmetic` for plain values).
-    register_builtin(_env, "Plus", q_plus);
-    register_builtin(_env, "Times", q_times);
-    register_builtin(_env, "Divide", q_divide);
-    register_builtin(_env, "Minus", q_minus);
-    register_builtin(_env, "Power", q_power);
-    register_builtin(_env, "Abs", q_abs);
+    register_builtin(env, "Plus", q_plus);
+    register_builtin(env, "Times", q_times);
+    register_builtin(env, "Divide", q_divide);
+    register_builtin(env, "Minus", q_minus);
+    register_builtin(env, "Power", q_power);
+    register_builtin(env, "Abs", q_abs);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1806,12 +2894,259 @@ mod tests {
     #[test]
     fn test_entity_value_unknown_unevaluated() {
         let e = builtin_entity(&[s("Element"), s("Gold")]).unwrap();
-        let out = builtin_entity_value(&[e.clone(), s("BoilingPoint")]).unwrap();
+        let out = builtin_entity_value(&[e.clone(), s("CrystalStructure")]).unwrap();
         assert_eq!(
             out,
             Value::Call {
                 head: "EntityValue".to_string(),
-                args: vec![e, s("BoilingPoint")]
+                args: vec![e, s("CrystalStructure")]
+            }
+        );
+    }
+
+    fn approx(v: &Value, expected: f64) -> bool {
+        value_as_f64(v).is_some_and(|x| (x - expected).abs() < 1e-6)
+    }
+
+    #[test]
+    fn test_expanded_element_table_and_properties() {
+        // Newly added element resolves.
+        let e = builtin_entity(&[s("Element"), s("Neon")]).unwrap();
+        assert_eq!(
+            builtin_entity_value(&[e.clone(), s("AtomicNumber")]).unwrap(),
+            int(10)
+        );
+        assert_eq!(
+            builtin_entity_value(&[e.clone(), s("Symbol")]).unwrap(),
+            s("Ne")
+        );
+        assert_eq!(
+            builtin_entity_value(&[e.clone(), s("Block")]).unwrap(),
+            s("p")
+        );
+        assert_eq!(builtin_entity_value(&[e, s("State")]).unwrap(), s("Gas"));
+
+        // Element count grew well beyond the original dozen.
+        assert!(ELEMENTS.len() >= 30);
+        assert!(COUNTRIES.len() >= 15);
+    }
+
+    #[test]
+    fn test_entity_property_builtin() {
+        let p = builtin_entity_property(&[s("Element"), s("BoilingPoint")]).unwrap();
+        assert_eq!(
+            p,
+            Value::Call {
+                head: "EntityProperty".to_string(),
+                args: vec![s("Element"), s("BoilingPoint")]
+            }
+        );
+        // Reversed order is normalised.
+        let p2 = builtin_entity_property(&[s("Population"), s("Country")]).unwrap();
+        assert_eq!(
+            p2,
+            Value::Call {
+                head: "EntityProperty".to_string(),
+                args: vec![s("Country"), s("Population")]
+            }
+        );
+        // Unknown property stays unevaluated.
+        let bad = builtin_entity_property(&[s("Element"), s("Colour")]).unwrap();
+        assert_eq!(
+            bad,
+            Value::Call {
+                head: "EntityProperty".to_string(),
+                args: vec![s("Element"), s("Colour")]
+            }
+        );
+    }
+
+    #[test]
+    fn test_entity_list() {
+        let out = builtin_entity_list(&[s("Element")]).unwrap();
+        match out {
+            Value::List(items) => {
+                assert_eq!(items.len(), ELEMENTS.len());
+                assert_eq!(
+                    items[0],
+                    Value::Call {
+                        head: "Entity".to_string(),
+                        args: vec![s("Element"), s("Hydrogen")]
+                    }
+                );
+            }
+            other => panic!("expected a list, got {other:?}"),
+        }
+        let types = builtin_entity_list(&[]).unwrap();
+        assert_eq!(types, Value::List(vec![s("Element"), s("Country")]));
+    }
+
+    #[test]
+    fn test_entity_class_basic() {
+        let c = builtin_entity_class(&[s("Element"), s("NobleGas")]).unwrap();
+        assert_eq!(
+            c,
+            Value::Call {
+                head: "EntityClass".to_string(),
+                args: vec![s("Element"), s("NobleGas")]
+            }
+        );
+        // Unknown class stays unevaluated.
+        let bad = builtin_entity_class(&[s("Element"), s("Metalloid")]).unwrap();
+        assert_eq!(
+            bad,
+            Value::Call {
+                head: "EntityClass".to_string(),
+                args: vec![s("Element"), s("Metalloid")]
+            }
+        );
+        // EntityList expands a class to its member entities.
+        let members = builtin_entity_list(&[c]).unwrap();
+        match members {
+            Value::List(items) => {
+                assert_eq!(items.len(), 4);
+                assert!(items.iter().all(|i| entity_parts(i).is_some()));
+            }
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_temperature_convert_celsius_fahrenheit() {
+        // 100 °C → 373.15 K
+        let out = builtin_unit_convert(&[q(100, "Celsius"), s("Kelvin")]).unwrap();
+        assert!(approx(&mag_of(&out), 373.15));
+        assert_eq!(unit_of(&out), s("Kelvin"));
+
+        // 32 °F → 0 °C
+        let out = builtin_unit_convert(&[q(32, "Fahrenheit"), s("Celsius")]).unwrap();
+        assert!(approx(&mag_of(&out), 0.0));
+        assert_eq!(unit_of(&out), s("Celsius"));
+
+        // 0 °C → 32 °F
+        let out = builtin_unit_convert(&[q(0, "Celsius"), s("Fahrenheit")]).unwrap();
+        assert!(approx(&mag_of(&out), 32.0));
+
+        // One-argument form converts to Kelvin base units.
+        let base = builtin_unit_convert(&[q(0, "Celsius")]).unwrap();
+        assert!(approx(&mag_of(&base), 273.15));
+        assert_eq!(unit_of(&base), s("Kelvin"));
+    }
+
+    #[test]
+    fn test_temperature_aliases_and_dimensions() {
+        assert_eq!(unit_of(&q(1, "DegreesCelsius")), s("Celsius"));
+        assert_eq!(unit_of(&q(1, "Fahrenheit")), s("Fahrenheit"));
+        let dims = builtin_unit_dimensions(&[s("Celsius")]).unwrap();
+        assert_eq!(
+            dims,
+            Value::List(vec![Value::List(vec![s("TemperatureUnit"), int(1)])])
+        );
+        assert_eq!(
+            builtin_compatible_unit_q(&[s("Celsius"), s("Fahrenheit")]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_quantity_distribution_basic() {
+        let dist = Value::Call {
+            head: "NormalDistribution".to_string(),
+            args: vec![int(0), int(1)],
+        };
+        let qd = builtin_quantity_distribution(&[dist.clone(), s("Meter")]).unwrap();
+        assert_eq!(
+            qd,
+            Value::Call {
+                head: "QuantityDistribution".to_string(),
+                args: vec![dist.clone(), s("Meter")]
+            }
+        );
+        assert_eq!(mag_of(&qd), dist);
+        assert_eq!(unit_of(&qd), s("Meter"));
+
+        // Dimensionless form defaults to unit 1.
+        let plain = builtin_quantity_distribution(&[dist]).unwrap();
+        assert_eq!(
+            plain,
+            Value::Call {
+                head: "QuantityDistribution".to_string(),
+                args: vec![
+                    Value::Call {
+                        head: "NormalDistribution".to_string(),
+                        args: vec![int(0), int(1)]
+                    },
+                    int(1)
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_interpreter_basic_types() {
+        assert_eq!(
+            builtin_interpreter(&[s("Integer"), int(42)]).unwrap(),
+            int(42)
+        );
+        assert_eq!(
+            builtin_interpreter(&[s("Integer"), s("123")]).unwrap(),
+            int(123)
+        );
+        assert!(approx(
+            &builtin_interpreter(&[s("Real"), int(3)]).unwrap(),
+            3.0
+        ));
+        assert_eq!(
+            builtin_interpreter(&[s("String"), int(42)]).unwrap(),
+            s("42")
+        );
+        assert_eq!(
+            builtin_interpreter(&[s("Boolean"), s("True")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            builtin_interpreter(&[s("Number"), s("2.5")]).unwrap(),
+            rf(2.5)
+        );
+        // Failed interpretation stays unevaluated.
+        let bad = builtin_interpreter(&[s("Integer"), s("abc")]).unwrap();
+        assert_eq!(
+            bad,
+            Value::Call {
+                head: "Interpreter".to_string(),
+                args: vec![s("Integer"), s("abc")]
+            }
+        );
+    }
+
+    #[test]
+    fn test_interpreter_spec_and_unit_coercion() {
+        // One-argument form yields the interpreter object.
+        let obj = builtin_interpreter(&[s("Integer")]).unwrap();
+        assert_eq!(
+            obj,
+            Value::Call {
+                head: "Interpreter".to_string(),
+                args: vec![s("Integer")]
+            }
+        );
+
+        // Unit spec coerces numbers into quantities.
+        let qty = builtin_interpreter(&[s("Meter"), int(5)]).unwrap();
+        assert_eq!(qty, q(5, "Meter"));
+
+        // A compatible quantity is converted to the requested unit.
+        let converted = builtin_interpreter(&[s("Meter"), q(1, "Kilometer")]).unwrap();
+        assert_eq!(mag_of(&converted), int(1000));
+        assert_eq!(unit_of(&converted), s("Meter"));
+
+        // Unknown spec stays unevaluated.
+        let bad = builtin_interpreter(&[s("Furlong"), int(1)]).unwrap();
+        assert_eq!(
+            bad,
+            Value::Call {
+                head: "Interpreter".to_string(),
+                args: vec![s("Furlong"), int(1)]
             }
         );
     }

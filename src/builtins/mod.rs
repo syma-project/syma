@@ -4,6 +4,7 @@ pub mod association;
 pub mod attributes;
 pub mod bitextra;
 pub mod boolean;
+pub mod calculusmore;
 pub mod calendar;
 pub mod charting;
 pub mod clearing;
@@ -27,6 +28,7 @@ pub mod format;
 pub mod graphics;
 pub mod graphics3d;
 pub mod graphtheory;
+pub mod graphtheory2;
 pub mod help;
 pub mod image;
 pub mod imageproc;
@@ -43,12 +45,14 @@ pub mod math;
 pub mod mllite;
 pub mod names;
 pub mod noncommutative;
+pub mod notebook;
 pub mod number_theory;
 pub mod numericsolve;
 pub mod operators;
 pub mod parallel;
 pub mod pattern;
 pub mod polyreduce;
+pub mod predicates;
 pub mod random;
 pub mod specialfuncmore;
 pub mod specialfunctions;
@@ -63,6 +67,7 @@ pub mod symbolicmore;
 pub mod systeminfo;
 pub mod systemio;
 pub mod text;
+pub mod timeseries;
 pub mod transforms;
 pub mod units;
 
@@ -742,7 +747,6 @@ pub fn register_builtins(env: &Env) {
         ("NMaximize", numericsolve::builtin_nmaximize),
         ("NMinimize", numericsolve::builtin_nminimize),
         ("NSolve", numericsolve::builtin_nsolve),
-        ("Names", names::builtin_names),
         ("Needs", builtin_needs),
         ("Nest", list::builtin_nest),
         ("NestList", list::builtin_nest_list),
@@ -1269,6 +1273,7 @@ pub fn register_builtins(env: &Env) {
     introspect::register(env);
     fit::register(env);
     polyreduce::register(env);
+    symbolicmanip::register(env);
     dsolve::register(env);
     graphtheory::register(env);
     units::register(env);
@@ -1283,8 +1288,18 @@ pub fn register_builtins(env: &Env) {
     stringpatterns::register(env);
     imageproc::register(env);
     datamore::register(env);
+    association::register(env);
+    dataset::register(env);
     streams::register(env);
     mllite::register(env);
+    graphtheory2::register(env);
+    timeseries::register(env);
+    calculusmore::register(env);
+    notebook::register(env);
+    // `names` owns the symbol/context introspection surface; register it last
+    // so it is authoritative over the overlapping session helpers.
+    names::register(env);
+    predicates::register(env);
 
     // ── Constants (kept symbolic; use N[] for numerical evaluation) ──
     env.set("Pi".to_string(), Value::Symbol("Pi".to_string()));
