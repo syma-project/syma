@@ -203,25 +203,23 @@ fn refine_expr(val: &Value, assum: &Value) -> Result<Value, EvalError> {
                 head: ph,
                 args: pargs,
             } = &args[0]
+                && ph == "Power"
+                && pargs.len() == 2
+                && let Value::Integer(e) = &pargs[1]
+                && *e == 2
             {
-                if ph == "Power" && pargs.len() == 2 {
-                    if let Value::Integer(e) = &pargs[1] {
-                        if *e == 2 {
-                            let var = &pargs[0];
-                            if implies_positive(var, assum) {
-                                return Ok(var.clone());
-                            }
-                            if implies_non_negative(var, assum) {
-                                return Ok(var.clone());
-                            }
-                            if implies_real(var, assum) {
-                                return Ok(Value::Call {
-                                    head: "Abs".to_string(),
-                                    args: vec![var.clone()],
-                                });
-                            }
-                        }
-                    }
+                let var = &pargs[0];
+                if implies_positive(var, assum) {
+                    return Ok(var.clone());
+                }
+                if implies_non_negative(var, assum) {
+                    return Ok(var.clone());
+                }
+                if implies_real(var, assum) {
+                    return Ok(Value::Call {
+                        head: "Abs".to_string(),
+                        args: vec![var.clone()],
+                    });
                 }
             }
             // Recurse into argument

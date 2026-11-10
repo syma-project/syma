@@ -17,7 +17,7 @@ pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
                 .to_string(),
         ));
     }
-    let path = match &args[0] {
+    let mut path = match &args[0] {
         Value::Str(s) => s.clone(),
         _ => {
             return Err(EvalError::TypeError {
@@ -26,6 +26,16 @@ pub fn builtin_import(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
+    // Expand leading ~ to home directory (mirrors Export).
+    if (path.starts_with("~/") || path == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        path = if path == "~" {
+            home
+        } else {
+            format!("{}{}", home, &path[1..])
+        };
+    }
 
     let format_name = args.get(1).and_then(|v| match v {
         Value::Str(s) => Some(s.as_str()),

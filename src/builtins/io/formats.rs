@@ -120,34 +120,32 @@ pub fn detect_format(path: &str, format_name: Option<&str>) -> Result<Format, Ev
 /// double-quoted fields where commas/tabs are allowed.  A pair of `""` inside
 /// a quoted field is a literal `"`.
 fn parse_delimited_line(line: &str, delimiter: u8) -> Vec<String> {
-    let bytes = line.as_bytes();
+    // Iterate over chars (not bytes) so multi-byte UTF-8 content is preserved.
+    let delimiter = delimiter as char;
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut i = 0;
+    let mut chars = line.chars().peekable();
 
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(c) = chars.next() {
         if in_quotes {
-            if b == b'"' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
                     current.push('"');
-                    i += 2;
-                    continue;
+                    chars.next();
+                } else {
+                    in_quotes = false;
                 }
-                in_quotes = false;
             } else {
-                current.push(b as char);
+                current.push(c);
             }
-        } else if b == b'"' {
+        } else if c == '"' {
             in_quotes = true;
-        } else if b == delimiter {
-            fields.push(current);
-            current = String::new();
+        } else if c == delimiter {
+            fields.push(std::mem::take(&mut current));
         } else {
-            current.push(b as char);
+            current.push(c);
         }
-        i += 1;
     }
     fields.push(current);
     fields
@@ -468,5 +466,40 @@ fn value_to_csv_field(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_delimited_line_preserves_utf8() {
+        assert_eq!(
+            parse_delimited_line("café,résumé", b','),
+            vec!["café", "résumé"]
+        );
+        // Quoted field with multi-byte content and an embedded delimiter
+        assert_eq!(
+            parse_delimited_line("\"naïve, 日本語\",x", b','),
+            vec!["naïve, 日本語", "x"]
+        );
+        // Escaped quotes still work
+        assert_eq!(
+            parse_delimited_line("\"a\"\"b\",c", b','),
+            vec!["a\"b", "c"]
+        );
+    }
+
+    #[test]
+    fn test_import_csv_utf8() {
+        let v = import_csv("café,résumé\nα,β").unwrap();
+        assert_eq!(
+            v,
+            Value::List(vec![
+                Value::List(vec![Value::Str("café".into()), Value::Str("résumé".into()),]),
+                Value::List(vec![Value::Str("α".into()), Value::Str("β".into())]),
+            ])
+        );
     }
 }

@@ -522,7 +522,9 @@ pub fn builtin_image_rotate(args: &[Value]) -> Result<Value, EvalError> {
                     let p01 = img.get_pixel(ox0, oy1);
                     let p11 = img.get_pixel(ox1, oy1);
 
-                    for c in 0..4.min(img.color().channel_count() as usize) {
+                    // `DynamicImage::get_pixel` always returns RGBA, so copy all
+                    // four channels (otherwise RGB/gray images lose G/B/alpha).
+                    for c in 0..4 {
                         let v00 = p00[c] as f64;
                         let v10 = p10[c] as f64;
                         let v01 = p01[c] as f64;
@@ -599,8 +601,11 @@ pub fn builtin_image_adjust(args: &[Value]) -> Result<Value, EvalError> {
         }
         let range = (max_pixel as f64 - min_pixel as f64).max(1.0);
         let scale = 255.0 / range;
-        let offset = -(min_pixel as f64) * scale / 255.0;
-        (scale / 255.0, offset, 1.0)
+        // Choose contrast/brightness so `min_pixel` maps to 0 and `max_pixel`
+        // maps to 1 under `(norm - 0.5) * contrast + 0.5 + brightness`.
+        let contrast = scale;
+        let brightness = -(min_pixel as f64 / 255.0) * scale - 0.5 * (1.0 - scale);
+        (contrast, brightness, 1.0)
     };
 
     // Apply brightness (additive shift), contrast (multiplicative), and gamma
@@ -1349,5 +1354,34 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_image_adjust_auto_stretches_contrast() {
+        let img = builtin_image(&[gray2x2()]).unwrap();
+        let adjusted = builtin_image_adjust(&[img]).unwrap();
+        let rgba = extract_image(&adjusted).to_rgba8();
+        // The darkest source pixel (0.0) → 0 and the brightest (1.0) → 255.
+        assert_eq!(rgba.get_pixel(0, 0)[0], 0);
+        assert_eq!(rgba.get_pixel(0, 1)[0], 255);
+    }
+
+    #[test]
+    fn test_image_rotate_arbitrary_angle_preserves_channels() {
+        let mut src = image::RgbImage::new(4, 4);
+        for p in src.pixels_mut() {
+            *p = image::Rgb([10, 20, 30]);
+        }
+        let data = Value::Image(Arc::new(image::DynamicImage::ImageRgb8(src)));
+        let rotated =
+            builtin_image_rotate(&[data, Value::Real(rug::Float::with_val(53, 30.0))]).unwrap();
+        let out = extract_image(&rotated).to_rgba8();
+        for p in out.pixels() {
+            // Alpha must be preserved (previously left at 0).
+            assert_eq!(p[3], 255, "alpha should stay opaque");
+            if p[0] == 10 {
+                assert_eq!((p[1], p[2]), (20, 30), "channels must stay aligned");
+            }
+        }
     }
 }

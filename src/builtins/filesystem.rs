@@ -286,8 +286,9 @@ pub fn builtin_directory_q(args: &[Value]) -> Result<Value, EvalError> {
 
 /// Simple glob matching: supports `*` (matches any sequence) and `?` (matches one char).
 fn glob_match(pattern: &str, name: &str) -> bool {
-    let p = pattern.as_bytes();
-    let n = name.as_bytes();
+    // Operate on chars (not bytes) so `?` matches a whole multi-byte character.
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
     let plen = p.len();
     let nlen = n.len();
 
@@ -297,7 +298,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 
     // Handle leading * patterns
     for i in 1..=plen {
-        if p[i - 1] == b'*' {
+        if p[i - 1] == '*' {
             dp[i][0] = dp[i - 1][0];
         }
     }
@@ -305,9 +306,9 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     for i in 1..=plen {
         for j in 1..=nlen {
             match p[i - 1] {
-                b'*' => dp[i][j] = dp[i - 1][j] || dp[i][j - 1],
-                b'?' => dp[i][j] = dp[i - 1][j - 1],
-                _ => dp[i][j] = dp[i - 1][j - 1] && p[i - 1] == n[j - 1],
+                '*' => dp[i][j] = dp[i - 1][j] || dp[i][j - 1],
+                '?' => dp[i][j] = dp[i - 1][j - 1],
+                c => dp[i][j] = dp[i - 1][j - 1] && c == n[j - 1],
             }
         }
     }
@@ -524,6 +525,9 @@ mod tests {
         assert!(!glob_match("?.rs", "ab.rs"));
         assert!(glob_match("*", "anything"));
         assert!(glob_match("test_*_v2.*", "test_alpha_v2.rs"));
+        // `?` matches a single multi-byte character, not a byte.
+        assert!(glob_match("?.rs", "é.rs"));
+        assert!(glob_match("*.rs", "日本語.rs"));
     }
 
     #[test]

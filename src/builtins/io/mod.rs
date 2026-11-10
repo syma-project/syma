@@ -1086,4 +1086,15 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
         let result = builtin_quit(&[Value::Str("arg".into())]);
         assert!(matches!(result, Err(EvalError::NoMatch { .. })));
     }
+
+    #[test]
+    fn test_import_expands_leading_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            let path = std::path::Path::new(&home).join("test_syma_tilde_import.csv");
+            std::fs::write(&path, "a,b\n1,2").ok();
+            let result = builtin_import(&[Value::Str("~/test_syma_tilde_import.csv".into())]);
+            std::fs::remove_file(&path).ok();
+            assert!(result.is_ok(), "tilde import failed: {:?}", result);
+        }
+    }
 }

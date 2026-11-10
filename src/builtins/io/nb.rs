@@ -208,29 +208,47 @@ impl<'a> WlParser<'a> {
         assert_eq!(self.advance(), Some(b'"'));
         let mut s = String::new();
         loop {
-            match self.advance() {
+            let b = match self.advance() {
                 None => return Err("Unterminated string literal".to_string()),
-                Some(b'"') => break,
-                Some(b'\\') => {
-                    match self.advance() {
+                Some(b) => b,
+            };
+            match b {
+                b'"' => break,
+                b'\\' => {
+                    let e = match self.advance() {
                         None => return Err("Unterminated escape sequence".to_string()),
-                        Some(b'"') => s.push('"'),
-                        Some(b'n') => s.push('\n'),
-                        Some(b't') => s.push('\t'),
-                        Some(b'\\') => s.push('\\'),
-                        Some(b'r') => s.push('\r'),
-                        Some(c) => {
+                        Some(e) => e,
+                    };
+                    match e {
+                        b'"' => s.push('"'),
+                        b'n' => s.push('\n'),
+                        b't' => s.push('\t'),
+                        b'\\' => s.push('\\'),
+                        b'r' => s.push('\r'),
+                        other => {
                             // WL allows \[Name] escape sequences (like \[Alpha]), but
                             // these rarely appear in .nb file strings. Just pass through.
                             s.push('\\');
-                            s.push(c as char);
+                            self.push_utf8_char(&mut s, other);
                         }
                     }
                 }
-                Some(c) => s.push(c as char),
+                other => self.push_utf8_char(&mut s, other),
             }
         }
         Ok(WlNode::Str(s))
+    }
+
+    /// Push the (possibly multi-byte) UTF-8 character whose first byte has
+    /// already been consumed by `advance`.
+    fn push_utf8_char(&mut self, out: &mut String, first: u8) {
+        let start = self.pos - 1;
+        if first >= 0x80 {
+            while self.peek().is_some_and(|n| (n & 0xC0) == 0x80) {
+                self.advance();
+            }
+        }
+        out.push_str(&String::from_utf8_lossy(&self.src[start..self.pos]));
     }
 
     /// Parse a numeric literal (integer or real, including `*^` notation and
@@ -896,5 +914,20 @@ Cell[BoxData[DynamicBox[Typeset`ToBoxes[var]]], "Input"]
 }]"#;
         let code = notebook_to_code(nb).unwrap();
         assert!(code.trim().is_empty());
+    }
+
+    #[test]
+    fn test_nb_utf8_string_literal() {
+        let nb = "Notebook[{\nCell[\"αβγ\", \"Input\"]\n}]";
+        let code = notebook_to_code(nb).unwrap();
+        assert_eq!(code.trim(), "αβγ");
+    }
+
+    #[test]
+    fn test_nb_string_escapes() {
+        // `\n` inside a WL string literal must become a real newline.
+        let nb = "Notebook[{\nCell[\"a\\nb\", \"Input\"]\n}]";
+        let code = notebook_to_code(nb).unwrap();
+        assert_eq!(code, "a\nb");
     }
 }
