@@ -50,11 +50,41 @@ use specificity::{flatten_sequences, specificity};
 pub(crate) use substitute::substitute_in_expr;
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
     let mut result = Value::Null;
-    for stmt in stmts {
-        match eval(stmt, env) {
-            Ok(v) => result = v,
-            // Return at top-level just yields the value
-            Err(EvalError::Return(v)) => result = *v,
+    let mut i = 0;
+    while i < stmts.len() {
+        match eval(&stmts[i], env) {
+            Ok(v) => {
+                result = v;
+                i += 1;
+            }
+            // Non-local transfers that reach the top level yield their value.
+            Err(EvalError::Return(v)) => {
+                result = *v;
+                i += 1;
+            }
+            Err(EvalError::Thrown(v)) => {
+                result = *v;
+                i += 1;
+            }
+            Err(EvalError::ThrownTagged { value, .. }) => {
+                result = *value;
+                i += 1;
+            }
+            Err(EvalError::Abort) => {
+                result = Value::Symbol("$Aborted".to_string());
+                i += 1;
+            }
+            // Goto jumps to the matching Label within this program, if any.
+            Err(EvalError::Goto(tag)) => match find_label(stmts, &tag) {
+                Some(pos) => i = pos,
+                None => {
+                    result = Value::Call {
+                        head: "Goto".to_string(),
+                        args: vec![Value::Symbol(tag)],
+                    };
+                    i += 1;
+                }
+            },
             Err(e) => return Err(e),
         }
     }
@@ -67,26 +97,35 @@ pub fn eval_program_with_results(
     stmts: &[(Expr, bool)],
     env: &Env,
 ) -> Result<Vec<Option<Value>>, EvalError> {
-    let mut results = Vec::with_capacity(stmts.len());
-    for (stmt, suppressed) in stmts {
-        match eval(stmt, env) {
-            Ok(val) => {
-                if *suppressed {
-                    results.push(None);
-                } else {
-                    results.push(Some(val));
-                }
-            }
-            // Return at top-level just yields the value
-            Err(EvalError::Return(v)) => {
-                if *suppressed {
-                    results.push(None);
-                } else {
-                    results.push(Some(*v));
+    let mut results: Vec<Option<Value>> = vec![None; stmts.len()];
+    let mut i = 0;
+    while i < stmts.len() {
+        let (stmt, suppressed) = &stmts[i];
+        let suppressed = *suppressed;
+        let val: Value = match eval(stmt, env) {
+            Ok(val) => val,
+            // Non-local transfers that reach the top level yield their value.
+            Err(EvalError::Return(v)) => *v,
+            Err(EvalError::Thrown(v)) => *v,
+            Err(EvalError::ThrownTagged { value, .. }) => *value,
+            Err(EvalError::Abort) => Value::Symbol("$Aborted".to_string()),
+            Err(EvalError::Goto(tag)) => {
+                let exprs: Vec<Expr> = stmts.iter().map(|(e, _)| e.clone()).collect();
+                match find_label(&exprs, &tag) {
+                    Some(pos) => {
+                        i = pos;
+                        continue;
+                    }
+                    None => Value::Call {
+                        head: "Goto".to_string(),
+                        args: vec![Value::Symbol(tag)],
+                    },
                 }
             }
             Err(e) => return Err(e),
-        }
+        };
+        results[i] = if suppressed { None } else { Some(val) };
+        i += 1;
     }
     Ok(results)
 }
@@ -121,6 +160,27 @@ fn release_inner(val: Value, env: &Env) -> Result<Value, EvalError> {
         }
         other => Ok(other),
     }
+}
+
+/// Extract a jump-target tag (symbol or string) from an expression.
+fn expr_tag_text(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Symbol(s) => Some(s.clone()),
+        Expr::Str(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Index of the first `Label[tag]` statement in `stmts`, if any.
+fn find_label(stmts: &[Expr], tag: &str) -> Option<usize> {
+    stmts.iter().position(|stmt| match stmt {
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Label") && args.len() == 1 =>
+        {
+            expr_tag_text(&args[0]).as_deref() == Some(tag)
+        }
+        _ => false,
+    })
 }
 
 /// Evaluate compound (non-atomic, non-call) expressions:
@@ -684,8 +744,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // ── Sequence ──
         Expr::Sequence(exprs) => {
             let mut result = Value::Null;
-            for expr in exprs {
-                result = eval(expr, env)?;
+            let mut i = 0;
+            while i < exprs.len() {
+                match eval(&exprs[i], env) {
+                    Ok(v) => {
+                        result = v;
+                        i += 1;
+                    }
+                    // Goto jumps to the matching Label within this sequence,
+                    // otherwise it propagates to the enclosing structure.
+                    Err(EvalError::Goto(tag)) => match find_label(exprs, &tag) {
+                        Some(pos) => i = pos,
+                        None => return Err(EvalError::Goto(tag)),
+                    },
+                    Err(e) => return Err(e),
+                }
             }
             Ok(result)
         }
@@ -964,6 +1037,60 @@ pub(crate) fn convert_blank_pattern(s: &str) -> Expr {
     }
 }
 
+/// Is `v` a concrete data value that should be substituted for a bound symbol
+/// appearing inside a held (HoldAll) argument? Builtins, functions and other
+/// non-data heads keep their symbolic names so held expressions stay readable.
+fn is_substitutable_held_value(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Symbol(_)
+            | Value::Integer(_)
+            | Value::Real(_)
+            | Value::Rational(_)
+            | Value::Complex { .. }
+            | Value::Bool(_)
+            | Value::Str(_)
+            | Value::Call { .. }
+            | Value::List(_)
+    )
+}
+
+/// Resolve variables bound in `env` that occur inside a held argument,
+/// without evaluating the surrounding expression. This mirrors the lexical
+/// substitution that `With`, `Module` and function application perform in the
+/// Wolfram Language, and lets held heads (e.g. `With`, `Module`, `If`, `Solve`)
+/// see concrete arguments rather than unbound parameter symbols.
+fn resolve_held_symbols(expr: &Expr, env: &Env) -> Expr {
+    match expr {
+        Expr::Symbol(s) => match env.get(s) {
+            Some(v) if is_substitutable_held_value(&v) => crate::eval::table::value_to_expr(&v),
+            _ => expr.clone(),
+        },
+        Expr::Call { head, args } => Expr::Call {
+            head: Box::new(resolve_held_symbols(head, env)),
+            args: args.iter().map(|a| resolve_held_symbols(a, env)).collect(),
+        },
+        Expr::List(items) => {
+            Expr::List(items.iter().map(|i| resolve_held_symbols(i, env)).collect())
+        }
+        Expr::Assoc(pairs) => Expr::Assoc(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), resolve_held_symbols(v, env)))
+                .collect(),
+        ),
+        Expr::Rule { lhs, rhs } => Expr::Rule {
+            lhs: Box::new(resolve_held_symbols(lhs, env)),
+            rhs: Box::new(resolve_held_symbols(rhs, env)),
+        },
+        Expr::RuleDelayed { lhs, rhs } => Expr::RuleDelayed {
+            lhs: Box::new(resolve_held_symbols(lhs, env)),
+            rhs: Box::new(resolve_held_symbols(rhs, env)),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Evaluate function arguments, respecting HoldAll/HoldFirst/HoldRest attributes.
 #[inline(never)]
 fn eval_args_with_attributes(
@@ -993,14 +1120,19 @@ fn eval_args_with_attributes(
         if hold_all {
             // For Symbol args, evaluate first to resolve bound variable names,
             // then wrap as Pattern to prevent further evaluation.
-            // For non-Symbol args, wrap as Pattern directly.
+            // For non-Symbol args, resolve bound variables *inside* them (as
+            // Wolfram Language does lexically for `With`/`Module`/function
+            // application) without evaluating the surrounding expression, then
+            // wrap as Pattern. Without this, a held argument such as
+            // `Integrate[g[u, x]/x, x]` would keep the bound symbol `u` literal
+            // and match the wrong rules.
             let mut vals = Vec::with_capacity(args.len());
             for arg in args {
                 let v = match arg {
                     Expr::Symbol(_) => {
                         Value::Pattern(crate::eval::table::value_to_expr(&eval(arg, env)?))
                     }
-                    _ => Value::Pattern(arg.clone()),
+                    _ => Value::Pattern(resolve_held_symbols(arg, env)),
                 };
                 vals.push(v);
             }
@@ -1294,12 +1426,20 @@ fn eval_call_inner(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalE
                 table::eval_parallel_do(args, env)
             }
             "Sum" => {
-                // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols
-                table::eval_sum(args, env)
+                // Sum[expr, {i, min, max}] — iterator spec has unevaluated symbols.
+                // Symbolic bounds use closed forms from builtins::list; numeric
+                // and multi-iterator calls fall through to the table machinery.
+                match crate::builtins::list::try_sum_symbolic(args, env)? {
+                    Some(v) => Ok(v),
+                    None => table::eval_sum(args, env),
+                }
             }
             "Product" => {
-                // Product[expr, {i, min, max}] — iterator spec has unevaluated symbols
-                table::eval_product(args, env)
+                // Product[expr, {i, min, max}] — iterator spec has unevaluated symbols.
+                match crate::builtins::list::try_product_symbolic(args, env)? {
+                    Some(v) => Ok(v),
+                    None => table::eval_product(args, env),
+                }
             }
             "RecurrenceTable" => {
                 // RecurrenceTable[eqns, f, {n, nmin, nmax}] — generate table from recurrence equations
@@ -1334,6 +1474,13 @@ fn eval_call_inner(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalE
                         }
                         eval(&args[2], &child_env)
                     }
+                    Err(EvalError::ThrownTagged { value, .. }) => {
+                        let child_env = env.child();
+                        if let Expr::Symbol(name) = &args[1] {
+                            child_env.set(name.clone(), *value);
+                        }
+                        eval(&args[2], &child_env)
+                    }
                     Err(e) => Err(e),
                 };
                 // Evaluate finally block if present
@@ -1342,18 +1489,18 @@ fn eval_call_inner(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalE
                 }
                 thrown
             }
-            "Catch" => {
-                // Catch[expr] — evaluate expr, catching any Throw[val]
+            "Catch" => crate::builtins::control::eval_catch(args, env),
+            "Goto" => {
+                // Goto[tag] — non-local jump caught by the enclosing
+                // Sequence/program that contains a matching Label[tag].
                 if args.len() != 1 {
-                    return Err(EvalError::Error(
-                        "Catch requires exactly 1 argument".to_string(),
-                    ));
+                    return Ok(Value::Call {
+                        head: "Goto".to_string(),
+                        args: args.iter().map(expr_to_value).collect(),
+                    });
                 }
-                match eval(&args[0], env) {
-                    Ok(v) => Ok(v),
-                    Err(EvalError::Thrown(v)) => Ok(*v),
-                    Err(e) => Err(e),
-                }
+                let tag = expr_tag_text(&args[0]).unwrap_or_else(|| args[0].to_string());
+                Err(EvalError::Goto(tag))
             }
             "Return" => {
                 // Return[expr] — return expr from the enclosing function
@@ -1620,6 +1767,16 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             .collect();
 
         if !list_indices.is_empty() {
+            // A lone list argument to a Flat+Listable symbol is spliced into the
+            // argument sequence instead of being threaded, matching Wolfram
+            // semantics (Max[{1,2,3}] => 3, Plus[{1,2,3}] => 6).
+            if args.len() == 1
+                && list_indices.len() == 1
+                && env.has_attribute(name, "Flat")
+                && let Value::List(items) = &args[0]
+            {
+                return apply_function(func, items, env);
+            }
             // Thread element-wise over *all* list arguments simultaneously.
             // (Mixed list/scalar args keep the scalars fixed.)
             if let Value::List(first) = &args[list_indices[0]] {
@@ -2066,7 +2223,7 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
 /// Returns `Some(result)` when the value is not a condition or when the
 /// condition holds (the wrapped expression is evaluated), and `None` when the
 /// condition is definitely false, so the caller can try the next definition.
-fn resolve_body_condition(val: Value, env: &Env) -> Option<Value> {
+pub(crate) fn resolve_body_condition(val: Value, env: &Env) -> Option<Value> {
     if let Value::Pattern(Expr::PatternGuard { pattern, condition }) = &val {
         return match eval(condition, env) {
             Ok(Value::Bool(true)) => Some(eval(pattern, env).unwrap_or(val)),

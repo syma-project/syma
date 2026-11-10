@@ -121,28 +121,218 @@ fn hyper_pfq(a: &[f64], b: &[f64], z: f64) -> f64 {
     }
 }
 
-/// Gauss hypergeometric `_2F_1(a, b; c; z)` using series plus Pfaff and
-/// linear transformations to bring the argument into the unit disk.
+/// True if `x` is a non-positive integer within tolerance.
+fn is_nonpos_int(x: f64) -> bool {
+    x <= 0.0 && (x - x.round()).abs() < 1e-12
+}
+
+/// Digamma `ψ(x) = d/dx ln Γ(x)` for real `x`, by recurrence plus the
+/// Bernoulli asymptotic series (accurate to ~1e-15).
+fn digamma_fn(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    while x < 8.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    result + x.ln()
+        - 0.5 * inv
+        - inv2
+            * (1.0 / 12.0
+                - inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0 - inv2 * (1.0 / 240.0 - inv2 / 132.0))))
+}
+
+/// `n!` for small non-negative integer `n`.
+fn factorial_small(n: u32) -> f64 {
+    let mut p = 1.0_f64;
+    for k in 2..=n {
+        p *= k as f64;
+    }
+    p
+}
+
+/// Gauss hypergeometric `_2F_1(a, b; c; z)` using the series plus Pfaff and
+/// linear transformations to bring the argument into the unit disk. Handles
+/// terminating series, `z = 1`, `z < 0` and `z` near `1` (where the direct
+/// series converges too slowly to be accurate).
 fn hyper_2f1(a: f64, b: f64, c: f64, z: f64) -> f64 {
-    if z.abs() < 1.0 {
+    if z == 0.0 {
+        return 1.0;
+    }
+    // A non-positive integer numerator terminates the series for every z.
+    if is_nonpos_int(a) || is_nonpos_int(b) {
         return hyper_pfq(&[a, b], &[c], z);
     }
     if z == 1.0 {
-        // Gauss summation, valid when c - a - b > 0.
-        return gamma_fn(c) * gamma_fn(c - a - b) / (gamma_fn(c - a) * gamma_fn(c - b));
+        let s = c - a - b;
+        if s > 1e-12 {
+            // Gauss summation, valid when c - a - b > 0.
+            return gamma_fn(c) * gamma_fn(s) / (gamma_fn(c - a) * gamma_fn(c - b));
+        }
+        if s.abs() <= 1e-9 {
+            // c = a + b: the series diverges logarithmically; report the sign.
+            let coeff = gamma_fn(c) / (gamma_fn(c - a) * gamma_fn(c - b));
+            return if coeff >= 0.0 {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+        }
+        return f64::NAN;
     }
     if z < 0.0 {
-        // Pfaff: 2F1(a,b;c;z) = (1-z)^-a 2F1(a, c-b; c; z/(z-1)).
+        // Pfaff: 2F1(a,b;c;z) = (1-z)^-a 2F1(a, c-b; c; z/(z-1));
+        // z/(z-1) lies in (0,1), so convergence is recovered.
         let w = z / (z - 1.0);
-        return (1.0 - z).powf(-a) * hyper_pfq(&[a, c - b], &[c], w);
+        return (1.0 - z).powf(-a) * hyper_2f1(a, c - b, c, w);
     }
-    // z > 1: use the linear transformation with argument 1 - z ∈ (-1, 0).
-    let w = 1.0 - z;
-    let front = gamma_fn(c) * gamma_fn(c - a - b) / (gamma_fn(c - a) * gamma_fn(c - b));
-    let second =
-        gamma_fn(c) * gamma_fn(a + b - c) / (gamma_fn(a) * gamma_fn(b)) * (1.0 - z).powf(c - a - b);
-    front * hyper_pfq(&[a, b], &[a + b - c + 1.0], w)
-        + second * hyper_pfq(&[c - a, c - b], &[c - a - b + 1.0], w)
+    if z <= 0.9 {
+        return hyper_pfq(&[a, b], &[c], z);
+    }
+    if z < 1.0 {
+        return hyper_2f1_near_one(a, b, c, z);
+    }
+    // z > 1: linear transformation to argument 1 - z (real for integer c-a-b).
+    let s = c - a - b;
+    let y = 1.0 - z;
+    let front = gamma_fn(c) * gamma_fn(s) / (gamma_fn(c - a) * gamma_fn(c - b));
+    let second = gamma_fn(c) * gamma_fn(-s) / (gamma_fn(a) * gamma_fn(b));
+    front * hyper_pfq(&[a, b], &[1.0 - s], y)
+        + second * y.powf(s) * hyper_pfq(&[c - a, c - b], &[1.0 + s], y)
+}
+
+/// `_2F_1(a,b;c;z)` for `0.9 < z < 1`, where the direct series is slow.
+///
+/// When `c - a - b` is an integer the limiting (possibly logarithmic) formula
+/// DLMF 15.8.10/15.8.12 is used; otherwise the standard linear transformation
+/// with argument `1 - z` is applied.
+fn hyper_2f1_near_one(a: f64, b: f64, c: f64, z: f64) -> f64 {
+    if is_nonpos_int(a) || is_nonpos_int(b) {
+        return hyper_pfq(&[a, b], &[c], z);
+    }
+    let s = c - a - b;
+    let m = s.round();
+    if (s - m).abs() < 1e-9 {
+        if (0.0..60.0).contains(&m) {
+            return hyper_2f1_int(a, b, m as u32, z);
+        }
+        if m < 0.0 {
+            // DLMF 15.8.12: reduce to the non-negative integer case.
+            let mm = (-m) as u32;
+            return (1.0 - z).powf(s) * hyper_2f1_int(a + s, b + s, mm, z);
+        }
+    }
+    // Otherwise apply (Erdelyi) with argument 1 - z; the two series converge
+    // quickly since |1 - z| is small.
+    let y = 1.0 - z;
+    let t1 = gamma_fn(c) * gamma_fn(s) / (gamma_fn(c - a) * gamma_fn(c - b))
+        * hyper_pfq(&[a, b], &[1.0 - s], y);
+    let t2 = gamma_fn(c) * gamma_fn(-s) / (gamma_fn(a) * gamma_fn(b))
+        * y.powf(s)
+        * hyper_pfq(&[c - a, c - b], &[1.0 + s], y);
+    t1 + t2
+}
+
+/// DLMF 15.8.10: `_2F_1(a, b; a+b+m; z)` for integer `m ≥ 0`, `|z-1| < 1`.
+fn hyper_2f1_int(a: f64, b: f64, m: u32, z: f64) -> f64 {
+    if is_nonpos_int(a) || is_nonpos_int(b) {
+        return hyper_pfq(&[a, b], &[a + b + m as f64], z);
+    }
+    let c = a + b + m as f64;
+    let mf = m as f64;
+    let y = 1.0 - z;
+    if m == 0 {
+        // Logarithmic case c = a + b.
+        let pref = gamma_fn(c) / (gamma_fn(a) * gamma_fn(b));
+        let mut acc = 0.0_f64;
+        let mut t = 1.0_f64;
+        for k in 0..400_000u32 {
+            let kf = k as f64;
+            let bracket =
+                2.0 * digamma_fn(kf + 1.0) - digamma_fn(a + kf) - digamma_fn(b + kf) - y.ln();
+            acc += t * bracket;
+            t *= (a + kf) * (b + kf) / ((kf + 1.0) * (kf + 1.0)) * y;
+            if (t * bracket).abs() < 1e-18 * acc.abs().max(1e-300) {
+                break;
+            }
+        }
+        return pref * acc;
+    }
+    // Finite polynomial part.
+    let pref1 = gamma_fn(c) / (gamma_fn(a + mf) * gamma_fn(b + mf));
+    let mut acc1 = 0.0_f64;
+    for k in 0..m {
+        acc1 += rising(a, k) * rising(b, k) * factorial_small(m - k - 1) / factorial_small(k)
+            * (z - 1.0).powi(k as i32);
+    }
+    acc1 *= pref1;
+    // Logarithmic tail.
+    let pref2 = gamma_fn(c) / (gamma_fn(a) * gamma_fn(b));
+    let mut acc2 = 0.0_f64;
+    let mut t = 1.0 / factorial_small(m);
+    for n in 0..800_000u32 {
+        let nf = n as f64;
+        let bracket = y.ln() - digamma_fn(nf + 1.0) - digamma_fn(nf + mf + 1.0)
+            + digamma_fn(a + nf + mf)
+            + digamma_fn(b + nf + mf);
+        acc2 += t * bracket;
+        t *= (a + mf + nf) * (b + mf + nf) / ((nf + 1.0) * (nf + mf + 1.0)) * y;
+        if (t * bracket).abs() < 1e-18 * acc2.abs().max(1e-300) {
+            break;
+        }
+    }
+    acc1 - pref2 * (z - 1.0).powi(m as i32) * acc2
+}
+
+/// Asymptotic series `Σ (p)_n (q)_n / n! x^{-n}` used by the large-`|z|`
+/// confluent expansion (DLMF 13.5.1).
+fn asym_series(p: f64, q: f64, x: f64) -> f64 {
+    let mut sum = 1.0_f64;
+    let mut term = 1.0_f64;
+    for n in 1..=40u32 {
+        let nf = (n - 1) as f64;
+        term *= (p + nf) * (q + nf) / (n as f64) / x;
+        sum += term;
+        if term.abs() < 1e-18 * sum.abs().max(1e-300) {
+            break;
+        }
+        if term.abs() > 1e15 {
+            break;
+        }
+    }
+    sum
+}
+
+/// `_1F_1(a;b;z)` evaluated with Kummer's transformation for `z < 0` (which
+/// avoids the catastrophic cancellation of the alternating series) and a
+/// large-`|z|` asymptotic fallback.
+fn confluent_1f1(a: f64, b: f64, z: f64) -> f64 {
+    if z >= 0.0 {
+        return hyper_pfq(&[a], &[b], z);
+    }
+    let k = z.exp() * hyper_pfq(&[b - a], &[b], -z);
+    if k.is_finite() {
+        k
+    } else {
+        hyper_1f1_asym(a, b, z)
+    }
+}
+
+/// Large-`|z|` asymptotic evaluation of `_1F_1(a;b;z)` for real `z`.
+///
+/// For `z < 0` Kummer's transformation is combined with the dominant
+/// exponential so that `e^{z}` and `e^{-z}` need not both be finite.
+fn hyper_1f1_asym(a: f64, b: f64, z: f64) -> f64 {
+    if z >= 0.0 {
+        let first =
+            gamma_fn(b) / gamma_fn(a) * z.exp() * z.powf(a - b) * asym_series(b - a, 1.0 - a, z);
+        let second = gamma_fn(b) / gamma_fn(b - a) * z.powf(-a) * asym_series(a, 1.0 + a - b, -z);
+        first + second
+    } else {
+        let t = -z;
+        gamma_fn(b) / gamma_fn(b - a) * t.powf(-a) * asym_series(a, 1.0 + a - b, t)
+    }
 }
 
 // ── Complex arithmetic helpers (for Riemann–Siegel / Kelvin) ────────────────
@@ -344,8 +534,10 @@ pub fn builtin_hypergeometric_1f1(args: &[Value]) -> Result<Value, EvalError> {
     if z == 0.0 {
         return Ok(Value::Integer(rug::Integer::from(1)));
     }
-    // b a non-positive integer is a degenerate case; handle the common branch.
-    let v = hyper_pfq(&[a], &[b], z);
+    // For z < 0 the plain series suffers catastrophic cancellation; Kummer's
+    // transformation 1F1(a;b;z) = e^z 1F1(b-a;b;-z) evaluates the same value
+    // with positive argument instead.
+    let v = confluent_1f1(a, b, z);
     if v.is_finite() {
         Ok(super::real(v))
     } else {
@@ -385,7 +577,11 @@ pub fn builtin_hypergeometric_pfq(args: &[Value]) -> Result<Value, EvalError> {
     ) else {
         return Ok(unevaluated("HypergeometricPFQ", args));
     };
-    let v = hyper_pfq(&a, &b, z);
+    let v = if a.len() == 1 && b.len() == 1 {
+        confluent_1f1(a[0], b[0], z)
+    } else {
+        hyper_pfq(&a, &b, z)
+    };
     if v.is_finite() {
         Ok(super::real(v))
     } else {
@@ -408,7 +604,12 @@ pub fn builtin_hypergeometric_pfq_regularized(args: &[Value]) -> Result<Value, E
     for &bj in &b {
         denom *= gamma_fn(bj);
     }
-    let v = hyper_pfq(&a, &b, z) / denom;
+    let base = if a.len() == 1 && b.len() == 1 {
+        confluent_1f1(a[0], b[0], z)
+    } else {
+        hyper_pfq(&a, &b, z)
+    };
+    let v = base / denom;
     if v.is_finite() {
         Ok(super::real(v))
     } else {
@@ -1424,6 +1625,81 @@ mod tests {
     }
 
     #[test]
+    fn test_2f1_near_one() {
+        // 2F1(1,1;2;z) = -ln(1-z)/z, accurate right up to z = 1.
+        for &z in &[0.9_f64, 0.99, 0.999_999, 0.999_999_9] {
+            close(
+                &builtin_hypergeometric_2f1(&[i(1), i(1), i(2), r(z)]).unwrap(),
+                -(1.0 - z).ln() / z,
+                1e-8 * (1.0 / (1.0 - z)).max(1.0),
+            );
+        }
+        // Degenerate denominator c = a + b reduces to 1/(1-z).
+        close(
+            &builtin_hypergeometric_2f1(&[i(1), i(1), i(1), r(0.9)]).unwrap(),
+            10.0,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_2f1_c_eq_a_plus_b_is_infinite_at_one() {
+        // c = a + b -> logarithmic divergence at z = 1.
+        assert_eq!(hyper_2f1(1.0, 1.0, 2.0, 1.0), f64::INFINITY);
+        assert_eq!(hyper_2f1(2.0, 3.0, 5.0, 1.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_2f1_terminating_and_noninteger_s() {
+        // Terminating series: 2F1(-2,1;1;z) = (1 - z)^2.
+        for &z in &[-3.0_f64, 0.5, 2.5] {
+            close(
+                &builtin_hypergeometric_2f1(&[i(-2), i(1), i(1), r(z)]).unwrap(),
+                (1.0 - z).powi(2),
+                1e-10,
+            );
+        }
+        // Non-integer c-a-b near z = 1 should match the direct series.
+        let (a, b, c, z) = (1.3, 2.1, 4.6, 0.95);
+        close(
+            &builtin_hypergeometric_2f1(&[r(a), r(b), r(c), r(z)]).unwrap(),
+            hyper_pfq(&[a, b], &[c], z),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_1f1_negative_argument_accuracy() {
+        // 1F1(1;2;z) = (e^z - 1)/z; the alternating series must not lose the
+        // small result to cancellation.
+        for &z in &[-1.0_f64, -10.0, -50.0, -100.0] {
+            close(
+                &builtin_hypergeometric_1f1(&[i(1), i(2), r(z)]).unwrap(),
+                (z.exp() - 1.0) / z,
+                1e-12 * ((z.exp() - 1.0) / z).abs().max(1.0),
+            );
+        }
+        // Large negative argument via the asymptotic expansion.
+        close(
+            &builtin_hypergeometric_1f1(&[i(1), i(2), r(-1000.0)]).unwrap(),
+            0.001,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn test_digamma() {
+        // ψ(1) = -γ, ψ(2) = 1 - γ, ψ(1/2) = -γ - 2 ln 2.
+        close(&r(digamma_fn(1.0)), -EULER_GAMMA, 1e-12);
+        close(&r(digamma_fn(2.0)), 1.0 - EULER_GAMMA, 1e-12);
+        close(
+            &r(digamma_fn(0.5)),
+            -EULER_GAMMA - 2.0 * std::f64::consts::LN_2,
+            1e-12,
+        );
+    }
+
+    #[test]
     fn test_pfq() {
         // 0F0(; ; z) = e^z.
         close(
@@ -1436,6 +1712,12 @@ mod tests {
             &builtin_hypergeometric_pfq(&[lst(&[1.0]), lst(&[]), r(0.5)]).unwrap(),
             2.0,
             1e-9,
+        );
+        // Confluent case with negative z avoids cancellation: 1F1(1;2;-100).
+        close(
+            &builtin_hypergeometric_pfq(&[lst(&[1.0]), lst(&[2.0]), i(-100)]).unwrap(),
+            0.01,
+            1e-12,
         );
     }
 

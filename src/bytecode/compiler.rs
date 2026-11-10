@@ -5,6 +5,7 @@
 /// a `Call` instruction that delegates to the tree-walk evaluator.
 ///
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use rug::Integer;
 
@@ -135,6 +136,17 @@ impl ConstPool {
     }
 }
 
+/// Compile-time context for an enclosing loop, used to lower `Break`/`Continue`
+/// into jumps instead of letting them escape as `EvalError`s.
+#[derive(Default)]
+struct LoopCtx {
+    /// Indices of placeholder jumps emitted for `Break`, patched to loop end.
+    break_jumps: Vec<usize>,
+    /// Indices of placeholder jumps emitted for `Continue`, patched to the
+    /// loop's continue point (condition for `While`, step for `For`).
+    continue_jumps: Vec<usize>,
+}
+
 // ── BytecodeCompiler ───────────────────────────────────────────────────────────
 
 pub struct BytecodeCompiler {
@@ -144,6 +156,11 @@ pub struct BytecodeCompiler {
     symbol_cache: HashMap<String, u32>,
     /// Maps parameter names to their register numbers.
     param_regs: HashMap<String, u16>,
+    /// Names of sequence parameters (whose register holds a `List`, not a
+    /// single argument); excluded from environment re-synchronisation.
+    seq_params: HashSet<String>,
+    /// Stack of enclosing loops (innermost last).
+    loops: Vec<LoopCtx>,
 }
 
 impl Default for BytecodeCompiler {
@@ -160,6 +177,8 @@ impl BytecodeCompiler {
             pool: ConstPool::new(),
             symbol_cache: HashMap::new(),
             param_regs: HashMap::new(),
+            seq_params: HashSet::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -198,6 +217,7 @@ impl BytecodeCompiler {
             ));
         }
         let mut c = Self::new();
+        let mut param_names: Vec<String> = Vec::with_capacity(params.len());
 
         for (i, param) in params.iter().enumerate() {
             let reg = c.regs.alloc()?;
@@ -207,8 +227,11 @@ impl BytecodeCompiler {
                 // Simple blanks always match
                 Expr::NamedBlank { name, .. } => {
                     c.param_regs.insert(name.clone(), reg);
+                    param_names.push(name.clone());
                 }
-                Expr::Blank { .. } => {}
+                Expr::Blank { .. } => {
+                    param_names.push(String::new());
+                }
                 // Sequence: collect remaining args into a list
                 Expr::BlankSequence {
                     name: Some(name), ..
@@ -219,6 +242,8 @@ impl BytecodeCompiler {
                     let seq_reg = c.regs.alloc()?;
                     c.emit(Instruction::MakeSeq(seq_reg, i as u16));
                     c.param_regs.insert(name.clone(), seq_reg);
+                    c.seq_params.insert(name.clone());
+                    param_names.push(name.clone());
                 }
                 // Complex patterns — fall back to tree-walk
                 _ => {
@@ -237,6 +262,7 @@ impl BytecodeCompiler {
             constants: c.pool.entries,
             nregs: c.regs.used(),
             nparams: params.len() as u8,
+            param_names,
         })
     }
 
@@ -413,11 +439,12 @@ impl BytecodeCompiler {
                 })
             }
             // ── Function constructor ──
+            // NB: `body` is the function's body expression, not the whole
+            // `Function[...]` node. The environment is captured lazily at the
+            // call site (`env: None`), which resolves to the callee's local
+            // scope (see `execute_bytecode`).
             Expr::Function { params, body } => self.emit_const(Value::PureFunction {
-                body: Expr::Function {
-                    params: params.clone(),
-                    body: body.clone(),
-                },
+                body: *body.clone(),
                 slot_count: params.len(),
                 params: params.clone(),
                 env: None,
@@ -469,7 +496,7 @@ impl BytecodeCompiler {
                 type_constraint: type_constraint.clone(),
                 default_value: default_value.clone(),
             })),
-            // ── Match (desugar to ReplaceAll) ──
+            // ── Match (desugar to Replace, which matches at the top level) ──
             Expr::Match { expr, branches } => {
                 let rules_list = Expr::List(
                     branches
@@ -481,7 +508,7 @@ impl BytecodeCompiler {
                         .collect(),
                 );
                 self.compile_expr(&Expr::Call {
-                    head: Box::new(Expr::Symbol("ReplaceAll".to_string())),
+                    head: Box::new(Expr::Symbol("Replace".to_string())),
                     args: vec![*expr.clone(), rules_list],
                 })
             }
@@ -522,6 +549,84 @@ impl BytecodeCompiler {
                 "call with more than 255 arguments".to_string(),
             ));
         }
+        // `Return[expr]` exits the enclosing function. Lower it to the function
+        // return so nested compiled calls return only from the inner function.
+        if let Expr::Symbol(name) = head
+            && name == "Return"
+            && args.len() <= 1
+        {
+            let reg = match args.first() {
+                Some(val) => self.compile_expr(val)?,
+                None => {
+                    let dst = self.regs.alloc()?;
+                    self.emit(Instruction::LoadNull(dst));
+                    dst
+                }
+            };
+            self.emit(Instruction::Return(reg));
+            return Ok(reg);
+        }
+
+        // `Break[]` / `Continue[]`: lower to jumps when a compiled loop encloses
+        // them, otherwise propagate the error to an outer (tree-walk) loop.
+        if args.is_empty()
+            && let Expr::Symbol(name) = head
+            && matches!(name.as_str(), "Break" | "Continue")
+        {
+            if self.loops.is_empty() {
+                self.emit(if name == "Break" {
+                    Instruction::Break
+                } else {
+                    Instruction::Continue
+                });
+            } else {
+                let jump = self.emit(Instruction::Jump(0));
+                let ctx = self.loops.last_mut().expect("loop context");
+                if name == "Break" {
+                    ctx.break_jumps.push(jump);
+                } else {
+                    ctx.continue_jumps.push(jump);
+                }
+            }
+            // The value is never observed (control transfers away), but return a
+            // valid register so callers have something to reference.
+            let dst = self.regs.alloc()?;
+            self.emit(Instruction::LoadNull(dst));
+            return Ok(dst);
+        }
+
+        // `Catch[body, ...]` is a special form with no registered builtin whose
+        // `Throw` handling escapes the instruction stream. Evaluate it (and its
+        // body) through the tree-walk evaluator, which resolves parameters from
+        // the call's local scope.
+        if let Expr::Symbol(name) = head
+            && name == "Catch"
+            && (1..=3).contains(&args.len())
+        {
+            let expr = Expr::Call {
+                head: Box::new(head.clone()),
+                args: args.to_vec(),
+            };
+            let dst = self.regs.alloc()?;
+            let idx = self.pool.insert(Value::Pattern(expr));
+            self.emit(Instruction::EvalTree(dst, idx));
+            // The tree-walk may have assigned to a parameter (via
+            // `set_propagate` in the local scope); reload parameter registers so
+            // later bytecode reads observe the new values.
+            self.resync_params();
+            return Ok(dst);
+        }
+
+        // `And`/`Or` with two operands: skip evaluating the second operand when
+        // the first is the deciding literal (`False` for And, `True` for Or),
+        // matching the `HoldAll` tree-walk builtins' short-circuit.
+        if args.len() == 2
+            && let Expr::Symbol(name) = head
+            && matches!(name.as_str(), "And" | "Or")
+        {
+            return self.compile_short_logic(name, &args[0], &args[1]);
+        }
+
         // Try inline arithmetic for known binary ops
         if let Expr::Symbol(name) = head
             && let Some(instr) = self.try_inline_arithmetic(name, args)?
@@ -701,6 +806,49 @@ impl BytecodeCompiler {
         Ok(Some(dst))
     }
 
+    /// Compile a two-operand `And`/`Or`, short-circuiting evaluation of the
+    /// second operand when the first is the deciding literal. The result value
+    /// matches `builtin_and`/`builtin_or` (see `and_values`/`or_values`).
+    fn compile_short_logic(
+        &mut self,
+        name: &str,
+        first: &Expr,
+        second: &Expr,
+    ) -> Result<u16, CompileError> {
+        let is_and = name == "And";
+        let dst = self.regs.alloc()?;
+        let decider = self.regs.alloc()?;
+        self.emit(if is_and {
+            Instruction::LoadFalse(decider)
+        } else {
+            Instruction::LoadTrue(decider)
+        });
+
+        let first_reg = self.compile_expr(first)?;
+        let cmp = self.regs.alloc()?;
+        self.emit(Instruction::Eq(cmp, first_reg, decider));
+        let short_circuit = self.emit(Instruction::JumpIfNotZero(cmp, 0));
+        self.regs._free(cmp);
+
+        let second_reg = self.compile_expr(second)?;
+        self.emit(if is_and {
+            Instruction::And(dst, first_reg, second_reg)
+        } else {
+            Instruction::Or(dst, first_reg, second_reg)
+        });
+        let skip_short_circuit = self.emit(Instruction::Jump(0));
+
+        // Short-circuit path: the result is the deciding literal itself.
+        self.patch_jump(short_circuit, self.code.len() as i32);
+        self.emit(Instruction::Mov(dst, first_reg));
+        self.patch_jump(skip_short_circuit, self.code.len() as i32);
+
+        self.regs._free(first_reg);
+        self.regs._free(second_reg);
+        self.regs._free(decider);
+        Ok(dst)
+    }
+
     fn compile_if(
         &mut self,
         condition: &Expr,
@@ -748,6 +896,8 @@ impl BytecodeCompiler {
 
     fn compile_while(&mut self, condition: &Expr, body: &Expr) -> Result<u16, CompileError> {
         let loop_start = self.code.len() as i32;
+        self.loops.push(LoopCtx::default());
+
         let cond_reg = self.compile_expr(condition)?;
         let exit_jz = self.emit(Instruction::JumpIfZero(cond_reg, 0));
         self.regs._free(cond_reg);
@@ -757,7 +907,16 @@ impl BytecodeCompiler {
         let jump_back = self.code.len();
         self.emit(Instruction::Jump(loop_start - jump_back as i32 - 1));
 
-        self.patch_jump(exit_jz, self.code.len() as i32);
+        let ctx = self.loops.pop().expect("loop context");
+        let loop_end = self.code.len() as i32;
+        for jump in ctx.continue_jumps {
+            self.patch_jump(jump, loop_start);
+        }
+        for jump in ctx.break_jumps {
+            self.patch_jump(jump, loop_end);
+        }
+
+        self.patch_jump(exit_jz, loop_end);
         let dst = self.regs.alloc()?;
         self.emit(Instruction::LoadNull(dst));
         Ok(dst)
@@ -837,11 +996,15 @@ impl BytecodeCompiler {
                 let val_reg = self.compile_expr(rhs)?;
                 let sym_idx = self.symbol_idx(name);
                 self.emit(Instruction::StoreSym(sym_idx, val_reg));
-                self.regs._free(val_reg);
-                // Assignments return Null
-                let dst = self.regs.alloc()?;
-                self.emit(Instruction::LoadNull(dst));
-                Ok(dst)
+                // If the target is a parameter, its reads are normally lowered to
+                // its parameter register, so keep that register in sync too.
+                if let Some(&param_reg) = self.param_regs.get(name.as_str())
+                    && param_reg != val_reg
+                {
+                    self.emit(Instruction::Mov(param_reg, val_reg));
+                }
+                // `Set` evaluates to the assigned value (matching `eval_assign`).
+                Ok(val_reg)
             }
             _ => Err(CompileError::UnsupportedFeature(format!(
                 "assignment target: {lhs:?}"
@@ -862,6 +1025,7 @@ impl BytecodeCompiler {
         self.regs._free(init_reg);
 
         let loop_start = self.code.len() as i32;
+        self.loops.push(LoopCtx::default());
 
         // Condition check
         let cond_reg = self.compile_expr(condition)?;
@@ -872,7 +1036,8 @@ impl BytecodeCompiler {
         let body_reg = self.compile_expr(body)?;
         self.regs._free(body_reg);
 
-        // Step (e.g., i = i + 1)
+        // Step (e.g., i = i + 1); `Continue` jumps here to run the step.
+        let step_start = self.code.len() as i32;
         let step_reg = self.compile_expr(step)?;
         self.regs._free(step_reg);
 
@@ -880,7 +1045,16 @@ impl BytecodeCompiler {
         let jump_back = self.code.len();
         self.emit(Instruction::Jump(loop_start - jump_back as i32 - 1));
 
-        self.patch_jump(exit_jz, self.code.len() as i32);
+        let ctx = self.loops.pop().expect("loop context");
+        let loop_end = self.code.len() as i32;
+        for jump in ctx.continue_jumps {
+            self.patch_jump(jump, step_start);
+        }
+        for jump in ctx.break_jumps {
+            self.patch_jump(jump, loop_end);
+        }
+
+        self.patch_jump(exit_jz, loop_end);
         let dst = self.regs.alloc()?;
         self.emit(Instruction::LoadNull(dst));
         Ok(dst)
@@ -972,56 +1146,49 @@ impl BytecodeCompiler {
     }
 
     /// Compile a Switch expression: Switch[expr, pat1, val1, pat2, val2, ...]
+    ///
+    /// Lowered to `Replace[expr, {pat1 -> val1, ..., _ -> Null}]`, which reuses
+    /// the tree-walk matcher so that pattern cases (blanks, guards, bindings)
+    /// behave exactly like `eval`'s `Expr::Switch`. A trailing catch-all yields
+    /// `Null` when no case matches.
     fn compile_switch(&mut self, expr: &Expr, cases: &[(Expr, Expr)]) -> Result<u16, CompileError> {
-        let switch_reg = self.compile_expr(expr)?;
-        let result_reg = self.regs.alloc()?;
-        let mut next_labels = Vec::new();
-        let mut end_jumps = Vec::new();
+        let mut rules: Vec<Expr> = cases
+            .iter()
+            .map(|(pat, val)| Expr::Rule {
+                lhs: Box::new(pat.clone()),
+                rhs: Box::new(val.clone()),
+            })
+            .collect();
+        rules.push(Expr::Rule {
+            lhs: Box::new(Expr::Blank {
+                type_constraint: None,
+            }),
+            rhs: Box::new(Expr::Null),
+        });
+        self.compile_expr(&Expr::Call {
+            head: Box::new(Expr::Symbol("Replace".to_string())),
+            args: vec![expr.clone(), Expr::List(rules)],
+        })
+    }
 
-        for (i, (pat, val)) in cases.iter().enumerate() {
-            let pat_reg = self.compile_expr(pat)?;
-
-            // Compare switch value with pattern
-            let cmp_reg = self.regs.alloc()?;
-            self.emit(Instruction::Eq(cmp_reg, switch_reg, pat_reg));
-            self.regs._free(pat_reg);
-
-            let next_label = self.emit(Instruction::JumpIfZero(cmp_reg, 0));
-            self.regs._free(cmp_reg);
-
-            let val_reg = self.compile_expr(val)?;
-            if val_reg != result_reg {
-                self.emit(Instruction::Mov(result_reg, val_reg));
+    /// Reload named parameter registers from the local environment.
+    ///
+    /// Used after an `EvalTree` escape (e.g. `Catch`) that may have mutated a
+    /// parameter binding through the tree-walk evaluator, keeping the fast
+    /// parameter-register reads consistent with the environment.
+    fn resync_params(&mut self) {
+        let pairs: Vec<(String, u16)> = self
+            .param_regs
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        for (name, reg) in pairs {
+            if self.seq_params.contains(&name) {
+                continue;
             }
-            self.regs._free(val_reg);
-
-            // Every case needs a Jump past the LoadNull so a matched value is
-            // not overwritten by the "no match" result.
-            let end_jump = self.emit(Instruction::Jump(0));
-            if i < cases.len() - 1 {
-                next_labels.push(next_label);
-                end_jumps.push(end_jump);
-            } else {
-                // Last case: JumpIfZero goes to the LoadNull (no match).
-                self.patch_jump(next_label, self.code.len() as i32);
-                end_jumps.push(end_jump);
-            }
+            let idx = self.symbol_idx(&name);
+            self.emit(Instruction::LoadSym(reg, idx));
         }
-
-        // No match — return Null
-        self.emit(Instruction::LoadNull(result_reg));
-
-        for (&next_label, &end_jump) in next_labels.iter().zip(end_jumps.iter()) {
-            // JumpIfZero → instruction past the corresponding Jump(end)
-            self.patch_jump(next_label, end_jump as i32 + 1);
-        }
-        for &end_jump in &end_jumps {
-            // Jump(end) → past LoadNull
-            self.patch_jump(end_jump, self.code.len() as i32);
-        }
-
-        self.regs._free(switch_reg);
-        Ok(result_reg)
     }
 
     fn symbol_idx(&mut self, name: &str) -> u32 {
@@ -1478,17 +1645,12 @@ mod tests {
             }],
             body,
         );
+        // Switch lowers to `Replace[expr, {rule, ..., _ -> Null}]`.
         assert!(
             bc.instructions
                 .iter()
-                .any(|i| matches!(i, Instruction::Eq(..))),
-            "Switch should contain Eq"
-        );
-        assert!(
-            bc.instructions
-                .iter()
-                .any(|i| matches!(i, Instruction::JumpIfZero(..))),
-            "Switch should contain JumpIfZero"
+                .any(|i| matches!(i, Instruction::Apply(..))),
+            "Switch should delegate to Replace via Apply"
         );
     }
 

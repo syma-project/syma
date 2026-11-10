@@ -211,6 +211,19 @@ impl JitHelpers {
 /// Returns `(function_pointer, allocation_size)` on success.
 /// The allocation_size is needed for proper deallocation via `JitModule`.
 pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), JitCompileError> {
+    // These instructions have no dedicated native lowering yet; failing
+    // compilation makes the caller fall back to the bytecode interpreter.
+    for instr in &bc.instructions {
+        if matches!(
+            instr,
+            Instruction::Break | Instruction::Continue | Instruction::EvalTree(..)
+        ) {
+            return Err(JitCompileError::UnsupportedInstruction(format!(
+                "{instr:?}"
+            )));
+        }
+    }
+
     // ── Set up target ISA ──────────────────────────────────────────
     let triple = Triple::host();
     let isa = isa::lookup(triple)
@@ -647,6 +660,9 @@ fn emit_op(builder: &mut FunctionBuilder, instr: &Instruction, ctx: ir::Value, h
         | Instruction::JumpIfNotZero(..) => {
             // Should not be reached — these are handled as terminators.
         }
+
+        // Not lowered to native helpers; `compile` rejects these up front.
+        Instruction::Break | Instruction::Continue | Instruction::EvalTree(..) => {}
     }
 }
 
@@ -844,6 +860,7 @@ mod tests {
             constants: vec![Value::Integer(10.into()), Value::Integer(20.into())],
             nregs: 3,
             nparams: 0,
+            param_names: vec![],
         };
         let Some((ptr, size)) = build(&bc) else {
             return;
@@ -867,6 +884,7 @@ mod tests {
             constants: vec![Value::Symbol("x".into())],
             nregs: 1,
             nparams: 0,
+            param_names: vec![],
         };
         let Some((ptr, size)) = build(&bc) else {
             return;
@@ -927,6 +945,7 @@ mod tests {
             constants: vec![Value::Integer(1.into()), Value::Integer(2.into())],
             nregs: 1,
             nparams: 0,
+            param_names: vec![],
         };
         let Some((ptr, size)) = build(&bc) else {
             return;

@@ -129,4 +129,40 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn test_reset_clears_hotness() {
+        Profiler::reset("reset_hot_fn");
+        for _ in 0..100 {
+            Profiler::count_call("reset_hot_fn");
+        }
+        assert!(Profiler::check_hot("reset_hot_fn"));
+        Profiler::reset("reset_hot_fn");
+        assert!(!Profiler::check_hot("reset_hot_fn"));
+        assert_eq!(
+            Profiler::get_or_create("reset_hot_fn")
+                .call_count
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_is_stable() {
+        let a = Profiler::get_or_create("stable_fn") as *const FunctionProfiler;
+        let b = Profiler::get_or_create("stable_fn") as *const FunctionProfiler;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_count_call_returns_increasing_values() {
+        Profiler::reset("increasing_fn");
+        let mut last = 0;
+        for _ in 0..5 {
+            let n = Profiler::count_call("increasing_fn");
+            assert!(n > last);
+            last = n;
+        }
+        assert_eq!(last, 5);
+    }
 }

@@ -8,13 +8,13 @@
 /// responses.
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 thread_local! {
     static MESSAGE_BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
-static MESSAGES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+static MESSAGES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 /// Run `f` with a message buffer active. Messages emitted during `f` are
 /// collected into the returned `Vec` instead of printed to stderr.
@@ -31,40 +31,59 @@ pub fn with_buffer<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     })
 }
 
-fn registry() -> &'static Mutex<HashMap<&'static str, &'static str>> {
+fn registry() -> &'static Mutex<HashMap<String, String>> {
     MESSAGES.get_or_init(|| {
-        let mut m: HashMap<&'static str, &'static str> = HashMap::new();
+        let mut m: HashMap<String, String> = HashMap::new();
 
         // Power messages
-        m.insert("Power::infy", "Infinite expression `1` encountered.");
+        m.insert(
+            "Power::infy".to_string(),
+            "Infinite expression `1` encountered.".to_string(),
+        );
 
         // Infinity messages
         m.insert(
-            "Infinity::indet",
-            "Indeterminate expression `1` encountered.",
+            "Infinity::indet".to_string(),
+            "Indeterminate expression `1` encountered.".to_string(),
         );
 
         // General numeric messages
-        m.insert("General::zero", "The argument `1` should be nonzero.");
+        m.insert(
+            "General::zero".to_string(),
+            "The argument `1` should be nonzero.".to_string(),
+        );
 
         // Image messages
         m.insert(
-            "Image::imgarray",
-            "The specified argument `1` should be an array of rank 2 or 3 with machine-sized numbers.",
+            "Image::imgarray".to_string(),
+            "The specified argument `1` should be an array of rank 2 or 3 with machine-sized numbers."
+                .to_string(),
+        );
+
+        // Formatting messages
+        m.insert(
+            "StringForm::sfr".to_string(),
+            "StringForm: item `1` is out of range.".to_string(),
         );
 
         Mutex::new(m)
     })
 }
 
+/// Lock the registry, recovering from a poisoned mutex rather than panicking
+/// so a single panicking thread cannot disable the message system.
+fn lock_registry() -> MutexGuard<'static, HashMap<String, String>> {
+    registry().lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Look up the template for a message tag (e.g. `"Power::infy"`).
 pub fn get_template(tag: &str) -> Option<String> {
-    registry().lock().unwrap().get(tag).map(|s| s.to_string())
+    lock_registry().get(tag).cloned()
 }
 
 /// Register a user-defined message template.
-pub fn set_template(tag: &'static str, template: &'static str) {
-    registry().lock().unwrap().insert(tag, template);
+pub fn set_template(tag: impl Into<String>, template: impl Into<String>) {
+    lock_registry().insert(tag.into(), template.into());
 }
 
 /// Format a message template by substituting positional args.
@@ -133,7 +152,7 @@ pub fn emit(tag: &str, args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_message;
+    use super::{emit, format_message, get_template, set_template, with_buffer};
 
     #[test]
     fn test_format_message_positional() {
@@ -153,5 +172,77 @@ mod tests {
     fn test_format_message_leaves_unknown_placeholder() {
         let out = format_message("`1` `3`", &["a".to_string()]);
         assert_eq!(out, "a `3`");
+    }
+
+    #[test]
+    fn test_format_message_two_digit_index() {
+        let args: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        assert_eq!(format_message("`1`..`10`", &args), "1..10");
+    }
+
+    #[test]
+    fn test_format_message_adjacent_slots() {
+        let out = format_message("`1``2`", &["a".to_string(), "b".to_string()]);
+        assert_eq!(out, "ab");
+    }
+
+    #[test]
+    fn test_format_message_empty_template() {
+        assert_eq!(format_message("", &["a".to_string()]), "");
+    }
+
+    #[test]
+    fn test_format_message_unicode_around_slot() {
+        let out = format_message("\u{ab}`1`\u{bb}", &["\u{3b1}\u{3b2}".to_string()]);
+        assert_eq!(out, "\u{ab}\u{3b1}\u{3b2}\u{bb}");
+    }
+
+    #[test]
+    fn test_format_message_unterminated_slot() {
+        assert_eq!(format_message("`1", &["a".to_string()]), "`1");
+    }
+
+    #[test]
+    fn test_format_message_index_zero_is_out_of_range() {
+        // `0` is not a valid slot (slots are 1-based); it is left verbatim.
+        assert_eq!(format_message("`0` `1`", &["a".to_string()]), "`0` a");
+    }
+
+    #[test]
+    fn test_set_and_get_template() {
+        set_template("Foo::bar", "x = `1`");
+        assert_eq!(get_template("Foo::bar").as_deref(), Some("x = `1`"));
+        assert_eq!(get_template("Nope::none"), None);
+    }
+
+    #[test]
+    fn test_with_buffer_collects_and_restores() {
+        let ((), msgs) = with_buffer(|| {
+            emit("Power::infy", &["1/0".to_string()]);
+        });
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].starts_with("Power::infy: "), "got: {}", msgs[0]);
+        assert!(msgs[0].contains("Infinite"));
+        // Buffer restored afterwards: this must not panic and goes to stderr.
+        emit("General::zero", &["0".to_string()]);
+    }
+
+    #[test]
+    fn test_with_buffer_nested() {
+        let (inner_result, outer_msgs) = with_buffer(|| {
+            let ((), inner) = with_buffer(|| emit("General::zero", &["0".to_string()]));
+            emit("Power::infy", &["1/0".to_string()]);
+            inner
+        });
+        assert_eq!(outer_msgs.len(), 1);
+        assert!(outer_msgs[0].starts_with("Power::infy: "));
+        assert_eq!(inner_result.len(), 1);
+        assert!(inner_result[0].starts_with("General::zero: "));
+    }
+
+    #[test]
+    fn test_emit_unknown_tag_joins_args() {
+        let ((), msgs) = with_buffer(|| emit("Nope::tag", &["a".to_string(), "b".to_string()]));
+        assert_eq!(msgs, vec!["Nope::tag: a, b".to_string()]);
     }
 }

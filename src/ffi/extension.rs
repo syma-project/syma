@@ -60,7 +60,17 @@ pub type SymaBuiltinFn = unsafe extern "C" fn(
 
 /// Load a Syma extension from a dynamic library and register its builtins.
 pub fn load_extension(path: &str, env: &Env) -> Result<(), EvalError> {
-    let handle = lib_open(path).map_err(|e| EvalError::FfiError(format!("LoadExtension: {e}")))?;
+    // Re-use an already-opened handle so loading the same extension twice does
+    // not leave the library opened more than once.
+    let handle = match env.get_native_lib(path) {
+        Some(handle) => handle,
+        None => {
+            let handle =
+                lib_open(path).map_err(|e| EvalError::FfiError(format!("LoadExtension: {e}")))?;
+            env.register_native_lib(path.to_string(), handle.clone());
+            handle
+        }
+    };
 
     let init_ptr = lib_sym(&handle, "syma_init").ok_or_else(|| {
         EvalError::FfiError(format!(
@@ -88,9 +98,6 @@ pub fn load_extension(path: &str, env: &Env) -> Result<(), EvalError> {
 
     // Reclaim the boxed env to avoid a leak.
     let _ = unsafe { Box::from_raw(ctx.env_opaque as *mut Env) };
-
-    // Store the handle in the registry so it stays live.
-    env.register_native_lib(path.to_string(), handle);
 
     Ok(())
 }
@@ -152,9 +159,12 @@ pub fn call_ext_fn(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     let args_cstr = CString::new(args_json)
         .map_err(|e| EvalError::FfiError(format!("JSON arg serialisation: {e}")))?;
 
+    // The extension is told the buffer length is `BUF_SIZE`; allocate one extra
+    // sentinel byte so that a full, non-NUL-terminated write still yields a
+    // valid `CStr` (otherwise `CStr::from_ptr` would read past the buffer).
     const BUF_SIZE: usize = 65536;
-    let mut out_buf = vec![0i8; BUF_SIZE];
-    let mut err_buf = vec![0i8; BUF_SIZE];
+    let mut out_buf = vec![0i8; BUF_SIZE + 1];
+    let mut err_buf = vec![0i8; BUF_SIZE + 1];
 
     let rc = unsafe {
         f(
@@ -165,6 +175,10 @@ pub fn call_ext_fn(name: &str, args: &[Value]) -> Result<Value, EvalError> {
             BUF_SIZE,
         )
     };
+
+    // Re-zero the sentinel in case a (buggy) extension wrote to `buf[BUF_SIZE]`.
+    out_buf[BUF_SIZE] = 0;
+    err_buf[BUF_SIZE] = 0;
 
     if rc != 0 {
         let msg = unsafe {
@@ -238,3 +252,143 @@ pub const EXT_DISPATCH_FN: crate::value::BuiltinFn = crate::value::BuiltinFn::Pu
 
 /// Raw fn pointer for the extension dispatch, used for pointer comparison in eval.
 pub const EXT_DISPATCH_PTR: fn(&[Value]) -> Result<Value, EvalError> = _ext_dispatch;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Integer;
+
+    /// Test extension fn: writes the number of arguments as a JSON result.
+    unsafe extern "C" fn echo_count(
+        args_json: *const c_char,
+        out_buf: *mut c_char,
+        out_len: usize,
+        _err_buf: *mut c_char,
+        _err_len: usize,
+    ) -> c_int {
+        let args = if args_json.is_null() {
+            ""
+        } else {
+            unsafe { CStr::from_ptr(args_json) }.to_str().unwrap_or("")
+        };
+        let n = serde_json::from_str::<Vec<serde_json::Value>>(args)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let text = n.to_string();
+        let bytes = text.as_bytes();
+        if bytes.len() < out_len {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr() as *const c_char,
+                    out_buf,
+                    bytes.len(),
+                );
+                *out_buf.add(bytes.len()) = 0;
+            }
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Test extension fn that always reports an error.
+    unsafe extern "C" fn always_fail(
+        _args_json: *const c_char,
+        _out_buf: *mut c_char,
+        _out_len: usize,
+        err_buf: *mut c_char,
+        _err_len: usize,
+    ) -> c_int {
+        let msg = b"boom\0";
+        unsafe {
+            std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, err_buf, msg.len());
+        }
+        1
+    }
+
+    /// Test extension fn that fills the entire output buffer with no NUL:
+    /// the value `1` followed by spaces up to `out_len`.
+    unsafe extern "C" fn fill_no_nul(
+        _args_json: *const c_char,
+        out_buf: *mut c_char,
+        out_len: usize,
+        _err_buf: *mut c_char,
+        _err_len: usize,
+    ) -> c_int {
+        if out_len == 0 {
+            return 1;
+        }
+        unsafe {
+            *out_buf = b'1' as c_char;
+            for i in 1..out_len {
+                *out_buf.add(i) = b' ' as c_char;
+            }
+        }
+        0
+    }
+
+    #[test]
+    fn test_call_ext_fn_full_buffer_without_nul_terminator() {
+        register_ext_fn("test_ext_fill_no_nul".to_string(), fill_no_nul);
+        // Without the extra sentinel byte this would read past the buffer.
+        let out = call_ext_fn("test_ext_fill_no_nul", &[]).unwrap();
+        assert_eq!(out, Value::Integer(Integer::from(1)));
+    }
+
+    #[test]
+    fn test_call_ext_fn_bridges_json_result() {
+        register_ext_fn("test_ext_echo_count".to_string(), echo_count);
+        let out = call_ext_fn(
+            "test_ext_echo_count",
+            &[Value::Integer(1.into()), Value::Integer(2.into())],
+        )
+        .unwrap();
+        // The extension wrote the argument count; JSON parses it back to an int.
+        assert_eq!(out, Value::Integer(Integer::from(2)));
+    }
+
+    #[test]
+    fn test_call_ext_fn_propagates_error() {
+        register_ext_fn("test_ext_always_fail".to_string(), always_fail);
+        let err = call_ext_fn("test_ext_always_fail", &[]).unwrap_err();
+        assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn test_call_ext_fn_missing_is_error() {
+        let err = call_ext_fn("test_ext_absent_xyz", &[]).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn test_register_fn_null_ctx_is_noop() {
+        unsafe {
+            register_fn(std::ptr::null_mut(), std::ptr::null(), echo_count);
+        }
+    }
+
+    #[test]
+    fn test_ext_builtin_stub_uses_dispatch_marker() {
+        match ext_builtin_stub("foo") {
+            Value::Builtin(name, crate::value::BuiltinFn::Pure(f)) => {
+                assert_eq!(name, "foo");
+                assert!(std::ptr::fn_addr_eq(f, EXT_DISPATCH_PTR));
+            }
+            _ => panic!("expected a Builtin stub"),
+        }
+    }
+
+    #[test]
+    fn test_load_extension_missing_file_errors() {
+        let env = Env::new();
+        assert!(load_extension("/no/such/libsyma_ext.so", &env).is_err());
+    }
+
+    #[test]
+    fn test_json_bridge_used_by_extensions() {
+        let json = values_to_json(&[Value::Integer(7.into()), Value::Str("x".into())]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array());
+        assert_eq!(json_to_value("[true,null]").unwrap().type_name(), "List");
+    }
+}

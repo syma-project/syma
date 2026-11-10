@@ -27,16 +27,33 @@ pub fn execute_bytecode(
         }
     }
 
+    // Run the body in a fresh child scope, binding parameters by name. This
+    // mirrors the tree-walk evaluator's per-call scope: local assignments do not
+    // leak to the caller, and `Function`/`PureFunction` values created in the
+    // body capture the parameters through their call-site environment.
+    let local = env.child();
+    for (i, name) in bytecode.param_names.iter().enumerate() {
+        if !name.is_empty() {
+            local.set(name.clone(), args.get(i).cloned().unwrap_or(Value::Null));
+        }
+    }
+
     let mut vm = VmState {
         regs,
         pc: 0,
         code: &bytecode.instructions,
         constants: &bytecode.constants,
         args,
-        env,
+        env: &local,
         instr_count: 0,
     };
-    vm.execute_loop()
+    // `Return[expr]` raises `EvalError::Return`; at a function boundary it must
+    // yield `expr` rather than escape to the caller (matching the tree-walk
+    // `Function`/`PureFunction` handling).
+    vm.execute_loop().or_else(|e| match e {
+        EvalError::Return(v) => Ok(*v),
+        other => Err(other),
+    })
 }
 
 const INSTRUCTION_LIMIT: u64 = 10_000_000;
@@ -72,6 +89,8 @@ impl VmState<'_> {
 
             match instr {
                 Instruction::Halt => return Ok(Value::Null),
+                Instruction::Break => return Err(EvalError::Break),
+                Instruction::Continue => return Err(EvalError::Continue),
 
                 Instruction::LoadNull(d) => self.regs[*d as usize] = Value::Null,
                 Instruction::LoadTrue(d) => self.regs[*d as usize] = Value::Bool(true),
@@ -84,7 +103,8 @@ impl VmState<'_> {
                     self.regs[*d as usize] = self.negate(&self.regs[*s as usize])?;
                 }
                 Instruction::Not(d, s) => {
-                    self.regs[*d as usize] = Value::Bool(!self.regs[*s as usize].is_truthy());
+                    let v = self.regs[*s as usize].clone();
+                    self.regs[*d as usize] = crate::builtins::logical::not_value(v);
                 }
 
                 // General arithmetic via builtins
@@ -196,11 +216,11 @@ impl VmState<'_> {
                 // Comparison
                 Instruction::Eq(d, a, b) => {
                     self.regs[*d as usize] =
-                        Value::Bool(self.regs[*a as usize] == self.regs[*b as usize]);
+                        self.builtin2("Equal", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Neq(d, a, b) => {
                     self.regs[*d as usize] =
-                        Value::Bool(self.regs[*a as usize] != self.regs[*b as usize]);
+                        self.builtin2("Unequal", &self.regs[*a as usize], &self.regs[*b as usize])?;
                 }
                 Instruction::Lt(d, a, b) => {
                     self.regs[*d as usize] =
@@ -225,24 +245,18 @@ impl VmState<'_> {
                     )?;
                 }
                 Instruction::And(d, a, b) => {
-                    // Mirror `builtin_and`: short-circuit on the first falsey
-                    // operand, otherwise yield the last operand's value.
+                    // Match `builtin_and`: short-circuit on False, drop True,
+                    // and form a symbolic call for two unknown operands.
                     let av = self.regs[*a as usize].clone();
-                    self.regs[*d as usize] = if !av.is_truthy() {
-                        av
-                    } else {
-                        self.regs[*b as usize].clone()
-                    };
+                    let bv = self.regs[*b as usize].clone();
+                    self.regs[*d as usize] = crate::builtins::logical::and_values(av, bv);
                 }
                 Instruction::Or(d, a, b) => {
-                    // Mirror `builtin_or`: short-circuit on the first truthy
-                    // operand, otherwise yield the last operand's value.
+                    // Match `builtin_or`: short-circuit on True, drop False,
+                    // and form a symbolic call for two unknown operands.
                     let av = self.regs[*a as usize].clone();
-                    self.regs[*d as usize] = if av.is_truthy() {
-                        av
-                    } else {
-                        self.regs[*b as usize].clone()
-                    };
+                    let bv = self.regs[*b as usize].clone();
+                    self.regs[*d as usize] = crate::builtins::logical::or_values(av, bv);
                 }
 
                 // List/Assoc
@@ -300,8 +314,20 @@ impl VmState<'_> {
                     self.regs[*d as usize] = val;
                 }
                 Instruction::StoreSym(idx, s) => {
+                    // `Set` propagates to the scope where the symbol is already
+                    // bound (matching `eval_assign`'s `set_propagate`), so
+                    // assigning a global from inside a function updates the
+                    // global rather than shadowing it.
                     let name = self.const_str(*idx);
-                    self.env.set(name, self.regs[*s as usize].clone());
+                    self.env.set_propagate(name, self.regs[*s as usize].clone());
+                }
+                Instruction::EvalTree(d, idx) => {
+                    let expr = match self.constants.get(*idx as usize) {
+                        Some(Value::Pattern(e)) => e.clone(),
+                        Some(other) => crate::eval::table::value_to_expr(other),
+                        None => crate::ast::Expr::Null,
+                    };
+                    self.regs[*d as usize] = eval::eval(&expr, self.env)?;
                 }
 
                 // Control flow
@@ -465,7 +491,7 @@ fn validate_bytecode_regs(bc: &CompiledBytecode) -> Result<(), EvalError> {
 /// Return the maximum register index referenced by an instruction.
 fn max_reg_index(instr: &Instruction) -> usize {
     match instr {
-        Instruction::Halt | Instruction::Jump(_) => 0,
+        Instruction::Halt | Instruction::Break | Instruction::Continue | Instruction::Jump(_) => 0,
 
         // 1 register
         Instruction::LoadNull(d) | Instruction::LoadTrue(d) | Instruction::LoadFalse(d) => {
@@ -514,9 +540,10 @@ fn max_reg_index(instr: &Instruction) -> usize {
         }
 
         // reg + u32
-        Instruction::LoadConst(d, _) | Instruction::LoadArg(d, _) | Instruction::LoadSym(d, _) => {
-            *d as usize
-        }
+        Instruction::LoadConst(d, _)
+        | Instruction::LoadArg(d, _)
+        | Instruction::LoadSym(d, _)
+        | Instruction::EvalTree(d, _) => *d as usize,
 
         // MakeSeq: dest register only
         Instruction::MakeSeq(d, _) => *d as usize,
@@ -560,6 +587,7 @@ mod tests {
             constants: vec![],
             nregs: 1,
             nparams: 0,
+            param_names: vec![],
         };
         assert_eq!(run(&bc, &[]).unwrap(), Value::Null);
     }
@@ -571,6 +599,7 @@ mod tests {
             constants: vec![Value::Integer(42.into())],
             nregs: 1,
             nparams: 0,
+            param_names: vec![],
         };
         assert_eq!(run(&bc, &[]).unwrap(), Value::Integer(42.into()));
     }
@@ -587,6 +616,7 @@ mod tests {
             constants: vec![Value::Integer(10.into()), Value::Integer(20.into())],
             nregs: 3,
             nparams: 0,
+            param_names: vec![],
         };
         assert_eq!(run(&bc, &[]).unwrap(), Value::Integer(30.into()));
     }
@@ -604,6 +634,7 @@ mod tests {
             constants: vec![Value::Integer(0.into()), Value::Integer(42.into())],
             nregs: 1,
             nparams: 0,
+            param_names: vec![],
         };
         assert_eq!(run(&bc, &[]).unwrap(), Value::Integer(42.into()));
     }
@@ -616,6 +647,7 @@ mod tests {
             constants: vec![Value::Integer(42.into())],
             nregs: 3,
             nparams: 0,
+            param_names: vec![],
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
@@ -633,6 +665,7 @@ mod tests {
             constants: vec![],
             nregs: 3,
             nparams: 0,
+            param_names: vec![],
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
@@ -649,6 +682,7 @@ mod tests {
             constants: vec![],
             nregs: 3,
             nparams: 0,
+            param_names: vec![],
         };
         let err = run(&bc, &[]).unwrap_err();
         let msg = format!("{err}");
@@ -866,5 +900,244 @@ mod tests {
             run(&bc, &[Value::Integer(99.into())]).unwrap(),
             Value::Integer(99.into())
         );
+    }
+}
+
+/// Differential tests: compile a body with parameters and assert that the
+/// bytecode VM produces exactly the same `Result` as the tree-walk evaluator.
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+    use crate::ast::Expr;
+    use crate::builtins;
+    use crate::bytecode::compiler::BytecodeCompiler;
+    use crate::env::Env;
+    use crate::lexer;
+    use crate::parser;
+
+    fn real(n: f64) -> Value {
+        Value::Real(rug::Float::with_val(53, n))
+    }
+
+    fn parse_expr(src: &str) -> Expr {
+        let tokens = lexer::tokenize(src).expect("lex");
+        let mut ast = parser::parse(tokens).expect("parse");
+        ast.pop().expect("non-empty")
+    }
+
+    fn make_env() -> Env {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        env
+    }
+
+    fn named(name: &str) -> Expr {
+        Expr::NamedBlank {
+            name: name.to_string(),
+            type_constraint: None,
+        }
+    }
+
+    /// Compare tree-walk vs bytecode for a function `params -> body` applied to
+    /// `args`. The tree-walk side goes through `apply_function` (wrapping the
+    /// body in a `Function[...]`) so that non-local `Return` behaves the same on
+    /// both sides.
+    fn diff(body_src: &str, params: &[(&str, Value)]) {
+        let body = parse_expr(body_src);
+        let names: Vec<String> = params.iter().map(|(n, _)| n.to_string()).collect();
+        let params_expr: Vec<Expr> = names.iter().map(|n| named(n)).collect();
+        let args: Vec<Value> = params.iter().map(|(_, v)| v.clone()).collect();
+
+        let tree_env = make_env();
+        let func_expr = Expr::Function {
+            params: names.clone(),
+            body: Box::new(body.clone()),
+        };
+        let func_val = crate::eval::eval(&func_expr, &tree_env)
+            .unwrap_or_else(|e| panic!("tree function build failed for {body_src}: {e:?}"));
+        let tree = crate::eval::apply_function(&func_val, &args, &tree_env);
+
+        let bc = BytecodeCompiler::compile_function(&params_expr, &body, "f")
+            .unwrap_or_else(|e| panic!("compile failed for {body_src}: {e:?}"));
+        let byte = execute_bytecode(&bc, &args, &make_env());
+
+        match (&tree, &byte) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b, "divergence for `{body_src}` (params={params:?})"),
+            (Err(_), Err(_)) => {}
+            _ => panic!("ok/err divergence for `{body_src}`: tree={tree:?} byte={byte:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_arithmetic() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("x + y", &[("x", i(2)), ("y", i(3))]);
+        diff("x - y", &[("x", i(2)), ("y", i(3))]);
+        diff("x * y", &[("x", i(2)), ("y", i(3))]);
+        diff("x / y", &[("x", i(7)), ("y", i(2))]);
+        diff("x^y", &[("x", i(2)), ("y", i(10))]);
+        diff("-x", &[("x", i(5))]);
+        diff("x + y", &[("x", real(2.5)), ("y", real(1.5))]);
+        diff("x / y", &[("x", real(3.0)), ("y", real(2.0))]);
+    }
+
+    #[test]
+    fn diff_comparisons() {
+        let i = |n: i64| Value::Integer(n.into());
+        for (src, a, b) in [
+            ("x == y", 1, 1),
+            ("x == y", 1, 2),
+            ("x != y", 1, 2),
+            ("x < y", 1, 2),
+            ("x > y", 1, 2),
+            ("x <= y", 2, 2),
+            ("x >= y", 2, 3),
+        ] {
+            diff(src, &[("x", i(a)), ("y", i(b))]);
+        }
+    }
+
+    #[test]
+    fn diff_control_flow() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("If[x > 0, 1, 2]", &[("x", i(3))]);
+        diff("If[x > 0, 1, 2]", &[("x", i(-3))]);
+        diff("If[Not[x > 0], 1, 2]", &[("x", i(-3))]);
+        diff("If[x > 0, 1]", &[("x", i(-3))]);
+        diff("Which[x > 0, 1, x < 0, 2]", &[("x", i(-3))]);
+        diff("Which[x > 0, 1, x < 0, 2]", &[("x", i(0))]);
+    }
+
+    #[test]
+    fn diff_lists() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("{x, x + 1, x + 2}", &[("x", i(1))]);
+        diff("Length[{x, x + 1}]", &[("x", i(1))]);
+        diff("{{x, x}, {x + 1}}", &[("x", i(1))]);
+    }
+
+    #[test]
+    fn diff_assignment_returns_value() {
+        // Set returns the assigned value in the tree-walk evaluator.
+        diff("x = 5", &[]);
+        diff("x = 5; x", &[]);
+        diff("{x = 5, x}", &[]);
+    }
+
+    #[test]
+    fn diff_switch_patterns() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("Switch[x, 1, 10, 2, 20]", &[("x", i(2))]);
+        diff("Switch[x, _Integer, 10, _, 20]", &[("x", i(2))]);
+        diff(
+            "Switch[x, _Integer, 10, _, 20]",
+            &[("x", Value::Str("s".into()))],
+        );
+    }
+
+    #[test]
+    fn diff_closure_capture() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("(Function[{y}, x + y])[10]", &[("x", i(5))]);
+        diff("(Function[{y}, x * y])[10]", &[("x", i(5))]);
+    }
+
+    #[test]
+    fn diff_param_assignment() {
+        let i = |n: i64| Value::Integer(n.into());
+        // Assigning to a parameter must affect later reads.
+        diff("x = x + 1; x", &[("x", i(5))]);
+        diff("x = x * 2; x + 1", &[("x", i(3))]);
+        diff("If[x > 0, x = 0, x = 10]; x", &[("x", i(7))]);
+    }
+
+    #[test]
+    fn diff_loops() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("While[x < 5, x = x + 1]; x", &[("x", i(0))]);
+        diff("For[i = 0, i < 3, i = i + 1, Null]; i", &[("i", i(0))]);
+        diff(
+            "Do[(If[x == 3, Break[]]; x = x + 1), {x, 0, 10}]; x",
+            &[("x", i(0))],
+        );
+        diff(
+            "x = 0; Do[(If[Mod[k, 2] == 0, Continue[]]; x = x + k), {k, 1, 6}]; x",
+            &[],
+        );
+    }
+
+    #[test]
+    fn diff_switch_bindings() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("Switch[x, y_Integer, y + 1, _, 0]", &[("x", i(4))]);
+        diff(
+            "Switch[x, y_Integer, y + 1, _, 0]",
+            &[("x", Value::Str("s".into()))],
+        );
+    }
+
+    #[test]
+    fn diff_return() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("If[x > 0, Return[x], Null]", &[("x", i(7))]);
+        diff("Do[If[i == 3, Return[i]], {i, 1, 10}]", &[]);
+    }
+
+    #[test]
+    fn diff_deep_register_pressure() {
+        // Exercise the register allocator with many live temporaries.
+        let i = |n: i64| Value::Integer(n.into());
+        let mut src = "x".to_string();
+        for _ in 0..40 {
+            src = format!("({src}) + x");
+        }
+        diff(&src, &[("x", i(2))]);
+    }
+
+    #[test]
+    fn diff_assignment_propagates_to_outer() {
+        let i = |n: i64| Value::Integer(n.into());
+        let body = parse_expr("g = x + 1");
+        let params = vec![named("x")];
+
+        // Tree-walk: `Set` on an existing outer binding updates the outer scope.
+        let tree_env = make_env();
+        tree_env.set("g".to_string(), i(1));
+        let func_val = crate::eval::eval(
+            &Expr::Function {
+                params: vec!["x".to_string()],
+                body: Box::new(body.clone()),
+            },
+            &tree_env,
+        )
+        .unwrap();
+        crate::eval::apply_function(&func_val, &[i(41)], &tree_env).unwrap();
+        assert_eq!(tree_env.get("g"), Some(i(42)));
+
+        // Bytecode must agree: the global `g` is updated, not shadowed.
+        let byte_env = make_env();
+        byte_env.set("g".to_string(), i(1));
+        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        execute_bytecode(&bc, &[i(41)], &byte_env).unwrap();
+        assert_eq!(byte_env.get("g"), Some(i(42)));
+    }
+
+    #[test]
+    fn diff_catch_throw() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("Catch[Throw[5]]", &[]);
+        diff("Catch[If[x < 0, Throw[\"neg\"], x]]", &[("x", i(3))]);
+        diff("Catch[If[x < 0, Throw[\"neg\"], x]]", &[("x", i(-1))]);
+        diff("Catch[x + 1]", &[("x", i(41))]);
+        diff("Catch[x = 5]; x", &[("x", i(1))]);
+    }
+
+    #[test]
+    fn diff_logical_short_circuit() {
+        let i = |n: i64| Value::Integer(n.into());
+        diff("And[x > 0, y > 0]", &[("x", i(1)), ("y", i(1))]);
+        diff("Or[x > 0, y > 0]", &[("x", i(-1)), ("y", i(1))]);
+        diff("And[x > 0, First[{}]]", &[("x", i(-1))]);
+        diff("Or[x > 0, First[{}]]", &[("x", i(1))]);
     }
 }

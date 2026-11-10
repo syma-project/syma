@@ -62,22 +62,245 @@ fn clamp01(v: f64) -> f64 {
     v.clamp(0.0, 1.0)
 }
 
+/// Convert a normalised [0, 1] pixel value to u16 (clamping).
+fn norm_to_u16(v: f64) -> u16 {
+    if v <= 0.0 {
+        0
+    } else if v >= 1.0 {
+        65535
+    } else {
+        (v * 65535.0).round() as u16
+    }
+}
+
+/// Rec.601 luminance of an 8-bit RGB triple, returned normalised to `[0, 1]`.
+///
+/// Matches `ColorConvert[image, "Grayscale"]`; the `image` crate's own
+/// `to_luma8` uses Rec.709 weights instead, which differs on saturated colours.
+fn luma601(r: u8, g: u8, b: u8) -> f64 {
+    (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64) / 255.0
+}
+
+/// Convert any image to an 8-bit grayscale image using Rec.601 luma weights.
+fn to_luma601(img: &image::DynamicImage) -> image::GrayImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut out = image::GrayImage::new(w, h);
+    for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
+        *o = image::Luma([norm_to_u8(luma601(p[0], p[1], p[2]))]);
+    }
+    out
+}
+
+/// Interpret a pixel-channel `Value` for `type_hint`, normalised to `[0, 1]`.
+///
+/// `Automatic`/`Real` values are already in `[0, 1]`, `Byte` values are in
+/// `0..=255`, and `Bit16` values are in `0..=65535`.
+fn channel_to_norm(v: &Value, type_hint: &str) -> Result<f64, EvalError> {
+    let x = value_to_f64(v)?;
+    let scale = match type_hint {
+        "Byte" | "Bit8" | "UnsignedInteger8" => 255.0,
+        "Bit16" | "UnsignedInteger16" => 65535.0,
+        _ => 1.0,
+    };
+    Ok(clamp01(x / scale))
+}
+
+/// True when `type_hint` names a 16-bit integer image type.
+fn is_bit16(type_hint: &str) -> bool {
+    matches!(type_hint, "Bit16" | "UnsignedInteger16")
+}
+
+/// Channel count of a pixel `Value` (a scalar is single-channel).
+fn value_channels(v: &Value) -> usize {
+    match v {
+        Value::List(ch) => ch.len(),
+        _ => 1,
+    }
+}
+
+/// Convert an image to grayscale using Rec.601 weights, at the requested depth.
+fn to_gray601(img: image::DynamicImage, bit16: bool) -> image::DynamicImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    if bit16 {
+        let mut out = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(w, h);
+        for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
+            *o = image::Luma([norm_to_u16(luma601(p[0], p[1], p[2]))]);
+        }
+        image::DynamicImage::ImageLuma16(out)
+    } else {
+        let mut out = image::GrayImage::new(w, h);
+        for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
+            *o = image::Luma([norm_to_u8(luma601(p[0], p[1], p[2]))]);
+        }
+        image::DynamicImage::ImageLuma8(out)
+    }
+}
+
+/// Apply a `ColorSpace` hint, converting only when it disagrees with the
+/// channel count implied by the data.
+fn apply_color_space(
+    img: image::DynamicImage,
+    hint: Option<&str>,
+    bit16: bool,
+) -> image::DynamicImage {
+    let hint = hint.map(|h| match h {
+        "Gray" | "GrayLevel" => "Grayscale",
+        "RGBColor" => "RGB",
+        other => other,
+    });
+    let channels = match img.color() {
+        image::ColorType::L8 | image::ColorType::L16 => 1,
+        image::ColorType::Rgb8 | image::ColorType::Rgb16 => 3,
+        _ => 4,
+    };
+    match hint {
+        Some("Grayscale") if channels != 1 => to_gray601(img, bit16),
+        Some("RGB") if channels == 1 => {
+            if bit16 {
+                image::DynamicImage::ImageRgb16(img.to_rgb16())
+            } else {
+                image::DynamicImage::ImageRgb8(img.to_rgb8())
+            }
+        }
+        _ => img,
+    }
+}
+
+/// Build an image of `channels` channels from a `get(channel, x, y)` accessor
+/// returning normalised `[0, 1]` values.
+fn build_channels<F>(
+    channels: usize,
+    width: u32,
+    height: u32,
+    bit16: bool,
+    get: F,
+) -> Result<image::DynamicImage, EvalError>
+where
+    F: Fn(usize, u32, u32) -> Result<f64, EvalError>,
+{
+    match (channels, bit16) {
+        (1, false) => {
+            let mut buf = image::GrayImage::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(x, y, image::Luma([norm_to_u8(get(0, x, y)?)]));
+                }
+            }
+            Ok(image::DynamicImage::ImageLuma8(buf))
+        }
+        (1, true) => {
+            let mut buf = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(x, y, image::Luma([norm_to_u16(get(0, x, y)?)]));
+                }
+            }
+            Ok(image::DynamicImage::ImageLuma16(buf))
+        }
+        (3, false) => {
+            let mut buf = image::RgbImage::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(
+                        x,
+                        y,
+                        image::Rgb([
+                            norm_to_u8(get(0, x, y)?),
+                            norm_to_u8(get(1, x, y)?),
+                            norm_to_u8(get(2, x, y)?),
+                        ]),
+                    );
+                }
+            }
+            Ok(image::DynamicImage::ImageRgb8(buf))
+        }
+        (3, true) => {
+            let mut buf = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(
+                        x,
+                        y,
+                        image::Rgb([
+                            norm_to_u16(get(0, x, y)?),
+                            norm_to_u16(get(1, x, y)?),
+                            norm_to_u16(get(2, x, y)?),
+                        ]),
+                    );
+                }
+            }
+            Ok(image::DynamicImage::ImageRgb16(buf))
+        }
+        (4, false) => {
+            let mut buf = image::RgbaImage::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(
+                        x,
+                        y,
+                        image::Rgba([
+                            norm_to_u8(get(0, x, y)?),
+                            norm_to_u8(get(1, x, y)?),
+                            norm_to_u8(get(2, x, y)?),
+                            norm_to_u8(get(3, x, y)?),
+                        ]),
+                    );
+                }
+            }
+            Ok(image::DynamicImage::ImageRgba8(buf))
+        }
+        (4, true) => {
+            let mut buf = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    buf.put_pixel(
+                        x,
+                        y,
+                        image::Rgba([
+                            norm_to_u16(get(0, x, y)?),
+                            norm_to_u16(get(1, x, y)?),
+                            norm_to_u16(get(2, x, y)?),
+                            norm_to_u16(get(3, x, y)?),
+                        ]),
+                    );
+                }
+            }
+            Ok(image::DynamicImage::ImageRgba16(buf))
+        }
+        _ => unreachable!("channel count validated by caller"),
+    }
+}
+
 /// Build an `image::DynamicImage` from a 2D or 3D nested Value list.
 ///
-/// Expected shapes:
+/// Expected shapes (with default `Interleaving -> True`):
 ///   - 2D: `{{r1c1, r1c2, ...}, {r2c1, ...}, ...}`  → Grayscale
 ///   - 3D (inner len=3): `{{{r,g,b}, ...}, ...}`      → RGB
 ///   - 3D (inner len=4): `{{{r,g,b,a}, ...}, ...}`    → RGBA
 ///
-/// `color_space_hint` can be `"RGB"`, `"Grayscale"`, or `None` for auto-detect.
-/// All pixel values are expected in [0,1].
-#[allow(unused_variables)]
+/// With `Interleaving -> False` the data is a list of channel planes, each
+/// plane being a full 2D (height × width) array of scalars.
+///
+/// `color_space_hint` (`"RGB"` / `"Grayscale"`) forces a colour space only when
+/// it disagrees with the detected channel count. `type_hint` selects the value
+/// range (`Automatic`/`Real` = `[0, 1]`, `Byte` = `0..=255`, `Bit16` =
+/// `0..=65535`).
 fn img_from_list(
     data: &[Value],
     color_space_hint: Option<&str>,
+    type_hint: &str,
+    interleaving: bool,
 ) -> Result<image::DynamicImage, EvalError> {
     if data.is_empty() {
         return Err(EvalError::Error("Image: data cannot be empty".to_string()));
+    }
+
+    let bit16 = is_bit16(type_hint);
+
+    if !interleaving {
+        return img_from_planes(data, color_space_hint, type_hint, bit16);
     }
 
     let height = data.len();
@@ -96,13 +319,7 @@ fn img_from_list(
     }
 
     let width = row0.len();
-    let first_pixel = &row0[0];
-
-    // Determine the number of channels from the innermost pixel representation.
-    let channels = match first_pixel {
-        Value::List(ch) => ch.len(),
-        _ => 1, // scalar → grayscale
-    };
+    let channels = value_channels(&row0[0]);
 
     if channels != 1 && channels != 3 && channels != 4 {
         return Err(EvalError::Error(format!(
@@ -111,7 +328,7 @@ fn img_from_list(
         )));
     }
 
-    // Validate all rows have the same width.
+    // Validate all rows have the same width and channel count.
     for (r, row) in data.iter().enumerate() {
         match row {
             Value::List(items) => {
@@ -123,12 +340,8 @@ fn img_from_list(
                         width
                     )));
                 }
-                // Validate all pixels have the same channel count.
                 for (c, item) in items.iter().enumerate() {
-                    let ch = match item {
-                        Value::List(ch) => ch.len(),
-                        _ => 1,
-                    };
+                    let ch = value_channels(item);
                     if ch != channels {
                         return Err(EvalError::Error(format!(
                             "Image: pixel [{}, {}] has {} channels, expected {}",
@@ -147,122 +360,197 @@ fn img_from_list(
         }
     }
 
-    match channels {
-        1 => {
-            // Grayscale
-            let mut buf = image::GrayImage::new(width as u32, height as u32);
-            for (r, row) in data.iter().enumerate() {
-                if let Value::List(items) = row {
-                    for (c, item) in items.iter().enumerate() {
-                        let v = value_to_f64(item)?;
-                        buf.put_pixel(c as u32, r as u32, image::Luma([norm_to_u8(v)]));
-                    }
-                }
+    let get = |c: usize, x: u32, y: u32| -> Result<f64, EvalError> {
+        if let Value::List(items) = &data[y as usize] {
+            if channels == 1 {
+                return channel_to_norm(&items[x as usize], type_hint);
             }
-            Ok(image::DynamicImage::ImageLuma8(buf))
-        }
-        3 => {
-            // RGB
-            let mut buf = image::RgbImage::new(width as u32, height as u32);
-            for (r, row) in data.iter().enumerate() {
-                if let Value::List(items) = row {
-                    for (c, item) in items.iter().enumerate() {
-                        if let Value::List(chs) = item
-                            && chs.len() >= 3
-                        {
-                            let rv = norm_to_u8(clamp01(value_to_f64(&chs[0])?));
-                            let gv = norm_to_u8(clamp01(value_to_f64(&chs[1])?));
-                            let bv = norm_to_u8(clamp01(value_to_f64(&chs[2])?));
-                            buf.put_pixel(c as u32, r as u32, image::Rgb([rv, gv, bv]));
-                        }
-                    }
-                }
+            if let Value::List(chs) = &items[x as usize] {
+                return channel_to_norm(&chs[c], type_hint);
             }
-            Ok(image::DynamicImage::ImageRgb8(buf))
         }
-        4 => {
-            // RGBA
-            let mut buf = image::RgbaImage::new(width as u32, height as u32);
-            for (r, row) in data.iter().enumerate() {
-                if let Value::List(items) = row {
-                    for (c, item) in items.iter().enumerate() {
-                        if let Value::List(chs) = item {
-                            let rv = norm_to_u8(clamp01(value_to_f64(&chs[0])?));
-                            let gv = norm_to_u8(clamp01(value_to_f64(&chs[1])?));
-                            let bv = norm_to_u8(clamp01(value_to_f64(&chs[2])?));
-                            let av = if chs.len() >= 4 {
-                                norm_to_u8(clamp01(value_to_f64(&chs[3])?))
-                            } else {
-                                255
-                            };
-                            buf.put_pixel(c as u32, r as u32, image::Rgba([rv, gv, bv, av]));
-                        }
-                    }
-                }
-            }
-            Ok(image::DynamicImage::ImageRgba8(buf))
-        }
-        _ => unreachable!(),
-    }
+        unreachable!("shape validated above")
+    };
+
+    let img = build_channels(channels, width as u32, height as u32, bit16, get)?;
+    Ok(apply_color_space(img, color_space_hint, bit16))
 }
 
-/// Convert an image to a 2D Value list (row-major) with normalised [0, 1] values.
+/// Build an image from `Interleaving -> False` channel-plane data
+/// (`{{plane_r}, {plane_g}, {plane_b}, ...}`, each plane height × width).
+fn img_from_planes(
+    data: &[Value],
+    color_space_hint: Option<&str>,
+    type_hint: &str,
+    bit16: bool,
+) -> Result<image::DynamicImage, EvalError> {
+    let channels = data.len();
+    if channels != 1 && channels != 3 && channels != 4 {
+        return Err(EvalError::Error(format!(
+            "Image: Interleaving -> False expects 1, 3, or 4 planes, got {}",
+            channels
+        )));
+    }
+
+    let first_plane = match &data[0] {
+        Value::List(plane) => plane,
+        other => {
+            return Err(EvalError::Error(format!(
+                "Image: expected each channel plane to be a List, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    if first_plane.is_empty() {
+        return Err(EvalError::Error(
+            "Image: planes cannot be empty".to_string(),
+        ));
+    }
+    let height = first_plane.len();
+    let width = match &first_plane[0] {
+        Value::List(row) => row.len(),
+        other => {
+            return Err(EvalError::Error(format!(
+                "Image: expected a plane row to be a List, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    if width == 0 {
+        return Err(EvalError::Error(
+            "Image: planes cannot be empty".to_string(),
+        ));
+    }
+
+    for (ci, plane_v) in data.iter().enumerate() {
+        let plane = match plane_v {
+            Value::List(plane) => plane,
+            other => {
+                return Err(EvalError::Error(format!(
+                    "Image: channel plane {} must be a List, got {}",
+                    ci,
+                    other.type_name()
+                )));
+            }
+        };
+        if plane.len() != height {
+            return Err(EvalError::Error(format!(
+                "Image: channel plane {} has {} rows, expected {}",
+                ci,
+                plane.len(),
+                height
+            )));
+        }
+        for (ri, row_v) in plane.iter().enumerate() {
+            let row = match row_v {
+                Value::List(row) => row,
+                other => {
+                    return Err(EvalError::Error(format!(
+                        "Image: plane {} row {} must be a List, got {}",
+                        ci,
+                        ri,
+                        other.type_name()
+                    )));
+                }
+            };
+            if row.len() != width {
+                return Err(EvalError::Error(format!(
+                    "Image: plane {} row {} has {} columns, expected {}",
+                    ci,
+                    ri,
+                    row.len(),
+                    width
+                )));
+            }
+            for item in row {
+                if matches!(item, Value::List(_)) {
+                    return Err(EvalError::Error(
+                        "Image: Interleaving -> False planes must contain scalars".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let get = |c: usize, x: u32, y: u32| -> Result<f64, EvalError> {
+        if let Value::List(plane) = &data[c]
+            && let Value::List(row) = &plane[y as usize]
+        {
+            return channel_to_norm(&row[x as usize], type_hint);
+        }
+        unreachable!("shape validated above")
+    };
+
+    let img = build_channels(channels, width as u32, height as u32, bit16, get)?;
+    Ok(apply_color_space(img, color_space_hint, bit16))
+}
+
+/// Build a row-major nested `Value` list from a per-pixel channel accessor.
+fn build_list(
+    width: u32,
+    height: u32,
+    channels: usize,
+    get: impl Fn(u32, u32, usize) -> f64,
+) -> Value {
+    let mut rows = Vec::with_capacity(height as usize);
+    for y in 0..height {
+        let mut row = Vec::with_capacity(width as usize);
+        for x in 0..width {
+            if channels == 1 {
+                row.push(Value::Real(rug::Float::with_val(53, get(x, y, 0))));
+            } else {
+                let mut chs = Vec::with_capacity(channels);
+                for c in 0..channels {
+                    chs.push(Value::Real(rug::Float::with_val(53, get(x, y, c))));
+                }
+                row.push(Value::List(chs));
+            }
+        }
+        rows.push(Value::List(row));
+    }
+    Value::List(rows)
+}
+
+/// Convert an image to a 2D/3D Value list (row-major) with normalised [0, 1]
+/// values. Grayscale → 2D scalars; RGB/RGBA/LumaA → 3D channel triples/quads.
+///
+/// Values are normalised by the depth of the underlying pixel type so that a
+/// `Bit16` image maps to the same `[0, 1]` range as a `Byte` image.
 fn list_from_img(img: &image::DynamicImage) -> Value {
     let (w, h) = (img.width(), img.height());
-    match img.color() {
-        image::ColorType::L8 | image::ColorType::L16 => {
-            // Grayscale: single channel per pixel → 2D list of scalars
-            let mut rows = Vec::with_capacity(h as usize);
-            for y in 0..h {
-                let mut row = Vec::with_capacity(w as usize);
-                for x in 0..w {
-                    let p = img.get_pixel(x, y);
-                    let v = u8_to_norm(p[0]);
-                    row.push(Value::Real(rug::Float::with_val(53, v)));
-                }
-                rows.push(Value::List(row));
-            }
-            Value::List(rows)
+    match img {
+        image::DynamicImage::ImageLuma8(b) => {
+            build_list(w, h, 1, |x, y, _| u8_to_norm(b.get_pixel(x, y)[0]))
         }
-        image::ColorType::Rgb8 | image::ColorType::Rgb16 | image::ColorType::Rgb32F => {
-            // RGB: 3 channels per pixel
-            let mut rows = Vec::with_capacity(h as usize);
-            for y in 0..h {
-                let mut row = Vec::with_capacity(w as usize);
-                for x in 0..w {
-                    let p = img.get_pixel(x, y);
-                    let chs = vec![
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[0]))),
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[1]))),
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[2]))),
-                    ];
-                    row.push(Value::List(chs));
-                }
-                rows.push(Value::List(row));
-            }
-            Value::List(rows)
+        image::DynamicImage::ImageLumaA8(b) => {
+            build_list(w, h, 2, |x, y, c| u8_to_norm(b.get_pixel(x, y)[c]))
         }
-        image::ColorType::Rgba8 | image::ColorType::Rgba16 | image::ColorType::Rgba32F => {
-            // RGBA: 4 channels per pixel
-            let mut rows = Vec::with_capacity(h as usize);
-            for y in 0..h {
-                let mut row = Vec::with_capacity(w as usize);
-                for x in 0..w {
-                    let p = img.get_pixel(x, y);
-                    let chs = vec![
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[0]))),
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[1]))),
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[2]))),
-                        Value::Real(rug::Float::with_val(53, u8_to_norm(p[3]))),
-                    ];
-                    row.push(Value::List(chs));
-                }
-                rows.push(Value::List(row));
-            }
-            Value::List(rows)
+        image::DynamicImage::ImageRgb8(b) => {
+            build_list(w, h, 3, |x, y, c| u8_to_norm(b.get_pixel(x, y)[c]))
+        }
+        image::DynamicImage::ImageRgba8(b) => {
+            build_list(w, h, 4, |x, y, c| u8_to_norm(b.get_pixel(x, y)[c]))
+        }
+        image::DynamicImage::ImageLuma16(b) => {
+            build_list(w, h, 1, |x, y, _| b.get_pixel(x, y)[0] as f64 / 65535.0)
+        }
+        image::DynamicImage::ImageLumaA16(b) => {
+            build_list(w, h, 2, |x, y, c| b.get_pixel(x, y)[c] as f64 / 65535.0)
+        }
+        image::DynamicImage::ImageRgb16(b) => {
+            build_list(w, h, 3, |x, y, c| b.get_pixel(x, y)[c] as f64 / 65535.0)
+        }
+        image::DynamicImage::ImageRgba16(b) => {
+            build_list(w, h, 4, |x, y, c| b.get_pixel(x, y)[c] as f64 / 65535.0)
+        }
+        image::DynamicImage::ImageRgb32F(b) => {
+            build_list(w, h, 3, |x, y, c| b.get_pixel(x, y)[c] as f64)
+        }
+        image::DynamicImage::ImageRgba32F(b) => {
+            build_list(w, h, 4, |x, y, c| b.get_pixel(x, y)[c] as f64)
         }
         _ => {
-            // Fallback: convert to RGB8 first
+            // Fallback: convert to RGB8 first.
             let rgb = img.to_rgb8();
             list_from_img(&image::DynamicImage::ImageRgb8(rgb))
         }
@@ -322,15 +610,24 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
 
-    // Parse optional arguments: type strings and Rule options
-    let mut _type_hint = "Byte".to_string();
+    // Parse optional arguments: type strings and Rule options.
+    let mut type_hint = "Automatic".to_string();
     let mut color_space: Option<String> = None;
-    let mut _interleaving = true;
+    let mut interleaving = true;
 
     for arg in &args[1..] {
         match arg {
             Value::Str(s) => {
-                _type_hint = s.clone();
+                // A bare string may name either a data type ("Byte", "Real32",
+                // …) or a colour space ("RGB", "Grayscale", …).
+                if matches!(
+                    s.as_str(),
+                    "RGB" | "Grayscale" | "Gray" | "RGBA" | "RGBColor" | "GrayLevel"
+                ) {
+                    color_space = Some(s.clone());
+                } else {
+                    type_hint = s.clone();
+                }
             }
             Value::Rule { lhs, rhs, .. } => {
                 let key = match lhs.as_ref() {
@@ -347,7 +644,7 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
                     },
                     "Interleaving" => {
                         if let Value::Bool(b) = rhs.as_ref() {
-                            _interleaving = *b;
+                            interleaving = *b;
                         }
                     }
                     _ => {}
@@ -362,7 +659,7 @@ pub fn builtin_image(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
 
-    let img = match img_from_list(data, color_space.as_deref()) {
+    let img = match img_from_list(data, color_space.as_deref(), &type_hint, interleaving) {
         Ok(img) => img,
         Err(_) => {
             crate::messages::emit("Image::imgarray", &[format!("{}", args[0])]);
@@ -421,6 +718,7 @@ pub fn builtin_image_type(args: &[Value]) -> Result<Value, EvalError> {
 ///
 /// Resize an image to the given dimensions using Lanczos3 filter.
 /// If n is given, scales width to n pixels preserving aspect ratio.
+/// The colour space (channel count) of the source is preserved.
 pub fn builtin_image_resize(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -432,37 +730,32 @@ pub fn builtin_image_resize(args: &[Value]) -> Result<Value, EvalError> {
 
     let (new_w, new_h) = match &args[1] {
         Value::List(dims) if dims.len() == 2 => {
-            let w = value_to_f64(&dims[0])? as u32;
-            let h = value_to_f64(&dims[1])? as u32;
-            if w == 0 || h == 0 {
+            let w = value_to_f64(&dims[0])?.round();
+            let h = value_to_f64(&dims[1])?.round();
+            if w < 1.0 || h < 1.0 {
                 return Err(EvalError::Error(
                     "ImageResize: dimensions must be positive".to_string(),
                 ));
             }
-            (w, h)
+            (w as u32, h as u32)
         }
         other => {
-            let w = value_to_f64(other)? as u32;
-            if w == 0 {
+            let w = value_to_f64(other)?.round();
+            if w < 1.0 {
                 return Err(EvalError::Error(
                     "ImageResize: dimension must be positive".to_string(),
                 ));
             }
             let aspect = img.height() as f64 / img.width() as f64;
-            let h = (w as f64 * aspect).round() as u32;
-            (w.max(1), h.max(1))
+            let h = (w * aspect).round().max(1.0);
+            (w as u32, h as u32)
         }
     };
 
-    let resized = image::imageops::resize(
-        img.as_ref(),
-        new_w,
-        new_h,
-        image::imageops::FilterType::Lanczos3,
-    );
-    Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(
-        resized,
-    ))))
+    // `DynamicImage::resize_exact` preserves the source colour type, so a
+    // grayscale image stays grayscale (`ImageData` keeps its 2D shape).
+    let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    Ok(Value::Image(Arc::new(resized)))
 }
 
 /// ImageRotate[image, angle]
@@ -544,7 +837,14 @@ pub fn builtin_image_rotate(args: &[Value]) -> Result<Value, EvalError> {
                 }
             }
         }
-        image::DynamicImage::ImageRgba8(buf)
+        // Preserve the source colour type so a grayscale/RGB image does not
+        // silently become RGBA after rotation.
+        let dynbuf = image::DynamicImage::ImageRgba8(buf);
+        match img.color() {
+            image::ColorType::L8 => image::DynamicImage::ImageLuma8(dynbuf.to_luma8()),
+            image::ColorType::Rgb8 => image::DynamicImage::ImageRgb8(dynbuf.to_rgb8()),
+            _ => dynbuf,
+        }
     };
 
     Ok(Value::Image(Arc::new(rotated)))
@@ -652,16 +952,19 @@ pub fn builtin_binarize(args: &[Value]) -> Result<Value, EvalError> {
         0.5
     };
 
-    // Convert to grayscale first, then threshold
-    let gray = img.to_luma8();
+    // Convert to grayscale (Rec.601 luma, matching WL), then threshold.
+    let gray = to_luma601(&img);
     let (w, h) = (gray.width(), gray.height());
     let mut buf = image::GrayImage::new(w, h);
 
-    let thresh_u8 = norm_to_u8(threshold);
     for y in 0..h {
         for x in 0..w {
             let p = gray.get_pixel(x, y);
-            let v = if p[0] >= thresh_u8 { 255 } else { 0 };
+            let v = if p[0] as f64 / 255.0 >= threshold {
+                255
+            } else {
+                0
+            };
             buf.put_pixel(x, y, image::Luma([v]));
         }
     }
@@ -690,7 +993,7 @@ pub fn builtin_color_convert(args: &[Value]) -> Result<Value, EvalError> {
     };
 
     let converted = match target.as_str() {
-        "Grayscale" => image::DynamicImage::ImageLuma8(img.to_luma8()),
+        "Grayscale" => to_gray601((*img).clone(), false),
         "RGB" => image::DynamicImage::ImageRgb8(img.to_rgb8()),
         _ => {
             return Err(EvalError::Error(format!(
@@ -730,14 +1033,15 @@ pub fn builtin_gaussian_filter(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Image(Arc::new(blurred)))
 }
 
-/// Sobel kernels for edge detection.
-const SOBEL_X: [f32; 9] = [-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0];
-const SOBEL_Y: [f32; 9] = [-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0];
-
 /// EdgeDetect[image]
 ///
-/// Apply Sobel edge detection. Converts to grayscale, then computes
-/// gradient magnitude from horizontal and vertical Sobel operators.
+/// Apply Sobel edge detection. Converts to grayscale (Rec.601 luma), then
+/// computes the gradient magnitude from signed horizontal and vertical Sobel
+/// operators in `f64`. The magnitude is normalised to `[0, 255]`.
+///
+/// Note: `image::imageops::filter3x3` cannot be used directly here because it
+/// clamps each response into the *unsigned* pixel range, discarding the
+/// negative lobe of the Sobel operator and saturating strong edges.
 pub fn builtin_edge_detect(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -746,40 +1050,47 @@ pub fn builtin_edge_detect(args: &[Value]) -> Result<Value, EvalError> {
     }
     let img = get_image_arg(args, 0)?;
 
-    // Convert to grayscale
-    let gray = img.to_luma8();
+    // Convert to grayscale (Rec.601, matching WL).
+    let gray = to_luma601(&img);
     let (w, h) = (gray.width(), gray.height());
-    let dyn_gray = image::DynamicImage::ImageLuma8(gray.clone());
+    if w == 0 || h == 0 {
+        return Ok(Value::Image(Arc::new(image::DynamicImage::ImageLuma8(
+            gray,
+        ))));
+    }
 
-    // Apply Sobel X and Y — filter3x3 preserves pixel type, so the output has
-    // Luma<u8> pixels just like the input.
-    let gx = image::imageops::filter3x3(&dyn_gray, &SOBEL_X);
-    let gy = image::imageops::filter3x3(&dyn_gray, &SOBEL_Y);
+    // Sample with edge clamping (replicate border pixels).
+    let at = |x: i64, y: i64| -> f64 {
+        let xx = x.clamp(0, w as i64 - 1) as u32;
+        let yy = y.clamp(0, h as i64 - 1) as u32;
+        gray.get_pixel(xx, yy)[0] as f64
+    };
 
-    let mut buf = image::GrayImage::new(w, h);
-    let mut max_mag = 0.0f64;
-
-    // Compute magnitude and find max for normalisation
     let mut magnitudes = vec![0.0f64; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let dx = gx.get_pixel(x, y)[0] as f64;
-            let dy = gy.get_pixel(x, y)[0] as f64;
-            let mag = (dx * dx + dy * dy).sqrt();
-            magnitudes[(y * w + x) as usize] = mag;
+    let mut max_mag = 0.0f64;
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let (p00, p10, p20) = (at(x - 1, y - 1), at(x, y - 1), at(x + 1, y - 1));
+            let (p01, p21) = (at(x - 1, y), at(x + 1, y));
+            let (p02, p12, p22) = (at(x - 1, y + 1), at(x, y + 1), at(x + 1, y + 1));
+
+            // Signed Sobel responses (positive on one side of an edge,
+            // negative on the other).
+            let gx = (p20 + 2.0 * p21 + p22) - (p00 + 2.0 * p01 + p02);
+            let gy = (p02 + 2.0 * p12 + p22) - (p00 + 2.0 * p10 + p20);
+            let mag = (gx * gx + gy * gy).sqrt();
+
+            magnitudes[(y as u32 * w + x as u32) as usize] = mag;
             if mag > max_mag {
                 max_mag = mag;
             }
         }
     }
 
-    // Normalise to 0-255
-    let scale = if max_mag > 0.0 { 255.0 / max_mag } else { 1.0 };
-    for y in 0..h {
-        for x in 0..w {
-            let v = (magnitudes[(y * w + x) as usize] * scale).round() as u8;
-            buf.put_pixel(x, y, image::Luma([v]));
-        }
+    let scale = if max_mag > 0.0 { 255.0 / max_mag } else { 0.0 };
+    let mut buf = image::GrayImage::new(w, h);
+    for (i, p) in buf.pixels_mut().enumerate() {
+        *p = image::Luma([(magnitudes[i] * scale).round().clamp(0.0, 255.0) as u8]);
     }
 
     Ok(Value::Image(Arc::new(image::DynamicImage::ImageLuma8(buf))))
@@ -788,8 +1099,10 @@ pub fn builtin_edge_detect(args: &[Value]) -> Result<Value, EvalError> {
 /// ImageConvolve[image, kernel]
 ///
 /// Convolve an image with a 2D kernel (list of lists).
-/// For 3×3 kernels, uses the optimised filter3x3 path.
-/// Kernels are normalised so the sum of coefficients ≈ 1.
+/// The kernel is applied as-is and is *not* normalised (matching WL's
+/// `ImageConvolve`; pass a normalised kernel such as `BoxMatrix[1]/9` for an
+/// average). Odd-sized kernels of any size are supported; border pixels use
+/// clamped (replicated) edge samples. The source colour space is preserved.
 pub fn builtin_image_convolve(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -859,58 +1172,43 @@ pub fn builtin_image_convolve(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
 
-    if kw == 3 && kh == 3 {
-        // Use the optimised filter3x3 path.
-        // Flatten to 9-element array in row-major order.
-        let flat: [f32; 9] = [
-            kernel[0][0],
-            kernel[0][1],
-            kernel[0][2],
-            kernel[1][0],
-            kernel[1][1],
-            kernel[1][2],
-            kernel[2][0],
-            kernel[2][1],
-            kernel[2][2],
-        ];
-        let result = image::imageops::filter3x3(img.as_ref(), &flat);
-        Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(
-            result,
-        ))))
-    } else {
-        // Manual convolution for larger kernels.
-        let rgb = img.to_rgba8();
-        let (w, h) = (rgb.width(), rgb.height());
-        let mut buf = image::RgbaImage::new(w, h);
-        let half_kw = (kw / 2) as i32;
-        let half_kh = (kh / 2) as i32;
+    // Manual convolution over the RGBA view, then restore the source colour
+    // type. Edge samples are clamped (replicated) at the borders.
+    let src = img.to_rgba8();
+    let (w, h) = (src.width(), src.height());
+    let half_kw = (kw / 2) as i64;
+    let half_kh = (kh / 2) as i64;
+    let mut buf = image::RgbaImage::new(w, h);
 
-        for y in 0..h {
-            for x in 0..w {
-                let mut acc = [0.0f64; 4];
-                for (ky, krow) in kernel.iter().enumerate() {
-                    for (kx, k_val) in krow.iter().enumerate() {
-                        let px = x as i32 + kx as i32 - half_kw;
-                        let py = y as i32 + ky as i32 - half_kh;
-                        if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
-                            let p = rgb.get_pixel(px as u32, py as u32);
-                            let k = *k_val as f64;
-                            for c in 0..4 {
-                                acc[c] += p[c] as f64 * k;
-                            }
-                        }
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f64; 4];
+            for (ky, krow) in kernel.iter().enumerate() {
+                for (kx, k_val) in krow.iter().enumerate() {
+                    let px = (x as i64 + kx as i64 - half_kw).clamp(0, w as i64 - 1) as u32;
+                    let py = (y as i64 + ky as i64 - half_kh).clamp(0, h as i64 - 1) as u32;
+                    let p = src.get_pixel(px, py);
+                    let k = *k_val as f64;
+                    for c in 0..4 {
+                        acc[c] += p[c] as f64 * k;
                     }
                 }
-                let mut out = [0u8; 4];
-                for c in 0..4 {
-                    out[c] = acc[c].round().clamp(0.0, 255.0) as u8;
-                }
-                buf.put_pixel(x, y, image::Rgba(out));
             }
+            let mut out = [0u8; 4];
+            for c in 0..4 {
+                out[c] = acc[c].round().clamp(0.0, 255.0) as u8;
+            }
+            buf.put_pixel(x, y, image::Rgba(out));
         }
-
-        Ok(Value::Image(Arc::new(image::DynamicImage::ImageRgba8(buf))))
     }
+
+    let dynbuf = image::DynamicImage::ImageRgba8(buf);
+    let result = match img.color() {
+        image::ColorType::L8 => image::DynamicImage::ImageLuma8(dynbuf.to_luma8()),
+        image::ColorType::Rgb8 => image::DynamicImage::ImageRgb8(dynbuf.to_rgb8()),
+        _ => dynbuf,
+    };
+    Ok(Value::Image(Arc::new(result)))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1383,5 +1681,237 @@ mod tests {
                 assert_eq!((p[1], p[2]), (20, 30), "channels must stay aligned");
             }
         }
+    }
+
+    // ── Type hints / Interleaving / ColorSpace (WL conventions) ──
+
+    fn real(v: f64) -> Value {
+        Value::Real(rug::Float::with_val(53, v))
+    }
+
+    fn int(n: i64) -> Value {
+        Value::Integer(rug::Integer::from(n))
+    }
+
+    /// Build a channel plane (list of row lists) from a slice of row slices.
+    fn plane(rows: &[&[f64]]) -> Value {
+        Value::List(
+            rows.iter()
+                .map(|r| Value::List(r.iter().map(|&v| real(v)).collect()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_image_default_values_are_normalised() {
+        // The default (no type argument) interprets values on the [0, 1] range.
+        let img = extract_image(&builtin_image(&[gray2x2()]).unwrap());
+        assert_eq!(img.color(), image::ColorType::L8);
+        assert_eq!(img.get_pixel(1, 0)[0], 128); // 0.5 → 128
+    }
+
+    #[test]
+    fn test_image_byte_type_hint_uses_0_255_range() {
+        let data = Value::List(vec![Value::List(vec![int(0), int(128), int(255)])]);
+        let img = extract_image(&builtin_image(&[data, Value::Str("Byte".to_string())]).unwrap());
+        assert_eq!(img.color(), image::ColorType::L8);
+        assert_eq!(img.get_pixel(0, 0)[0], 0);
+        assert_eq!(img.get_pixel(1, 0)[0], 128);
+        assert_eq!(img.get_pixel(2, 0)[0], 255);
+    }
+
+    #[test]
+    fn test_image_bit16_type_hint_and_image_data() {
+        // 16-bit values are interpreted on a 0..=65535 range and stored as L16.
+        let data = Value::List(vec![Value::List(vec![int(0), int(65535)])]);
+        let img = builtin_image(&[data, Value::Str("Bit16".to_string())]).unwrap();
+        assert_eq!(
+            builtin_image_type(&[img.clone()]).unwrap(),
+            Value::Str("Bit16".to_string())
+        );
+        let stored = extract_image(&img);
+        assert_eq!(stored.color(), image::ColorType::L16);
+        assert_eq!(stored.as_luma16().unwrap().get_pixel(1, 0)[0], 65535);
+
+        // ImageData normalises by 65535 so a Bit16 image keeps a [0, 1] range.
+        let out = builtin_image_data(&[img]).unwrap();
+        if let Value::List(rows) = out
+            && let Value::List(row) = &rows[0]
+            && let (Value::Real(a), Value::Real(b)) = (&row[0], &row[1])
+        {
+            assert_eq!(a.to_f64(), 0.0);
+            assert_eq!(b.to_f64(), 1.0);
+        } else {
+            panic!("expected a 2D list of scalars, got unexpected shape");
+        }
+    }
+
+    #[test]
+    fn test_image_interleaving_false_planes() {
+        // 2×2 RGB given as three separate channel planes.
+        let planes = Value::List(vec![
+            plane(&[&[1.0, 0.0], &[0.0, 0.0]]),
+            plane(&[&[0.0, 0.0], &[0.0, 1.0]]),
+            plane(&[&[0.0, 1.0], &[0.0, 0.0]]),
+        ]);
+        let opts = Value::Rule {
+            lhs: Box::new(Value::Symbol("Interleaving".to_string())),
+            rhs: Box::new(Value::Bool(false)),
+            delayed: false,
+        };
+        let img = extract_image(&builtin_image(&[planes, opts]).unwrap());
+        assert_eq!(img.color(), image::ColorType::Rgb8);
+        assert_eq!(img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(1, 0), image::Rgba([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn test_image_colorspace_grayscale_option_converts() {
+        let data = Value::List(vec![Value::List(vec![Value::List(vec![
+            real(0.0),
+            real(1.0),
+            real(0.0),
+        ])])]);
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Symbol("ColorSpace".to_string())),
+            rhs: Box::new(Value::Str("Grayscale".to_string())),
+            delayed: false,
+        };
+        let img = extract_image(&builtin_image(&[data, rule]).unwrap());
+        assert_eq!(img.color(), image::ColorType::L8);
+        // Rec.601 luma of pure green ≈ 0.587 × 255 ≈ 150.
+        let v = img.get_pixel(0, 0)[0];
+        assert!((v as i32 - 150).abs() <= 1, "expected ≈150, got {v}");
+    }
+
+    #[test]
+    fn test_image_colorspace_string_arg_forces_gray() {
+        // `Image[data, "Grayscale"]` uses the second argument as a colour space.
+        let data = Value::List(vec![Value::List(vec![Value::List(vec![
+            real(0.0),
+            real(1.0),
+            real(0.0),
+        ])])]);
+        let img =
+            extract_image(&builtin_image(&[data, Value::Str("Grayscale".to_string())]).unwrap());
+        assert_eq!(img.color(), image::ColorType::L8);
+        let v = img.get_pixel(0, 0)[0];
+        assert!((v as i32 - 150).abs() <= 1, "expected ≈150, got {v}");
+    }
+
+    // ── Colour-space / channel conventions of core ops ──
+
+    #[test]
+    fn test_image_data_luma_alpha_two_channels() {
+        let buf = image::GrayAlphaImage::from_pixel(1, 1, image::LumaA([255, 128]));
+        let img = Value::Image(Arc::new(image::DynamicImage::ImageLumaA8(buf)));
+        let out = builtin_image_data(&[img]).unwrap();
+        if let Value::List(rows) = out
+            && let Value::List(row) = &rows[0]
+            && let Value::List(chs) = &row[0]
+        {
+            assert_eq!(chs.len(), 2, "LumaA must expose two channels");
+            return;
+        }
+        panic!("expected a 2-channel pixel");
+    }
+
+    #[test]
+    fn test_image_resize_preserves_colour_space() {
+        let gray = builtin_image(&[gray2x2()]).unwrap();
+        let r = extract_image(
+            &builtin_image_resize(&[gray, Value::List(vec![int(4), int(4)])]).unwrap(),
+        );
+        assert_eq!(r.color(), image::ColorType::L8);
+
+        let rgb = builtin_image(&[rgb2x2()]).unwrap();
+        let r2 = extract_image(&builtin_image_resize(&[rgb, int(3)]).unwrap());
+        assert_eq!(r2.color(), image::ColorType::Rgb8);
+    }
+
+    #[test]
+    fn test_image_convolve_not_normalised_and_preserves_gray() {
+        // Uniform gray 3×3 at 0.1 (≈26/255); box kernel of ones.
+        let data = Value::List(vec![
+            Value::List(vec![real(0.1), real(0.1), real(0.1)]),
+            Value::List(vec![real(0.1), real(0.1), real(0.1)]),
+            Value::List(vec![real(0.1), real(0.1), real(0.1)]),
+        ]);
+        let img = builtin_image(&[data]).unwrap();
+        let kernel = Value::List(vec![
+            Value::List(vec![int(1), int(1), int(1)]),
+            Value::List(vec![int(1), int(1), int(1)]),
+            Value::List(vec![int(1), int(1), int(1)]),
+        ]);
+        let r = extract_image(&builtin_image_convolve(&[img, kernel]).unwrap());
+        assert_eq!(r.color(), image::ColorType::L8);
+        // ImageConvolve does not normalise: 9 × 26 = 234.
+        assert_eq!(r.get_pixel(1, 1)[0], 234);
+    }
+
+    #[test]
+    fn test_edge_detect_keeps_signed_response() {
+        // Hard vertical step: bright columns then dark columns.
+        let data = Value::List(vec![
+            Value::List(vec![real(1.0), real(1.0), real(0.0)]),
+            Value::List(vec![real(1.0), real(1.0), real(0.0)]),
+            Value::List(vec![real(1.0), real(1.0), real(0.0)]),
+        ]);
+        let img = builtin_image(&[data]).unwrap();
+        let e = extract_image(&builtin_edge_detect(&[img]).unwrap());
+        // Both sides of the edge are bright because the Sobel response has
+        // opposite signs there; the old filter3x3 path clamped the negative
+        // lobe to zero.
+        assert!(e.get_pixel(1, 1)[0] > 200, "positive lobe missing");
+        assert!(e.get_pixel(2, 1)[0] > 200, "negative lobe missing");
+        assert_eq!(e.get_pixel(0, 1)[0], 0);
+    }
+
+    #[test]
+    fn test_binarize_uses_rec601_luma() {
+        let red = Value::List(vec![Value::List(vec![Value::List(vec![
+            real(1.0),
+            real(0.0),
+            real(0.0),
+        ])])]);
+        let b = extract_image(&builtin_binarize(&[builtin_image(&[red]).unwrap()]).unwrap());
+        // luma601(red) ≈ 0.299 < 0.5 → black.
+        assert_eq!(b.get_pixel(0, 0)[0], 0);
+
+        let green = Value::List(vec![Value::List(vec![Value::List(vec![
+            real(0.0),
+            real(1.0),
+            real(0.0),
+        ])])]);
+        let b2 = extract_image(&builtin_binarize(&[builtin_image(&[green]).unwrap()]).unwrap());
+        // luma601(green) ≈ 0.587 ≥ 0.5 → white.
+        assert_eq!(b2.get_pixel(0, 0)[0], 255);
+    }
+
+    #[test]
+    fn test_color_convert_grayscale_uses_rec601() {
+        let green = Value::List(vec![Value::List(vec![Value::List(vec![
+            real(0.0),
+            real(1.0),
+            real(0.0),
+        ])])]);
+        let img = builtin_image(&[green]).unwrap();
+        let c = extract_image(
+            &builtin_color_convert(&[img, Value::Str("Grayscale".to_string())]).unwrap(),
+        );
+        assert_eq!(c.color(), image::ColorType::L8);
+        let v = c.get_pixel(0, 0)[0];
+        assert!((v as i32 - 150).abs() <= 1, "expected ≈150, got {v}");
+    }
+
+    #[test]
+    fn test_image_rotate_arbitrary_preserves_rgb_type() {
+        let mut src = image::RgbImage::new(3, 3);
+        for p in src.pixels_mut() {
+            *p = image::Rgb([10, 20, 30]);
+        }
+        let img = Value::Image(Arc::new(image::DynamicImage::ImageRgb8(src)));
+        let rotated = builtin_image_rotate(&[img, real(30.0)]).unwrap();
+        assert_eq!(extract_image(&rotated).color(), image::ColorType::Rgb8);
     }
 }

@@ -4,6 +4,7 @@
 ///   Direct C-ABI path (Tier 1): `value_to_c_arg` / `c_ret_to_value`
 ///   JSON wire path (Tier 2 Python, Tier 3 extensions): `values_to_json` / `json_to_value`
 use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 
 use crate::value::{DEFAULT_PRECISION, EvalError, NativeType, PackedArrayType, Value};
 use rug::{Float, Integer};
@@ -29,19 +30,27 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
     match ty {
         NativeType::I32 => {
             let n = require_int(v, "Integer32")?;
-            Ok(CArg::I32(n as i32))
+            let n = i32::try_from(n).map_err(|_| EvalError::TypeError {
+                expected: "Integer32".to_string(),
+                got: format!("Integer {n} out of 32-bit signed range"),
+            })?;
+            Ok(CArg::I32(n))
         }
         NativeType::I64 => {
             let n = require_int(v, "Integer64")?;
             Ok(CArg::I64(n))
         }
         NativeType::U32 => {
-            let n = require_int(v, "UnsignedInteger32")?;
-            Ok(CArg::U32(n as u32))
+            let n = require_uint(v, "UnsignedInteger32")?;
+            let n = u32::try_from(n).map_err(|_| EvalError::TypeError {
+                expected: "UnsignedInteger32".to_string(),
+                got: format!("integer {n} out of 32-bit unsigned range"),
+            })?;
+            Ok(CArg::U32(n))
         }
         NativeType::U64 => {
-            let n = require_int(v, "UnsignedInteger64")?;
-            Ok(CArg::U64(n as u64))
+            let n = require_uint(v, "UnsignedInteger64")?;
+            Ok(CArg::U64(n))
         }
         NativeType::F32 => {
             let r = require_real(v, "Real32")?;
@@ -51,7 +60,7 @@ pub fn value_to_c_arg(v: &Value, ty: &NativeType) -> Result<CArg, EvalError> {
             let r = require_real(v, "Real64")?;
             Ok(CArg::F64(r))
         }
-        NativeType::Bool => Ok(CArg::Bool(if v.to_bool() { 1 } else { 0 })),
+        NativeType::Bool => Ok(CArg::Bool(i32::from(v.to_bool()))),
         NativeType::CString => {
             if let Value::Str(s) = v {
                 let cs = CString::new(s.as_str())
@@ -88,7 +97,7 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
         }
         NativeType::Bool => Value::Bool(bits != 0),
         NativeType::CString => {
-            let ptr = bits as *const i8;
+            let ptr = bits as *const c_char;
             if ptr.is_null() {
                 Value::Null
             } else {
@@ -736,6 +745,61 @@ fn require_real(v: &Value, ty_name: &str) -> Result<f64, EvalError> {
     }
 }
 
+/// Convert a value to a `u64` for an unsigned C parameter.
+///
+/// Unlike `require_int`, this accepts the full 64-bit unsigned range (values
+/// above `i64::MAX` previously failed to marshal at all), and it rejects
+/// negative integers so that `UnsignedInteger*` is not silently reinterpreted.
+fn require_uint(v: &Value, ty_name: &str) -> Result<u64, EvalError> {
+    let out_of_range = |v: &Value| EvalError::TypeError {
+        expected: ty_name.to_string(),
+        got: v.type_name().to_string(),
+    };
+    match v {
+        Value::Integer(n) => {
+            if let Some(u) = n.to_u64() {
+                Ok(u)
+            } else if let Some(i) = n.to_i64() {
+                // Negative-but-fits: reinterpret as two's complement, matching C.
+                Ok(i as u64)
+            } else {
+                Err(EvalError::TypeError {
+                    expected: ty_name.to_string(),
+                    got: format!("Integer {n} out of 64-bit range"),
+                })
+            }
+        }
+        Value::Real(r) => {
+            let f = r.to_f64();
+            if f < 0.0 {
+                Err(out_of_range(v))
+            } else {
+                Ok(f as u64)
+            }
+        }
+        Value::Rational(r) => {
+            if r.denom() == &Integer::from(1) {
+                let n = r.numer();
+                if let Some(u) = n.to_u64() {
+                    Ok(u)
+                } else if let Some(i) = n.to_i64() {
+                    Ok(i as u64)
+                } else {
+                    Err(out_of_range(v))
+                }
+            } else {
+                let f = r.to_f64();
+                if f < 0.0 {
+                    Err(out_of_range(v))
+                } else {
+                    Ok(f as u64)
+                }
+            }
+        }
+        _ => Err(out_of_range(v)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,5 +847,119 @@ mod tests {
             c_ret_to_value(big as u64, &NativeType::U32),
             Value::Integer(Integer::from(big))
         );
+    }
+
+    #[test]
+    fn test_value_to_c_arg_i32_out_of_range_errors() {
+        // 2^40 does not fit in i32; previously it silently wrapped to 0.
+        let big = Value::Integer(Integer::from(1) << 40);
+        assert!(value_to_c_arg(&big, &NativeType::I32).is_err());
+        // Boundary values still marshal.
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(i32::MIN.into()), &NativeType::I32),
+            Ok(CArg::I32(i32::MIN))
+        ));
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(i32::MAX.into()), &NativeType::I32),
+            Ok(CArg::I32(i32::MAX))
+        ));
+    }
+
+    #[test]
+    fn test_value_to_c_arg_u32_out_of_range_errors() {
+        let big = Value::Integer(Integer::from(1) << 40);
+        assert!(value_to_c_arg(&big, &NativeType::U32).is_err());
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(u32::MAX.into()), &NativeType::U32),
+            Ok(CArg::U32(u32::MAX))
+        ));
+    }
+
+    #[test]
+    fn test_value_to_c_arg_u64_accepts_above_i64_max() {
+        // Values in (i64::MAX, u64::MAX] must be representable as UnsignedInteger64.
+        let big = Value::Integer(Integer::from(u64::MAX));
+        assert!(matches!(
+            value_to_c_arg(&big, &NativeType::U64),
+            Ok(CArg::U64(v)) if v == u64::MAX
+        ));
+        // A negative integer is reinterpreted two's-complement, as C does.
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(Integer::from(-1)), &NativeType::U64),
+            Ok(CArg::U64(u64::MAX))
+        ));
+    }
+
+    #[test]
+    fn test_value_to_c_arg_cstring_interior_nul_errors() {
+        let v = Value::Str("a\0b".to_string());
+        assert!(value_to_c_arg(&v, &NativeType::CString).is_err());
+        let ok = Value::Str("hello".to_string());
+        match value_to_c_arg(&ok, &NativeType::CString).unwrap() {
+            CArg::CStr(cs) => assert_eq!(cs.to_str().unwrap(), "hello"),
+            _ => panic!("expected CStr"),
+        }
+    }
+
+    #[test]
+    fn test_c_ret_float_roundtrip() {
+        let f = 1.5f64;
+        assert_eq!(
+            c_ret_to_value(f.to_bits(), &NativeType::F64),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, f))
+        );
+        let g = -2.25f32;
+        assert_eq!(
+            c_ret_to_value(g.to_bits() as u64, &NativeType::F32),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, g))
+        );
+    }
+
+    #[test]
+    fn test_c_ret_i32_sign_extends() {
+        let bits = (-7i32) as u64; // upper bits set by the cast
+        assert_eq!(
+            c_ret_to_value(bits, &NativeType::I32),
+            Value::Integer(Integer::from(-7))
+        );
+    }
+
+    #[test]
+    fn test_c_ret_cstring_null_is_null() {
+        assert_eq!(c_ret_to_value(0, &NativeType::CString), Value::Null);
+        let s = CString::new("hello").unwrap();
+        assert_eq!(
+            c_ret_to_value(s.as_ptr() as usize as u64, &NativeType::CString),
+            Value::Str("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_c_ret_bool_and_void() {
+        assert_eq!(c_ret_to_value(0, &NativeType::Bool), Value::Bool(false));
+        assert_eq!(c_ret_to_value(7, &NativeType::Bool), Value::Bool(true));
+        assert_eq!(c_ret_to_value(1234, &NativeType::Void), Value::Null);
+    }
+
+    #[test]
+    fn test_legacy_json_roundtrip() {
+        let args = vec![
+            Value::Integer(Integer::from(42)),
+            Value::Real(Float::with_val(DEFAULT_PRECISION, 2.5)),
+            Value::Str("hi".to_string()),
+            Value::Bool(true),
+            Value::Null,
+            Value::List(vec![Value::Integer(Integer::from(1))]),
+        ];
+        let json = values_to_json(&args).unwrap();
+        let json_vals: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(json_vals.len(), args.len());
+        assert_eq!(json_to_value("[1,2,3]").unwrap().type_name(), "List");
+    }
+
+    #[test]
+    fn test_legacy_values_to_json_rejects_unsupported() {
+        let v = Value::Complex { re: 1.0, im: 2.0 };
+        assert!(values_to_json(&[v]).is_err());
     }
 }

@@ -85,6 +85,8 @@ pub enum Token {
     Not,             // !
     FatArrow,        // =>
     StringJoinOp,    // <>
+    GetOp,           // <<  (Get / read file)
+    PutOp,           // >>  (Put / write file)
     PipeAlt,         // | (pattern alternatives)
     FuncRef,         // & (function reference / pure function)
 
@@ -204,6 +206,8 @@ impl fmt::Display for Token {
             Token::Not => write!(f, "!"),
             Token::FatArrow => write!(f, "=>"),
             Token::StringJoinOp => write!(f, "<>"),
+            Token::GetOp => write!(f, "<<"),
+            Token::PutOp => write!(f, ">>"),
             Token::PipeAlt => write!(f, "|"),
             Token::FuncRef => write!(f, "&"),
             Token::Quote => write!(f, "'"),
@@ -967,6 +971,10 @@ impl Lexer {
                     } else if self.peek() == Some('>') {
                         self.advance();
                         push!(Token::StringJoinOp);
+                    } else if self.peek() == Some('<') {
+                        // `<<` is Get (prefix file read).
+                        self.advance();
+                        push!(Token::GetOp);
                     } else {
                         push!(Token::Less);
                     }
@@ -978,6 +986,10 @@ impl Lexer {
                     if self.peek() == Some('=') {
                         self.advance();
                         push!(Token::GreaterEqual);
+                    } else if self.peek() == Some('>') {
+                        // `>>` is Put (infix file write).
+                        self.advance();
+                        push!(Token::PutOp);
                     } else {
                         push!(Token::Greater);
                     }
@@ -1361,6 +1373,40 @@ mod tests {
                 Token::Str("a".to_string()),
                 Token::StringJoinOp,
                 Token::Str("b".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_put_get_operators() {
+        let toks = tokens("x >> \"file\"");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("x".to_string()),
+                Token::PutOp,
+                Token::Str("file".to_string()),
+                Token::Eof,
+            ]
+        );
+
+        let toks = tokens("<< \"file\"");
+        assert_eq!(
+            toks,
+            vec![Token::GetOp, Token::Str("file".to_string()), Token::Eof,]
+        );
+
+        // A single `<` / `>` still lexes as comparison.
+        let toks = tokens("a < b > c");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Less,
+                Token::Ident("b".to_string()),
+                Token::Greater,
+                Token::Ident("c".to_string()),
                 Token::Eof,
             ]
         );

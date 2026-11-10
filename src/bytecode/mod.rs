@@ -181,4 +181,8 @@ pub struct CompiledBytecode {
     pub nregs: u16,
     /// Number of parameters the function expects.
     pub nparams: u8,
+    /// Names of the parameters, in order. An empty string marks an anonymous
+    /// pattern (`_`). Used by the VM to bind arguments into the call's local
+    /// environment so that closures created in the body capture them.
+    pub param_names: Vec<String>,
 }

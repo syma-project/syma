@@ -1,12 +1,13 @@
+use crate::ast::Expr;
 use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
-use super::list::resolve_span;
-
 /// Extract a `&str` from a `&Value`, returning TypeError if not a string.
+/// Literal strings wrapped as a `Pattern` (as rule arguments are) are accepted.
 fn str_of(v: &Value) -> Result<&str, EvalError> {
     match v {
         Value::Str(s) => Ok(s.as_str()),
+        Value::Pattern(Expr::Str(s)) => Ok(s.as_str()),
         _ => Err(EvalError::TypeError {
             expected: "String".to_string(),
             got: v.type_name().to_string(),
@@ -28,6 +29,75 @@ fn str_arg(args: &[Value], idx: usize) -> Result<&str, EvalError> {
 /// Extract two string arguments.
 fn str_args(args: &[Value], a: usize, b: usize) -> Result<(&str, &str), EvalError> {
     Ok((str_arg(args, a)?, str_arg(args, b)?))
+}
+
+/// True when `v` is the symbol `All`.
+fn is_all(v: &Value) -> bool {
+    matches!(v, Value::Symbol(s) if s == "All")
+}
+
+/// True when `v` is the symbol `None`.
+fn is_none(v: &Value) -> bool {
+    matches!(v, Value::Symbol(s) if s == "None")
+}
+
+/// Extract an integer argument, reporting a TypeError otherwise.
+fn int_of(v: &Value) -> Result<i64, EvalError> {
+    v.to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: v.type_name().to_string(),
+    })
+}
+
+/// Convert a 1-based (possibly negative) string position to a 0-based char
+/// index, clamped to `[0, len]`. Position 0 refers to just before the first
+/// character.
+fn resolve_index(pos: i64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len_i = len as i64;
+    let idx = if pos > 0 {
+        pos - 1
+    } else if pos < 0 {
+        len_i + pos
+    } else {
+        0
+    };
+    idx.clamp(0, len_i - 1) as usize
+}
+
+/// Character indices selected by the WL span `{m, n, step}` in traversal
+/// order. When `m > n` the span is traversed backwards (WL semantics).
+fn range_indices(m: i64, n: i64, step: i64, len: usize) -> Vec<usize> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let step = step.unsigned_abs().max(1) as i64;
+    let dir: i64 = if n >= m { 1 } else { -1 };
+    if step == 1 {
+        let a = resolve_index(m, len);
+        let b = resolve_index(n, len);
+        return if dir > 0 {
+            (a..=b).collect()
+        } else {
+            (b..=a).rev().collect()
+        };
+    }
+    let mut out = Vec::new();
+    let mut i = m;
+    loop {
+        out.push(resolve_index(i, len));
+        if (dir > 0 && i >= n) || (dir < 0 && i <= n) {
+            break;
+        }
+        let next = i + dir * step;
+        if (dir > 0 && next > n) || (dir < 0 && next < n) {
+            break;
+        }
+        i = next;
+    }
+    out
 }
 
 pub fn builtin_string_join(args: &[Value]) -> Result<Value, EvalError> {
@@ -114,12 +184,24 @@ pub fn builtin_string_split(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "StringReplace requires exactly 2 arguments".to_string(),
+            "StringReplace requires 2 or 3 arguments".to_string(),
         ));
     }
     let s = str_arg(args, 0)?.to_string();
+    // WL replaces every occurrence by default; an optional third argument caps
+    // the number of replacements.
+    let max: Option<usize> = if args.len() == 3 {
+        let n = int_of(&args[2])?;
+        if n < 0 { None } else { Some(n as usize) }
+    } else {
+        None
+    };
+    let apply = |text: String, old: &str, new: &str| match max {
+        Some(k) => text.replacen(old, new, k),
+        None => text.replace(old, new),
+    };
     match &args[1] {
         Value::Rule {
             lhs,
@@ -128,7 +210,7 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
         } => {
             let old = str_of(lhs.as_ref())?;
             let new = str_of(rhs.as_ref())?;
-            Ok(Value::Str(s.replacen(old, new, 1)))
+            Ok(Value::Str(apply(s, old, new)))
         }
         Value::List(rules) => {
             let mut result = s;
@@ -141,7 +223,7 @@ pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
                     && let Ok(old) = str_of(lhs.as_ref())
                     && let Ok(new) = str_of(rhs.as_ref())
                 {
-                    result = result.replacen(old, new, 1);
+                    result = apply(result, old, new);
                 }
             }
             Ok(Value::Str(result))
@@ -162,35 +244,48 @@ pub fn builtin_string_take(args: &[Value]) -> Result<Value, EvalError> {
     let s = str_arg(args, 0)?;
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
-    // {m, n} takes an inclusive character span; negative positions count from
-    // the end.
+    // `All` keeps the whole string, `None` keeps nothing.
+    if is_all(&args[1]) {
+        return Ok(Value::Str(s.to_string()));
+    }
+    if is_none(&args[1]) {
+        return Ok(Value::Str(String::new()));
+    }
+    // {m} / {m, n} / {m, n, step} takes an inclusive character span; negative
+    // positions count from the end and `m > n` traverses backwards.
     if let Value::List(range) = &args[1] {
-        if range.len() != 2 {
+        if range.is_empty() || range.len() > 3 {
             return Err(EvalError::Error(
-                "StringTake: range spec must have 2 elements".to_string(),
+                "StringTake: range spec must have 1 to 3 elements".to_string(),
             ));
         }
-        let m = range[0].to_integer().ok_or_else(|| EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: range[0].type_name().to_string(),
-        })?;
-        let n = range[1].to_integer().ok_or_else(|| EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: range[1].type_name().to_string(),
-        })?;
-        let (start, end) = resolve_span(m, n, len);
-        return Ok(Value::Str(chars[start..end].iter().collect()));
+        let m = int_of(&range[0])?;
+        let n = if range.len() >= 2 {
+            int_of(&range[1])?
+        } else {
+            m
+        };
+        let step = if range.len() == 3 {
+            int_of(&range[2])?
+        } else {
+            1
+        };
+        if step == 0 {
+            return Err(EvalError::Error(
+                "StringTake: step must be non-zero".to_string(),
+            ));
+        }
+        let idx = range_indices(m, n, step, len);
+        let result: String = idx.into_iter().map(|i| chars[i]).collect();
+        return Ok(Value::Str(result));
     }
-    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
-        expected: "Integer".to_string(),
-        got: args[1].type_name().to_string(),
-    })?;
+    let n = int_of(&args[1])?;
     // Positive n takes the first n characters; negative n takes the last |n|.
+    let count = n.unsigned_abs() as usize;
     let result: String = if n >= 0 {
-        chars[..(n as usize).min(len)].iter().collect()
+        chars[..count.min(len)].iter().collect()
     } else {
-        let count = ((-n) as usize).min(len);
-        chars[len - count..].iter().collect()
+        chars[len - count.min(len)..].iter().collect()
     };
     Ok(Value::Str(result))
 }
@@ -204,35 +299,53 @@ pub fn builtin_string_drop(args: &[Value]) -> Result<Value, EvalError> {
     let s = str_arg(args, 0)?;
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
+    // `All` drops everything, `None` drops nothing.
+    if is_all(&args[1]) {
+        return Ok(Value::Str(String::new()));
+    }
+    if is_none(&args[1]) {
+        return Ok(Value::Str(s.to_string()));
+    }
     if let Value::List(range) = &args[1] {
-        if range.len() != 2 {
+        if range.is_empty() || range.len() > 3 {
             return Err(EvalError::Error(
-                "StringDrop: range spec must have 2 elements".to_string(),
+                "StringDrop: range spec must have 1 to 3 elements".to_string(),
             ));
         }
-        let m = range[0].to_integer().ok_or_else(|| EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: range[0].type_name().to_string(),
-        })?;
-        let n = range[1].to_integer().ok_or_else(|| EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: range[1].type_name().to_string(),
-        })?;
-        let (start, end) = resolve_span(m, n, len);
-        let mut result: String = chars[..start].iter().collect();
-        result.extend(chars[end..].iter());
+        let m = int_of(&range[0])?;
+        let n = if range.len() >= 2 {
+            int_of(&range[1])?
+        } else {
+            m
+        };
+        let step = if range.len() == 3 {
+            int_of(&range[2])?
+        } else {
+            1
+        };
+        if step == 0 {
+            return Err(EvalError::Error(
+                "StringDrop: step must be non-zero".to_string(),
+            ));
+        }
+        let mut keep = vec![true; len];
+        for i in range_indices(m, n, step, len) {
+            keep[i] = false;
+        }
+        let result: String = chars
+            .iter()
+            .zip(keep)
+            .filter_map(|(c, k)| k.then_some(*c))
+            .collect();
         return Ok(Value::Str(result));
     }
-    let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
-        expected: "Integer".to_string(),
-        got: args[1].type_name().to_string(),
-    })?;
+    let n = int_of(&args[1])?;
     // Positive n drops the first n characters; negative n drops the last |n|.
+    let count = n.unsigned_abs() as usize;
     let result: String = if n >= 0 {
-        chars[(n as usize).min(len)..].iter().collect()
+        chars[count.min(len)..].iter().collect()
     } else {
-        let count = ((-n) as usize).min(len);
-        chars[..len - count].iter().collect()
+        chars[..len - count.min(len)].iter().collect()
     };
     Ok(Value::Str(result))
 }
@@ -473,7 +586,8 @@ pub fn builtin_string_part(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(chars[idx as usize].to_string()))
 }
 
-/// StringPosition[s, sub] — list of 1-indexed start positions where sub occurs in s.
+/// StringPosition[s, sub] — list of `{start, end}` 1-indexed character spans
+/// where `sub` occurs in `s`, including overlapping occurrences.
 pub fn builtin_string_position(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -481,16 +595,30 @@ pub fn builtin_string_position(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let (s, sub) = str_args(args, 0, 1)?;
-    // match_indices returns byte offsets; convert to char indices
-    let positions: Vec<Value> = s
-        .match_indices(sub)
-        .map(|(byte_pos, _)| {
-            // Report character positions, not byte offsets.
-            let char_pos = s[..byte_pos].chars().count();
-            Value::Integer(Integer::from(char_pos as i64 + 1))
-        })
-        .collect();
-    Ok(Value::List(positions))
+    let schars: Vec<char> = s.chars().collect();
+    let subchars: Vec<char> = sub.chars().collect();
+    let n = subchars.len();
+    let mut out: Vec<Value> = Vec::new();
+    if n == 0 {
+        // Zero-width matches sit before each character and after the last.
+        for i in 0..=schars.len() {
+            out.push(Value::List(vec![
+                Value::Integer(Integer::from(i as i64 + 1)),
+                Value::Integer(Integer::from(i as i64)),
+            ]));
+        }
+    } else if n <= schars.len() {
+        // Scan every start position so overlapping matches are reported.
+        for start in 0..=schars.len() - n {
+            if schars[start..start + n] == subchars[..] {
+                out.push(Value::List(vec![
+                    Value::Integer(Integer::from(start as i64 + 1)),
+                    Value::Integer(Integer::from((start + n) as i64)),
+                ]));
+            }
+        }
+    }
+    Ok(Value::List(out))
 }
 
 /// StringCount[s, sub] — count non-overlapping occurrences of sub in s.
@@ -578,11 +706,12 @@ pub fn builtin_string_insert(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Str(result))
 }
 
-/// StringRiffle[list, sep] — join a list of values with separator sep between each.
+/// StringRiffle[list] / StringRiffle[list, sep] — join a list of values with
+/// separator sep between each (defaults to a single space).
 pub fn builtin_string_riffle(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "StringRiffle requires exactly 2 arguments".to_string(),
+            "StringRiffle requires 1 or 2 arguments".to_string(),
         ));
     }
     let items = match &args[0] {
@@ -594,7 +723,11 @@ pub fn builtin_string_riffle(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let sep = str_arg(args, 1)?;
+    let sep = if args.len() == 2 {
+        str_arg(args, 1)?
+    } else {
+        " "
+    };
     let parts: Vec<String> = items
         .iter()
         .map(|v| match v {
@@ -1039,6 +1172,12 @@ mod tests {
     fn string(s: &str) -> Value {
         Value::Str(s.to_string())
     }
+    fn all() -> Value {
+        Value::Symbol("All".to_string())
+    }
+    fn none() -> Value {
+        Value::Symbol("None".to_string())
+    }
 
     #[test]
     fn test_string_join() {
@@ -1206,7 +1345,13 @@ mod tests {
     #[test]
     fn test_string_position() {
         let result = builtin_string_position(&[string("hello"), string("l")]).unwrap();
-        assert_eq!(result, Value::List(vec![int(3), int(4)]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![int(3), int(3)]),
+                Value::List(vec![int(4), int(4)]),
+            ])
+        );
     }
 
     #[test]
@@ -1217,9 +1362,28 @@ mod tests {
 
     #[test]
     fn test_string_position_overlap() {
-        // match_indices finds non-overlapping matches
+        // Overlapping occurrences are all reported as {start, end} pairs.
         let result = builtin_string_position(&[string("aaa"), string("aa")]).unwrap();
-        assert_eq!(result, Value::List(vec![int(1)]));
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![int(1), int(2)]),
+                Value::List(vec![int(2), int(3)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_string_position_empty_sub() {
+        let result = builtin_string_position(&[string("ab"), string("")]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::List(vec![int(1), int(0)]),
+                Value::List(vec![int(2), int(1)]),
+                Value::List(vec![int(3), int(2)]),
+            ])
+        );
     }
 
     // ── StringCount ──
@@ -1534,7 +1698,7 @@ mod tests {
     fn test_string_position_unicode() {
         // Byte offsets would report position 10; character position is 4.
         let result = builtin_string_position(&[string("日本語x"), string("x")]).unwrap();
-        assert_eq!(result, Value::List(vec![int(4)]));
+        assert_eq!(result, Value::List(vec![Value::List(vec![int(4), int(4)])]));
     }
 
     // ── Regression: StringPad uses character width and repeated padding ──
@@ -1622,6 +1786,145 @@ mod tests {
         assert_eq!(
             builtin_string_take(&[string("hello"), Value::List(vec![int(-2), int(-1)])]).unwrap(),
             string("lo")
+        );
+    }
+
+    // ── Hardening: All / None / single-index / stepped / reversed spans ──
+
+    #[test]
+    fn test_string_take_all_none() {
+        assert_eq!(
+            builtin_string_take(&[string("abc"), all()]).unwrap(),
+            string("abc")
+        );
+        assert_eq!(
+            builtin_string_take(&[string("abc"), none()]).unwrap(),
+            string("")
+        );
+    }
+
+    #[test]
+    fn test_string_drop_all_none() {
+        assert_eq!(
+            builtin_string_drop(&[string("abc"), all()]).unwrap(),
+            string("")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("abc"), none()]).unwrap(),
+            string("abc")
+        );
+    }
+
+    #[test]
+    fn test_string_take_single_index() {
+        // StringTake["abcde", {2}] → "b"
+        assert_eq!(
+            builtin_string_take(&[string("abcde"), Value::List(vec![int(2)])]).unwrap(),
+            string("b")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("abcde"), Value::List(vec![int(2)])]).unwrap(),
+            string("acde")
+        );
+    }
+
+    #[test]
+    fn test_string_take_reversed_range() {
+        // m > n traverses backwards: StringTake["abcde", {4, 2}] → "dcb"
+        assert_eq!(
+            builtin_string_take(&[string("abcde"), Value::List(vec![int(4), int(2)])]).unwrap(),
+            string("dcb")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("abcde"), Value::List(vec![int(4), int(2)])]).unwrap(),
+            string("ae")
+        );
+    }
+
+    #[test]
+    fn test_string_take_step() {
+        // StringTake["abcdef", {1, 6, 2}] → "ace"
+        assert_eq!(
+            builtin_string_take(&[string("abcdef"), Value::List(vec![int(1), int(6), int(2)])])
+                .unwrap(),
+            string("ace")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("abcdef"), Value::List(vec![int(1), int(6), int(2)])])
+                .unwrap(),
+            string("bdf")
+        );
+    }
+
+    #[test]
+    fn test_string_take_char_based_unicode() {
+        // "héllo" is 5 characters; taking 3 keeps three characters.
+        assert_eq!(
+            builtin_string_take(&[string("héllo"), int(3)]).unwrap(),
+            string("hél")
+        );
+        assert_eq!(
+            builtin_string_take(&[string("日本語x"), Value::List(vec![int(2), int(3)])]).unwrap(),
+            string("本語")
+        );
+    }
+
+    // ── Hardening: StringReplace replaces every occurrence by default ──
+
+    #[test]
+    fn test_string_replace_all_occurrences() {
+        let rule = Value::Rule {
+            lhs: Box::new(string("l")),
+            rhs: Box::new(string("L")),
+            delayed: false,
+        };
+        assert_eq!(
+            builtin_string_replace(&[string("hello"), rule.clone()]).unwrap(),
+            string("heLLo")
+        );
+        // Explicit cap limits the number of replacements.
+        assert_eq!(
+            builtin_string_replace(&[string("hello"), rule, int(1)]).unwrap(),
+            string("heLlo")
+        );
+    }
+
+    #[test]
+    fn test_string_replace_accepts_pattern_wrapped_literals() {
+        // Rule arguments reach the builtin wrapped as `Pattern[Str]`.
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Pattern(Expr::Str("a".to_string()))),
+            rhs: Box::new(Value::Pattern(Expr::Str("X".to_string()))),
+            delayed: false,
+        };
+        assert_eq!(
+            builtin_string_replace(&[string("banana"), rule]).unwrap(),
+            string("bXnXnX")
+        );
+    }
+
+    // ── Hardening: StringRiffle defaults its separator to a space ──
+
+    #[test]
+    fn test_string_riffle_default_sep() {
+        let result =
+            builtin_string_riffle(&[Value::List(vec![string("a"), string("b"), string("c")])])
+                .unwrap();
+        assert_eq!(result, string("a b c"));
+    }
+
+    // ── Hardening: StringCount counts non-overlapping occurrences ──
+
+    #[test]
+    fn test_string_count_non_overlapping() {
+        // WL StringCount counts non-overlapping matches.
+        assert_eq!(
+            builtin_string_count(&[string("aaa"), string("aa")]).unwrap(),
+            int(1)
+        );
+        assert_eq!(
+            builtin_string_count(&[string("abcabc"), string("abc")]).unwrap(),
+            int(2)
         );
     }
 

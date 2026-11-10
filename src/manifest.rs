@@ -271,17 +271,37 @@ fn parse_inline_path(s: &str) -> Option<String> {
 }
 
 /// Parse a TOML `key = "value"` (or `key = { ... }`) line.
-/// Returns `(key, value)` with surrounding quotes stripped for plain strings.
+/// Returns `(key, value)` with surrounding quotes stripped for plain strings
+/// and any trailing inline comment removed.
 fn parse_kv(line: &str) -> Option<(&str, &str)> {
     let eq = line.find('=')?;
     let key = line[..eq].trim();
     let raw = line[eq + 1..].trim();
-    let val = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        &raw[1..raw.len() - 1]
-    } else {
-        raw
-    };
+    let val = strip_quoted(raw).unwrap_or(raw);
     Some((key, val))
+}
+
+/// If `raw` begins with `"` or `'`, return the contents up to the matching
+/// closing quote (honouring `\"` escapes inside double quotes). Returns `None`
+/// when `raw` is not a quoted string (e.g. an inline table or bare value).
+fn strip_quoted(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let quote = *bytes.first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        if quote == b'"' && bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == quote {
+            return Some(&raw[1..i]);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -336,5 +356,113 @@ mod tests {
         fs::write(pkg.root.join("src/main.syma"), "x = 1\n").unwrap();
         fs::write(pkg.root.join("src/lib.syma"), "x = 1\n").unwrap();
         assert!(pkg.manifest().entry_path().ends_with("src/main.syma"));
+    }
+
+    #[test]
+    fn test_read_manifest_sections() {
+        let pkg = TempPkg::new(
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nentry = \"src/main.syma\"\n\n\
+             [dependencies]\nfoo = \"1.0\"\nbar = \"2.0\"\n\n\
+             [dev-dependencies]\ntestkit = \"0.5\"\n",
+        );
+        let m = pkg.manifest();
+        assert_eq!(m.name, "demo");
+        assert_eq!(m.version, "1.2.3");
+        assert_eq!(m.entry.as_deref(), Some("src/main.syma"));
+        assert_eq!(m.dependencies.get("foo").map(String::as_str), Some("1.0"));
+        assert_eq!(m.dependencies.get("bar").map(String::as_str), Some("2.0"));
+        assert_eq!(
+            m.dev_dependencies.get("testkit").map(String::as_str),
+            Some("0.5")
+        );
+    }
+
+    #[test]
+    fn test_read_manifest_trailing_comment() {
+        let pkg =
+            TempPkg::new("[package]\nname = \"demo\"\n\n[dependencies]\nfoo = \"1.0\" # pinned\n");
+        let m = pkg.manifest();
+        assert_eq!(m.dependencies.get("foo").map(String::as_str), Some("1.0"));
+    }
+
+    #[test]
+    fn test_read_native_inline_dep() {
+        let pkg = TempPkg::new(
+            "[package]\nname = \"demo\"\n\n\
+             [native-dependencies]\nlibfoo = { path = \"vendor/libfoo.so\" }\n",
+        );
+        let m = pkg.manifest();
+        assert_eq!(
+            m.native_dependencies.get("libfoo").map(|d| d.path.as_str()),
+            Some("vendor/libfoo.so")
+        );
+    }
+
+    #[test]
+    fn test_add_dep_updates_existing() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\n\n[dependencies]\nfoo = \"1.0\"\n");
+        let mpath = pkg.root.join("syma.toml");
+        add_dep(&mpath, "foo", "2.0", false).unwrap();
+        let m = pkg.manifest();
+        assert_eq!(m.dependencies.get("foo").map(String::as_str), Some("2.0"));
+        assert_eq!(m.dependencies.len(), 1);
+    }
+
+    #[test]
+    fn test_add_dep_inserts_into_existing_section_before_next() {
+        let pkg = TempPkg::new(
+            "[package]\nname = \"x\"\n\n[dependencies]\nfoo = \"1.0\"\n\n[dev-dependencies]\n",
+        );
+        let mpath = pkg.root.join("syma.toml");
+        add_dep(&mpath, "bar", "3.0", false).unwrap();
+        let m = pkg.manifest();
+        assert_eq!(m.dependencies.get("bar").map(String::as_str), Some("3.0"));
+        assert_eq!(m.dependencies.get("foo").map(String::as_str), Some("1.0"));
+        // Must not have leaked into the dev section.
+        assert!(m.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_add_dep_appends_missing_section() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\n");
+        let mpath = pkg.root.join("syma.toml");
+        add_dep(&mpath, "bar", "3.0", true).unwrap();
+        let m = pkg.manifest();
+        assert_eq!(
+            m.dev_dependencies.get("bar").map(String::as_str),
+            Some("3.0")
+        );
+    }
+
+    #[test]
+    fn test_remove_dep_roundtrip() {
+        let pkg = TempPkg::new(
+            "[package]\nname = \"x\"\n\n[dependencies]\nfoo = \"1.0\"\nbar = \"2.0\"\n",
+        );
+        let mpath = pkg.root.join("syma.toml");
+        assert!(remove_dep(&mpath, "foo", false).unwrap());
+        let m = pkg.manifest();
+        assert!(!m.dependencies.contains_key("foo"));
+        assert_eq!(m.dependencies.get("bar").map(String::as_str), Some("2.0"));
+        // Removing again reports false.
+        assert!(!remove_dep(&mpath, "foo", false).unwrap());
+    }
+
+    #[test]
+    fn test_strip_quoted() {
+        assert_eq!(strip_quoted("\"hello\""), Some("hello"));
+        assert_eq!(strip_quoted("'world'"), Some("world"));
+        assert_eq!(strip_quoted("\"a\" # note"), Some("a"));
+        assert_eq!(strip_quoted(r#""a\"b""#), Some(r#"a\"b"#));
+        assert_eq!(strip_quoted("{ path = \"x\" }"), None);
+        assert_eq!(strip_quoted("\"unterminated"), None);
+    }
+
+    #[test]
+    fn test_find_from() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\n");
+        let nested = pkg.root.join("src");
+        let found = Manifest::find_from(&nested).expect("should find manifest in ancestor");
+        assert_eq!(found, pkg.root.join("syma.toml"));
     }
 }

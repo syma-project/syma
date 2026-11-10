@@ -1045,14 +1045,8 @@ pub fn q_plus(args: &[Value]) -> Result<Value, EvalError> {
     if !is_zero(&other_sum) {
         terms.push(other_sum);
     }
-    match terms.len() {
-        0 => Ok(int(0)),
-        1 => Ok(terms.pop().expect("len checked")),
-        _ => Ok(Value::Call {
-            head: "Plus".to_string(),
-            args: terms,
-        }),
-    }
+    // Delegate to the core combiner so like terms are folded consistently.
+    arithmetic::builtin_plus(&terms)
 }
 
 pub fn q_times(args: &[Value]) -> Result<Value, EvalError> {

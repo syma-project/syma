@@ -4,6 +4,7 @@ use crate::value::{DEFAULT_PRECISION, EvalError, Value};
 use rug::Float;
 use rug::Integer;
 use rug::Rational;
+use rug::integer::IsPrime;
 use rug::ops::Pow;
 
 // ── Primality ─────────────────────────────────────────────────────────────
@@ -79,22 +80,7 @@ pub fn builtin_prime_q(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) => {
-            if n.is_negative() || n.is_zero() {
-                return Ok(Value::Symbol("False".to_string()));
-            }
-            let n64 = n.to_u64().unwrap_or(u64::MAX);
-            // For large integers beyond u64, fall back to trial division
-            let result = if n <= &Integer::from(u64::MAX) {
-                is_prime_u64(n64)
-            } else {
-                // Trial division up to sqrt for large integers (slow but correct)
-                trial_prime_check(n)
-            };
-            Ok(Value::Symbol(
-                if result { "True" } else { "False" }.to_string(),
-            ))
-        }
+        Value::Integer(n) => Ok(bool_value(is_prime_int(n))),
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
             got: args[0].type_name().to_string(),
@@ -102,7 +88,24 @@ pub fn builtin_prime_q(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-fn trial_prime_check(n: &Integer) -> bool {
+/// `True`/`False` symbol helper.
+fn bool_value(b: bool) -> Value {
+    Value::Symbol(if b { "True" } else { "False" }.to_string())
+}
+
+/// Primality test matching Mathematica's `PrimeQ`: deterministic for values
+/// that fit in `u64`, a strong probable-prime test beyond that, with negative
+/// inputs handled via `|n|` (`PrimeQ[-n] == PrimeQ[n]`).
+fn is_prime_int(n: &Integer) -> bool {
+    let a = n.clone().abs();
+    if let Some(u) = a.to_u64() {
+        is_prime_u64(u)
+    } else {
+        a.is_probably_prime(30) != IsPrime::No
+    }
+}
+
+pub fn trial_prime_check(n: &Integer) -> bool {
     if n < &Integer::from(2) {
         return false;
     }
@@ -175,6 +178,28 @@ pub fn builtin_factor_integer(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Divisors ──────────────────────────────────────────────────────────────
 
+/// All positive divisors of the non-negative integer `n_abs`, ascending.
+/// Returns an empty vector for zero.
+fn positive_divisors(n_abs: &Integer) -> Vec<Integer> {
+    let mut divs: Vec<Integer> = Vec::new();
+    if n_abs.is_zero() {
+        return divs;
+    }
+    let mut d = Integer::from(1);
+    while d.clone() * d.clone() <= *n_abs {
+        if (n_abs.clone() % d.clone()).is_zero() {
+            divs.push(d.clone());
+            let other = n_abs.clone() / d.clone();
+            if other != d {
+                divs.push(other);
+            }
+        }
+        d += Integer::from(1);
+    }
+    divs.sort();
+    divs
+}
+
 pub fn builtin_divisors(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -183,23 +208,7 @@ pub fn builtin_divisors(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) => {
-            let n_abs = n.clone().abs();
-            if n_abs.is_zero() {
-                return Ok(Value::List(vec![]));
-            }
-            let mut divs: Vec<Integer> = Vec::new();
-            let mut d = Integer::from(1);
-            while d.clone() * d.clone() <= n_abs {
-                if (n_abs.clone() % d.clone()).is_zero() {
-                    divs.push(d.clone());
-                    let other = n_abs.clone() / d.clone();
-                    if other != d {
-                        divs.push(other);
-                    }
-                }
-                d += Integer::from(1);
-            }
-            divs.sort();
+            let divs = positive_divisors(&n.clone().abs());
             Ok(Value::List(divs.into_iter().map(Value::Integer).collect()))
         }
         _ => Err(EvalError::TypeError {
@@ -271,14 +280,16 @@ pub fn builtin_prime_pi(args: &[Value]) -> Result<Value, EvalError> {
 // ── NextPrime ─────────────────────────────────────────────────────────────
 
 pub fn builtin_next_prime(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "NextPrime requires exactly 1 argument".to_string(),
+            "NextPrime requires 1 or 2 arguments: NextPrime[n, k]".to_string(),
         ));
     }
     let start = match &args[0] {
-        Value::Integer(n) => n.to_u64().unwrap_or(0),
-        Value::Real(r) => r.to_f64() as u64,
+        Value::Integer(n) => n.clone(),
+        Value::Real(r) => r
+            .to_integer()
+            .ok_or_else(|| EvalError::Error("NextPrime: argument too large".to_string()))?,
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Number".to_string(),
@@ -286,11 +297,45 @@ pub fn builtin_next_prime(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    let mut n = start + 1;
-    while !is_prime_u64(n) {
-        n += 1;
+    let k = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(k) => k
+                .to_i64()
+                .ok_or_else(|| EvalError::Error("NextPrime: k is too large".to_string()))?,
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: args[1].type_name().to_string(),
+                });
+            }
+        }
+    } else {
+        1
+    };
+    if k == 0 {
+        // The "0th" next prime is the largest prime <= n (n itself if prime).
+        if is_prime_int(&start) {
+            return Ok(Value::Integer(start));
+        }
+        let mut m = start;
+        loop {
+            m -= 1;
+            if is_prime_int(&m) {
+                return Ok(Value::Integer(m));
+            }
+        }
     }
-    Ok(Value::Integer(Integer::from(n)))
+    let step = Integer::from(k.signum());
+    let mut n = start;
+    for _ in 0..k.unsigned_abs() {
+        loop {
+            n += step.clone();
+            if is_prime_int(&n) {
+                break;
+            }
+        }
+    }
+    Ok(Value::Integer(n))
 }
 
 // ── PowerMod ──────────────────────────────────────────────────────────────
@@ -308,16 +353,13 @@ pub fn builtin_power_mod(args: &[Value]) -> Result<Value, EvalError> {
                     "PowerMod: modulus cannot be zero".to_string(),
                 ));
             }
+            let modulus = n.clone().abs();
+            // Reduce the base into [0, |n|) so negative bases are handled.
+            let base = ((a.clone() % &modulus) + &modulus) % &modulus;
             if b.is_negative() {
-                // Modular inverse: find x such that a*x ≡ 1 (mod n)
-                let pos_b = (-b.clone()).to_u64().unwrap_or(0);
-                let a_u = a.clone().abs();
-                let n_u = n.clone().abs();
-                // Compute a^|b| mod n, then find modular inverse
-                let pow_val = compute_power_mod(&a_u, pos_b, &n_u);
-                // Extended GCD for modular inverse
-                let inv = mod_inverse(&pow_val, &n_u);
-                match inv {
+                // a^(-b) ≡ (a^b)^(-1) (mod n).
+                let pow_val = compute_power_mod_int(&base, &(-b.clone()), &modulus);
+                match mod_inverse(&pow_val, &modulus) {
                     Some(i) => Ok(Value::Integer(i)),
                     None => Ok(Value::Call {
                         head: "PowerMod".to_string(),
@@ -325,9 +367,7 @@ pub fn builtin_power_mod(args: &[Value]) -> Result<Value, EvalError> {
                     }),
                 }
             } else {
-                let b_u = b.to_u64().unwrap_or(0);
-                let result = compute_power_mod(a, b_u, n);
-                Ok(Value::Integer(result))
+                Ok(Value::Integer(compute_power_mod_int(&base, b, &modulus)))
             }
         }
         _ => Err(EvalError::TypeError {
@@ -335,22 +375,6 @@ pub fn builtin_power_mod(args: &[Value]) -> Result<Value, EvalError> {
             got: args[0].type_name().to_string(),
         }),
     }
-}
-
-fn compute_power_mod(base: &Integer, mut exp: u64, modulus: &Integer) -> Integer {
-    if modulus == &Integer::from(1) {
-        return Integer::from(0);
-    }
-    let mut result = Integer::from(1);
-    let mut base = base.clone() % modulus;
-    while exp > 0 {
-        if exp & 1 == 1 {
-            result = result * base.clone() % modulus;
-        }
-        exp >>= 1;
-        base = base.clone() * base.clone() % modulus;
-    }
-    result
 }
 
 fn mod_inverse(a: &Integer, m: &Integer) -> Option<Integer> {
@@ -383,13 +407,13 @@ pub fn builtin_euler_phi(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) => {
-            if n <= &Integer::from(0) {
-                return Err(EvalError::Error(
-                    "EulerPhi: argument must be positive".to_string(),
-                ));
+            // Mathematica: EulerPhi[0] == 0 and EulerPhi[-n] == EulerPhi[n].
+            let n_abs = n.clone().abs();
+            if n_abs.is_zero() {
+                return Ok(Value::Integer(Integer::from(0)));
             }
-            let factors = factor_integer(n);
-            let mut result = n.clone();
+            let factors = factor_integer(&n_abs);
+            let mut result = n_abs.clone();
             for (p, _) in &factors {
                 result = result.clone() / p.clone() * (p.clone() - Integer::from(1));
             }
@@ -412,12 +436,12 @@ pub fn builtin_moebius_mu(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) => {
-            if n <= &Integer::from(0) {
-                return Err(EvalError::Error(
-                    "MoebiusMu: argument must be positive".to_string(),
-                ));
+            // Mathematica: MoebiusMu[0] == 0 and MoebiusMu[-n] == MoebiusMu[n].
+            let n_abs = n.clone().abs();
+            if n_abs.is_zero() {
+                return Ok(Value::Integer(Integer::from(0)));
             }
-            let factors = factor_integer(n);
+            let factors = factor_integer(&n_abs);
             // If any prime factor has exponent > 1, μ(n) = 0
             for (_, e) in &factors {
                 if *e > 1 {
@@ -448,9 +472,7 @@ pub fn builtin_divisor_sigma(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let k = match &args[0] {
-        Value::Integer(k) => k.to_u32().ok_or_else(|| {
-            EvalError::Error("DivisorSigma: k must be a non-negative integer".to_string())
-        })?,
+        Value::Integer(k) => k.clone(),
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Integer".to_string(),
@@ -458,32 +480,38 @@ pub fn builtin_divisor_sigma(args: &[Value]) -> Result<Value, EvalError> {
             });
         }
     };
-    match &args[1] {
-        Value::Integer(n) => {
-            let n_abs = n.clone().abs();
-            if n_abs.is_zero() {
-                return Ok(Value::Integer(Integer::from(0)));
-            }
-            // Sum d^k for all divisors d of n
-            let mut sum = Integer::from(0);
-            let mut d = Integer::from(1);
-            while d.clone() * d.clone() <= n_abs {
-                if (n_abs.clone() % d.clone()).is_zero() {
-                    let dk = d.clone().pow(k);
-                    sum += dk;
-                    let other = n_abs.clone() / d.clone();
-                    if other != d {
-                        sum += other.pow(k);
-                    }
-                }
-                d += Integer::from(1);
-            }
-            Ok(Value::Integer(sum))
+    let n_abs = match &args[1] {
+        Value::Integer(n) => n.clone().abs(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[1].type_name().to_string(),
+            });
         }
-        _ => Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: args[1].type_name().to_string(),
-        }),
+    };
+    if n_abs.is_zero() {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    let divs = positive_divisors(&n_abs);
+    if k.is_negative() {
+        // DivisorSigma[-k, n] = sum over divisors of 1/d^k, an exact rational.
+        let e = (-k)
+            .to_u32()
+            .ok_or_else(|| EvalError::Error("DivisorSigma: |k| is too large".to_string()))?;
+        let mut sum = Rational::from(0);
+        for d in &divs {
+            sum += Rational::from((Integer::from(1), d.clone().pow(e)));
+        }
+        Ok(Value::Rational(Box::new(sum)))
+    } else {
+        let e = k.to_u32().ok_or_else(|| {
+            EvalError::Error("DivisorSigma: k must be a non-negative integer".to_string())
+        })?;
+        let mut sum = Integer::from(0);
+        for d in &divs {
+            sum += d.clone().pow(e);
+        }
+        Ok(Value::Integer(sum))
     }
 }
 
@@ -553,35 +581,108 @@ fn gcd_int(mut a: Integer, mut b: Integer) -> Integer {
 // ── IntegerDigits ─────────────────────────────────────────────────────────
 
 pub fn builtin_integer_digits(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(EvalError::Error(
+            "IntegerDigits requires 1 to 3 arguments: IntegerDigits[n, b, len]".to_string(),
+        ));
+    }
+    let base = if args.len() >= 2 {
+        match &args[1] {
+            Value::Integer(b) if *b >= 1 => b.clone(),
+            _ => {
+                return Err(EvalError::Error(
+                    "IntegerDigits: base must be an integer >= 1".to_string(),
+                ));
+            }
+        }
+    } else {
+        Integer::from(10)
+    };
+    let n = match &args[0] {
+        Value::Integer(n) => n.clone().abs(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    // Base 1 ("unary") cannot use the usual division loop (n/1 == n), so it is
+    // handled separately: one digit per unit.
+    let mut digits: Vec<Integer> = if n.is_zero() {
+        vec![Integer::from(0)]
+    } else if base == 1 {
+        vec![Integer::from(1); n.to_usize().unwrap_or(0)]
+    } else {
+        let mut m = n;
+        let mut ds = Vec::new();
+        while m > 0 {
+            ds.push(m.clone() % &base);
+            m /= &base;
+        }
+        ds.reverse();
+        ds
+    };
+    if args.len() == 3 {
+        let len = match &args[2] {
+            Value::Integer(l) if !l.is_negative() => l.to_usize().ok_or_else(|| {
+                EvalError::Error("IntegerDigits: length is too large".to_string())
+            })?,
+            _ => {
+                return Err(EvalError::Error(
+                    "IntegerDigits: length must be a non-negative integer".to_string(),
+                ));
+            }
+        };
+        if len < digits.len() {
+            // Keep only the `len` least significant digits.
+            digits = digits.split_off(digits.len() - len);
+        } else {
+            while digits.len() < len {
+                digits.insert(0, Integer::from(0));
+            }
+        }
+    }
+    Ok(Value::List(
+        digits.into_iter().map(Value::Integer).collect(),
+    ))
+}
+
+// ── IntegerLength ───────────────────────────────────────────────────────────
+
+/// `IntegerLength[n]` / `IntegerLength[n, b]` — the number of base-`b` digits
+/// in `|n|` (most significant first, sign discarded). Following Mathematica,
+/// `IntegerLength[0]` is 0. Works for arbitrarily large bases.
+pub fn builtin_integer_length(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "IntegerDigits requires 1 or 2 arguments".to_string(),
+            "IntegerLength requires 1 or 2 arguments: IntegerLength[n, b]".to_string(),
         ));
     }
     let base = if args.len() == 2 {
         match &args[1] {
-            Value::Integer(b) => b.to_u32().unwrap_or(10),
-            _ => 10,
+            Value::Integer(b) if *b >= 2 => b.clone(),
+            _ => {
+                return Err(EvalError::Error(
+                    "IntegerLength: base must be an integer >= 2".to_string(),
+                ));
+            }
         }
     } else {
-        10
+        Integer::from(10)
     };
     match &args[0] {
         Value::Integer(n) => {
-            if n.is_zero() {
-                return Ok(Value::List(vec![Value::Integer(Integer::from(0))]));
-            }
             let mut m = n.clone().abs();
-            let base_int = Integer::from(base);
-            let mut digits: Vec<Integer> = Vec::new();
-            while m > 0 {
-                digits.push(m.clone() % base_int.clone());
-                m /= base_int.clone();
+            if m.is_zero() {
+                return Ok(Value::Integer(Integer::from(0)));
             }
-            digits.reverse();
-            Ok(Value::List(
-                digits.into_iter().map(Value::Integer).collect(),
-            ))
+            let mut len: u64 = 0;
+            while m > 0 {
+                m /= &base;
+                len += 1;
+            }
+            Ok(Value::Integer(Integer::from(len)))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -1248,15 +1349,7 @@ pub fn builtin_composite_q(args: &[Value]) -> Result<Value, EvalError> {
             if *n <= 1 {
                 return Ok(Value::Symbol("False".to_string()));
             }
-            let n64 = n.to_u64().unwrap_or(u64::MAX);
-            let result = if *n <= u64::MAX {
-                !is_prime_u64(n64)
-            } else {
-                !trial_prime_check(n)
-            };
-            Ok(Value::Symbol(
-                if result { "True" } else { "False" }.to_string(),
-            ))
+            Ok(bool_value(!is_prime_int(n)))
         }
         _ => Err(EvalError::TypeError {
             expected: "Integer".to_string(),
@@ -1379,11 +1472,8 @@ pub fn builtin_from_digits(args: &[Value]) -> Result<Value, EvalError> {
             for d in digits {
                 match d {
                     Value::Integer(d) => {
-                        if d.is_negative() || *d >= base_int {
-                            return Err(EvalError::Error(
-                                "FromDigits: digit out of range for base".to_string(),
-                            ));
-                        }
+                        // Mathematica allows digits outside [0, base): the list
+                        // is evaluated as a positional polynomial in `base`.
                         result = result * &base_int + d;
                     }
                     _ => {
@@ -2379,5 +2469,153 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(result, Value::Call { head, .. } if head == "Residue"));
+    }
+
+    // ── Hardening: negative / edge inputs ────────────────────────────────
+
+    #[test]
+    fn test_prime_q_negative() {
+        // Mathematica: PrimeQ[-n] == PrimeQ[n]
+        assert_eq!(builtin_prime_q(&[int(-7)]).unwrap(), bool_value(true));
+        assert_eq!(builtin_prime_q(&[int(-8)]).unwrap(), bool_value(false));
+        assert_eq!(builtin_prime_q(&[int(-2)]).unwrap(), bool_value(true));
+        assert_eq!(builtin_prime_q(&[int(0)]).unwrap(), bool_value(false));
+    }
+
+    #[test]
+    fn test_prime_q_huge() {
+        // A 2^127-1 Mersenne prime, beyond u64.
+        let mersenne = Integer::from(1) << 127;
+        let mersenne = mersenne - 1;
+        assert_eq!(
+            builtin_prime_q(&[Value::Integer(mersenne)]).unwrap(),
+            bool_value(true)
+        );
+        // 2^127 is composite.
+        assert_eq!(
+            builtin_prime_q(&[Value::Integer(Integer::from(1) << 127)]).unwrap(),
+            bool_value(false)
+        );
+    }
+
+    #[test]
+    fn test_power_mod_negative_base() {
+        // (-3)^3 mod 7 = 1, and the modular inverse of -3 is 2 (mod 7).
+        assert_eq!(
+            builtin_power_mod(&[int(-3), int(3), int(7)]).unwrap(),
+            int(1)
+        );
+        assert_eq!(
+            builtin_power_mod(&[int(-3), int(-1), int(7)]).unwrap(),
+            int(2)
+        );
+        // Result is always in [0, |n|). (-2)^3 = -8, and -8 mod 5 = 2.
+        assert_eq!(
+            builtin_power_mod(&[int(-2), int(3), int(5)]).unwrap(),
+            int(2)
+        );
+    }
+
+    #[test]
+    fn test_power_mod_huge_exponent() {
+        // Exponent beyond u64 must not collapse to 2^0. 2^(10^21) mod 1000 = 376.
+        let e = Integer::from(10).pow(21);
+        assert_eq!(
+            builtin_power_mod(&[int(2), Value::Integer(e), int(1000)]).unwrap(),
+            int(376)
+        );
+    }
+
+    #[test]
+    fn test_euler_phi_zero_and_negative() {
+        assert_eq!(builtin_euler_phi(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_euler_phi(&[int(-6)]).unwrap(), int(2));
+        assert_eq!(builtin_euler_phi(&[int(-7)]).unwrap(), int(6));
+    }
+
+    #[test]
+    fn test_moebius_mu_zero_and_negative() {
+        assert_eq!(builtin_moebius_mu(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_moebius_mu(&[int(-6)]).unwrap(), int(1));
+        assert_eq!(builtin_moebius_mu(&[int(-4)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_divisor_sigma_negative_k() {
+        // sigma_{-1}(6) = 1 + 1/2 + 1/3 + 1/6 = 2.
+        let got = builtin_divisor_sigma(&[int(-1), int(6)]).unwrap();
+        assert_eq!(got, Value::Rational(Box::new(Rational::from(2))));
+    }
+
+    #[test]
+    fn test_integer_digits_base_one() {
+        assert_eq!(
+            builtin_integer_digits(&[int(5), int(1)]).unwrap(),
+            Value::List(vec![int(1), int(1), int(1), int(1), int(1)])
+        );
+    }
+
+    #[test]
+    fn test_integer_digits_padding() {
+        // Pad to length 6.
+        assert_eq!(
+            builtin_integer_digits(&[int(1234), int(10), int(6)]).unwrap(),
+            Value::List(vec![int(0), int(0), int(1), int(2), int(3), int(4)])
+        );
+        // Truncate to the 2 least significant digits.
+        assert_eq!(
+            builtin_integer_digits(&[int(1234), int(10), int(2)]).unwrap(),
+            Value::List(vec![int(3), int(4)])
+        );
+    }
+
+    #[test]
+    fn test_integer_digits_large_base_and_negative() {
+        // Digits may exceed the base's usual range (Mathematica semantics).
+        assert_eq!(
+            builtin_integer_digits(&[int(58127), int(123)]).unwrap(),
+            Value::List(vec![int(3), int(103), int(71)])
+        );
+        assert_eq!(
+            builtin_integer_digits(&[int(-1234)]).unwrap(),
+            Value::List(vec![int(1), int(2), int(3), int(4)])
+        );
+    }
+
+    #[test]
+    fn test_integer_length() {
+        assert_eq!(builtin_integer_length(&[int(1234)]).unwrap(), int(4));
+        assert_eq!(
+            builtin_integer_length(&[int(255), int(16)]).unwrap(),
+            int(2)
+        );
+        assert_eq!(builtin_integer_length(&[int(0)]).unwrap(), int(0));
+        assert_eq!(builtin_integer_length(&[int(-99)]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_from_digits_out_of_range() {
+        // Mathematica evaluates the digit list as a positional polynomial.
+        assert_eq!(
+            builtin_from_digits(&[Value::List(vec![int(10), int(2)])]).unwrap(),
+            int(102)
+        );
+        assert_eq!(
+            builtin_from_digits(&[Value::List(vec![int(-1), int(2)])]).unwrap(),
+            int(-8)
+        );
+    }
+
+    #[test]
+    fn test_next_prime_negative_and_k() {
+        // Primes are searched over all integers: |n| decides primality, so the
+        // smallest prime above -5 is -3 (matching NextPrime's index semantics).
+        assert_eq!(builtin_next_prime(&[int(-5)]).unwrap(), int(-3));
+        assert_eq!(builtin_next_prime(&[int(-3), int(-1)]).unwrap(), int(-5));
+        assert_eq!(builtin_next_prime(&[int(10), int(3)]).unwrap(), int(17));
+        assert_eq!(builtin_next_prime(&[int(10), int(-2)]).unwrap(), int(5));
+        // The zeroth next prime is the largest prime <= n.
+        assert_eq!(builtin_next_prime(&[int(10), int(0)]).unwrap(), int(7));
+        assert_eq!(builtin_next_prime(&[int(7), int(0)]).unwrap(), int(7));
     }
 }

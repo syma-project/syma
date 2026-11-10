@@ -1269,10 +1269,14 @@ pub fn builtin_nice_sqrt_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// BinomialMatchQ[expr, a, b, x, n] — is expr of form (a + b*x^n)^p
+/// BinomialMatchQ[expr, x] — Rubi's 2-arg predicate form: is expr a binomial?
 pub fn builtin_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return builtin_binomial_q(args);
+    }
     if args.len() < 5 {
         return Err(EvalError::Error(
-            "BinomialMatchQ requires at least 5 arguments".to_string(),
+            "BinomialMatchQ requires 2 or at least 5 arguments".to_string(),
         ));
     }
     let var = match &args[3] {
@@ -1494,10 +1498,14 @@ pub fn builtin_discriminant(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// QuadraticMatchQ[expr, a, b, c, x] — is expr = a*x^2 + b*x + c
+/// QuadraticMatchQ[expr, x] — Rubi's 2-arg predicate form.
 pub fn builtin_quadratic_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return builtin_quadratic_q(args);
+    }
     if args.len() != 5 {
         return Err(EvalError::Error(
-            "QuadraticMatchQ requires exactly 5 arguments".to_string(),
+            "QuadraticMatchQ requires 2 or 5 arguments".to_string(),
         ));
     }
     let var = match &args[4] {
@@ -1642,10 +1650,14 @@ pub fn builtin_power_of_linear_q(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// PowerOfLinearMatchQ[expr, a, b, x, n] — stub
+/// PowerOfLinearMatchQ[expr, x] — Rubi's 2-arg predicate form.
 pub fn builtin_power_of_linear_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return builtin_power_of_linear_q(args);
+    }
     if args.len() < 5 {
         return Err(EvalError::Error(
-            "PowerOfLinearMatchQ requires at least 5 arguments".to_string(),
+            "PowerOfLinearMatchQ requires 2 or at least 5 arguments".to_string(),
         ));
     }
     Ok(Value::Bool(false))
@@ -2343,10 +2355,14 @@ pub fn builtin_generalized_binomial_q(args: &[Value]) -> Result<Value, EvalError
 }
 
 /// GeneralizedBinomialMatchQ[expr, a, b, x, n] — match expr = a + b*x^n form
+/// GeneralizedBinomialMatchQ[expr, x] — Rubi's 2-arg predicate form.
 pub fn builtin_generalized_binomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return builtin_generalized_binomial_q(args);
+    }
     if args.len() < 5 {
         return Err(EvalError::Error(
-            "GeneralizedBinomialMatchQ requires at least 5 arguments".to_string(),
+            "GeneralizedBinomialMatchQ requires 2 or at least 5 arguments".to_string(),
         ));
     }
     let var = match &args[3] {
@@ -2374,10 +2390,14 @@ pub fn builtin_generalized_binomial_match_q(args: &[Value]) -> Result<Value, Eva
 }
 
 /// GeneralizedTrinomialMatchQ[expr, a, b, c, x] — match expr = a + b*x^n + c*x^(2n)
+/// GeneralizedTrinomialMatchQ[expr, x] — Rubi's 2-arg predicate form.
 pub fn builtin_generalized_trinomial_match_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() == 2 {
+        return builtin_generalized_trinomial_q(args);
+    }
     if args.len() < 5 {
         return Err(EvalError::Error(
-            "GeneralizedTrinomialMatchQ requires at least 5 arguments".to_string(),
+            "GeneralizedTrinomialMatchQ requires 2 or at least 5 arguments".to_string(),
         ));
     }
     let _var = match &args[4] {

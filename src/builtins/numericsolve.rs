@@ -1,5 +1,4 @@
 use crate::env::Env;
-use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
@@ -38,9 +37,11 @@ fn eval_expr_to_f64(expr: &Value, env: &Env) -> Result<f64, EvalError> {
         Value::Rational(r) => Ok(r.to_f64()),
         Value::Complex { re, im: 0.0 } => Ok(*re),
         _ => {
-            let evaluated =
-                apply_function(&Value::Symbol("Simplify".to_string()), &[expr.clone()], env)
-                    .unwrap_or(expr.clone());
+            // Fully evaluate the (already variable-substituted) expression
+            // rather than only simplifying it: `Simplify` does not always
+            // perform arithmetic, which previously made every residual `0`.
+            let as_expr = crate::eval::table::value_to_expr(expr);
+            let evaluated = crate::eval::eval(&as_expr, env).unwrap_or_else(|_| expr.clone());
             super::to_f64(&evaluated).ok_or_else(|| {
                 EvalError::Error("Cannot evaluate expression to a real number".to_string())
             })
@@ -154,6 +155,79 @@ fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError
     Ok(if fa.abs() < fb.abs() { a } else { b })
 }
 
+/// Local minimiser from a starting point: Newton's method on the derivative.
+fn newton_minimize(f: &dyn Fn(f64) -> f64, mut x: f64) -> f64 {
+    let h = 1e-6;
+    for _ in 0..100 {
+        let d1 = (f(x + h) - f(x - h)) / (2.0 * h);
+        let d2 = (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h);
+        if d2.abs() < 1e-15 {
+            break;
+        }
+        let x_new = x - d1 / d2;
+        if (x_new - x).abs() < 1e-12 {
+            return x_new;
+        }
+        x = x_new;
+    }
+    x
+}
+
+/// Expand an interval `[a, b, c]` until the middle is a local minimum
+/// (`f(b) <= f(a)` and `f(b) <= f(c)`). Works from an arbitrary start point.
+fn bracket_min(f: &dyn Fn(f64) -> f64, x0: f64) -> (f64, f64, f64) {
+    const GOLD: f64 = std::f64::consts::GOLDEN_RATIO;
+    let mut a = x0;
+    let mut b = x0 + 1.0;
+    let mut fa = f(a);
+    let mut fb = f(b);
+    if fb > fa {
+        std::mem::swap(&mut a, &mut b);
+        std::mem::swap(&mut fa, &mut fb);
+    }
+    let mut c = b + GOLD * (b - a);
+    let mut fc = f(c);
+    for _ in 0..200 {
+        if fb <= fc {
+            return (a, b, c);
+        }
+        a = b;
+        b = c;
+        fb = fc;
+        c = b + GOLD * (b - a);
+        fc = f(c);
+    }
+    (a, b, c)
+}
+
+/// Robust local minimiser from a start point: bracket the minimum, then run
+/// golden-section search. Falls back to Newton's method if bracketing stalls.
+fn local_minimize(f: &dyn Fn(f64) -> f64, x0: f64) -> f64 {
+    let (a, _b, c) = bracket_min(f, x0);
+    if !(a.is_finite() && c.is_finite()) || c == a {
+        return newton_minimize(f, x0);
+    }
+    let (lo, hi) = (a.min(c), a.max(c));
+    let (_v, x) = golden_section(f, lo, hi);
+    if x.is_finite() {
+        x
+    } else {
+        newton_minimize(f, x0)
+    }
+}
+
+/// Find a stationary/nearby extremum from a start point. Newton on the
+/// derivative converges quickly for smooth functions; if the result is not a
+/// stationary point (or Newton stalls), fall back to a bracketing local search.
+fn stationary_or_local(f: &dyn Fn(f64) -> f64, x0: f64) -> f64 {
+    let x = newton_minimize(f, x0);
+    if x.is_finite() && f(x).is_finite() && numerical_derivative(f, x).abs() < 1e-4 {
+        x
+    } else {
+        local_minimize(f, x0)
+    }
+}
+
 fn golden_section<F: Fn(f64) -> f64>(f: F, a: f64, b: f64) -> (f64, f64) {
     let inv_phi = 2.0 / (1.0 + 5.0f64.sqrt());
     let mut lo = a;
@@ -250,10 +324,160 @@ fn parse_equation(arg: &Value) -> Result<(Value, f64), EvalError> {
     }
 }
 
-fn extract_var_symbol(val: &Value) -> Result<String, EvalError> {
-    match val {
-        Value::Symbol(s) => Ok(s.clone()),
-        _ => Err(EvalError::Error("Variable must be a symbol".to_string())),
+/// Like [`parse_equation`] but keeps a symbolic right-hand side, so equations
+/// such as `Cos[x] == x` are handled correctly. A bare expression `f` is
+/// treated as `f == 0`.
+fn parse_equation_sym(arg: &Value) -> (Value, Value) {
+    match arg {
+        Value::Call {
+            head,
+            args: eq_args,
+        } if head == "Equal" && eq_args.len() == 2 => (eq_args[0].clone(), eq_args[1].clone()),
+        _ => (arg.clone(), super::real(0.0)),
+    }
+}
+
+/// Collect the free symbols (function heads excluded) in `expr`.
+fn expr_free_symbols(expr: &Value, out: &mut Vec<String>) {
+    match expr {
+        Value::Symbol(s) => {
+            if !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+        Value::List(items) => items.iter().for_each(|i| expr_free_symbols(i, out)),
+        Value::Call { args, .. } => args.iter().for_each(|a| expr_free_symbols(a, out)),
+        Value::Rule { lhs, rhs, .. } => {
+            expr_free_symbols(lhs, out);
+            expr_free_symbols(rhs, out);
+        }
+        _ => {}
+    }
+}
+
+/// Determine the optimization/solve variable. When the held variable spec was
+/// resolved to a value (because the symbol was bound), recover the name from
+/// the free symbols of the expression.
+fn resolve_var(spec0: &Value, exprs: &[&Value]) -> Result<String, EvalError> {
+    if let Value::Symbol(s) = spec0 {
+        return Ok(s.clone());
+    }
+    let mut syms = Vec::new();
+    for e in exprs {
+        expr_free_symbols(e, &mut syms);
+    }
+    match syms.len() {
+        0 => Ok("x".to_string()),
+        _ => Ok(syms.remove(0)),
+    }
+}
+
+/// Strip a `HoldAll`/`Hold*` wrapper (`Value::Pattern` / `Value::Hold`) from an
+/// argument so builtins work whether or not their attributes evaluate args.
+/// The held expression is *not* evaluated, which is what keeps equations such
+/// as `Cos[x] == x` intact (instead of collapsing to `False`) and keeps the
+/// optimization variable symbolic.
+fn unheld(v: &Value) -> Value {
+    match v {
+        Value::Pattern(e) => crate::pattern::unwrap_expr_to_value(e),
+        Value::Hold(b) | Value::HoldComplete(b) => (**b).clone(),
+        other => other.clone(),
+    }
+}
+
+/// Deeply strip held wrappers (used for variables/specs nested in a list).
+fn deep_unheld(v: &Value) -> Value {
+    match unheld(v) {
+        Value::List(items) => Value::List(items.iter().map(deep_unheld).collect()),
+        other => other,
+    }
+}
+
+/// Extract a numeric spec entry, evaluating a held/compound form (e.g. `-5`,
+/// which arrives as an unevaluated `Times[-1, 5]`).
+fn spec_number(v: &Value, name: &str, pos: usize, env: &Env) -> Result<f64, EvalError> {
+    if let Some(x) = super::to_f64(v) {
+        return Ok(x);
+    }
+    if let Some(evaluated) = eval_value(v, env)
+        && let Some(x) = super::to_f64(&evaluated)
+    {
+        return Ok(x);
+    }
+    super::require_f64(v, name, pos)
+}
+
+/// Evaluate an (unheld) value by converting it back to an expression.
+fn eval_value(v: &Value, env: &Env) -> Option<Value> {
+    if let Some(x) = super::to_f64(v) {
+        return Some(super::real(x));
+    }
+    let e = crate::eval::table::value_to_expr(v);
+    crate::eval::eval(&e, env).ok()
+}
+
+/// Solve `d/dvar expr == 0` symbolically and return the real critical points.
+/// Returns an empty vector when the derivative is constant or cannot be solved.
+fn critical_points(expr: &Value, var: &str, env: &Env) -> Vec<f64> {
+    let derivative = Value::Call {
+        head: "D".to_string(),
+        args: vec![expr.clone(), Value::Symbol(var.to_string())],
+    };
+    let deriv = match eval_value(&derivative, env) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    // A constant (or vanishing) derivative has no isolated critical point; the
+    // caller falls back to a numeric scan in that case.
+    if super::to_f64(&deriv).is_some() && !matches!(&deriv, Value::Call { .. }) {
+        return Vec::new();
+    }
+
+    let equation = Value::Call {
+        head: "Equal".to_string(),
+        args: vec![deriv, super::real(0.0)],
+    };
+    let solved = Value::Call {
+        head: "Solve".to_string(),
+        args: vec![equation, Value::Symbol(var.to_string())],
+    };
+    let solutions = match eval_value(&solved, env) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let mut points = Vec::new();
+    if let Value::List(rows) = solutions {
+        for row in rows {
+            if let Value::List(rules) = row {
+                for rule in rules {
+                    if let Value::Rule { rhs, .. } = rule
+                        && let Some(x) = super::to_f64(&rhs)
+                        && x.is_finite()
+                    {
+                        points.push(x);
+                    }
+                }
+            }
+        }
+    }
+    points
+}
+
+/// Return the smaller/larger of `(v, x)` according to `maximize`.
+fn pick(best: &mut Option<(f64, f64)>, v: f64, x: f64, maximize: bool) {
+    if !v.is_finite() || !x.is_finite() {
+        return;
+    }
+    match *best {
+        None => *best = Some((v, x)),
+        Some((bv, _)) if maximize => {
+            if v > bv {
+                *best = Some((v, x))
+            }
+        }
+        Some((bv, _)) if v < bv => *best = Some((v, x)),
+        _ => {}
     }
 }
 
@@ -266,8 +490,10 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         ));
     }
 
-    let (expr, rhs) = parse_equation(&args[0])?;
-    let search_spec = match &args[1] {
+    let eqn = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let (lhs, rhs) = parse_equation_sym(&eqn);
+    let search_spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
@@ -282,39 +508,64 @@ pub fn builtin_find_root(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         ));
     }
 
-    let var = extract_var_symbol(&search_spec[0])?;
+    let var = resolve_var(&search_spec[0], &[&lhs, &rhs])?;
+    let var_clone = var.clone();
 
-    if search_spec.len() == 2 {
-        let x0 = super::require_f64(&search_spec[1], "FindRoot", 1)?;
-        let var_clone = var.clone();
-        let f = move |x: f64| {
-            let substituted = substitute_numeric(&expr, &var_clone, x);
-            eval_expr_to_f64(&substituted, env).unwrap_or(0.0) - rhs
-        };
-        let root = newton_method(&f, x0)?;
-        Ok(Value::Rule {
-            lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(super::real(root)),
-            delayed: false,
-        })
+    // Evaluate `lhs - rhs` at a candidate `x`. Both sides may be symbolic.
+    let residual = move |x: f64| {
+        let l = substitute_numeric(&lhs, &var_clone, x);
+        let r = substitute_numeric(&rhs, &var_clone, x);
+        eval_expr_to_f64(&l, env).unwrap_or(0.0) - eval_expr_to_f64(&r, env).unwrap_or(0.0)
+    };
+
+    let root = if search_spec.len() == 2 {
+        let x0 = spec_number(&search_spec[1], "FindRoot", 1, env)?;
+        // Newton first; if it stalls (e.g. a horizontal tangent), fall back to
+        // scanning for a sign change and refining with Brent's method.
+        newton_method(&residual, x0).or_else(|_| scan_for_root(&residual, x0))?
     } else {
-        let xmin = super::require_f64(&search_spec[1], "FindRoot", 1)?;
-        let xmax = super::require_f64(&search_spec[2], "FindRoot", 2)?;
-        let var_clone = var.clone();
-        let f = move |x: f64| {
-            let substituted = substitute_numeric(&expr, &var_clone, x);
-            eval_expr_to_f64(&substituted, env).unwrap_or(0.0) - rhs
-        };
-        let root = brent_method(&f, xmin, xmax)?;
-        Ok(Value::Rule {
-            lhs: Box::new(Value::Symbol(var)),
-            rhs: Box::new(super::real(root)),
-            delayed: false,
-        })
+        let xmin = spec_number(&search_spec[1], "FindRoot", 1, env)?;
+        let xmax = spec_number(&search_spec[2], "FindRoot", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "FindRoot: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        brent_method(&residual, xmin, xmax).or_else(|_| scan_for_root(&residual, xmin))?
+    };
+    // Mathematica returns a list of rules: `{x -> root}`.
+    Ok(Value::List(vec![Value::Rule {
+        lhs: Box::new(Value::Symbol(var)),
+        rhs: Box::new(super::real(root)),
+        delayed: false,
+    }]))
+}
+
+/// Scan outward from `x0` for a sign change of `f`, then refine with Brent.
+fn scan_for_root(f: &dyn Fn(f64) -> f64, x0: f64) -> Result<f64, EvalError> {
+    let mut step = 0.5_f64.max(x0.abs() * 0.1);
+    let mut prev_x = x0;
+    let mut prev_f = f(x0);
+    for _ in 0..80 {
+        let x = x0 + step;
+        let fx = f(x);
+        if prev_f == 0.0 {
+            return Ok(prev_x);
+        }
+        if prev_f * fx < 0.0 || fx == 0.0 {
+            return brent_method(f, prev_x.min(x), prev_x.max(x));
+        }
+        prev_x = x;
+        prev_f = fx;
+        step *= 1.5;
     }
+    Err(EvalError::Error(
+        "FindRoot: could not bracket a root".to_string(),
+    ))
 }
 
 /// FindMinimum[f, {x, xmin, xmax}] — find local minimum via golden section search.
+/// FindMinimum[f, {x, x0}] — local minimum near the start point `x0`.
 pub fn builtin_find_minimum(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -322,41 +573,53 @@ pub fn builtin_find_minimum(args: &[Value], env: &Env) -> Result<Value, EvalErro
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
-                "Second argument must be a list: {var, xmin, xmax}".to_string(),
+                "Second argument must be a list: {var, x0} or {var, xmin, xmax}".to_string(),
             ));
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "FindMinimum", 1)?;
-    let xmax = super::require_f64(&spec[2], "FindMinimum", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let var_clone = var.clone();
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var_clone, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::INFINITY)
     };
 
-    let (f_min, x_min) = golden_section(&f, xmin, xmax);
+    let (f_min, x_min) = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "FindMinimum", 1, env)?;
+        let x_min = stationary_or_local(&f, x0);
+        (f(x_min), x_min)
+    } else {
+        let xmin = spec_number(&spec[1], "FindMinimum", 1, env)?;
+        let xmax = spec_number(&spec[2], "FindMinimum", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "FindMinimum: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        golden_section(&f, xmin, xmax)
+    };
 
     Ok(Value::List(vec![
         super::real(f_min),
-        Value::Rule {
+        Value::List(vec![Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
             rhs: Box::new(super::real(x_min)),
             delayed: false,
-        },
+        }]),
     ]))
 }
 
@@ -368,7 +631,9 @@ pub fn builtin_find_maximum(args: &[Value], env: &Env) -> Result<Value, EvalErro
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
@@ -377,35 +642,190 @@ pub fn builtin_find_maximum(args: &[Value], env: &Env) -> Result<Value, EvalErro
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "FindMaximum", 1)?;
-    let xmax = super::require_f64(&spec[2], "FindMaximum", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let var_clone = var.clone();
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var_clone, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::NEG_INFINITY)
     };
 
-    let neg_f = move |x: f64| -f(x);
-    let (neg_f_min, x_max) = golden_section(&neg_f, xmin, xmax);
-    let f_max = -neg_f_min;
+    let neg_f = |x: f64| -f(x);
+    let (f_max, x_max) = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "FindMaximum", 1, env)?;
+        let x_max = stationary_or_local(&neg_f, x0);
+        (f(x_max), x_max)
+    } else {
+        let xmin = spec_number(&spec[1], "FindMaximum", 1, env)?;
+        let xmax = spec_number(&spec[2], "FindMaximum", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "FindMaximum: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        let (neg_f_min, x_max) = golden_section(neg_f, xmin, xmax);
+        (-neg_f_min, x_max)
+    };
 
     Ok(Value::List(vec![
         super::real(f_max),
-        Value::Rule {
+        Value::List(vec![Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
             rhs: Box::new(super::real(x_max)),
             delayed: false,
-        },
+        }]),
     ]))
+}
+
+/// Shared `Minimize`/`Maximize` implementation: candidates from the symbolic
+/// critical points (`D` + `Solve`), interval endpoints, and a numeric scan,
+/// then returns the Wolfram-style `{value, {x -> x0}}` pair.
+fn symbolic_extremum(
+    args: &[Value],
+    env: &Env,
+    maximize: bool,
+    name: &str,
+) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(format!(
+            "{name} requires exactly 2 arguments"
+        )));
+    }
+
+    let first = unheld(&args[0]);
+    let second = deep_unheld(&args[1]);
+
+    // `Minimize[{f, cons}, spec]` — use the objective and ignore the constraint.
+    let expr = match &first {
+        Value::List(items)
+            if items.len() == 2
+                && matches!(
+                    &items[1],
+                    Value::Call { head, .. }
+                        if matches!(
+                            head.as_str(),
+                            "Equal"
+                                | "Unequal"
+                                | "Less"
+                                | "LessEqual"
+                                | "Greater"
+                                | "GreaterEqual"
+                                | "And"
+                                | "Or"
+                        )
+                ) =>
+        {
+            items[0].clone()
+        }
+        _ => first,
+    };
+
+    let (var, bounds) = match &second {
+        Value::Symbol(s) => (s.clone(), None),
+        Value::List(items) if !items.is_empty() => {
+            let var = resolve_var(&items[0], &[&expr])?;
+            let bounds = if items.len() >= 3 {
+                match (
+                    spec_number(&items[1], name, 1, env),
+                    spec_number(&items[2], name, 2, env),
+                ) {
+                    (Ok(lo), Ok(hi)) => Some((lo.min(hi), lo.max(hi))),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (var, bounds)
+        }
+        // The bare variable symbol was resolved to its bound value.
+        _ => (resolve_var(&second, &[&expr])?, None),
+    };
+
+    let var_clone = var.clone();
+    let f = |x: f64| {
+        let substituted = substitute_numeric(&expr, &var_clone, x);
+        eval_expr_to_f64(&substituted, env)
+    };
+
+    let mut best: Option<(f64, f64)> = None;
+
+    // Symbolic critical points.
+    for cp in critical_points(&expr, &var, env) {
+        if let Ok(v) = f(cp) {
+            pick(&mut best, v, cp, maximize);
+        }
+    }
+
+    // Bounds are always candidates.
+    if let Some((lo, hi)) = bounds {
+        for x in [lo, hi] {
+            if let Ok(v) = f(x) {
+                pick(&mut best, v, x, maximize);
+            }
+        }
+    }
+
+    // Numeric scan / local refinement: polish around the best candidate, or
+    // fall back to a scan over the natural range when nothing was symbolic.
+    let (scan_lo, scan_hi) = match (bounds, best) {
+        (Some((lo, hi)), _) => (lo, hi),
+        (None, Some((_, bx))) => (bx - 10.0, bx + 10.0),
+        (None, None) => (-100.0, 100.0),
+    };
+    let g = |x: f64| {
+        let v = f(x).unwrap_or(if maximize {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
+        if maximize { -v } else { v }
+    };
+    let seed = best.map(|(_, x)| x).unwrap_or((scan_lo + scan_hi) / 2.0);
+    let x_ref = if bounds.is_some() {
+        let (v, x) = golden_section(g, scan_lo, scan_hi);
+        let v = if maximize { -v } else { v };
+        pick(&mut best, v, x, maximize);
+        x
+    } else {
+        stationary_or_local(&g, seed)
+    };
+    let v_ref = if maximize { -g(x_ref) } else { g(x_ref) };
+    pick(&mut best, v_ref, x_ref, maximize);
+
+    if best.is_none() {
+        // Last-resort numeric sweep.
+        let (v, x) = multi_restart_minimize(&g, scan_lo, scan_hi, 20);
+        let v = if maximize { -v } else { v };
+        pick(&mut best, v, x, maximize);
+    }
+
+    match best {
+        Some((value, x0)) => Ok(Value::List(vec![
+            super::real(value),
+            Value::List(vec![Value::Rule {
+                lhs: Box::new(Value::Symbol(var)),
+                rhs: Box::new(super::real(x0)),
+                delayed: false,
+            }]),
+        ])),
+        None => Err(EvalError::Error(format!("{name}: no extremum found"))),
+    }
+}
+
+/// Minimize[f, x] / Minimize[f, {x, xmin, xmax}] — global symbolic minimum.
+pub fn builtin_minimize(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    symbolic_extremum(args, env, false, "Minimize")
+}
+
+/// Maximize[f, x] / Maximize[f, {x, xmin, xmax}] — global symbolic maximum.
+pub fn builtin_maximize(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    symbolic_extremum(args, env, true, "Maximize")
 }
 
 /// NMinimize[f, {x, xmin, xmax}] — global numeric minimization.
@@ -416,41 +836,53 @@ pub fn builtin_nminimize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
-                "Second argument must be a list: {var, xmin, xmax}".to_string(),
+                "Second argument must be a list: {var, x0} or {var, xmin, xmax}".to_string(),
             ));
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "NMinimize", 1)?;
-    let xmax = super::require_f64(&spec[2], "NMinimize", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let var_clone = var.clone();
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var_clone, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::INFINITY)
     };
 
-    let (f_min, x_min) = multi_restart_minimize(&f, xmin, xmax, 10);
+    let (f_min, x_min) = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "NMinimize", 1, env)?;
+        let x_min = stationary_or_local(&f, x0);
+        (f(x_min), x_min)
+    } else {
+        let xmin = spec_number(&spec[1], "NMinimize", 1, env)?;
+        let xmax = spec_number(&spec[2], "NMinimize", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "NMinimize: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        multi_restart_minimize(&f, xmin, xmax, 10)
+    };
 
     Ok(Value::List(vec![
         super::real(f_min),
-        Value::Rule {
+        Value::List(vec![Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
             rhs: Box::new(super::real(x_min)),
             delayed: false,
-        },
+        }]),
     ]))
 }
 
@@ -462,43 +894,55 @@ pub fn builtin_nmaximize(args: &[Value], env: &Env) -> Result<Value, EvalError> 
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
-                "Second argument must be a list: {var, xmin, xmax}".to_string(),
+                "Second argument must be a list: {var, x0} or {var, xmin, xmax}".to_string(),
             ));
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "NMaximize", 1)?;
-    let xmax = super::require_f64(&spec[2], "NMaximize", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let var_clone = var.clone();
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var_clone, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::NEG_INFINITY)
     };
 
-    let neg_f = move |x: f64| -f(x);
-    let (neg_f_min, x_max) = multi_restart_minimize(&neg_f, xmin, xmax, 10);
-    let f_max = -neg_f_min;
+    let neg_f = |x: f64| -f(x);
+    let (f_max, x_max) = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "NMaximize", 1, env)?;
+        let x_max = stationary_or_local(&neg_f, x0);
+        (f(x_max), x_max)
+    } else {
+        let xmin = spec_number(&spec[1], "NMaximize", 1, env)?;
+        let xmax = spec_number(&spec[2], "NMaximize", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "NMaximize: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        let (neg_f_min, x_max) = multi_restart_minimize(&neg_f, xmin, xmax, 10);
+        (-neg_f_min, x_max)
+    };
 
     Ok(Value::List(vec![
         super::real(f_max),
-        Value::Rule {
+        Value::List(vec![Value::Rule {
             lhs: Box::new(Value::Symbol(var)),
             rhs: Box::new(super::real(x_max)),
             delayed: false,
-        },
+        }]),
     ]))
 }
 
@@ -510,32 +954,44 @@ pub fn builtin_argmin(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
-                "Second argument must be a list: {var, xmin, xmax}".to_string(),
+                "Second argument must be a list: {var, x0} or {var, xmin, xmax}".to_string(),
             ));
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "ArgMin", 1)?;
-    let xmax = super::require_f64(&spec[2], "ArgMin", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::INFINITY)
     };
 
-    let (_f_min, x_min) = multi_restart_minimize(&f, xmin, xmax, 10);
+    let x_min = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "ArgMin", 1, env)?;
+        stationary_or_local(&f, x0)
+    } else {
+        let xmin = spec_number(&spec[1], "ArgMin", 1, env)?;
+        let xmax = spec_number(&spec[2], "ArgMin", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "ArgMin: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        let (_f_min, x_min) = multi_restart_minimize(&f, xmin, xmax, 10);
+        x_min
+    };
 
     Ok(super::real(x_min))
 }
@@ -548,33 +1004,45 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    let spec = match &args[1] {
+    let expr = unheld(&args[0]);
+    let spec_val = deep_unheld(&args[1]);
+    let spec = match &spec_val {
         Value::List(items) => items,
         _ => {
             return Err(EvalError::Error(
-                "Second argument must be a list: {var, xmin, xmax}".to_string(),
+                "Second argument must be a list: {var, x0} or {var, xmin, xmax}".to_string(),
             ));
         }
     };
 
-    if spec.len() != 3 {
+    if spec.len() != 2 && spec.len() != 3 {
         return Err(EvalError::Error(
-            "Search specification must have 3 elements: {var, xmin, xmax}".to_string(),
+            "Search specification must have 2 or 3 elements: {var, x0} or {var, xmin, xmax}"
+                .to_string(),
         ));
     }
 
-    let var = extract_var_symbol(&spec[0])?;
-    let xmin = super::require_f64(&spec[1], "ArgMax", 1)?;
-    let xmax = super::require_f64(&spec[2], "ArgMax", 2)?;
-
-    let expr = args[0].clone();
+    let var = resolve_var(&spec[0], &[&expr])?;
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var, x);
         eval_expr_to_f64(&substituted, env).unwrap_or(f64::NEG_INFINITY)
     };
 
-    let neg_f = move |x: f64| -f(x);
-    let (_neg_f_min, x_max) = multi_restart_minimize(&neg_f, xmin, xmax, 10);
+    let neg_f = |x: f64| -f(x);
+    let x_max = if spec.len() == 2 {
+        let x0 = spec_number(&spec[1], "ArgMax", 1, env)?;
+        stationary_or_local(&neg_f, x0)
+    } else {
+        let xmin = spec_number(&spec[1], "ArgMax", 1, env)?;
+        let xmax = spec_number(&spec[2], "ArgMax", 2, env)?;
+        if xmin >= xmax {
+            return Err(EvalError::Error(
+                "ArgMax: interval must satisfy xmin < xmax".to_string(),
+            ));
+        }
+        let (_neg_f_min, x_max) = multi_restart_minimize(&neg_f, xmin, xmax, 10);
+        x_max
+    };
 
     Ok(super::real(x_max))
 }
@@ -582,9 +1050,13 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 /// FindInstance[eqn, var, n] — find n numeric instances (solutions).
 pub fn builtin_find_instance(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     let (n_val, eqn_arg, var_arg) = if args.len() == 3 {
-        (args[2].clone(), &args[0], &args[1])
+        (unheld(&args[2]), unheld(&args[0]), deep_unheld(&args[1]))
     } else if args.len() == 2 {
-        (Value::Integer(Integer::from(1)), &args[0], &args[1])
+        (
+            Value::Integer(Integer::from(1)),
+            unheld(&args[0]),
+            deep_unheld(&args[1]),
+        )
     } else {
         return Err(EvalError::Error(
             "FindInstance requires 2 or 3 arguments".to_string(),
@@ -599,9 +1071,9 @@ pub fn builtin_find_instance(args: &[Value], env: &Env) -> Result<Value, EvalErr
         _ => 1,
     };
 
-    let var = extract_var_symbol(var_arg)?;
+    let (expr, rhs) = parse_equation(&eqn_arg)?;
+    let var = resolve_var(&var_arg, &[&expr])?;
     let var_clone = var.clone();
-    let (expr, rhs) = parse_equation(eqn_arg)?;
 
     let f = move |x: f64| {
         let substituted = substitute_numeric(&expr, &var_clone, x);
@@ -650,8 +1122,10 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    let var = extract_var_symbol(&args[1])?;
-    let (expr, rhs) = parse_equation(&args[0])?;
+    let eqn = unheld(&args[0]);
+    let var_val = deep_unheld(&args[1]);
+    let (expr, rhs) = parse_equation(&eqn)?;
+    let var = resolve_var(&var_val, &[&expr])?;
 
     let poly_expr = if rhs == 0.0 {
         expr.clone()
@@ -1164,8 +1638,118 @@ fn hessenberg(a: &mut [Vec<f64>], n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Expr;
     use crate::value::DEFAULT_PRECISION;
     use rug::Float;
+    use rug::Integer;
+
+    fn env_with_builtins() -> Env {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        env
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = env_with_builtins();
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap_or_else(|e| panic!("parse {input}: {e:?}"));
+        crate::eval::eval_program(&ast, &env).unwrap_or_else(|e| panic!("eval {input}: {e:?}"))
+    }
+
+    fn num(input: &str) -> f64 {
+        super::super::to_f64(&eval_str(input)).unwrap_or_else(|| panic!("not numeric: {input}"))
+    }
+
+    fn assert_close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-7, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn test_local_minimize_from_start() {
+        let f = |x: f64| (x - 2.0) * (x - 2.0);
+        let x = local_minimize(&f, 0.0);
+        assert!((x - 2.0).abs() < 1e-7, "expected 2, got {x}");
+    }
+
+    #[test]
+    fn test_bracket_min_encloses_minimum() {
+        let f = |x: f64| (x - 5.0) * (x - 5.0);
+        let (a, b, c) = bracket_min(&f, 0.0);
+        assert!(a <= 5.0 && 5.0 <= c, "bracket {a}..{c} misses 5");
+        assert!(f(b) <= f(a) && f(b) <= f(c));
+    }
+
+    #[test]
+    fn test_scan_for_root_cos() {
+        let f = |x: f64| x.cos() - x;
+        let root = scan_for_root(&f, 0.0).unwrap();
+        assert!((root - 0.739_085_133_215_160_6).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_unheld_strips_pattern() {
+        let pattern = Value::Pattern(Expr::Call {
+            head: Box::new(Expr::Symbol("Power".to_string())),
+            args: vec![
+                Expr::Symbol("x".to_string()),
+                Expr::Integer(Integer::from(2)),
+            ],
+        });
+        let value = unheld(&pattern);
+        assert!(matches!(value, Value::Call { ref head, .. } if head == "Power"));
+    }
+
+    #[test]
+    fn test_eval_find_minimum_start_point() {
+        assert_close(num("First[FindMinimum[(x - 2)^2, {x, 0}]]"), 0.0);
+        // Result has the Wolfram shape `{value, {x -> x0}}`.
+        assert_close(num("FindMinimum[(x - 2)^2, {x, 0}][[2, 1, 2]]"), 2.0);
+    }
+
+    #[test]
+    fn test_eval_find_minimum_interval() {
+        assert_close(num("First[FindMinimum[(x - 3)^2 + 1, {x, 0, 10}]]"), 1.0);
+    }
+
+    #[test]
+    fn test_eval_find_maximum_start_point() {
+        assert_close(num("First[FindMaximum[3 - (x - 1)^2, {x, 0}]]"), 3.0);
+        assert_close(num("First[FindMaximum[3 - (x - 1)^2, {x, -5, 5}]]"), 3.0);
+    }
+
+    #[test]
+    fn test_eval_minimize_maximize_symbolic() {
+        assert_close(num("First[Minimize[x^2 - 2 x, x]]"), -1.0);
+        assert_close(num("Minimize[x^2 - 2 x, x][[2, 1, 2]]"), 1.0);
+        assert_close(num("First[Maximize[-(x - 1)^2 + 3, x]]"), 3.0);
+        assert_close(num("First[Minimize[(x - 4)^2, {x, 0, 10}]]"), 0.0);
+    }
+
+    #[test]
+    fn test_eval_nminimize_nmaximize() {
+        assert_close(num("First[NMinimize[x^2 - 4 x + 7, {x, -20, 20}]]"), 3.0);
+        assert_close(num("First[NMaximize[4 x - x^2 + 1, {x, -20, 20}]]"), 5.0);
+    }
+
+    #[test]
+    fn test_eval_find_root_equation() {
+        assert_close(
+            num("FindRoot[Cos[x] == x, {x, 1}][[1, 2]]"),
+            0.739_085_133_215_160_6,
+        );
+        // Bare expression form is treated as `f == 0`.
+        assert_close(num("FindRoot[x^2 - 4, {x, 3}][[1, 2]]"), 2.0);
+        // Interval form uses Brent's method.
+        assert_close(num("FindRoot[x^2 - 4, {x, 1, 4}][[1, 2]]"), 2.0);
+    }
+
+    #[test]
+    fn test_eval_nsolve_equation() {
+        // `==` must survive into NSolve (requires HoldAll).
+        assert_close(num("x /. NSolve[x^2 - 4 == 0, x][[1]]"), -2.0);
+        assert_close(num("x /. NSolve[x^2 - 4 == 0, x][[2]]"), 2.0);
+        assert_close(num("x /. NSolve[2 x + 1 == 0, x][[1]]"), -0.5);
+    }
 
     #[test]
     fn test_golden_section_simple() {

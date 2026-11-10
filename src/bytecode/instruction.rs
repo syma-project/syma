@@ -8,6 +8,8 @@
 #[repr(u8)]
 pub enum Opcode {
     Halt = 0x00,
+    Break = 0x01,
+    Continue = 0x02,
     LoadNull = 0x10,
     LoadTrue = 0x11,
     LoadFalse = 0x12,
@@ -44,6 +46,7 @@ pub enum Opcode {
     LoadArg = 0x61,
     LoadSym = 0x62,
     StoreSym = 0x63,
+    EvalTree = 0x64,
     Jump = 0x70,
     JumpIfZero = 0x71,
     JumpIfNotZero = 0x72,
@@ -54,6 +57,10 @@ pub enum Opcode {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     Halt,
+    /// Propagate `EvalError::Break` to an enclosing (possibly tree-walk) loop.
+    Break,
+    /// Propagate `EvalError::Continue` to an enclosing loop.
+    Continue,
 
     // 1 register
     LoadNull(u16),
@@ -102,6 +109,11 @@ pub enum Instruction {
     LoadArg(u16, u32),
     LoadSym(u16, u32),
     StoreSym(u32, u16),
+
+    /// Evaluate the held expression stored at constant index `idx` with the
+    /// tree-walk evaluator (used for special forms with no builtin, e.g.
+    /// `Catch`, whose control flow escapes the instruction stream).
+    EvalTree(u16, u32),
 
     // register + i32
     Jump(i32),

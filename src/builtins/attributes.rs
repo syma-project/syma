@@ -79,16 +79,37 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Scoping/conditionals (HoldAll so body is not pre-evaluated) --
         "With" | "Module" | "Block" => vec!["HoldAll", "Locked", "ReadProtected"],
         "If" => vec!["HoldAll", "Locked", "ReadProtected"],
-        // -- Calculus (HoldAll so expressions are not pre-evaluated) --
-        "D" | "Integrate" => vec!["HoldAll", "Locked", "ReadProtected"],
+        // -- Calculus --
+        // `D` and `Integrate` evaluate their arguments (so nested/partial
+        // results are normalized before rule matching). The integration
+        // variable spec `x` / `{x, a, b}` is a plain symbol/list and evaluates
+        // harmlessly.
+        "D" => vec!["Locked", "ReadProtected"],
+        "Integrate" => vec!["Locked", "ReadProtected"],
         "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
         // -- Equation solvers (need HoldAll so equations aren't evaluated before solving) --
         "Solve" | "RSolve" => vec!["HoldAll", "Locked", "ReadProtected"],
+        // -- Numeric/symbolic root finding and optimization. HoldAll keeps the
+        // equation intact (`Cos[x] == x` would otherwise collapse to `False`)
+        // and the optimization variable symbolic.
+        "FindRoot" | "FindMinimum" | "FindMaximum" | "FindInstance" | "NSolve" | "NMinimize"
+        | "NMaximize" | "Minimize" | "Maximize" | "ArgMin" | "ArgMax" => {
+            vec!["HoldAll", "Locked", "ReadProtected"]
+        }
         // -- Constants --
         "Pi" | "E" | "Degree" => vec!["Constant", "Locked", "ReadProtected"],
         // -- Math functions (Listable + NumericFunction) --
-        "Mod" | "GCD" | "LCM" | "IntegerPart" | "FractionalPart" | "Sign" | "UnitStep" | "Clip"
-        | "Rescale" | "Quotient" | "KroneckerDelta" => {
+        "GCD" | "LCM" => vec![
+            "Flat",
+            "Listable",
+            "Locked",
+            "NumericFunction",
+            "OneIdentity",
+            "Orderless",
+            "ReadProtected",
+        ],
+        "Mod" | "IntegerPart" | "FractionalPart" | "Sign" | "UnitStep" | "Clip" | "Rescale"
+        | "Quotient" | "KroneckerDelta" => {
             vec!["Listable", "Locked", "NumericFunction", "ReadProtected"]
         }
         // -- Predicates (Listable only) --
@@ -103,8 +124,19 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Symbol Names --
         "Names" => vec!["Locked", "ReadProtected"],
         // -- Symbol Clearing --
-        "Clear" | "ClearAll" | "Remove" => vec!["Locked", "ReadProtected"],
+        // HoldAll keeps the (usually undefined) symbol arguments from being
+        // evaluated away before clearing. `eval_call_inner` also special-cases
+        // Clear/ClearAll/Remove; the attributes matter for Apply-style calls.
+        "Clear" | "ClearAll" | "Remove" => vec!["HoldFirst", "Locked", "ReadProtected"],
         "Unset" => vec!["HoldFirst", "Locked", "ReadProtected"],
+        // -- Protection --
+        "Protect" | "Unprotect" => vec!["HoldFirst", "Locked", "ReadProtected"],
+        // -- Attributes --
+        "Attributes" => vec!["HoldFirst", "Locked", "ReadProtected"],
+        // -- Domains --
+        "Element" => vec!["Locked", "ReadProtected"],
+        // -- System information --
+        "SystemInformation" => vec!["Locked", "ReadProtected"],
         _ => vec![],
     }
 }

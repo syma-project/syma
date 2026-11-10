@@ -13,3 +13,5 @@ mod format;
 mod localsymbol;
 #[path = "cli/pattern.rs"]
 mod pattern;
+#[path = "cli/runtime.rs"]
+mod runtime;

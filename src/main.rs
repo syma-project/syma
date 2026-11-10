@@ -1,7 +1,7 @@
 /// Syma: A Symbolic-First Language with OOP Structure
 ///
 /// CLI entry point. The language library lives in `lib.rs`.
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::process;
 
 use rustyline::completion::{Completer, Pair};
@@ -277,33 +277,47 @@ fn dirs_or_default() -> Option<std::path::PathBuf> {
 /// Truncate output that exceeds MAX_OUTPUT_CHARS.
 /// Returns the original string if under the limit, or a truncated version
 /// with a message like `... (N bytes omitted)` appended.
+///
+/// The cut is made on a UTF-8 character boundary so multi-byte output is not
+/// split in the middle of a character.
 fn truncate_output(s: &str) -> String {
     if s.len() <= MAX_OUTPUT_CHARS {
-        s.to_string()
-    } else {
-        let omitted = s.len() - MAX_OUTPUT_CHARS;
-        let truncated: String = s.chars().take(MAX_OUTPUT_CHARS).collect();
-        format!(
-            "{}\n{}",
-            truncated,
-            dim(&format!("... ({} bytes omitted)", omitted))
-        )
+        return s.to_string();
     }
+    let mut end = MAX_OUTPUT_CHARS;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = s.len() - end;
+    format!(
+        "{}\n{}",
+        &s[..end],
+        dim(&format!("... ({} bytes omitted)", omitted))
+    )
 }
 
 /// Run in kernel mode: read JSON requests from stdin, write JSON responses to stdout.
+///
+/// The protocol is line-framed: each non-empty input line is one JSON request
+/// and each response is exactly one line of JSON. Responses are flushed after
+/// every request so frontends see them promptly even through a pipe.
 fn run_kernel() {
     let kernel = SymaKernel::new();
-    let stdin = io::stdin().lock();
-    for line in stdin.lines() {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for line in stdin.lock().lines() {
         match line {
             Ok(input) => {
-                let trimmed = input.trim().to_string();
+                let trimmed = input.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                let response = kernel.eval_json(&trimmed);
-                println!("{response}");
+                let response = kernel.eval_json(trimmed);
+                if writeln!(out, "{response}").is_err() {
+                    break;
+                }
+                let _ = out.flush();
             }
             Err(e) => {
                 eprintln!("Error reading stdin: {}", e);
@@ -313,32 +327,23 @@ fn run_kernel() {
     }
 }
 
+/// Return the first positional argument (one that does not start with `-`)
+/// after the program name. Used by `--check`/`--dap` to locate their file
+/// operand without confusing it with a subcommand name (e.g. `syma --dap run`).
+fn first_positional_arg(args: &[String]) -> Option<&str> {
+    args.iter()
+        .skip(1)
+        .map(|s| s.as_str())
+        .find(|a| !a.starts_with('-'))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // Check for --check flag (single file parse-only syntax check)
     let has_check = args.iter().any(|a| a == "--check");
     let has_dap = args.iter().any(|a| a == "--dap");
-    let file_arg = args
-        .iter()
-        .skip(1)
-        .find(|a| {
-            !a.starts_with('-')
-                && a.as_str() != "new"
-                && a.as_str() != "run"
-                && a.as_str() != "build"
-                && a.as_str() != "check"
-                && a.as_str() != "test"
-                && a.as_str() != "add"
-                && a.as_str() != "remove"
-                && a.as_str() != "rm"
-                && a.as_str() != "install"
-                && a.as_str() != "update"
-                && a.as_str() != "publish"
-                && a.as_str() != "search"
-                && a.as_str() != "info"
-        })
-        .map(|s| s.as_str());
+    let file_arg = first_positional_arg(&args);
 
     if has_dap {
         if let Some(path) = file_arg {
@@ -374,25 +379,38 @@ fn main() {
                 eprintln!("Usage: syma --eval <expression>");
                 process::exit(1);
             });
-            // Check for --format flag
-            let format_flag = args
-                .iter()
-                .position(|a| a == "--format")
-                .and_then(|i| args.get(i + 1).map(|s| s.as_str()));
+            // Parse an optional `--format F` flag.
+            let format_flag = match args.iter().position(|a| a == "--format") {
+                Some(i) => match args.get(i + 1) {
+                    Some(v) => Some(v.as_str()),
+                    None => {
+                        eprintln!("error: --format requires a value (inputform|fullform)");
+                        process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let display_format = match format_flag.map(|s| s.to_ascii_lowercase()).as_deref() {
+                // Default to InputForm for readability.
+                None | Some("inputform") | Some("input") => Format::InputForm,
+                Some("fullform") | Some("full") => Format::FullForm,
+                Some("standardform") | Some("standard") => Format::StandardForm,
+                Some("outputform") | Some("output") => Format::OutputForm,
+                Some(other) => {
+                    eprintln!(
+                        "error: unknown --format value '{other}' \
+                         (expected inputform|fullform|standardform|outputform)"
+                    );
+                    process::exit(1);
+                }
+            };
             let env = syma::env::Env::new();
             syma::builtins::register_builtins(&env);
             match eval_input(expr, &env) {
                 Some(val) => {
-                    let display_val = match format_flag {
-                        Some("fullform") | Some("full") => Value::Formatted {
-                            format: Format::FullForm,
-                            value: Box::new(val),
-                        },
-                        // Default to InputForm for readability
-                        _ => Value::Formatted {
-                            format: Format::InputForm,
-                            value: Box::new(val),
-                        },
+                    let display_val = Value::Formatted {
+                        format: display_format,
+                        value: Box::new(val),
                     };
                     println!("{}", truncate_output(&display_val.to_string()));
                 }
@@ -466,5 +484,64 @@ fn main() {
             process::exit(1);
         }
         None => run_repl(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_first_positional_arg() {
+        // Subcommand-like file names must still be found after --check/--dap.
+        assert_eq!(
+            first_positional_arg(&args(&["syma", "--check", "run"])),
+            Some("run")
+        );
+        assert_eq!(
+            first_positional_arg(&args(&["syma", "--dap", "check"])),
+            Some("check")
+        );
+        assert_eq!(
+            first_positional_arg(&args(&["syma", "--dap", "file.syma"])),
+            Some("file.syma")
+        );
+        assert_eq!(
+            first_positional_arg(&args(&["syma", "-e", "1+1"])),
+            Some("1+1")
+        );
+        assert_eq!(first_positional_arg(&args(&["syma", "--kernel"])), None);
+        assert_eq!(first_positional_arg(&args(&["syma"])), None);
+        assert_eq!(first_positional_arg(&args(&["syma", "--check"])), None);
+    }
+
+    #[test]
+    fn test_truncate_output_short() {
+        assert_eq!(truncate_output("hello"), "hello");
+    }
+
+    #[test]
+    fn test_truncate_output_long_ascii() {
+        let s = "x".repeat(MAX_OUTPUT_CHARS + 10);
+        let out = truncate_output(&s);
+        assert!(out.contains("10 bytes omitted"), "got: {out}");
+        assert!(out.contains("..."));
+    }
+
+    #[test]
+    fn test_truncate_output_respects_char_boundary() {
+        // Two-byte 'é' characters; ensure the cut lands on a boundary.
+        let s = "é".repeat(MAX_OUTPUT_CHARS + 5);
+        let out = truncate_output(&s);
+        let head = out.split('\n').next().unwrap();
+        assert!(
+            head.chars().all(|c| c == 'é'),
+            "split mid-character: {head}"
+        );
+        assert!(out.contains("bytes omitted"));
     }
 }

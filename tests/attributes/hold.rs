@@ -230,15 +230,20 @@ fn block_hold_all() {
 
 #[test]
 fn d_hold_all() {
+    // WL: Attributes[D] is {Protected, ReadProtected} — no HoldAll (args evaluate).
     let out = syma_eval("MemberQ[Attributes[D], HoldAll]");
-    assert!(out.contains("True"), "D should have HoldAll, got: {out}");
+    assert!(
+        out.contains("False"),
+        "D should not have HoldAll, got: {out}"
+    );
 }
 
 #[test]
 fn integrate_hold_all() {
+    // WL: Integrate evaluates its arguments (nested Integrate must normalize).
     let out = syma_eval("MemberQ[Attributes[Integrate], HoldAll]");
     assert!(
-        out.contains("True"),
-        "Integrate should have HoldAll, got: {out}"
+        out.contains("False"),
+        "Integrate should not have HoldAll, got: {out}"
     );
 }

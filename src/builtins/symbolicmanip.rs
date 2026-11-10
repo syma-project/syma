@@ -149,14 +149,54 @@ fn simplify_plus(args: &[Value]) -> Value {
     if terms.is_empty() {
         return Value::Integer(Integer::from(0));
     }
-    if terms.len() == 1 {
-        return terms.into_iter().next().unwrap();
+    // Fold all numeric constants together so that mixed exact/inexact sums
+    // (e.g. `1 + (-1.0)`) collapse to zero; the symbolic combiner alone misses
+    // those because it keys like terms by structural equality.
+    let mut numeric = Value::Integer(Integer::from(0));
+    let mut symbolic: Vec<Value> = Vec::new();
+    for t in terms {
+        if matches!(t, Value::Integer(_) | Value::Real(_) | Value::Rational(_)) {
+            numeric = add_numeric(&numeric, &t);
+        } else {
+            symbolic.push(t);
+        }
     }
-    let combined = combine_plus_terms(terms);
-    if combined.len() == 1 {
-        return combined.into_iter().next().unwrap();
+    let mut result: Vec<Value> = Vec::new();
+    if !is_zero_v(&numeric) {
+        result.push(numeric);
     }
-    call("Plus", combined)
+    if symbolic.len() == 1 {
+        result.push(symbolic.into_iter().next().unwrap());
+    } else if !symbolic.is_empty() {
+        result.extend(combine_plus_terms(symbolic));
+    }
+    if result.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if result.len() == 1 {
+        result.into_iter().next().unwrap()
+    } else {
+        call("Plus", result)
+    }
+}
+
+/// Add two numeric values directly (mirrors `mul_numeric`).
+fn add_numeric(a: &Value, b: &Value) -> Value {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Value::Integer((x + y).into()),
+        (Value::Rational(x), Value::Rational(y)) => {
+            Value::Rational(Box::new((**x).clone() + (**y).clone()))
+        }
+        (Value::Integer(x), Value::Rational(y)) => {
+            Value::Rational(Box::new(Rational::from(x.clone()) + (**y).clone()))
+        }
+        (Value::Rational(x), Value::Integer(y)) => {
+            Value::Rational(Box::new((**x).clone() + Rational::from(y.clone())))
+        }
+        _ => match (value_to_float(a), value_to_float(b)) {
+            (Some(fa), Some(fb)) => Value::Real(fa + fb),
+            _ => call("Plus", vec![a.clone(), b.clone()]),
+        },
+    }
 }
 
 fn combine_plus_terms(terms: Vec<Value>) -> Vec<Value> {
@@ -623,24 +663,57 @@ fn basic_diff(expr: &Value, var: &str) -> Value {
     }
 }
 
+/// Unwrap a `Value::Pattern(Expr)` into a concrete `Value`.
+///
+/// Held arguments (and the `Rule`/`Pattern` nodes embedded in them) reach
+/// builtins pattern-wrapped — e.g. `x -> 0` arrives as
+/// `Rule[Pattern[x], Pattern[0]]`. This converts such a wrapper back to an
+/// ordinary value; anything else is cloned unchanged.
+fn unwrap_pattern(v: &Value) -> Value {
+    match v {
+        Value::Pattern(expr) => crate::pattern::unwrap_expr_to_value(expr),
+        _ => v.clone(),
+    }
+}
+
+/// Extract a symbol name from a value that may be pattern-wrapped.
+fn pattern_symbol_name(v: &Value) -> Option<String> {
+    match unwrap_pattern(v) {
+        Value::Symbol(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Check if a value is a negative number.
+fn is_neg_number(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_negative(),
+        Value::Real(r) => *r < 0,
+        Value::Rational(r) => r.is_negative(),
+        _ => false,
+    }
+}
+
+/// Check if a value represents +/-Infinity.
+fn is_any_infinity(v: &Value) -> bool {
+    is_infinity(v) || is_neg_infinity(v)
+}
+
 /// Parse the var -> target rule from Limit's second argument.
 /// Returns (var_name, target_value).
+///
+/// Handles both evaluated `Rule` values and held `Rule[..]` calls, unwrapping
+/// any `Pattern` wrappers on the rule, its left-hand side and its target.
 fn parse_limit_rule(arg: &Value) -> Option<(String, Value)> {
-    match arg {
+    let rule = unwrap_pattern(arg);
+    match &rule {
         Value::Rule { lhs, rhs, .. } => {
-            let var = match lhs.as_ref() {
-                Value::Symbol(s) => s.clone(),
-                _ => return None,
-            };
-            let target = (**rhs).clone();
-            Some((var, target))
+            let var = pattern_symbol_name(lhs.as_ref())?;
+            Some((var, unwrap_pattern(rhs.as_ref())))
         }
         Value::Call { head, args } if head == "Rule" && args.len() == 2 => {
-            let var = match &args[0] {
-                Value::Symbol(s) => s.clone(),
-                _ => return None,
-            };
-            Some((var, args[1].clone()))
+            let var = pattern_symbol_name(&args[0])?;
+            Some((var, unwrap_pattern(&args[1])))
         }
         _ => None,
     }
@@ -687,14 +760,18 @@ pub fn builtin_limit(args: &[Value]) -> Result<Value, EvalError> {
             "Limit requires exactly 2 arguments: Limit[expr, var -> x0]".to_string(),
         ));
     }
-    let expr = &args[0];
+    let expr = unwrap_pattern(&args[0]);
     let (var, target) = match parse_limit_rule(&args[1]) {
         Some(v) => v,
         None => {
             return Ok(call("Limit", args.to_vec()));
         }
     };
-    Ok(compute_limit(expr, &var, &target))
+    let r = compute_limit(&expr, &var, &target);
+    if std::env::var("SYMA_LIMIT_DEBUG").is_ok() {
+        eprintln!("LIMIT expr={expr:?} var={var} target={target:?} -> {r:?}");
+    }
+    Ok(r)
 }
 
 fn compute_limit(expr: &Value, var: &str, target: &Value) -> Value {
@@ -941,6 +1018,41 @@ fn limit_power_at_point(exp: &Value, target: &Value) -> Value {
     }
 }
 
+/// If `v` is (a product containing) `num/den`, return `(num, den)`.
+fn recip_split(v: &Value) -> Option<(Value, Value)> {
+    match v {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            Some((args[0].clone(), args[1].clone()))
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut num_factors = Vec::new();
+            let mut den: Option<Value> = None;
+            for a in args {
+                if let Value::Call { head: dh, args: da } = a
+                    && dh == "Divide"
+                    && da.len() == 2
+                    && den.is_none()
+                {
+                    den = Some(da[1].clone());
+                    num_factors.push(da[0].clone());
+                } else {
+                    num_factors.push(a.clone());
+                }
+            }
+            let den = den?;
+            let num = if num_factors.is_empty() {
+                Value::Integer(Integer::from(1))
+            } else if num_factors.len() == 1 {
+                num_factors.into_iter().next().unwrap()
+            } else {
+                call("Times", num_factors)
+            };
+            Some((num, den))
+        }
+        _ => None,
+    }
+}
+
 fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
     match expr {
         // Constant
@@ -987,6 +1099,45 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                 // Non-integer exponent, return unevaluated
                 expr.clone()
             }
+        }
+        // (1 + w)^v at infinity, where w -> 0 and v grows: limit is E^(v*w).
+        // E.g. (1 + 1/n)^n -> E as n -> Infinity.
+        Value::Call { head, args }
+            if head == "Power" && args.len() == 2 && free_appears_p(&args[0], var) =>
+        {
+            let base = &args[0];
+            let exp = &args[1];
+            if let Value::Call { head: bh, args: pa } = base
+                && bh == "Plus"
+                && pa.len() == 2
+            {
+                let w = if is_one_v(&pa[0]) {
+                    Some(&pa[1])
+                } else if is_one_v(&pa[1]) {
+                    Some(&pa[0])
+                } else {
+                    None
+                };
+                if let Some(w) = w
+                    && is_zero_v(&limit_at_infinity(w, var, neg))
+                {
+                    // v * w, cancelling a reciprocal denominator when present so
+                    // that e.g. n * (1/n) collapses to 1 instead of Infinity.
+                    let prod = if let Some((num, den)) = recip_split(w) {
+                        simplify_value(&call(
+                            "Divide",
+                            vec![simplify_call("Times", &[exp.clone(), num]), den],
+                        ))
+                    } else {
+                        simplify_value(&call("Times", vec![exp.clone(), w.clone()]))
+                    };
+                    let k = limit_at_infinity(&prod, var, neg);
+                    if !matches!(&k, Value::Call { head: kh, .. } if kh == "Limit") {
+                        return simplify_call("Power", &[Value::Symbol("E".to_string()), k]);
+                    }
+                }
+            }
+            expr.clone()
         }
         // Exp[x] at Infinity -> Infinity, at -Infinity -> 0
         Value::Call { head, args } if head == "Exp" && args.len() == 1 => {
@@ -1079,6 +1230,21 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
                 .iter()
                 .map(|a| limit_at_infinity(a, var, neg))
                 .collect();
+            // A single-sided infinite term dominates the finite ones.
+            let has_pos = terms.iter().any(is_infinity);
+            let has_neg = terms.iter().any(is_neg_infinity);
+            if has_pos && !has_neg {
+                return Value::Symbol("Infinity".to_string());
+            }
+            if has_neg && !has_pos {
+                return call(
+                    "Times",
+                    vec![
+                        Value::Integer(Integer::from(-1)),
+                        Value::Symbol("Infinity".to_string()),
+                    ],
+                );
+            }
             let combined = simplify_value(&call("Plus", terms));
             if is_infinity(&combined) || is_neg_infinity(&combined) {
                 return combined;
@@ -1089,11 +1255,32 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
         Value::Call { head, args } if head == "Times" && args.len() == 2 => {
             let l = limit_at_infinity(&args[0], var, neg);
             let r = limit_at_infinity(&args[1], var, neg);
+            // Handle infinities before the numeric-constant fold: `Infinity` is
+            // itself a known constant, so `Times[3, Infinity]` must collapse.
+            if is_any_infinity(&l) || is_any_infinity(&r) {
+                let other = if is_any_infinity(&l) { &r } else { &l };
+                if is_zero_v(other) {
+                    return Value::Integer(Integer::from(0));
+                }
+                if is_any_infinity(other) || is_numeric_constant(other) {
+                    let neg_sign = (is_neg_infinity(&l) || is_neg_number(&l))
+                        ^ (is_neg_infinity(&r) || is_neg_number(&r));
+                    return if neg_sign {
+                        call(
+                            "Times",
+                            vec![
+                                Value::Integer(Integer::from(-1)),
+                                Value::Symbol("Infinity".to_string()),
+                            ],
+                        )
+                    } else {
+                        Value::Symbol("Infinity".to_string())
+                    };
+                }
+                return call("Times", vec![l, r]);
+            }
             if is_numeric_constant(&l) && is_numeric_constant(&r) {
                 return simplify_call("Times", &[l, r]);
-            }
-            if is_infinity(&l) || is_infinity(&r) {
-                return Value::Symbol("Infinity".to_string());
             }
             if is_zero_v(&l) || is_zero_v(&r) {
                 return Value::Integer(Integer::from(0));
@@ -1107,10 +1294,52 @@ fn limit_at_infinity(expr: &Value, var: &str, neg: bool) -> Value {
             if is_zero_v(&den_lim) {
                 return Value::Symbol("Infinity".to_string());
             }
-            if is_infinity(&num_lim) && !is_infinity(&den_lim) {
+            // finite / infinity -> 0
+            if is_any_infinity(&den_lim) && !is_any_infinity(&num_lim) {
+                return Value::Integer(Integer::from(0));
+            }
+            if is_any_infinity(&num_lim) && !is_any_infinity(&den_lim) {
                 return Value::Symbol("Infinity".to_string());
             }
-            if is_infinity(&num_lim) && is_infinity(&den_lim) {
+            if is_any_infinity(&num_lim) && is_any_infinity(&den_lim) {
+                // Both infinite: compare polynomial degrees / leading coeffs.
+                let num_e = expand_value(&args[0]);
+                let den_e = expand_value(&args[1]);
+                if is_polynomial_in(&num_e, var) && is_polynomial_in(&den_e, var) {
+                    let mut nc = poly_coeffs(&num_e, var);
+                    let mut dc = poly_coeffs(&den_e, var);
+                    while nc.len() > 1 && is_zero_v(&simplify_value(nc.last().unwrap())) {
+                        nc.pop();
+                    }
+                    while dc.len() > 1 && is_zero_v(&simplify_value(dc.last().unwrap())) {
+                        dc.pop();
+                    }
+                    let nd = nc.len() as i64 - 1;
+                    let dd = dc.len() as i64 - 1;
+                    if nd > dd {
+                        let lead_num = simplify_value(&nc[nc.len() - 1]);
+                        let lead_den = simplify_value(&dc[dc.len() - 1]);
+                        let parity = neg && ((nd - dd) % 2 != 0);
+                        let neg_sign = is_neg_number(&lead_num) ^ is_neg_number(&lead_den) ^ parity;
+                        return if neg_sign {
+                            call(
+                                "Times",
+                                vec![
+                                    Value::Integer(Integer::from(-1)),
+                                    Value::Symbol("Infinity".to_string()),
+                                ],
+                            )
+                        } else {
+                            Value::Symbol("Infinity".to_string())
+                        };
+                    }
+                    if nd < dd {
+                        return Value::Integer(Integer::from(0));
+                    }
+                    let lead_num = simplify_value(&nc[nc.len() - 1]);
+                    let lead_den = simplify_value(&dc[dc.len() - 1]);
+                    return simplify_call("Divide", &[lead_num, lead_den]);
+                }
                 return call(
                     "Limit",
                     vec![
@@ -2404,14 +2633,14 @@ pub fn builtin_nlimit(args: &[Value]) -> Result<Value, EvalError> {
             "NLimit requires exactly 2 arguments: NLimit[expr, var -> x0]".to_string(),
         ));
     }
-    let expr = &args[0];
+    let expr = unwrap_pattern(&args[0]);
     let (var, target) = match parse_limit_rule(&args[1]) {
         Some(v) => v,
         None => {
             return Ok(call("NLimit", args.to_vec()));
         }
     };
-    Ok(numeric_limit(expr, &var, &target))
+    Ok(numeric_limit(&expr, &var, &target))
 }
 
 fn numeric_limit(expr: &Value, var: &str, target: &Value) -> Value {
@@ -2994,115 +3223,193 @@ pub fn builtin_series_coefficient(args: &[Value]) -> Result<Value, EvalError> {
         }
     };
     let x0 = &list_args[1];
-    let n = match &list_args[2] {
-        Value::Integer(i) => i.to_i64().ok_or_else(|| {
-            EvalError::Error("SeriesCoefficient: order n must fit in i64".to_string())
-        })?,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Integer".to_string(),
-                got: list_args[2].type_name().to_string(),
-            });
-        }
-    };
+    let n_arg = &list_args[2];
+    match value_to_i64(n_arg) {
+        Some(n) => Ok(series_coefficient(&args[0], &var, x0, n)),
+        // Symbolic order, e.g. SeriesCoefficient[1/(1 - x), {x, 0, n}].
+        None => Ok(series_coefficient_symbolic(&args[0], &var, x0, n_arg)),
+    }
+}
 
-    Ok(series_coefficient(&args[0], &var, x0, n))
+/// Convert a numeric value to `i64` when it is an exact integer (an `Integer`,
+/// or a `Real`/`Rational` with no fractional part — `N` reals the order `n`).
+fn value_to_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Integer(i) => i.to_i64(),
+        Value::Rational(r) if r.is_integer() => r.numer().to_i64(),
+        Value::Real(r) if r.is_integer() => r.to_integer().and_then(|i| i.to_i64()),
+        _ => None,
+    }
+}
+
+/// Is `expr` a polynomial in `var` (Plus/Times/Power with non-negative
+/// integer exponents and no other heads containing `var`)?
+fn is_polynomial_in(expr: &Value, var: &str) -> bool {
+    if !free_appears_p(expr, var) {
+        return true;
+    }
+    match expr {
+        Value::Symbol(s) => s == var,
+        Value::Call { head, args } if head == "Plus" || head == "Times" => {
+            args.iter().all(|a| is_polynomial_in(a, var))
+        }
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && args[0].struct_eq(&Value::Symbol(var.to_string())) =>
+        {
+            matches!(&args[1], Value::Integer(k) if !k.is_negative())
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            matches!(&args[1], Value::Integer(k) if !k.is_negative())
+                && is_polynomial_in(&args[0], var)
+        }
+        _ => false,
+    }
+}
+
+/// Recognize `1/(c + a*var)` (as `Divide[1, ..]` or `Power[.., -1]`) and
+/// return the pair `(c, a*var)` when `c` is constant.
+fn geometric_denominator<'a>(expr: &'a Value, var: &str) -> Option<(&'a Value, &'a Value)> {
+    let den: &Value = match expr {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 && is_one_v(&args[0]) => {
+            &args[1]
+        }
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && matches!(&args[1], Value::Integer(k) if *k == -1) =>
+        {
+            &args[0]
+        }
+        _ => return None,
+    };
+    if let Value::Call { head, args } = den
+        && head == "Plus"
+        && args.len() == 2
+    {
+        let is_const = |v: &Value| !free_appears_p(v, var);
+        if is_const(&args[0]) && free_appears_p(&args[1], var) {
+            return Some((&args[0], &args[1]));
+        }
+        if is_const(&args[1]) && free_appears_p(&args[0], var) {
+            return Some((&args[1], &args[0]));
+        }
+    }
+    None
+}
+
+/// Linear coefficient of `var` in `var_part`, or `None` if not linear.
+fn linear_coeff(var_part: &Value, var: &str) -> Option<Value> {
+    match var_part {
+        Value::Symbol(s) if s == var => Some(Value::Integer(Integer::from(1))),
+        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
+            if matches!(&args[0], Value::Symbol(s) if s == var) {
+                Some(args[1].clone())
+            } else if matches!(&args[1], Value::Symbol(s) if s == var) {
+                Some(args[0].clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Normalize an exact numeric value to an `Integer` (turning `Real(1.0)` and
+/// integral `Rational`s into exact integers), cloning anything else.
+fn normalize_int(v: &Value) -> Value {
+    match value_to_i64(v) {
+        Some(i) => Value::Integer(Integer::from(i)),
+        None => v.clone(),
+    }
+}
+
+/// Exact division of two numeric values, producing a `Rational`/`Integer`
+/// where possible (so results survive numeric evaluation by `N`).
+fn exact_div(num: &Value, den: &Value) -> Value {
+    fn to_rat(v: &Value) -> Option<Rational> {
+        match v {
+            Value::Integer(n) => Some(Rational::from(n.clone())),
+            Value::Rational(r) => Some((**r).clone()),
+            _ => None,
+        }
+    }
+    if let (Some(a), Some(b)) = (to_rat(num), to_rat(den))
+        && !b.is_zero()
+    {
+        let q = a / b;
+        if *q.denom() == 1 {
+            return Value::Integer(q.numer().clone());
+        }
+        return Value::Rational(Box::new(q));
+    }
+    simplify_call("Divide", &[num.clone(), den.clone()])
+}
+
+/// Coefficient of var^n in 1/(c + a*var): (1/c) * (-a/c)^n.
+fn geometric_coeff(c: &Value, var_part: &Value, var: &str, n: i64) -> Option<Value> {
+    let a = linear_coeff(var_part, var)?;
+    if n < 0 {
+        return Some(Value::Integer(Integer::from(0)));
+    }
+    let c = normalize_int(c);
+    let neg_a = simplify_call("Times", &[Value::Integer(Integer::from(-1)), a]);
+    let ratio = exact_div(&neg_a, &c);
+    let pow = simplify_call("Power", &[ratio, Value::Integer(Integer::from(n))]);
+    Some(exact_div(&pow, &c))
+}
+
+/// Symbolic-order series coefficient: only the geometric `1/(c + a*var)`
+/// family is supported, returning an expression in `n_sym`.
+fn series_coefficient_symbolic(expr: &Value, var: &str, x0: &Value, n_sym: &Value) -> Value {
+    if is_zero_v(x0)
+        && let Some((c, var_part)) = geometric_denominator(expr, var)
+        && let Some(a) = linear_coeff(var_part, var)
+    {
+        let c = normalize_int(c);
+        let a = normalize_int(&a);
+        let neg_a = simplify_call("Times", &[Value::Integer(Integer::from(-1)), a]);
+        let ratio = exact_div(&neg_a, &c);
+        let pow = simplify_call("Power", &[ratio, n_sym.clone()]);
+        return exact_div(&pow, &c);
+    }
+    call(
+        "SeriesCoefficient",
+        vec![
+            expr.clone(),
+            Value::List(vec![
+                Value::Symbol(var.to_string()),
+                x0.clone(),
+                n_sym.clone(),
+            ]),
+        ],
+    )
 }
 
 /// Compute the nth series coefficient of expr around x=x0.
 fn series_coefficient(expr: &Value, var: &str, x0: &Value, n: i64) -> Value {
-    // For x0 = 0, we can extract coefficients from the expanded polynomial
     if is_zero_v(x0) {
-        // Special case for 1/(1-x) and 1/(1+x) type expressions
-        if let Value::Call { head, args } = expr
-            && head == "Power"
-            && args.len() == 2
-            && let Value::Integer(k) = &args[1]
-            && *k == -1
+        // Geometric families: 1/(1 - x), (1 + c*x)^-1, ...
+        if let Some((c, var_part)) = geometric_denominator(expr, var)
+            && let Some(coeff) = geometric_coeff(c, var_part, var, n)
         {
-            // 1/f(x) where f is a polynomial in var
-            if let Value::Call {
-                head: ph,
-                args: pargs,
-            } = &args[0]
-                && ph == "Plus"
-                && pargs.len() == 2
-            {
-                let is_const = |v: &Value| !free_appears_p(v, var);
+            return coeff;
+        }
 
-                let (const_part, var_part) =
-                    if is_const(&pargs[0]) && free_appears_p(&pargs[1], var) {
-                        (&pargs[0], &pargs[1])
-                    } else if is_const(&pargs[1]) && free_appears_p(&pargs[0], var) {
-                        (&pargs[1], &pargs[0])
-                    } else {
-                        return call(
-                            "SeriesCoefficient",
-                            vec![
-                                expr.clone(),
-                                Value::List(vec![
-                                    Value::Symbol(var.to_string()),
-                                    x0.clone(),
-                                    Value::Integer(Integer::from(n)),
-                                ]),
-                            ],
-                        );
-                    };
-
-                // (1 + c*x)^(-1) pattern
-                if *const_part == Value::Integer(Integer::from(1)) {
-                    if let Value::Symbol(s) = var_part
-                        && s == var
-                    {
-                        // (1+x)^(-1) -> (-1)^n
-                        if n >= 0 {
-                            let sign = if n % 2 == 0 { 1 } else { -1 };
-                            return Value::Integer(Integer::from(sign));
-                        }
-                        return Value::Integer(Integer::from(0));
-                    }
-                    // (1 + c*x)^(-1) -> (-c)^n
-                    if let Value::Call {
-                        head: th,
-                        args: targs,
-                    } = var_part
-                        && th == "Times"
-                        && targs.len() == 2
-                    {
-                        let (coeff, var_term) = if free_appears_p(&targs[0], var) {
-                            (&targs[1], &targs[0])
-                        } else {
-                            (&targs[0], &targs[1])
-                        };
-                        if matches!(var_term, Value::Symbol(s) if s == var) {
-                            if n >= 0 {
-                                let neg_c = simplify_call(
-                                    "Times",
-                                    &[Value::Integer(Integer::from(-1)), coeff.clone()],
-                                );
-                                return simplify_call(
-                                    "Power",
-                                    &[neg_c, Value::Integer(Integer::from(n))],
-                                );
-                            }
-                            return Value::Integer(Integer::from(0));
-                        }
-                    }
-                }
+        // Exact polynomial extraction, only when the expression really is a
+        // polynomial in var (otherwise e.g. Exp[x] would yield itself).
+        if is_polynomial_in(expr, var) {
+            let expanded = expand_value(expr);
+            let coeffs = poly_coeffs(&expanded, var);
+            if n >= 0 && (n as usize) < coeffs.len() {
+                return simplify_value(&coeffs[n as usize]);
             }
+            return Value::Integer(Integer::from(0));
         }
-
-        // For polynomial expressions, extract coefficient by looking at polynomial terms
-        let expanded = expand_value(expr);
-        let coeffs = poly_coeffs(&expanded, var);
-        if n >= 0 && (n as usize) < coeffs.len() {
-            return simplify_value(&coeffs[n as usize]);
-        }
-        return Value::Integer(Integer::from(0));
     }
 
-    // For x0 != 0, substitute u = x - x0 and compute coefficient at 0
-    // This is equivalent to computing the nth derivative at x0 / n!
+    // Non-polynomial (or x0 != 0): use the derivative/factorial formula.
     let mut result_expr = expr.clone();
     for _ in 0..n {
         result_expr = basic_diff(&result_expr, var);
@@ -3111,7 +3418,7 @@ fn series_coefficient(expr: &Value, var: &str, x0: &Value, n: i64) -> Value {
 
     // Divide by n!
     let factorial = factorial_value(n);
-    simplify_call("Divide", &[evaluated, factorial])
+    exact_div(&evaluated, &factorial)
 }
 
 fn factorial_value(n: i64) -> Value {

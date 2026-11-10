@@ -86,6 +86,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
              the first value that is False, or the last value if all are True.\n\
              And[] = True.",
         ),
+        ("Anticommutator", "Anticommutator[x, y] = x ** y + y ** x."),
         (
             "Append",
             "Append[expr, elem] returns expr with elem appended.",
@@ -259,6 +260,7 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "ColorNegate",
             "ColorNegate[image] inverts the colors of an image.",
         ),
+        ("Commutator", "Commutator[x, y] = x ** y - y ** x."),
         (
             "Complement",
             "Complement[list1, list2, ...] gives elements in list1 not in any other list.",
@@ -433,6 +435,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         ("EdgeCount", "EdgeCount[graph] gives the number of edges."),
         ("EdgeDetect", "EdgeDetect[image] detects edges in an image."),
         ("EdgeList", "EdgeList[graph] gives the list of edges."),
+        (
+            "Element",
+            "Element[x, domain] returns True if x is an element of domain.\n\
+             Element[{x1, x2, ...}, domain] threads over lists, and a list of\n\
+             domains matches any of them.",
+        ),
         (
             "Equal",
             "Equal[a, b] or a == b returns True if a and b are equal.",
@@ -983,6 +991,11 @@ pub fn get_help(name: &str) -> Option<&'static str> {
             "New[class, args...] creates a new object of the given class.",
         ),
         (
+            "NonCommutativeMultiply",
+            "NonCommutativeMultiply[a, b, ...] or a ** b ** ... gives a non-commutative product.\n\
+             Numeric factors are combined into a single coefficient.",
+        ),
+        (
             "Nor",
             "Nor[a, b, ...] returns True if no argument is True, False otherwise.\n\
              Nor[] = True.",
@@ -1479,6 +1492,12 @@ pub fn get_help(name: &str) -> Option<&'static str> {
         (
             "SystemDialog",
             "SystemDialog[title, message] displays a simple system dialog box.",
+        ),
+        (
+            "SystemInformation",
+            "SystemInformation[] gives a list of rules of system properties.\n\
+             SystemInformation[property] gives information about a property such as\n\
+             \"Kernel\", \"System\", or \"Properties\".",
         ),
         (
             "Table",

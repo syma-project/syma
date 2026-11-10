@@ -1,3 +1,4 @@
+use crate::ast::Expr;
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{EvalError, Value};
@@ -386,6 +387,20 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                         return Err(EvalError::IndexOutOfBounds { index, length: 1 });
                     }
                 }
+                // A rule exposes its head and two operands, like any other
+                // compound expression: Part[lhs -> rhs, 0] == Rule, 1 == lhs,
+                // 2 == rhs. Needed for `FindRoot[...][[1, 2]]`.
+                Value::Rule { lhs, rhs, .. } => {
+                    if index == 0 {
+                        current = Value::Symbol("Rule".to_string());
+                    } else if index == 1 {
+                        current = (**lhs).clone();
+                    } else if index == 2 {
+                        current = (**rhs).clone();
+                    } else {
+                        return Err(EvalError::IndexOutOfBounds { index, length: 2 });
+                    }
+                }
                 _ => {
                     return Err(EvalError::TypeError {
                         expected: "List or Call or String".to_string(),
@@ -469,6 +484,27 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                 Ok(Value::Str(name.clone()))
             } else {
                 Err(EvalError::IndexOutOfBounds { index, length: 1 })
+            }
+        }
+        // Part[lhs -> rhs, 0|1|2] — head / lhs / rhs.
+        Value::Rule { lhs, rhs, .. } => {
+            let index = match &args[1] {
+                Value::Integer(n) => n.to_i64().unwrap_or(0),
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: args[1].type_name().to_string(),
+                    });
+                }
+            };
+            if index == 0 {
+                Ok(Value::Symbol("Rule".to_string()))
+            } else if index == 1 {
+                Ok((**lhs).clone())
+            } else if index == 2 {
+                Ok((**rhs).clone())
+            } else {
+                Err(EvalError::IndexOutOfBounds { index, length: 2 })
             }
         }
         _ => Err(EvalError::TypeError {
@@ -868,32 +904,505 @@ pub fn builtin_transpose(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 pub fn builtin_total(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "Total requires exactly 1 argument".to_string(),
+            "Total requires at least 1 argument".to_string(),
         ));
+    }
+    // Total[a, b, ...] sums the arguments (WL accepts a sequence).
+    if args.len() > 1 {
+        return super::arithmetic::builtin_plus(args);
     }
     match &args[0] {
         Value::List(items) => super::arithmetic::builtin_plus(items),
-        _ => Err(EvalError::TypeError {
-            expected: "List".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
+        // Total[scalar] is the scalar (matches Total[list-of-one]).
+        other => Ok(other.clone()),
     }
 }
 
-pub fn builtin_sum(_args: &[Value]) -> Result<Value, EvalError> {
-    // Sum[expr, {i, min, max}] — handled by evaluator
-    Err(EvalError::Error(
-        "Sum should be handled by evaluator".to_string(),
-    ))
+// ── Sum / Product ───────────────────────────────────────────────────────────
+//
+// The evaluator dispatches the `Sum`/`Product` special forms here so the
+// iterator variable stays unevaluated and can be substituted symbolically.
+// The functions double as the plain builtins, which makes `Apply[Sum, ...]`
+// and friends work too.
+//
+// Finite ranges are iterated with exact arithmetic.  A symbolic upper bound
+// (including `Infinity`) is handled with closed forms: Faulhaber polynomials
+// for `k`, `k^2`, `k^3`, the geometric series for `r^k`, and `Factorial` for
+// `Product[k, ...]`.  Anything unrecognised is returned unevaluated.
+
+/// Iteration limit substituted for a symbolic `Infinity` bound.
+const ITER_INFINITY_LIMIT: i64 = 100;
+
+fn call_expr(head: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call {
+        head: Box::new(Expr::Symbol(head.to_string())),
+        args,
+    }
 }
 
-pub fn builtin_product(_args: &[Value]) -> Result<Value, EvalError> {
-    // Product[expr, {i, min, max}] — handled by evaluator
-    Err(EvalError::Error(
-        "Product should be handled by evaluator".to_string(),
-    ))
+fn int_expr(n: i64) -> Expr {
+    Expr::Integer(Integer::from(n))
+}
+
+/// An integer-valued literal, tolerating the `Real` spelling (`2.0`) that `N`
+/// introduces.
+fn expr_int(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Integer(n) => n.to_i64(),
+        Expr::Real(r) if r.is_integer() => Some(r.to_f64() as i64),
+        _ => None,
+    }
+}
+
+/// Is the literal `e` exactly one (in exact or `Real` form)?
+fn expr_is_one(e: &Expr) -> bool {
+    expr_int(e) == Some(1)
+}
+
+/// Recognise `expr` as `k^p` for a non-negative integer power `p`.
+fn as_power_of(expr: &Expr, k: &str) -> Option<i64> {
+    let p = match expr {
+        Expr::Symbol(s) if s == k => 1,
+        Expr::Call { head, args }
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Power")
+                && args.len() == 2
+                && matches!(&args[0], Expr::Symbol(s) if s == k) =>
+        {
+            expr_int(&args[1])?
+        }
+        _ => return None,
+    };
+    (p >= 0).then_some(p)
+}
+
+/// Recognise `expr` as `r^k` for some base `r` free of `k`, accepting both the
+/// `Power[r, k]` and the `Divide[1, Power[r, k]]` spellings.
+fn as_geometric(expr: &Expr, k: &str) -> Option<Expr> {
+    if let Expr::Call { head, args } = expr
+        && matches!(head.as_ref(), Expr::Symbol(h) if h == "Power")
+        && args.len() == 2
+    {
+        if matches!(&args[1], Expr::Symbol(s) if s == k) {
+            return Some(args[0].clone());
+        }
+        // r^(-k) == (1/r)^k
+        if let Expr::Call { head: h, args: ea } = &args[1]
+            && matches!(h.as_ref(), Expr::Symbol(s) if s == "Times")
+            && ea.len() == 2
+            && expr_int(&ea[0]) == Some(-1)
+            && matches!(&ea[1], Expr::Symbol(s) if s == k)
+        {
+            return Some(call_expr("Divide", vec![int_expr(1), args[0].clone()]));
+        }
+    }
+    if let Expr::Call { head, args } = expr
+        && matches!(head.as_ref(), Expr::Symbol(h) if h == "Divide")
+        && args.len() == 2
+        && expr_is_one(&args[0])
+        && let Expr::Call { head: h2, args: a2 } = &args[1]
+        && matches!(h2.as_ref(), Expr::Symbol(h) if h == "Power")
+        && a2.len() == 2
+        && matches!(&a2[1], Expr::Symbol(s) if s == k)
+    {
+        return Some(call_expr("Divide", vec![int_expr(1), a2[0].clone()]));
+    }
+    None
+}
+
+/// Faulhaber polynomial `S_p(x) = sum_{j=1}^{x} j^p` as an expression in `x`.
+fn faulhaber(p: i64, x: &Expr) -> Option<Expr> {
+    let one = int_expr(1);
+    match p {
+        0 => Some(x.clone()),
+        1 => Some(call_expr(
+            "Divide",
+            vec![
+                call_expr(
+                    "Times",
+                    vec![x.clone(), call_expr("Plus", vec![x.clone(), one])],
+                ),
+                int_expr(2),
+            ],
+        )),
+        2 => Some(call_expr(
+            "Divide",
+            vec![
+                call_expr(
+                    "Times",
+                    vec![
+                        x.clone(),
+                        call_expr("Plus", vec![x.clone(), one.clone()]),
+                        call_expr(
+                            "Plus",
+                            vec![call_expr("Times", vec![int_expr(2), x.clone()]), one],
+                        ),
+                    ],
+                ),
+                int_expr(6),
+            ],
+        )),
+        3 => Some(call_expr(
+            "Divide",
+            vec![
+                call_expr(
+                    "Times",
+                    vec![
+                        call_expr("Power", vec![x.clone(), int_expr(2)]),
+                        call_expr(
+                            "Power",
+                            vec![call_expr("Plus", vec![x.clone(), one]), int_expr(2)],
+                        ),
+                    ],
+                ),
+                int_expr(4),
+            ],
+        )),
+        _ => None,
+    }
+}
+
+fn unevaluated_term(is_product: bool, expr: &Expr, k: &str, lo: &Expr, hi: &Expr) -> Value {
+    let head = if is_product { "Product" } else { "Sum" };
+    Value::Call {
+        head: head.to_string(),
+        args: vec![
+            Value::Pattern(expr.clone()),
+            Value::List(vec![
+                Value::Symbol(k.to_string()),
+                Value::Pattern(lo.clone()),
+                Value::Pattern(hi.clone()),
+            ]),
+        ],
+    }
+}
+
+fn eval_int_bound(expr: &Expr, env: &Env, label: &str) -> Result<i64, EvalError> {
+    let v = crate::eval::eval(expr, env)?;
+    v.to_integer().ok_or_else(|| EvalError::TypeError {
+        expected: "Integer".to_string(),
+        got: format!("{label} bound {}", v.type_name()),
+    })
+}
+
+/// Like `eval_int_bound` but accepts a symbolic `Infinity`.
+fn eval_iter_bound(expr: &Expr, env: &Env) -> Result<i64, EvalError> {
+    let v = crate::eval::eval(expr, env)?;
+    if matches!(&v, Value::Symbol(s) if s == "Infinity") {
+        Ok(ITER_INFINITY_LIMIT)
+    } else {
+        v.to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer or Infinity".to_string(),
+            got: format!("bound {}", v.type_name()),
+        })
+    }
+}
+
+/// Closed form for a symbolic single-iterator sum/product, or `None` when the
+/// bounds are numeric and the caller should iterate.
+fn try_symbolic(
+    expr: &Expr,
+    items: &[Expr],
+    is_product: bool,
+    env: &Env,
+) -> Result<Option<Value>, EvalError> {
+    let k = match items.first() {
+        Some(Expr::Symbol(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let (lo_expr, hi_expr) = match items.len() {
+        2 => {
+            if matches!(items[1], Expr::List(_)) {
+                return Ok(None);
+            }
+            (int_expr(1), items[1].clone())
+        }
+        3 => (items[1].clone(), items[2].clone()),
+        _ => return Ok(None),
+    };
+
+    let hi_val = crate::eval::eval(&hi_expr, env)?;
+    if hi_val.to_integer().is_some() {
+        return Ok(None);
+    }
+    let inf = matches!(&hi_val, Value::Symbol(s) if s == "Infinity");
+
+    let lo = match crate::eval::eval(&lo_expr, env)?.to_integer() {
+        Some(l) => l,
+        None => {
+            return Ok(Some(unevaluated_term(
+                is_product, expr, &k, &lo_expr, &hi_expr,
+            )));
+        }
+    };
+
+    // Product[k, ...] == hi! / (lo - 1)! (only for a finite upper bound).
+    if is_product && !inf && matches!(expr, Expr::Symbol(s) if s == &k) {
+        let fact = call_expr("Factorial", vec![hi_expr.clone()]);
+        let e = if lo == 1 {
+            fact
+        } else {
+            call_expr(
+                "Divide",
+                vec![fact, call_expr("Factorial", vec![int_expr(lo - 1)])],
+            )
+        };
+        return Ok(Some(crate::eval::eval(&e, env)?));
+    }
+
+    if !is_product {
+        // Faulhaber: sum k^p = S_p(hi) - S_p(lo - 1).
+        if let Some(p) = as_power_of(expr, &k)
+            && let Some(s_hi) = faulhaber(p, &hi_expr)
+        {
+            let e = if lo == 1 {
+                s_hi
+            } else if let Some(s_lo) = faulhaber(p, &int_expr(lo - 1)) {
+                call_expr(
+                    "Plus",
+                    vec![s_hi, call_expr("Times", vec![int_expr(-1), s_lo])],
+                )
+            } else {
+                s_hi
+            };
+            return Ok(Some(crate::eval::eval(&e, env)?));
+        }
+        // Geometric: sum r^k (finite, or infinite when convergent).
+        if let Some(r) = as_geometric(expr, &k) {
+            if inf {
+                let num = call_expr("Power", vec![r.clone(), int_expr(lo)]);
+                let den = call_expr(
+                    "Plus",
+                    vec![int_expr(1), call_expr("Times", vec![int_expr(-1), r])],
+                );
+                return Ok(Some(crate::eval::eval(
+                    &call_expr("Divide", vec![num, den]),
+                    env,
+                )?));
+            }
+            let num = call_expr(
+                "Plus",
+                vec![
+                    call_expr(
+                        "Power",
+                        vec![
+                            r.clone(),
+                            call_expr("Plus", vec![hi_expr.clone(), int_expr(1)]),
+                        ],
+                    ),
+                    call_expr(
+                        "Times",
+                        vec![
+                            int_expr(-1),
+                            call_expr("Power", vec![r.clone(), int_expr(lo)]),
+                        ],
+                    ),
+                ],
+            );
+            let den = call_expr("Plus", vec![r, int_expr(-1)]);
+            return Ok(Some(crate::eval::eval(
+                &call_expr("Divide", vec![num, den]),
+                env,
+            )?));
+        }
+    }
+
+    Ok(Some(unevaluated_term(
+        is_product, expr, &k, &lo_expr, &hi_expr,
+    )))
+}
+
+/// Symbolic fast path for the evaluator: returns `Some` only when the
+/// single-iterator bounds are non-numeric and a closed form applies, so that
+/// numeric/multi-iterator calls can keep using the `eval::table` machinery.
+pub fn try_sum_symbolic(args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
+    try_symbolic_spec(args, false, env)
+}
+
+/// Symbolic fast path for `Product` (see [`try_sum_symbolic`]).
+pub fn try_product_symbolic(args: &[Expr], env: &Env) -> Result<Option<Value>, EvalError> {
+    try_symbolic_spec(args, true, env)
+}
+
+fn try_symbolic_spec(
+    args: &[Expr],
+    is_product: bool,
+    env: &Env,
+) -> Result<Option<Value>, EvalError> {
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    let items = match &args[1] {
+        Expr::List(v) => v,
+        _ => return Ok(None),
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    try_symbolic(&args[0], items, is_product, env)
+}
+
+/// Expand an iterator spec into the concrete values to iterate over.
+fn iterator_values(items: &[Expr], env: &Env) -> Result<(String, Vec<Value>), EvalError> {
+    let var = match items.first() {
+        Some(Expr::Symbol(s)) => s.clone(),
+        _ => {
+            return Err(EvalError::Error(
+                "iterator variable must be a symbol".to_string(),
+            ));
+        }
+    };
+    let ints = |lo: i64, hi: i64, step: i64| -> Vec<Value> {
+        let mut values = Vec::new();
+        if step == 0 {
+            return values;
+        }
+        let mut i = lo;
+        if step > 0 {
+            while i <= hi {
+                values.push(Value::Integer(Integer::from(i)));
+                i = i.saturating_add(step);
+            }
+        } else {
+            while i >= hi {
+                values.push(Value::Integer(Integer::from(i)));
+                i = i.saturating_add(step);
+            }
+        }
+        values
+    };
+    match items.len() {
+        2 => {
+            if matches!(items[1], Expr::List(_)) {
+                match crate::eval::eval(&items[1], env)? {
+                    Value::List(v) => Ok((var, v)),
+                    other => Err(EvalError::TypeError {
+                        expected: "List".to_string(),
+                        got: other.type_name().to_string(),
+                    }),
+                }
+            } else {
+                let n = eval_iter_bound(&items[1], env)?;
+                Ok((var, ints(1, n, 1)))
+            }
+        }
+        3 => {
+            let lo = eval_int_bound(&items[1], env, "min")?;
+            let hi = eval_iter_bound(&items[2], env)?;
+            Ok((var, ints(lo, hi, 1)))
+        }
+        4 => {
+            let lo = eval_int_bound(&items[1], env, "min")?;
+            let hi = eval_iter_bound(&items[2], env)?;
+            let step = eval_int_bound(&items[3], env, "step")?;
+            if step == 0 {
+                return Err(EvalError::Error("iterator step cannot be zero".to_string()));
+            }
+            Ok((var, ints(lo, hi, step)))
+        }
+        _ => Err(EvalError::Error(
+            "iterator spec must have 2-4 elements".to_string(),
+        )),
+    }
+}
+
+/// `Sum[expr, {i, min, max}, ...]` — exact summation.
+pub fn eval_sum(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "Sum requires at least 1 argument".to_string(),
+        ));
+    }
+    eval_sum_recursive(&args[0], &args[1..], env)
+}
+
+fn eval_sum_recursive(expr: &Expr, specs: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if specs.is_empty() {
+        return crate::eval::eval(expr, env);
+    }
+    let items = match &specs[0] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "Sum iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+    if items.is_empty() {
+        return eval_sum_recursive(expr, &specs[1..], env);
+    }
+    if specs.len() == 1
+        && let Some(v) = try_symbolic(expr, items, false, env)?
+    {
+        return Ok(v);
+    }
+    let (var, values) = iterator_values(items, env)?;
+    let child = env.child();
+    let mut acc = Value::Integer(Integer::from(0));
+    for val in values {
+        child.set(var.clone(), val);
+        let term = eval_sum_recursive(expr, &specs[1..], &child)?;
+        acc = super::arithmetic::add_values_public(&acc, &term)?;
+    }
+    Ok(acc)
+}
+
+/// `Product[expr, {i, min, max}, ...]` — exact product.
+pub fn eval_product(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Error(
+            "Product requires at least 1 argument".to_string(),
+        ));
+    }
+    eval_product_recursive(&args[0], &args[1..], env)
+}
+
+fn eval_product_recursive(expr: &Expr, specs: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if specs.is_empty() {
+        return crate::eval::eval(expr, env);
+    }
+    let items = match &specs[0] {
+        Expr::List(items) => items,
+        _ => {
+            return Err(EvalError::Error(
+                "Product iterator spec must be a list".to_string(),
+            ));
+        }
+    };
+    if items.is_empty() {
+        return eval_product_recursive(expr, &specs[1..], env);
+    }
+    if specs.len() == 1
+        && let Some(v) = try_symbolic(expr, items, true, env)?
+    {
+        return Ok(v);
+    }
+    let (var, values) = iterator_values(items, env)?;
+    let child = env.child();
+    let mut acc = Value::Integer(Integer::from(1));
+    for val in values {
+        child.set(var.clone(), val);
+        let term = eval_product_recursive(expr, &specs[1..], &child)?;
+        acc = super::arithmetic::mul_values_public(&acc, &term)?;
+    }
+    Ok(acc)
+}
+
+/// `Sum[...]` / `Product[...]` when reached as plain (already-evaluated)
+/// builtins, e.g. via `Apply[Sum, ...]`.
+pub fn builtin_sum(args: &[Value]) -> Result<Value, EvalError> {
+    let exprs: Vec<Expr> = args.iter().map(crate::eval::table::value_to_expr).collect();
+    let env = Env::new();
+    super::register_builtins(&env);
+    eval_sum(&exprs, &env)
+}
+
+pub fn builtin_product(args: &[Value]) -> Result<Value, EvalError> {
+    let exprs: Vec<Expr> = args.iter().map(crate::eval::table::value_to_expr).collect();
+    let env = Env::new();
+    super::register_builtins(&env);
+    eval_product(&exprs, &env)
 }
 
 // ── Extended list operations ──

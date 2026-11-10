@@ -6,6 +6,7 @@
 //! `Plot` requires evaluator access (to evaluate functions at sample
 //! points) and is handled in eval.rs.
 
+use crate::ast::Expr;
 use crate::value::{EvalError, Value};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -18,6 +19,70 @@ fn as_list(v: &Value) -> Result<&Vec<Value>, EvalError> {
             got: v.type_name().to_string(),
         }),
     }
+}
+
+/// Convert an AST `Expr` to a `Value` without evaluation.
+///
+/// Used to unwrap the `Value::Pattern` wrappers that the evaluator attaches to
+/// both sides of a `Rule`, so option values can be inspected structurally.
+fn expr_to_value(expr: &Expr) -> Value {
+    match expr {
+        Expr::Integer(n) => Value::Integer(n.clone()),
+        Expr::Real(r) => Value::Real(r.clone()),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::Str(s) => Value::Str(s.clone()),
+        Expr::Null => Value::Null,
+        Expr::Symbol(s) => Value::Symbol(s.clone()),
+        Expr::List(items) => Value::List(items.iter().map(expr_to_value).collect()),
+        Expr::Call { head, args } => Value::Call {
+            head: match head.as_ref() {
+                Expr::Symbol(s) => s.clone(),
+                _ => String::new(),
+            },
+            args: args.iter().map(expr_to_value).collect(),
+        },
+        _ => Value::Pattern(expr.clone()),
+    }
+}
+
+/// Extract an option `(key, value)` pair from a `Rule` value.
+///
+/// The evaluator wraps rule operands in `Value::Pattern`, so both sides are
+/// unwrapped here before use.
+fn option_from_rule(v: &Value) -> Option<(String, Value)> {
+    let Value::Rule { lhs, rhs, .. } = v else {
+        return None;
+    };
+    let key = match lhs.as_ref() {
+        Value::Symbol(k) | Value::Str(k) => k.clone(),
+        Value::Pattern(Expr::Symbol(k) | Expr::Str(k)) => k.clone(),
+        _ => return None,
+    };
+    let value = match rhs.as_ref() {
+        Value::Pattern(e) => expr_to_value(e),
+        other => other.clone(),
+    };
+    Some((key, value))
+}
+
+/// Merge trailing option arguments (associations and/or `Rule`s) into an Assoc.
+pub(crate) fn merge_options(args: &[Value]) -> Value {
+    let mut map = std::collections::HashMap::new();
+    for a in args {
+        match a {
+            Value::Assoc(inner) => {
+                for (k, v) in inner {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {
+                if let Some((k, v)) = option_from_rule(a) {
+                    map.insert(k, v);
+                }
+            }
+        }
+    }
+    Value::Assoc(map)
 }
 
 // ── Graphics Style State ────────────────────────────────────────────────────
@@ -303,7 +368,7 @@ fn viridis_color(t: f64) -> (u8, u8, u8) {
 // ── Axis scale type ───────────────────────────────────────────────────────────
 
 /// Linear or logarithmic axis scale.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ScaleType {
     Linear,
     Log,
@@ -317,20 +382,120 @@ impl ScaleType {
 
 // ── SVG Renderer ────────────────────────────────────────────────────────────
 
-/// Parsed graphics options: (width, height, plot_range, show_axes, x_scale, y_scale).
-type GraphicsOptions = (
-    f64,
-    f64,
-    Option<((f64, f64), (f64, f64))>,
-    bool,
-    ScaleType,
-    ScaleType,
-);
+/// Which ticks to draw on one axis.
+#[derive(Clone, Debug, Default)]
+enum TickSpec {
+    #[default]
+    Automatic,
+    None,
+    Explicit(Vec<f64>),
+}
+
+impl TickSpec {
+    /// Tick positions (in data coordinates) for this axis.
+    fn positions(&self, min: f64, max: f64, scale: ScaleType) -> Vec<f64> {
+        match self {
+            TickSpec::Automatic => axis_ticks(min, max, scale),
+            TickSpec::None => Vec::new(),
+            TickSpec::Explicit(v) => v
+                .iter()
+                .copied()
+                .filter(|t| t.is_finite() && *t >= min - 1e-9 && *t <= max + 1e-9)
+                .collect(),
+        }
+    }
+
+    /// Positions for grid lines, which are drawn even when `Ticks -> None`.
+    fn grid_positions(&self, min: f64, max: f64, scale: ScaleType) -> Vec<f64> {
+        match self {
+            TickSpec::Explicit(_) => self.positions(min, max, scale),
+            _ => axis_ticks(min, max, scale),
+        }
+    }
+}
+
+/// Parsed graphics options extracted from the options `Assoc`.
+#[derive(Clone, Debug)]
+struct RenderOptions {
+    width: f64,
+    height: f64,
+    plot_range: Option<((f64, f64), (f64, f64))>,
+    show_axes: bool,
+    x_scale: ScaleType,
+    y_scale: ScaleType,
+    grid_lines: bool,
+    plot_label: Option<String>,
+    x_axis_label: Option<String>,
+    y_axis_label: Option<String>,
+    plot_style: GraphicsStyle,
+    x_ticks: TickSpec,
+    y_ticks: TickSpec,
+    legend: Option<Vec<String>>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            plot_range: None,
+            show_axes: true,
+            x_scale: ScaleType::Linear,
+            y_scale: ScaleType::Linear,
+            grid_lines: false,
+            plot_label: None,
+            x_axis_label: None,
+            y_axis_label: None,
+            plot_style: GraphicsStyle::default(),
+            x_ticks: TickSpec::Automatic,
+            y_ticks: TickSpec::Automatic,
+            legend: None,
+        }
+    }
+}
 
 /// Default image dimensions.
 const DEFAULT_WIDTH: f64 = 600.0;
 const DEFAULT_HEIGHT: f64 = 400.0;
 const MARGIN: f64 = 50.0;
+
+/// Escape text for safe inclusion in SVG/XML content and attributes.
+fn escape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Widen a degenerate `[lo, hi]` interval so the coordinate transform is safe.
+fn ensure_range(lo: &mut f64, hi: &mut f64) {
+    if !lo.is_finite() || !hi.is_finite() {
+        *lo = -1.0;
+        *hi = 1.0;
+        return;
+    }
+    if *hi < *lo {
+        std::mem::swap(lo, hi);
+    }
+    if (*hi - *lo).abs() < 1e-12 {
+        let center = (*lo + *hi) / 2.0;
+        *lo = center - 1.0;
+        *hi = center + 1.0;
+    }
+}
+
+/// Colors used for legend swatches.
+const LEGEND_COLORS: &[&str] = &[
+    "#1a73e8", "#dc2626", "#16a34a", "#ea580c", "#9333ea", "#06b6d4", "#eab308", "#ec4899",
+];
 
 /// Render a list of graphics primitives and directives to an SVG string.
 ///
@@ -352,17 +517,19 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
     let prims = as_list(primitives)?;
 
     // Extract options
-    let (width, height, plot_range, show_axes, x_scale, y_scale) = parse_options(options)?;
+    let opts = parse_options(options)?;
+    let (width, height) = (opts.width, opts.height);
 
     // Compute data bounds for auto-ranging (skip directives)
-    let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &plot_range {
+    let (mut x_min, mut x_max, mut y_min, mut y_max) = if let Some((xr, yr)) = &opts.plot_range {
         (xr.0, xr.1, yr.0, yr.1)
     } else {
         compute_bounds(prims)?
     };
 
-    // Add padding if auto-ranged
-    if plot_range.is_none() {
+    // Add padding only when auto-ranging; always guard against degenerate spans
+    // (e.g. a single point, or a user-supplied `PlotRange -> {{1, 1}, ...}`).
+    if opts.plot_range.is_none() {
         let x_pad = (x_max - x_min).abs() * 0.05;
         let y_pad = (y_max - y_min).abs() * 0.05;
         if x_pad > 0.0 {
@@ -373,16 +540,9 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
             y_min -= y_pad;
             y_max += y_pad;
         }
-        // Handle degenerate cases
-        if (x_max - x_min).abs() < 1e-15 {
-            x_min -= 1.0;
-            x_max += 1.0;
-        }
-        if (y_max - y_min).abs() < 1e-15 {
-            y_min -= 1.0;
-            y_max += 1.0;
-        }
     }
+    ensure_range(&mut x_min, &mut x_max);
+    ensure_range(&mut y_min, &mut y_max);
 
     let plot_w = width - 2.0 * MARGIN;
     let plot_h = height - 2.0 * MARGIN;
@@ -397,15 +557,37 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
         width as i32, height as i32
     );
 
-    // Draw axes
-    if show_axes {
-        svg.push_str(&render_axes(
-            x_min, x_max, y_min, y_max, width, height, &tx, &ty, x_scale, y_scale,
-        ));
+    // Grid lines (under everything else)
+    if opts.grid_lines {
+        for x_tick in opts.x_ticks.grid_positions(x_min, x_max, opts.x_scale) {
+            let sx = tx(x_tick);
+            svg.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#e5e5e5\" stroke-width=\"1\"/>\n",
+                sx,
+                MARGIN,
+                sx,
+                MARGIN + plot_h
+            ));
+        }
+        for y_tick in opts.y_ticks.grid_positions(y_min, y_max, opts.y_scale) {
+            let sy = ty(y_tick);
+            svg.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#e5e5e5\" stroke-width=\"1\"/>\n",
+                MARGIN,
+                sy,
+                MARGIN + plot_w,
+                sy
+            ));
+        }
     }
 
-    // Draw primitives with directive state
-    let mut style = GraphicsStyle::default();
+    // Draw axes
+    if opts.show_axes {
+        svg.push_str(&render_axes(&opts, x_min, x_max, y_min, y_max, &tx, &ty));
+    }
+
+    // Draw primitives with directive state (PlotStyle seeds the initial style)
+    let mut style = opts.plot_style.clone();
     for prim in prims {
         if is_directive(prim) {
             apply_directive(&mut style, prim);
@@ -414,64 +596,244 @@ pub fn render_svg(primitives: &Value, options: &Value) -> Result<String, EvalErr
         }
     }
 
+    // Plot label / axis labels / legend
+    svg.push_str(&render_decorations(
+        &opts, x_min, x_max, y_min, y_max, &tx, &ty,
+    ));
+
     svg.push_str("</svg>\n");
     Ok(svg)
 }
 
-fn parse_options(options: &Value) -> Result<GraphicsOptions, EvalError> {
-    let mut width = DEFAULT_WIDTH;
-    let mut height = DEFAULT_HEIGHT;
-    let mut plot_range: Option<((f64, f64), (f64, f64))> = None;
-    let mut show_axes = true;
-    let mut x_scale = ScaleType::Linear;
-    let mut y_scale = ScaleType::Linear;
+/// Render `PlotLabel`, `AxesLabel`/`AxesLabels` and `Legend`/`PlotLegends`.
+fn render_decorations(
+    opts: &RenderOptions,
+    x_min: f64,
+    x_max: f64,
+    _y_min: f64,
+    _y_max: f64,
+    tx: &dyn Fn(f64) -> f64,
+    _ty: &dyn Fn(f64) -> f64,
+) -> String {
+    let mut s = String::new();
+    let (width, height) = (opts.width, opts.height);
+
+    if let Some(label) = &opts.plot_label {
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"bold\" fill=\"#333\">{}</text>\n",
+            width / 2.0,
+            MARGIN / 2.0 + 4.0,
+            escape_xml(label)
+        ));
+    }
+
+    if let Some(label) = &opts.x_axis_label {
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"12\" fill=\"#333\">{}</text>\n",
+            width / 2.0,
+            height - 8.0,
+            escape_xml(label)
+        ));
+    }
+    if let Some(label) = &opts.y_axis_label {
+        let cy = height / 2.0;
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"12\" fill=\"#333\" transform=\"rotate(-90 {:.1} {:.1})\">{}</text>\n",
+            14.0,
+            cy,
+            14.0,
+            cy,
+            escape_xml(label)
+        ));
+    }
+
+    if let Some(labels) = &opts.legend
+        && !labels.is_empty()
+    {
+        let box_w = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64 * 7.0 + 34.0;
+        let box_h = labels.len() as f64 * 18.0 + 12.0;
+        let x0 = (width - MARGIN - box_w - 6.0).max(MARGIN + 6.0);
+        let y0 = MARGIN + 6.0;
+        s.push_str(&format!(
+            "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#ffffff\" fill-opacity=\"0.85\" stroke=\"#888\" stroke-width=\"1\"/>\n",
+            x0, y0, box_w, box_h
+        ));
+        for (i, label) in labels.iter().enumerate() {
+            let cy = y0 + 6.0 + i as f64 * 18.0 + 6.0;
+            let color = LEGEND_COLORS[i % LEGEND_COLORS.len()];
+            s.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"12\" height=\"9\" fill=\"{}\" stroke=\"none\"/>\n",
+                x0 + 8.0,
+                cy - 5.0,
+                color
+            ));
+            s.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"start\" font-size=\"11\" fill=\"#333\" dominant-baseline=\"middle\">{}</text>\n",
+                x0 + 26.0,
+                cy,
+                escape_xml(label)
+            ));
+        }
+    }
+
+    // Keep `tx`/`x_min`/`x_max` referenced for potential future use.
+    let _ = (tx, x_min, x_max);
+    s
+}
+
+/// Parse a label-ish value (`"text"`, `Style[...]`, etc.) into plain text.
+fn label_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.clone()),
+        Value::Symbol(s) => Some(s.clone()),
+        Value::List(items) if !items.is_empty() => items.iter().find_map(label_text),
+        _ => {
+            let s = v.to_string();
+            if s.is_empty() { None } else { Some(s) }
+        }
+    }
+}
+
+/// Parse a boolean-ish option value (`True`/`False`, `Automatic`, list).
+fn bool_opt(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Symbol(s) => matches!(s.as_str(), "True" | "Automatic" | "All"),
+        Value::List(_) => true,
+        _ => false,
+    }
+}
+
+/// Parse a `Ticks` option value into per-axis tick specs.
+fn parse_ticks(v: &Value) -> (TickSpec, TickSpec) {
+    match v {
+        Value::Symbol(s) if s == "None" => (TickSpec::None, TickSpec::None),
+        Value::Symbol(_) => (TickSpec::Automatic, TickSpec::Automatic),
+        Value::List(items) if items.len() >= 2 => {
+            (parse_tick_axis(&items[0]), parse_tick_axis(&items[1]))
+        }
+        _ => (TickSpec::Automatic, TickSpec::Automatic),
+    }
+}
+
+/// Parse one axis of a `Ticks` spec (a bare list of positions).
+fn parse_tick_axis(v: &Value) -> TickSpec {
+    let items: &[Value] = match v {
+        Value::Symbol(s) if s == "None" => return TickSpec::None,
+        Value::Symbol(_) => return TickSpec::Automatic,
+        Value::List(items) => items,
+        _ => return TickSpec::Automatic,
+    };
+    let mut positions = Vec::new();
+    for item in items {
+        // A tick may be a bare number or `{value, label, ...}`.
+        let val = match item {
+            Value::List(inner) if !inner.is_empty() => inner.first(),
+            other => Some(other),
+        };
+        if let Some(f) = val.and_then(super::to_f64) {
+            positions.push(f);
+        }
+    }
+    if positions.is_empty() {
+        TickSpec::Automatic
+    } else {
+        TickSpec::Explicit(positions)
+    }
+}
+
+fn parse_options(options: &Value) -> Result<RenderOptions, EvalError> {
+    let mut o = RenderOptions::default();
 
     if let Value::Assoc(map) = options {
         if let Some(v) = map.get("ImageSize")
             && let Value::List(size) = v
             && size.len() >= 2
         {
-            width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-            height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+            o.width = super::to_f64(&size[0])
+                .filter(|w| w.is_finite() && *w > 0.0)
+                .unwrap_or(DEFAULT_WIDTH);
+            o.height = super::to_f64(&size[1])
+                .filter(|h| h.is_finite() && *h > 0.0)
+                .unwrap_or(DEFAULT_HEIGHT);
         }
         if let Some(v) = map.get("Axes") {
-            show_axes = match v {
-                Value::Bool(b) => *b,
-                Value::Symbol(s) => s == "True",
-                _ => true,
-            };
+            o.show_axes = bool_opt(v);
         }
-        if let Some(v) = map.get("PlotRange")
-            && let Value::List(range) = v
-            && range.len() >= 2
-            && let (Value::List(xr), Value::List(yr)) = (&range[0], &range[1])
-            && xr.len() >= 2
-            && yr.len() >= 2
-        {
-            plot_range = Some((
-                (
-                    super::to_f64(&xr[0]).unwrap_or(-1.0),
-                    super::to_f64(&xr[1]).unwrap_or(1.0),
-                ),
-                (
-                    super::to_f64(&yr[0]).unwrap_or(-1.0),
-                    super::to_f64(&yr[1]).unwrap_or(1.0),
-                ),
-            ));
+        if let Some(v) = map.get("GridLines") {
+            o.grid_lines = bool_opt(v);
+        }
+        if let Some(v) = map.get("PlotRange") {
+            o.plot_range = parse_plot_range(v);
         }
         if let Some(Value::List(scales)) = map.get("AxesScale")
             && scales.len() >= 2
         {
             if let Value::Str(s) = &scales[0] {
-                x_scale = ScaleType::from_str(s);
+                o.x_scale = ScaleType::from_str(s);
             }
             if let Value::Str(s) = &scales[1] {
-                y_scale = ScaleType::from_str(s);
+                o.y_scale = ScaleType::from_str(s);
+            }
+        }
+        if let Some(v) = map.get("PlotLabel") {
+            o.plot_label = label_text(v);
+        }
+        if let Some(v) = map.get("AxesLabel").or_else(|| map.get("AxesLabels")) {
+            match v {
+                Value::List(items) if items.len() >= 2 => {
+                    o.x_axis_label = label_text(&items[0]);
+                    o.y_axis_label = label_text(&items[1]);
+                }
+                other => o.x_axis_label = label_text(other),
+            }
+        }
+        if let Some(v) = map.get("PlotStyle") {
+            let directives: Vec<&Value> = match v {
+                Value::List(items) => items.iter().collect(),
+                other => vec![other],
+            };
+            for d in directives {
+                apply_directive(&mut o.plot_style, d);
+            }
+        }
+        if let Some(v) = map.get("Ticks") {
+            let (xt, yt) = parse_ticks(v);
+            o.x_ticks = xt;
+            o.y_ticks = yt;
+        }
+        if let Some(v) = map.get("Legend").or_else(|| map.get("PlotLegends")) {
+            let labels: Vec<String> = match v {
+                Value::List(items) => items.iter().filter_map(label_text).collect(),
+                other => label_text(other).into_iter().collect(),
+            };
+            if !labels.is_empty() {
+                o.legend = Some(labels);
             }
         }
     }
 
-    Ok((width, height, plot_range, show_axes, x_scale, y_scale))
+    Ok(o)
+}
+
+/// Parse `PlotRange -> All | {{x0, x1}, {y0, y1}}` into explicit bounds (or `None` for auto).
+fn parse_plot_range(v: &Value) -> Option<((f64, f64), (f64, f64))> {
+    match v {
+        // `All`/`Automatic` means auto-range.
+        Value::Symbol(s) if s == "All" || s == "Automatic" => None,
+        Value::List(range) if range.len() >= 2 => {
+            let (Value::List(xr), Value::List(yr)) = (&range[0], &range[1]) else {
+                return None;
+            };
+            if xr.len() < 2 || yr.len() < 2 {
+                return None;
+            }
+            let x = (super::to_f64(&xr[0])?, super::to_f64(&xr[1])?);
+            let y = (super::to_f64(&yr[0])?, super::to_f64(&yr[1])?);
+            Some((x, y))
+        }
+        _ => None,
+    }
 }
 
 fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
@@ -497,20 +859,48 @@ fn compute_bounds(prims: &[Value]) -> Result<(f64, f64, f64, f64), EvalError> {
             }
             Value::Call { head, args } if head == "Circle" => {
                 if let Some(center) = args.first() {
-                    let r = if args.len() > 1 {
-                        super::to_f64(&args[1]).unwrap_or(1.0)
+                    let (rx, ry) = if args.len() > 1 {
+                        ellipse_radii(&args[1])
                     } else {
-                        1.0
+                        (1.0, 1.0)
                     };
                     if let Value::List(c) = center
                         && c.len() >= 2
                     {
                         let cx = super::to_f64(&c[0]).unwrap_or(0.0);
                         let cy = super::to_f64(&c[1]).unwrap_or(0.0);
-                        x_min = x_min.min(cx - r);
-                        x_max = x_max.max(cx + r);
-                        y_min = y_min.min(cy - r);
-                        y_max = y_max.max(cy + r);
+                        x_min = x_min.min(cx - rx.abs());
+                        x_max = x_max.max(cx + rx.abs());
+                        y_min = y_min.min(cy - ry.abs());
+                        y_max = y_max.max(cy + ry.abs());
+                    }
+                }
+            }
+            Value::Call { head, args } if head == "Disk" => {
+                if let Some(center) = args.first() {
+                    let (rx, ry) = if args.len() > 1 {
+                        ellipse_radii(&args[1])
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    if let Value::List(c) = center
+                        && c.len() >= 2
+                    {
+                        let cx = super::to_f64(&c[0]).unwrap_or(0.0);
+                        let cy = super::to_f64(&c[1]).unwrap_or(0.0);
+                        x_min = x_min.min(cx - rx.abs());
+                        x_max = x_max.max(cx + rx.abs());
+                        y_min = y_min.min(cy - ry.abs());
+                        y_max = y_max.max(cy + ry.abs());
+                    }
+                }
+            }
+            Value::Call { head, args } if head == "Polygon" => {
+                if let Some(Value::List(pts)) = args.first() {
+                    for pt in pts {
+                        expand_bounds_from_point(
+                            pt, &mut x_min, &mut x_max, &mut y_min, &mut y_max,
+                        )?;
                     }
                 }
             }
@@ -583,19 +973,17 @@ fn expand_bounds_from_point(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_axes(
+    opts: &RenderOptions,
     x_min: f64,
     x_max: f64,
     y_min: f64,
     y_max: f64,
-    width: f64,
-    height: f64,
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
-    x_scale: ScaleType,
-    y_scale: ScaleType,
 ) -> String {
+    let (width, height) = (opts.width, opts.height);
+    let (x_scale, y_scale) = (opts.x_scale, opts.y_scale);
     let mut s = String::new();
     let color = "#888";
     let stroke = "stroke-width=\"1\"";
@@ -644,7 +1032,7 @@ fn render_axes(
     } else {
         height - MARGIN
     };
-    for x_tick in axis_ticks(x_min, x_max, x_scale) {
+    for x_tick in opts.x_ticks.positions(x_min, x_max, x_scale) {
         let sx = tx(x_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
@@ -673,7 +1061,7 @@ fn render_axes(
     } else {
         MARGIN
     };
-    for y_tick in axis_ticks(y_min, y_max, y_scale) {
+    for y_tick in opts.y_ticks.positions(y_min, y_max, y_scale) {
         let sy = ty(y_tick);
         s.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" {}/>\n",
@@ -794,13 +1182,13 @@ fn render_primitive(
             }
             "Circle" => {
                 let center = args.first();
-                let r = if args.len() > 1 {
-                    super::to_f64(&args[1]).unwrap_or(1.0)
+                let radii = if args.len() > 1 {
+                    ellipse_radii(&args[1])
                 } else {
-                    1.0
+                    (1.0, 1.0)
                 };
                 if let Some(c) = center {
-                    render_circle(c, r, tx, ty, style)
+                    render_circle(c, radii, tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
@@ -808,6 +1196,26 @@ fn render_primitive(
             "Rectangle" => {
                 if args.len() >= 2 {
                     render_rectangle(&args[0], &args[1], tx, ty, style)
+                } else {
+                    Ok(String::new())
+                }
+            }
+            "Disk" => {
+                let center = args.first();
+                let radii = if args.len() > 1 {
+                    ellipse_radii(&args[1])
+                } else {
+                    (1.0, 1.0)
+                };
+                if let Some(c) = center {
+                    render_disk(c, radii, tx, ty, style)
+                } else {
+                    Ok(String::new())
+                }
+            }
+            "Polygon" => {
+                if let Some(pts_val) = args.first() {
+                    render_polygon(pts_val, tx, ty, style)
                 } else {
                     Ok(String::new())
                 }
@@ -885,9 +1293,64 @@ fn render_point(
     Ok(String::new())
 }
 
+/// Parse a radius spec: a scalar `r` or an ellipse `{rx, ry}`.
+fn ellipse_radii(v: &Value) -> (f64, f64) {
+    match v {
+        Value::List(axes) if axes.len() >= 2 => (
+            super::to_f64(&axes[0]).unwrap_or(1.0),
+            super::to_f64(&axes[1]).unwrap_or(1.0),
+        ),
+        other => {
+            let r = super::to_f64(other).unwrap_or(1.0);
+            (r, r)
+        }
+    }
+}
+
+/// Emit a `<circle>` (rx == ry) or `<ellipse>` (rx != ry) primitive.
+fn render_ellipse(
+    coords: &[Value],
+    radii: (f64, f64),
+    fill: bool,
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> String {
+    let cx = super::to_f64(&coords[0]).unwrap_or(0.0);
+    let cy = super::to_f64(&coords[1]).unwrap_or(0.0);
+    let sx = tx(cx);
+    let sy = ty(cy);
+    // Scale radii by the (absolute) x/y scale factors so circles stay circular in
+    // aspect-corrected data space where possible.
+    let sx_scale = (tx(1.0) - tx(0.0)).abs();
+    let sy_scale = (ty(1.0) - ty(0.0)).abs();
+    let rx = radii.0.abs() * sx_scale;
+    let ry = radii.1.abs() * sy_scale;
+    let attrs = if fill {
+        let mut a = format!("fill=\"{}\" stroke=\"none\"", style.color);
+        if style.opacity < 1.0 {
+            a.push_str(&format!(" fill-opacity=\"{:.2}\"", style.opacity));
+        }
+        a
+    } else {
+        format!("fill=\"none\" {}", svg_stroke_attrs(style))
+    };
+    if (rx - ry).abs() < 1e-9 {
+        format!(
+            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" {}/>\n",
+            sx, sy, rx, attrs
+        )
+    } else {
+        format!(
+            "<ellipse cx=\"{:.2}\" cy=\"{:.2}\" rx=\"{:.2}\" ry=\"{:.2}\" {}/>\n",
+            sx, sy, rx, ry, attrs
+        )
+    }
+}
+
 fn render_circle(
     center: &Value,
-    r: f64,
+    radii: (f64, f64),
     tx: &dyn Fn(f64) -> f64,
     ty: &dyn Fn(f64) -> f64,
     style: &GraphicsStyle,
@@ -895,19 +1358,72 @@ fn render_circle(
     if let Value::List(coords) = center
         && coords.len() >= 2
     {
-        let cx = super::to_f64(&coords[0]).unwrap_or(0.0);
-        let cy = super::to_f64(&coords[1]).unwrap_or(0.0);
-        // Scale radius using the x scale factor
-        let scale = tx(1.0) - tx(0.0);
-        return Ok(format!(
-            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"none\" {}/>\n",
-            tx(cx),
-            ty(cy),
-            r * scale.abs(),
-            svg_stroke_attrs(style),
-        ));
+        return Ok(render_ellipse(coords, radii, false, tx, ty, style));
     }
     Ok(String::new())
+}
+
+fn render_disk(
+    center: &Value,
+    radii: (f64, f64),
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> Result<String, EvalError> {
+    if let Value::List(coords) = center
+        && coords.len() >= 2
+    {
+        // A scalar Disk radius should stay circular even under a non-square
+        // aspect ratio, so render it as a circle scaled by the x factor.
+        if (radii.0 - radii.1).abs() < 1e-12 {
+            let cx = super::to_f64(&coords[0]).unwrap_or(0.0);
+            let cy = super::to_f64(&coords[1]).unwrap_or(0.0);
+            let scale = (tx(1.0) - tx(0.0)).abs();
+            let mut attrs = format!("fill=\"{}\" stroke=\"none\"", style.color);
+            if style.opacity < 1.0 {
+                attrs.push_str(&format!(" fill-opacity=\"{:.2}\"", style.opacity));
+            }
+            return Ok(format!(
+                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" {}/>\n",
+                tx(cx),
+                ty(cy),
+                radii.0.abs() * scale,
+                attrs,
+            ));
+        }
+        return Ok(render_ellipse(coords, radii, true, tx, ty, style));
+    }
+    Ok(String::new())
+}
+
+fn render_polygon(
+    pts_val: &Value,
+    tx: &dyn Fn(f64) -> f64,
+    ty: &dyn Fn(f64) -> f64,
+    style: &GraphicsStyle,
+) -> Result<String, EvalError> {
+    let pts = as_list(pts_val)?;
+    let mut points_str = String::new();
+    for pt in pts {
+        if let Value::List(coords) = pt
+            && coords.len() >= 2
+        {
+            let x = super::to_f64(&coords[0]).unwrap_or(0.0);
+            let y = super::to_f64(&coords[1]).unwrap_or(0.0);
+            if !points_str.is_empty() {
+                points_str.push(' ');
+            }
+            points_str.push_str(&format!("{:.2},{:.2}", tx(x), ty(y)));
+        }
+    }
+    if points_str.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "<polygon points=\"{}\" fill=\"none\" {}/>\n",
+        points_str,
+        svg_stroke_attrs(style),
+    ))
 }
 
 fn render_rectangle(
@@ -1040,17 +1556,13 @@ fn make_rgb(r: f64, g: f64, b: f64) -> Value {
 
 /// ListPlot[data] — scatter plot from {x,y} pairs, returns a Graphics object.
 pub fn builtin_list_plot(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "ListPlot requires 1 or 2 arguments".to_string(),
+            "ListPlot requires at least 1 argument".to_string(),
         ));
     }
     let data = as_list(&args[0])?;
-    let options = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        Value::Assoc(std::collections::HashMap::new())
-    };
+    let options = merge_options(&args[1..]);
 
     // Convert data to Point primitives
     let points: Vec<Value> = data
@@ -1070,17 +1582,13 @@ pub fn builtin_list_plot(args: &[Value]) -> Result<Value, EvalError> {
 
 /// ListLinePlot[data] — line plot from {x,y} pairs, returns a Graphics object.
 pub fn builtin_list_line_plot(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "ListLinePlot requires 1 or 2 arguments".to_string(),
+            "ListLinePlot requires at least 1 argument".to_string(),
         ));
     }
     let data = as_list(&args[0])?;
-    let options = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        Value::Assoc(std::collections::HashMap::new())
-    };
+    let options = merge_options(&args[1..]);
 
     // Wrap as a Line primitive
     let line = Value::Call {
@@ -1129,20 +1637,60 @@ pub fn builtin_export_graphics(args: &[Value]) -> Result<Value, EvalError> {
 /// Graphics[primitives, options] — wrap primitives into a Graphics value.
 /// This is a simple constructor; rendering is done by ExportGraphics or Show.
 pub fn builtin_graphics(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() {
         return Err(EvalError::Error(
-            "Graphics requires 1 or 2 arguments".to_string(),
+            "Graphics requires at least 1 argument".to_string(),
         ));
     }
     let prims = args[0].clone();
-    let opts = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        Value::Assoc(std::collections::HashMap::new())
-    };
+    let opts = merge_options(&args[1..]);
     Ok(Value::Call {
         head: "Graphics".to_string(),
         args: vec![prims, opts],
+    })
+}
+
+/// Show[g1, g2, ..., opts] — combine Graphics objects (and option rules) into one.
+///
+/// Primitives from each `Graphics[...]` are concatenated in order; options are
+/// merged with later values overriding earlier ones.
+pub fn builtin_show(args: &[Value]) -> Result<Value, EvalError> {
+    let mut prims: Vec<Value> = Vec::new();
+    let mut opts: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut saw_graphics = false;
+
+    for a in args {
+        match a {
+            Value::Call { head, args: gargs } if head == "Graphics" && !gargs.is_empty() => {
+                saw_graphics = true;
+                if let Value::List(p) = &gargs[0] {
+                    prims.extend(p.iter().cloned());
+                }
+                if let Some(Value::Assoc(m)) = gargs.get(1) {
+                    for (k, v) in m {
+                        opts.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            Value::Rule { .. } => {
+                if let Some((k, v)) = option_from_rule(a) {
+                    opts.insert(k, v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_graphics && prims.is_empty() && opts.is_empty() {
+        return Ok(Value::Call {
+            head: "Show".to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    Ok(Value::Call {
+        head: "Graphics".to_string(),
+        args: vec![Value::List(prims), Value::Assoc(opts)],
     })
 }
 
@@ -1728,6 +2276,7 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "ListLinePlot", builtin_list_line_plot);
     register_builtin(env, "ExportGraphics", builtin_export_graphics);
     register_builtin(env, "Graphics", builtin_graphics);
+    register_builtin(env, "Show", builtin_show);
     // Plot is handled in eval.rs (needs evaluator access)
 
     // Color primitives
@@ -2503,5 +3052,356 @@ mod tests {
     fn test_extract_rgb_non_color() {
         assert!(extract_rgb(&real_val(1.0)).is_none());
         assert!(extract_rgb(&Value::Symbol("Red".to_string())).is_none());
+    }
+
+    // ── Option parsing / rendering hardening ─────────────────────────────────
+
+    fn assoc(pairs: Vec<(&str, Value)>) -> Value {
+        let mut m = std::collections::HashMap::new();
+        for (k, v) in pairs {
+            m.insert(k.to_string(), v);
+        }
+        Value::Assoc(m)
+    }
+
+    fn line_prim() -> Value {
+        Value::Call {
+            head: "Line".to_string(),
+            args: vec![list(vec![point(0.0, 0.0), point(1.0, 1.0)])],
+        }
+    }
+
+    #[test]
+    fn test_escape_xml() {
+        assert_eq!(escape_xml("a<b>&\"c'"), "a&lt;b&gt;&amp;&quot;c&apos;");
+        assert_eq!(escape_xml("plain"), "plain");
+    }
+
+    #[test]
+    fn test_ensure_range_degenerate_and_reversed() {
+        let (mut a, mut b) = (5.0, 5.0);
+        ensure_range(&mut a, &mut b);
+        assert!(b > a);
+        let (mut c, mut d) = (10.0, 2.0);
+        ensure_range(&mut c, &mut d);
+        assert!(c < d);
+        let (mut e, mut f) = (f64::NAN, f64::INFINITY);
+        ensure_range(&mut e, &mut f);
+        assert!((e + 1.0).abs() < 1e-12 && (f - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_parse_plot_range_all() {
+        assert!(parse_plot_range(&Value::Symbol("All".to_string())).is_none());
+        assert!(parse_plot_range(&Value::Symbol("Automatic".to_string())).is_none());
+        let r = parse_plot_range(&list(vec![
+            list(vec![real_val(0.0), real_val(4.0)]),
+            list(vec![-1.0_f64, 1.0].into_iter().map(real_val).collect()),
+        ]));
+        let (xr, yr) = r.expect("explicit range");
+        assert_eq!(xr, (0.0, 4.0));
+        assert_eq!(yr, (-1.0, 1.0));
+    }
+
+    #[test]
+    fn test_parse_options_grid_label_style_legend() {
+        let opts = assoc(vec![
+            ("GridLines", Value::Bool(true)),
+            ("PlotLabel", Value::Str("Title".to_string())),
+            (
+                "AxesLabel",
+                list(vec![
+                    Value::Str("X".to_string()),
+                    Value::Str("Y".to_string()),
+                ]),
+            ),
+            (
+                "PlotStyle",
+                Value::Call {
+                    head: "RGBColor".to_string(),
+                    args: vec![real_val(1.0), real_val(0.0), real_val(0.0)],
+                },
+            ),
+            (
+                "Legend",
+                list(vec![
+                    Value::Str("a".to_string()),
+                    Value::Str("b".to_string()),
+                ]),
+            ),
+            ("ImageSize", list(vec![real_val(-5.0), real_val(200.0)])),
+        ]);
+        let o = parse_options(&opts).unwrap();
+        assert!(o.grid_lines);
+        assert_eq!(o.plot_label.as_deref(), Some("Title"));
+        assert_eq!(o.x_axis_label.as_deref(), Some("X"));
+        assert_eq!(o.y_axis_label.as_deref(), Some("Y"));
+        assert_eq!(o.plot_style.color, "#ff0000");
+        assert_eq!(o.legend.as_ref().map(|l| l.len()), Some(2));
+        // Non-finite/negative ImageSize falls back to default width.
+        assert!((o.width - DEFAULT_WIDTH).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_parse_ticks_none_and_explicit() {
+        let (x, y) = parse_ticks(&Value::Symbol("None".to_string()));
+        assert!(matches!(x, TickSpec::None));
+        assert!(matches!(y, TickSpec::None));
+        let (x, y) = parse_ticks(&list(vec![
+            list(vec![real_val(1.0), real_val(2.0)]),
+            list(vec![real_val(3.0)]),
+        ]));
+        match (x, y) {
+            (TickSpec::Explicit(xs), TickSpec::Explicit(ys)) => {
+                assert_eq!(xs, vec![1.0, 2.0]);
+                assert_eq!(ys, vec![3.0]);
+            }
+            _ => panic!("expected explicit ticks"),
+        }
+    }
+
+    #[test]
+    fn test_render_grid_lines() {
+        let prims = Value::List(vec![line_prim()]);
+        let svg = render_svg(&prims, &assoc(vec![("GridLines", Value::Bool(true))])).unwrap();
+        assert!(svg.contains("#e5e5e5"), "grid lines expected");
+        let svg2 = render_svg(&prims, &assoc(vec![("GridLines", Value::Bool(false))])).unwrap();
+        assert!(!svg2.contains("#e5e5e5"), "no grid lines expected");
+    }
+
+    #[test]
+    fn test_render_plot_label_and_axes_labels_escaped() {
+        let prims = Value::List(vec![line_prim()]);
+        let opts = assoc(vec![
+            ("PlotLabel", Value::Str("a<b".to_string())),
+            (
+                "AxesLabel",
+                list(vec![
+                    Value::Str("x&y".to_string()),
+                    Value::Str("z".to_string()),
+                ]),
+            ),
+        ]);
+        let svg = render_svg(&prims, &opts).unwrap();
+        assert!(svg.contains("a&lt;b"), "escaped plot label");
+        assert!(svg.contains("x&amp;y"), "escaped axis label");
+    }
+
+    #[test]
+    fn test_render_plot_style_seed() {
+        let prims = Value::List(vec![line_prim()]);
+        let opts = assoc(vec![(
+            "PlotStyle",
+            Value::Call {
+                head: "RGBColor".to_string(),
+                args: vec![real_val(0.0), real_val(0.5), real_val(1.0)],
+            },
+        )]);
+        let svg = render_svg(&prims, &opts).unwrap();
+        assert!(
+            svg.contains("stroke=\"#0080ff\""),
+            "plot style color: {}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_render_ticks_none() {
+        let prims = Value::List(vec![line_prim()]);
+        let svg = render_svg(
+            &prims,
+            &assoc(vec![("Ticks", Value::Symbol("None".to_string()))]),
+        )
+        .unwrap();
+        // With no ticks there must still be axis lines but no tick-label text.
+        assert!(svg.contains("<line"));
+        assert!(
+            !svg.contains("<text"),
+            "no tick labels when Ticks->None: {}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_render_legend() {
+        let prims = Value::List(vec![line_prim()]);
+        let svg = render_svg(
+            &prims,
+            &assoc(vec![(
+                "Legend",
+                list(vec![Value::Str("series".to_string())]),
+            )]),
+        )
+        .unwrap();
+        assert!(svg.contains("series"), "legend text expected");
+    }
+
+    #[test]
+    fn test_render_degenerate_plot_range_is_finite() {
+        let prims = Value::List(vec![line_prim()]);
+        let opts = assoc(vec![(
+            "PlotRange",
+            list(vec![
+                list(vec![real_val(1.0), real_val(1.0)]),
+                list(vec![real_val(2.0), real_val(2.0)]),
+            ]),
+        )]);
+        let svg = render_svg(&prims, &opts).unwrap();
+        assert!(
+            !svg.contains("NaN"),
+            "degenerate range must not yield NaN: {}",
+            svg
+        );
+        assert!(svg.contains("</svg>"));
+    }
+
+    #[test]
+    fn test_show_combines_graphics_and_options() {
+        let g1 = Value::Call {
+            head: "Graphics".to_string(),
+            args: vec![
+                Value::List(vec![line_prim()]),
+                assoc(vec![("PlotLabel", Value::Str("old".to_string()))]),
+            ],
+        };
+        let g2 = Value::Call {
+            head: "Graphics".to_string(),
+            args: vec![Value::List(vec![Value::Call {
+                head: "Point".to_string(),
+                args: vec![point(2.0, 3.0)],
+            }])],
+        };
+        let merged = builtin_show(&[
+            g1,
+            g2,
+            Value::Rule {
+                lhs: Box::new(Value::Symbol("PlotLabel".to_string())),
+                rhs: Box::new(Value::Str("new".to_string())),
+                delayed: false,
+            },
+        ])
+        .unwrap();
+        match &merged {
+            Value::Call { head, args } if head == "Graphics" => {
+                assert!(matches!(&args[0], Value::List(p) if p.len() == 2));
+                match &args[1] {
+                    Value::Assoc(m) => {
+                        assert_eq!(m.get("PlotLabel"), Some(&Value::Str("new".to_string())));
+                    }
+                    _ => panic!("expected options assoc"),
+                }
+            }
+            _ => panic!("Show should return Graphics"),
+        }
+    }
+
+    #[test]
+    fn test_render_circle_ellipse_and_disk() {
+        let ellipse = Value::Call {
+            head: "Circle".to_string(),
+            args: vec![point(0.0, 0.0), list(vec![real_val(2.0), real_val(1.0)])],
+        };
+        let svg = render_svg(
+            &Value::List(vec![ellipse]),
+            &Value::Assoc(Default::default()),
+        )
+        .unwrap();
+        assert!(svg.contains("<ellipse"), "ellipse expected: {}", svg);
+
+        let disk = Value::Call {
+            head: "Disk".to_string(),
+            args: vec![point(1.0, 1.0), real_val(1.0)],
+        };
+        let svg = render_svg(&Value::List(vec![disk]), &Value::Assoc(Default::default())).unwrap();
+        assert!(svg.contains("<circle"), "disk expected: {}", svg);
+    }
+
+    #[test]
+    fn test_render_polygon() {
+        let poly = Value::Call {
+            head: "Polygon".to_string(),
+            args: vec![list(vec![
+                point(0.0, 0.0),
+                point(1.0, 0.0),
+                point(0.5, 1.0),
+            ])],
+        };
+        let svg = render_svg(&Value::List(vec![poly]), &Value::Assoc(Default::default())).unwrap();
+        assert!(svg.contains("<polygon"), "polygon expected");
+    }
+
+    #[test]
+    fn test_render_grid_lines_with_ticks_none() {
+        // GridLines must still render when Ticks -> None.
+        let prims = Value::List(vec![line_prim()]);
+        let opts = assoc(vec![
+            ("GridLines", Value::Bool(true)),
+            ("Ticks", Value::Symbol("None".to_string())),
+        ]);
+        let svg = render_svg(&prims, &opts).unwrap();
+        assert!(svg.contains("#e5e5e5"), "grid should survive Ticks->None");
+    }
+
+    #[test]
+    fn test_list_plot_accepts_option_rules() {
+        let data = list(vec![point(0.0, 0.0), point(1.0, 1.0)]);
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Pattern(Expr::Symbol("GridLines".to_string()))),
+            rhs: Box::new(Value::Pattern(Expr::Bool(true))),
+            delayed: false,
+        };
+        let res = builtin_list_plot(&[data, rule]).unwrap();
+        match &res {
+            Value::Call { head, args } if head == "Graphics" => match &args[1] {
+                Value::Assoc(m) => {
+                    assert_eq!(m.get("GridLines"), Some(&Value::Bool(true)));
+                }
+                other => panic!("expected options assoc, got {:?}", other),
+            },
+            _ => panic!("expected Graphics"),
+        }
+    }
+
+    #[test]
+    fn test_list_line_plot_accepts_option_rules() {
+        let data = list(vec![point(0.0, 0.0), point(1.0, 1.0)]);
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Pattern(Expr::Str("PlotLabel".to_string()))),
+            rhs: Box::new(Value::Pattern(Expr::Str("L".to_string()))),
+            delayed: false,
+        };
+        let res = builtin_list_line_plot(&[data, rule]).unwrap();
+        match &res {
+            Value::Call { head, args } if head == "Graphics" => match &args[1] {
+                Value::Assoc(m) => {
+                    assert_eq!(m.get("PlotLabel"), Some(&Value::Str("L".to_string())));
+                }
+                other => panic!("expected options assoc, got {:?}", other),
+            },
+            _ => panic!("expected Graphics"),
+        }
+    }
+
+    #[test]
+    fn test_show_merges_pattern_option_rule() {
+        let g = Value::Call {
+            head: "Graphics".to_string(),
+            args: vec![Value::List(vec![line_prim()])],
+        };
+        let rule = Value::Rule {
+            lhs: Box::new(Value::Pattern(Expr::Symbol("GridLines".to_string()))),
+            rhs: Box::new(Value::Pattern(Expr::Bool(true))),
+            delayed: false,
+        };
+        let res = builtin_show(&[g, rule]).unwrap();
+        match &res {
+            Value::Call { head, args } if head == "Graphics" => match &args[1] {
+                Value::Assoc(m) => {
+                    assert_eq!(m.get("GridLines"), Some(&Value::Bool(true)));
+                }
+                _ => panic!("expected options assoc"),
+            },
+            _ => panic!("expected Graphics"),
+        }
     }
 }

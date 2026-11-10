@@ -1097,4 +1097,96 @@ Cell[BoxData[StyleBox["Title", FontSize->24]], "Title"]
             assert!(result.is_ok(), "tilde import failed: {:?}", result);
         }
     }
+
+    // ── UTF-8 / special-character round-trip tests ───────────────────────
+
+    fn tmp_path(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("syma_io_{}_{}", std::process::id(), tag))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn test_csv_file_roundtrip_utf8_and_special() {
+        let path = tmp_path("rt_utf8.csv");
+        let data = Value::List(vec![
+            Value::List(vec![
+                Value::Str("café".into()),
+                Value::Str("a,b".into()),
+                Value::Str("q\"q".into()),
+            ]),
+            Value::List(vec![
+                Value::Str("日本語".into()),
+                Value::Str("nl\nnl".into()),
+                Value::Str("".into()),
+            ]),
+        ]);
+        builtin_export(&[Value::Str(path.clone()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(imported, data);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_tsv_file_roundtrip_embedded_tab() {
+        let path = tmp_path("rt_tab.tsv");
+        let data = Value::List(vec![
+            Value::List(vec![Value::Str("a\tb".into()), Value::Str("x".into())]),
+            Value::List(vec![Value::Str("c".into()), Value::Str("d\ne".into())]),
+        ]);
+        builtin_export(&[Value::Str(path.clone()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(imported, data);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_csv_import_crlf_file() {
+        let path = tmp_path("crlf.csv");
+        std::fs::write(&path, "a,b\r\n1,2\r\n").unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(
+            imported,
+            Value::List(vec![
+                Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]),
+                Value::List(vec![Value::Str("1".into()), Value::Str("2".into())]),
+            ])
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_json_file_roundtrip_utf8() {
+        let path = tmp_path("rt_utf8.json");
+        let data = Value::List(vec![
+            Value::Str("café".into()),
+            Value::Str("日本語".into()),
+            Value::Str("emoji 🚀".into()),
+        ]);
+        builtin_export(&[Value::Str(path.clone()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(imported, data);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_write_read_string_utf8() {
+        let path = tmp_path("utf8.txt");
+        let data = "héllo, 世界 🚀";
+        builtin_write_string(&[Value::Str(path.clone()), Value::Str(data.into())]).unwrap();
+        let read = builtin_read_string(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(read, Value::Str(data.into()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_text_export_import_utf8_no_extension_forcing() {
+        let path = tmp_path("utf8_text.txt");
+        let data = Value::Str("α β γ — ✓".into());
+        builtin_export(&[Value::Str(path.clone()), data.clone()]).unwrap();
+        let imported = builtin_import(&[Value::Str(path.clone())]).unwrap();
+        assert_eq!(imported, data);
+        std::fs::remove_file(&path).ok();
+    }
 }

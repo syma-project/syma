@@ -16,12 +16,12 @@ pub fn cmd_new(name: &str, is_lib: bool) {
     }
 
     let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir).unwrap_or_else(|e| {
-        eprintln!("{}: {}", red("error"), e);
-        std::process::exit(1);
-    });
-    fs::create_dir_all(root.join("tests")).unwrap();
-    fs::create_dir_all(root.join("examples")).unwrap();
+    for sub in ["src", "tests", "examples"] {
+        if let Err(e) = fs::create_dir_all(root.join(sub)) {
+            eprintln!("{}: creating {}/: {}", red("error"), sub, e);
+            std::process::exit(1);
+        }
+    }
 
     // syma.toml
     let entry_rel = if is_lib {
@@ -44,7 +44,7 @@ pub fn cmd_new(name: &str, is_lib: bool) {
             format!("entry       = \"{}\"", entry_rel)
         },
     );
-    fs::write(root.join("syma.toml"), toml).unwrap();
+    write_or_exit(&root.join("syma.toml"), &toml);
 
     // src/main.syma  or  src/lib.syma
     let (entry_file, entry_src) = if is_lib {
@@ -72,7 +72,7 @@ pub fn cmd_new(name: &str, is_lib: bool) {
             ),
         )
     };
-    fs::write(src_dir.join(entry_file), entry_src).unwrap();
+    write_or_exit(&src_dir.join(entry_file), &entry_src);
 
     println!(
         "{} {} `{}`",
@@ -296,6 +296,14 @@ fn check_or_build(building: bool) {
 pub fn cmd_add(spec: &str, dev: bool) {
     let manifest_path = require_manifest();
     let (name, version) = parse_dep_spec(spec);
+    if name.is_empty() {
+        eprintln!(
+            "{}: empty package name in `{}`\n  usage: syma add <package>[@version]",
+            red("error"),
+            spec
+        );
+        std::process::exit(1);
+    }
 
     manifest::add_dep(&manifest_path, name, version, dev).unwrap_or_else(|e| {
         eprintln!("{}: {}", red("error"), e);
@@ -507,10 +515,10 @@ fn run_file_silent(path: &Path) -> Result<(), String> {
 
 /// Parse `<name>` or `<name>@<version>` into `(name, version)`.
 fn parse_dep_spec(spec: &str) -> (&str, &str) {
-    if let Some(pos) = spec.find('@') {
-        (&spec[..pos], &spec[pos + 1..])
-    } else {
-        (spec, "*")
+    match spec.find('@') {
+        // `@1.0` ⇢ empty name, `foo@` ⇢ empty version.
+        Some(pos) => (&spec[..pos], &spec[pos + 1..]),
+        None => (spec, "*"),
     }
 }
 
@@ -525,4 +533,53 @@ fn to_pascal_case(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Write `contents` to `path`, exiting with a message on failure.
+fn write_or_exit(path: &Path, contents: &str) {
+    if let Err(e) = fs::write(path, contents) {
+        eprintln!("{}: writing {}: {}", red("error"), path.display(), e);
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dep_spec() {
+        assert_eq!(parse_dep_spec("foo"), ("foo", "*"));
+        assert_eq!(parse_dep_spec("foo@1.2.3"), ("foo", "1.2.3"));
+        assert_eq!(parse_dep_spec("foo@"), ("foo", ""));
+        assert_eq!(parse_dep_spec("@1.0"), ("", "1.0"));
+    }
+
+    #[test]
+    fn test_to_pascal_case() {
+        assert_eq!(to_pascal_case("my-package"), "MyPackage");
+        assert_eq!(to_pascal_case("my_pkg"), "MyPkg");
+        assert_eq!(to_pascal_case("hello world"), "HelloWorld");
+        assert_eq!(to_pascal_case("x"), "X");
+        assert_eq!(to_pascal_case(""), "");
+    }
+
+    #[test]
+    fn test_collect_syma_files_sorted_recursive() {
+        let root = std::env::temp_dir().join(format!("syma_cli_collect_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("b.syma"), "").unwrap();
+        fs::write(root.join("a.syma"), "").unwrap();
+        fs::write(root.join("sub/c.syma"), "").unwrap();
+        fs::write(root.join("ignore.txt"), "").unwrap();
+
+        let files = collect_syma_files(&root);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.syma", "b.syma", "c.syma"]);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

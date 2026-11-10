@@ -11,6 +11,17 @@ pub fn register(env: &Env) {
         "Complexes",
         "Booleans",
         "Primes",
+        "Algebraics",
+        "Transcendentals",
+        "PositiveIntegers",
+        "NonNegativeIntegers",
+        "NegativeIntegers",
+        "PositiveRationals",
+        "NonNegativeRationals",
+        "NegativeRationals",
+        "PositiveReals",
+        "NonNegativeReals",
+        "NegativeReals",
     ] {
         env.set(sym.to_string(), Value::Symbol(sym.to_string()));
     }
@@ -20,6 +31,13 @@ pub fn register(env: &Env) {
             "Element".to_string(),
             crate::value::BuiltinFn::Pure(builtin_element),
         ),
+    );
+    // Seed Element's attributes. Threading over a first-argument list is
+    // handled in `builtin_element` (rather than via `Listable`) so that a
+    // second-argument domain list means "any of" instead of being threaded.
+    env.set_attributes(
+        "Element",
+        vec!["Locked".to_string(), "ReadProtected".to_string()],
     );
     env.set(
         "Refine".to_string(),
@@ -34,91 +52,194 @@ pub fn register(env: &Env) {
 
 // ── Element ──
 
-fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "Element requires exactly 2 arguments".to_string(),
-        ));
-    }
-    let x = &args[0];
-    let dom = &args[1];
+fn bool_symbol(b: bool) -> Value {
+    Value::Symbol(if b { "True" } else { "False" }.to_string())
+}
 
+fn is_concrete(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Integer(_) | Value::Rational(_) | Value::Real(_) | Value::Complex { .. }
+    )
+}
+
+fn is_real_number(v: &Value) -> bool {
+    matches!(v, Value::Integer(_) | Value::Rational(_) | Value::Real(_))
+}
+
+/// The sign of a concrete real number: -1, 0, or 1. `None` for non-reals.
+fn sign_of(v: &Value) -> Option<i32> {
+    let ord = match v {
+        Value::Integer(n) => n.cmp0(),
+        Value::Rational(r) => r.cmp0(),
+        Value::Real(r) => r.cmp0()?,
+        _ => return None,
+    };
+    Some(match ord {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// Element of an unrecognised domain: stays unevaluated.
+fn element_unknown(x: &Value, dom: &Value) -> Value {
+    Value::Call {
+        head: "Element".to_string(),
+        args: vec![x.clone(), dom.clone()],
+    }
+}
+
+/// True if `x` carries a surd shape (`Power[..., rational]` / `Sqrt[...]`),
+/// which is algebraic (e.g. `Sqrt[2]`).
+fn is_surd(x: &Value) -> bool {
+    match x {
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => {
+            is_concrete(&args[0]) || matches!(args[0], Value::Symbol(_))
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            matches!(args[1], Value::Rational(_))
+        }
+        _ => false,
+    }
+}
+
+fn is_imaginary_unit(x: &Value) -> bool {
+    matches!(x, Value::Complex { re, im } if *re == 0.0 && *im == 1.0)
+}
+
+/// Evaluate `Element[x, dom]` for a single domain. Returns `True`/`False`
+/// symbols, or an unevaluated `Element[...]` when undecidable.
+fn element_single(x: &Value, dom: &Value) -> Value {
     let dom_name = match dom {
         Value::Symbol(s) => s.as_str(),
-        _ => {
-            return Ok(Value::Call {
-                head: "Element".to_string(),
-                args: args.to_vec(),
-            });
-        }
+        _ => return element_unknown(x, dom),
     };
+    let concrete = is_concrete(x);
 
-    fn is_concrete(v: &Value) -> bool {
-        matches!(
-            v,
-            Value::Integer(_) | Value::Rational(_) | Value::Real(_) | Value::Complex { .. }
-        )
+    match dom_name {
+        "Integers" if concrete => bool_symbol(matches!(x, Value::Integer(_))),
+        "Rationals" if concrete => bool_symbol(matches!(x, Value::Integer(_) | Value::Rational(_))),
+        "Reals" if concrete => bool_symbol(is_real_number(x)),
+        "Complexes" if concrete => bool_symbol(true),
+        "Booleans" => match x {
+            Value::Symbol(s) if s == "True" || s == "False" => bool_symbol(true),
+            Value::Bool(_) => bool_symbol(true),
+            _ if concrete => bool_symbol(false),
+            _ => element_unknown(x, dom),
+        },
+        "Primes" => match x {
+            Value::Integer(n) => bool_symbol(n.is_positive() && prime_q(n)),
+            _ if concrete => bool_symbol(false),
+            _ => element_unknown(x, dom),
+        },
+        "PositiveIntegers" if concrete => {
+            bool_symbol(matches!(x, Value::Integer(_)) && sign_of(x) == Some(1))
+        }
+        "NonNegativeIntegers" if concrete => {
+            bool_symbol(matches!(x, Value::Integer(_)) && sign_of(x).is_some_and(|s| s >= 0))
+        }
+        "NegativeIntegers" if concrete => {
+            bool_symbol(matches!(x, Value::Integer(_)) && sign_of(x) == Some(-1))
+        }
+        "PositiveRationals" if concrete => bool_symbol(
+            matches!(x, Value::Integer(_) | Value::Rational(_)) && sign_of(x) == Some(1),
+        ),
+        "NonNegativeRationals" if concrete => bool_symbol(
+            matches!(x, Value::Integer(_) | Value::Rational(_))
+                && sign_of(x).is_some_and(|s| s >= 0),
+        ),
+        "NegativeRationals" if concrete => bool_symbol(
+            matches!(x, Value::Integer(_) | Value::Rational(_)) && sign_of(x) == Some(-1),
+        ),
+        "PositiveReals" if concrete => bool_symbol(is_real_number(x) && sign_of(x) == Some(1)),
+        "NonNegativeReals" if concrete => {
+            bool_symbol(is_real_number(x) && sign_of(x).is_some_and(|s| s >= 0))
+        }
+        "NegativeReals" if concrete => bool_symbol(is_real_number(x) && sign_of(x) == Some(-1)),
+        "Algebraics" => {
+            if matches!(x, Value::Integer(_) | Value::Rational(_))
+                || is_imaginary_unit(x)
+                || is_surd(x)
+            {
+                bool_symbol(true)
+            } else if concrete {
+                bool_symbol(false)
+            } else {
+                element_unknown(x, dom)
+            }
+        }
+        "Transcendentals" => match x {
+            Value::Symbol(s) if s == "Pi" || s == "E" || s == "Degree" => bool_symbol(true),
+            _ if concrete => bool_symbol(false),
+            _ => element_unknown(x, dom),
+        },
+        _ => element_unknown(x, dom),
+    }
+}
+
+/// `Element[x, dom1, dom2, ...]` — membership test.
+///
+/// Each domain argument may be a single domain or a list of alternative
+/// domains; multiple arguments are combined conjunctively. Undecidable cases
+/// (symbolic `x`, unknown domains) stay unevaluated.
+fn builtin_element(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Ok(Value::Call {
+            head: "Element".to_string(),
+            args: args.to_vec(),
+        });
+    }
+    let x = &args[0];
+
+    // Thread over a first-argument list (Element[{a, b}, dom]).
+    if let Value::List(items) = x {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let mut sub_args = Vec::with_capacity(args.len());
+            sub_args.push(item.clone());
+            sub_args.extend_from_slice(&args[1..]);
+            out.push(builtin_element(&sub_args)?);
+        }
+        return Ok(Value::List(out));
     }
 
-    let result = match dom_name {
-        "Integers" if is_concrete(x) => Value::Symbol(if matches!(x, Value::Integer(_)) {
-            "True".to_string()
+    let mut any_unknown = false;
+    for dom in &args[1..] {
+        let domains: Vec<&Value> = match dom {
+            Value::List(items) => items.iter().collect(),
+            other => vec![other],
+        };
+
+        let mut group_true = false;
+        let mut group_unknown = false;
+        for d in &domains {
+            match element_single(x, d) {
+                Value::Symbol(s) if s == "True" => group_true = true,
+                Value::Symbol(s) if s == "False" => {}
+                _ => group_unknown = true,
+            }
+        }
+
+        if group_true {
+            continue;
+        }
+        if group_unknown {
+            any_unknown = true;
         } else {
-            "False".to_string()
-        }),
-        "Rationals" if is_concrete(x) => {
-            Value::Symbol(if matches!(x, Value::Integer(_) | Value::Rational(_)) {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            })
+            // Every alternative in this conjunct was False.
+            return Ok(bool_symbol(false));
         }
-        "Reals" if is_concrete(x) => Value::Symbol(
-            if matches!(x, Value::Integer(_) | Value::Rational(_) | Value::Real(_)) {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            },
-        ),
-        "Complexes" if is_concrete(x) => Value::Symbol("True".to_string()),
-        "Booleans" => match x {
-            Value::Symbol(s) if s == "True" || s == "False" => Value::Symbol("True".to_string()),
-            Value::Bool(_) => Value::Symbol("True".to_string()),
-            _ => {
-                if is_concrete(x) {
-                    Value::Symbol("False".to_string())
-                } else {
-                    return Ok(Value::Call {
-                        head: "Element".to_string(),
-                        args: args.to_vec(),
-                    });
-                }
-            }
-        },
-        "Primes" => {
-            if let Value::Integer(n) = x {
-                Value::Symbol(if n.is_positive() && prime_q(n) {
-                    "True".to_string()
-                } else {
-                    "False".to_string()
-                })
-            } else if is_concrete(x) {
-                Value::Symbol("False".to_string())
-            } else {
-                return Ok(Value::Call {
-                    head: "Element".to_string(),
-                    args: args.to_vec(),
-                });
-            }
-        }
-        _ => {
-            return Ok(Value::Call {
-                head: "Element".to_string(),
-                args: args.to_vec(),
-            });
-        }
-    };
-    Ok(result)
+    }
+
+    if any_unknown {
+        Ok(Value::Call {
+            head: "Element".to_string(),
+            args: args.to_vec(),
+        })
+    } else {
+        Ok(bool_symbol(true))
+    }
 }
 
 fn prime_q(n: &Integer) -> bool {
@@ -498,6 +619,109 @@ mod tests {
         assert_eq!(
             builtin_element(&[int(0), sym("Booleans")]).unwrap(),
             sym("False")
+        );
+    }
+
+    #[test]
+    fn test_element_positive_integers() {
+        assert_eq!(
+            builtin_element(&[int(3), sym("PositiveIntegers")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[int(0), sym("PositiveIntegers")]).unwrap(),
+            sym("False")
+        );
+        assert_eq!(
+            builtin_element(&[int(0), sym("NonNegativeIntegers")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[int(-2), sym("NegativeIntegers")]).unwrap(),
+            sym("True")
+        );
+    }
+
+    #[test]
+    fn test_element_domain_list_is_any() {
+        let doms = Value::List(vec![sym("Integers"), sym("Reals")]);
+        assert_eq!(
+            builtin_element(&[int(3), doms.clone()]).unwrap(),
+            sym("True")
+        );
+        let doms2 = Value::List(vec![sym("Booleans"), sym("NegativeIntegers")]);
+        assert_eq!(builtin_element(&[int(3), doms2]).unwrap(), sym("False"));
+    }
+
+    #[test]
+    fn test_element_threads_over_first_list() {
+        let result = builtin_element(&[
+            Value::List(vec![int(1), real(2.5), Value::Str("x".to_string())]),
+            sym("Reals"),
+        ])
+        .unwrap();
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], sym("True"));
+                assert_eq!(items[1], sym("True"));
+                assert!(matches!(items[2], Value::Call { .. }));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_element_multiple_domains_are_all() {
+        assert_eq!(
+            builtin_element(&[int(3), sym("Integers"), sym("Reals")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[int(3), sym("Integers"), sym("Booleans")]).unwrap(),
+            sym("False")
+        );
+    }
+
+    #[test]
+    fn test_element_algebraics_and_transcendentals() {
+        assert_eq!(
+            builtin_element(&[int(7), sym("Algebraics")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[Value::Complex { re: 0.0, im: 1.0 }, sym("Algebraics")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![int(2)],
+                },
+                sym("Algebraics")
+            ])
+            .unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[sym("Pi"), sym("Transcendentals")]).unwrap(),
+            sym("True")
+        );
+        assert_eq!(
+            builtin_element(&[int(3), sym("Transcendentals")]).unwrap(),
+            sym("False")
+        );
+    }
+
+    #[test]
+    fn test_element_wrong_arity_stays_symbolic() {
+        assert_eq!(
+            builtin_element(&[sym("x")]).unwrap(),
+            Value::Call {
+                head: "Element".to_string(),
+                args: vec![sym("x")],
+            }
         );
     }
 

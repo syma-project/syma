@@ -95,6 +95,185 @@ fn rational_matrix_to_value(m: &[Vec<Rational>]) -> Value {
     )
 }
 
+// ── Exact characteristic-polynomial / eigenvalue helpers ────────────────────
+
+/// True if a list is a vector/matrix whose entries are all exact rationals.
+fn all_exact_rational(m: &[Value]) -> bool {
+    for item in m {
+        match item {
+            Value::Integer(_) | Value::Rational(_) => {}
+            Value::List(inner) => {
+                if !inner
+                    .iter()
+                    .all(|v| matches!(v, Value::Integer(_) | Value::Rational(_)))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Characteristic polynomial `det(x·I − A)` of a rational square matrix.
+/// Coefficients are in ascending power order (index = power of `x`).
+fn charpoly_rational(a: &[Vec<Rational>]) -> Vec<Rational> {
+    let n = a.len();
+    let mut c = vec![Rational::from(0); n + 1];
+    c[0] = Rational::from(1);
+    if n == 0 {
+        return c;
+    }
+    // Faddeev–LeVerrier: M_0 = 0; M_k = A·M_{k−1} + c_{k−1}·I; c_k = −tr(A·M_k)/k.
+    let zero = Rational::from(0);
+    let mut m = vec![vec![zero; n]; n];
+    for k in 1..=n {
+        let mut next = mat_mul_rational(a, &m);
+        for i in 0..n {
+            next[i][i] = Rational::from(&next[i][i] + &c[k - 1]);
+        }
+        m = next;
+        let am = mat_mul_rational(a, &m);
+        let mut tr = Rational::from(0);
+        for i in 0..n {
+            tr = Rational::from(&tr + &am[i][i]);
+        }
+        let scaled = tr / Rational::from(k as i64);
+        c[k] = -scaled;
+    }
+    // `c[k]` multiplies `x^{n−k}`; convert to ascending order.
+    let mut asc = vec![Rational::from(0); n + 1];
+    for j in 0..=n {
+        asc[j] = c[n - j].clone();
+    }
+    asc
+}
+
+/// Evaluate an ascending-coefficient polynomial at a rational point (Horner).
+fn eval_poly_rational(p: &[Rational], x: &Rational) -> Rational {
+    let mut acc = Rational::from(0);
+    for c in p.iter().rev() {
+        acc = Rational::from(&acc * x);
+        acc = Rational::from(&acc + c);
+    }
+    acc
+}
+
+/// Deflate an ascending-coefficient polynomial by `(x − r)`, assuming `r` is a root.
+fn deflate_poly(p: &[Rational], r: &Rational) -> Vec<Rational> {
+    let d = p.len() - 1;
+    if d == 0 {
+        return vec![];
+    }
+    let mut q = vec![Rational::from(0); d];
+    let mut carry = p[d].clone();
+    q[d - 1] = carry.clone();
+    for k in (1..d).rev() {
+        let prod = Rational::from(&carry * r);
+        carry = Rational::from(&p[k] + &prod);
+        q[k - 1] = carry.clone();
+    }
+    q
+}
+
+/// Positive divisors of `n`, or `None` if `n` is too large to enumerate cheaply.
+fn integer_divisors(n: &Integer) -> Option<Vec<Integer>> {
+    let a = n.clone().abs();
+    if a.is_zero() {
+        return Some(vec![]);
+    }
+    let av = a.to_u64()?;
+    let limit = (av as f64).sqrt() as u64 + 1;
+    if limit > 5_000_000 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut i: u64 = 1;
+    while i <= limit && i <= av {
+        if av % i == 0 {
+            out.push(Integer::from(i));
+            if av / i != i {
+                out.push(Integer::from(av / i));
+            }
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+/// All rational roots (with multiplicity) of a polynomial, or `None` when it
+/// does not split completely into rational linear factors.
+fn all_rational_roots(mut p: Vec<Rational>) -> Option<Vec<Rational>> {
+    let mut roots = Vec::new();
+    // Strip the root at x = 0 (trailing zero coefficients).
+    while p.len() > 1 && p[0].is_zero() {
+        roots.push(Rational::from(0));
+        p.remove(0);
+    }
+    while p.len() > 1 {
+        // Scale to integer coefficients so the rational-root theorem applies.
+        let mut lcm = Integer::from(1);
+        for c in &p {
+            lcm = lcm.lcm(c.denom());
+        }
+        let ip: Vec<Integer> = p
+            .iter()
+            .map(|c| (c.clone() * &lcm).into_numer_denom().0)
+            .collect();
+        let constant = ip[0].clone();
+        let leading = ip[ip.len() - 1].clone();
+        if constant.is_zero() || leading.is_zero() {
+            return None;
+        }
+        let cd = integer_divisors(&constant)?;
+        let ld = integer_divisors(&leading)?;
+        let mut found = None;
+        'outer: for cn in &cd {
+            for dn in &ld {
+                for sign in [Integer::from(1), Integer::from(-1)] {
+                    let cand = Rational::from((sign.clone() * cn, dn.clone()));
+                    if eval_poly_rational(&p, &cand).is_zero() {
+                        found = Some(cand);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let r = found?;
+        roots.push(r.clone());
+        p = deflate_poly(&p, &r);
+    }
+    Some(roots)
+}
+
+/// Exact rational eigenvalues of a rational matrix, or `None` when the
+/// characteristic polynomial does not split completely over the rationals.
+fn exact_rational_eigenvalues(m: &[Value]) -> Option<Vec<Rational>> {
+    let a = value_to_rational_matrix(m).ok()?;
+    let n = a.len();
+    if a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let roots = all_rational_roots(charpoly_rational(&a))?;
+    if roots.len() == n { Some(roots) } else { None }
+}
+
+/// Exact square root of a non-negative rational, if it is a perfect square.
+fn exact_sqrt_rational(r: &Rational) -> Option<Rational> {
+    if r.numer().is_negative() {
+        return None;
+    }
+    let (num, den) = r.clone().into_numer_denom();
+    let sn = num.clone().sqrt();
+    let sd = den.clone().sqrt();
+    if Integer::from(&sn * &sn) == num && Integer::from(&sd * &sd) == den {
+        Some(Rational::from((sn, sd)))
+    } else {
+        None
+    }
+}
+
 // ── Builtins ────────────────────────────────────────────────────────────────
 
 /// Dimensions[m] — returns {rows, cols} for a matrix or {n} for a vector.
@@ -464,6 +643,9 @@ pub fn builtin_tr(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// Norm[v] — Euclidean norm for vectors, Frobenius norm for matrices.
+///
+/// Returns an exact result for exact inputs whose sum of squares is a perfect
+/// rational square (e.g. `Norm[{3, 4}]` → `5`), matching Wolfram.
 pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -474,29 +656,41 @@ pub fn builtin_norm(args: &[Value]) -> Result<Value, EvalError> {
     if items.is_empty() {
         return Ok(int(0));
     }
-    let sum_sq = if is_vector(items) {
-        // Vector norm
+    // Flatten to the list of scalar entries (vector) or all matrix entries.
+    let entries: Vec<&Value> = if is_vector(items) {
+        items.iter().collect()
+    } else {
+        let mut flat = Vec::new();
+        for row_val in items {
+            flat.extend(as_list(row_val)?.iter());
+        }
+        flat
+    };
+
+    // Exact path: all entries rational and the sum of squares is a perfect square.
+    if entries
+        .iter()
+        .all(|v| matches!(v, Value::Integer(_) | Value::Rational(_)))
+    {
+        let mut sum = Rational::from(0);
+        for v in &entries {
+            let r = value_to_rational(v)?;
+            let sq = Rational::from(&r * &r);
+            sum = Rational::from(&sum + &sq);
+        }
+        if let Some(root) = exact_sqrt_rational(&sum) {
+            return Ok(rational_to_value(root));
+        }
+    }
+
+    let sum_sq = {
         let mut s = 0.0f64;
-        for v in items {
+        for v in &entries {
             let f = super::to_f64(v).ok_or_else(|| EvalError::TypeError {
                 expected: "Number".to_string(),
                 got: v.type_name().to_string(),
             })?;
             s += f * f;
-        }
-        s
-    } else {
-        // Frobenius norm (matrix)
-        let mut s = 0.0f64;
-        for row_val in items {
-            let row = as_list(row_val)?;
-            for v in row {
-                let f = super::to_f64(v).ok_or_else(|| EvalError::TypeError {
-                    expected: "Number".to_string(),
-                    got: v.type_name().to_string(),
-                })?;
-                s += f * f;
-            }
         }
         s
     };
@@ -817,6 +1011,26 @@ pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
             rows, cols
         )));
     }
+    // Exact path: a rational matrix whose characteristic polynomial splits over
+    // the rationals has exact (Integer/Rational) eigenvalues in Wolfram.
+    let exact = if all_exact_rational(m) {
+        exact_rational_eigenvalues(m)
+    } else {
+        None
+    };
+    if let Some(mut vals) = exact {
+        // Sort by descending absolute value (Wolfram convention).
+        vals.sort_by(|x, y| {
+            y.clone()
+                .abs()
+                .partial_cmp(&x.clone().abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return Ok(Value::List(
+            vals.into_iter().map(rational_to_value).collect(),
+        ));
+    }
+
     let mut a = matrix_to_f64(m)?;
     let mut eigenvalues = super::numericsolve::qr_eigenvalues(&mut a, rows);
     // Sort by descending absolute value (Wolfram convention)
@@ -1726,13 +1940,57 @@ mod tests {
 
     #[test]
     fn test_norm_vector() {
+        // Exact input with a perfect-square norm stays exact.
         let v = list(vec![int_val(3), int_val(4)]);
-        let result = builtin_norm(&[v]).unwrap();
-        if let Value::Real(r) = result {
-            assert!((r.to_f64() - 5.0).abs() < 1e-10);
-        } else {
-            panic!("Expected Real");
+        assert_eq!(builtin_norm(&[v]).unwrap(), int_val(5));
+    }
+
+    #[test]
+    fn test_norm_vector_irrational() {
+        // Non-perfect-square norm falls back to a real approximation.
+        let v = list(vec![int_val(1), int_val(1)]);
+        match builtin_norm(&[v]).unwrap() {
+            Value::Real(r) => assert!((r.to_f64() - std::f64::consts::SQRT_2).abs() < 1e-10),
+            other => panic!("Expected Real, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_norm_rational_perfect_square() {
+        // Norm[{3/5, 4/5}] = 1 exactly.
+        let v = list(vec![
+            rational_value(Integer::from(3), Integer::from(5)),
+            rational_value(Integer::from(4), Integer::from(5)),
+        ]);
+        assert_eq!(builtin_norm(&[v]).unwrap(), int_val(1));
+    }
+
+    #[test]
+    fn test_eigenvalues_exact_integer() {
+        // Exact integer matrix with rational spectrum → exact, descending |λ|.
+        let m = matrix(vec![vec![2, 0], vec![0, 3]]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        assert_eq!(result, list(vec![int_val(3), int_val(2)]));
+    }
+
+    #[test]
+    fn test_eigenvalues_exact_triangular() {
+        let m = matrix(vec![vec![1, 5, 7], vec![0, 2, 9], vec![0, 0, -4]]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        assert_eq!(result, list(vec![int_val(-4), int_val(2), int_val(1)]));
+    }
+
+    #[test]
+    fn test_eigenvalues_irrational_fallback() {
+        // [[1,2],[3,4]] has irrational eigenvalues → numeric fallback.
+        let m = matrix(vec![vec![1, 2], vec![3, 4]]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        let vals = as_list(&result).unwrap();
+        assert_eq!(vals.len(), 2);
+        let v0 = super::super::to_f64(&vals[0]).unwrap();
+        let v1 = super::super::to_f64(&vals[1]).unwrap();
+        assert!(v0 > v1);
+        assert!((v0 - 5.372_281_323_269_014).abs() < 1e-9);
     }
 
     #[test]

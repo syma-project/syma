@@ -45,83 +45,99 @@ impl Drop for NativeLibHandle {
 
 #[cfg(unix)]
 mod platform {
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString, c_void};
+    use std::os::raw::{c_char, c_int};
 
     unsafe extern "C" {
-        fn dlopen(filename: *const libc_c_char, flag: i32) -> usize;
-        fn dlsym(handle: usize, symbol: *const libc_c_char) -> usize;
-        fn dlclose(handle: usize) -> i32;
-        fn dlerror() -> *const libc_c_char;
+        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+        fn dlerror() -> *const c_char;
     }
 
-    #[allow(non_camel_case_types)]
-    type libc_c_char = i8;
-    const RTLD_NOW: i32 = 2;
+    const RTLD_NOW: c_int = 2;
     #[cfg(target_os = "macos")]
-    const RTLD_LOCAL: i32 = 4;
+    const RTLD_LOCAL: c_int = 4;
     #[cfg(not(target_os = "macos"))]
-    const RTLD_LOCAL: i32 = 0;
+    const RTLD_LOCAL: c_int = 0;
 
     pub fn open(path: &str) -> Result<usize, String> {
         let cpath = CString::new(path).map_err(|e| format!("invalid path: {e}"))?;
+        // Clear any stale error before dlopen so a failure message is ours.
+        unsafe {
+            dlerror();
+        }
         let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
-        if handle == 0 {
+        if handle.is_null() {
             let msg = unsafe {
                 let p = dlerror();
                 if p.is_null() {
                     "unknown error".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+                    CStr::from_ptr(p).to_string_lossy().into_owned()
                 }
             };
             Err(format!("dlopen({path}): {msg}"))
         } else {
-            Ok(handle)
+            Ok(handle as usize)
         }
     }
 
     pub fn sym(handle: usize, name: &str) -> Option<usize> {
         let cname = CString::new(name).ok()?;
-        let ptr = unsafe { dlsym(handle, cname.as_ptr()) };
-        if ptr == 0 { None } else { Some(ptr) }
+        let ptr = unsafe { dlsym(handle as *mut c_void, cname.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr as usize)
+        }
     }
 
     pub fn close(handle: usize) {
-        unsafe {
-            dlclose(handle);
+        if handle != 0 {
+            unsafe {
+                dlclose(handle as *mut c_void);
+            }
         }
     }
 }
 
 #[cfg(windows)]
 mod platform {
-    use std::ffi::CString;
+    use std::ffi::{CString, c_void};
+    use std::os::raw::{c_char, c_int};
 
-    extern "system" {
-        fn LoadLibraryA(lp_lib_file_name: *const u8) -> usize;
-        fn GetProcAddress(h_module: usize, lp_proc_name: *const u8) -> usize;
-        fn FreeLibrary(h_lib_module: usize) -> i32;
+    unsafe extern "system" {
+        fn LoadLibraryA(lp_lib_file_name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const c_char) -> *mut c_void;
+        fn FreeLibrary(h_lib_module: *mut c_void) -> c_int;
     }
 
     pub fn open(path: &str) -> Result<usize, String> {
         let cpath = CString::new(path).map_err(|e| format!("invalid path: {e}"))?;
-        let handle = unsafe { LoadLibraryA(cpath.as_ptr() as *const u8) };
-        if handle == 0 {
+        let handle = unsafe { LoadLibraryA(cpath.as_ptr()) };
+        if handle.is_null() {
             Err(format!("LoadLibraryA({path}) failed"))
         } else {
-            Ok(handle)
+            Ok(handle as usize)
         }
     }
 
     pub fn sym(handle: usize, name: &str) -> Option<usize> {
         let cname = CString::new(name).ok()?;
-        let ptr = unsafe { GetProcAddress(handle, cname.as_ptr() as *const u8) };
-        if ptr == 0 { None } else { Some(ptr) }
+        let ptr = unsafe { GetProcAddress(handle as *mut c_void, cname.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr as usize)
+        }
     }
 
     pub fn close(handle: usize) {
-        unsafe {
-            FreeLibrary(handle);
+        if handle != 0 {
+            unsafe {
+                FreeLibrary(handle as *mut c_void);
+            }
         }
     }
 }

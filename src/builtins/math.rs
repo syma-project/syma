@@ -2,6 +2,7 @@ use crate::builtins::arithmetic::{builtin_divide, builtin_plus};
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::{DEFAULT_PRECISION, EvalError, Value};
+use rug::Complete;
 use rug::Float;
 use rug::Integer;
 
@@ -27,39 +28,11 @@ fn trig_epsilon() -> Float {
 }
 
 /// Try to extract a Pi-multiple from a symbolic expression.
-/// Returns Some((num, den)) if the expression is Pi, Pi/n, n*Pi, or n*Pi/m.
+/// Returns `Some((num, den))` (angle `num/den*Pi` reduced into `[0, 2)`) when the
+/// expression is an exact rational multiple of `Pi`.
 fn extract_pi_multiple(val: &Value) -> Option<(i64, u32)> {
-    match val {
-        // Pi itself → 1*Pi
-        Value::Symbol(s) if s == "Pi" => Some((1, 1)),
-        // Divide[Pi, n] or Times[Pi, Power[n, -1]]
-        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
-            if let (Value::Symbol(s), Value::Integer(d)) = (&args[0], &args[1])
-                && s == "Pi"
-                && !d.is_zero()
-                && !d.is_negative()
-            {
-                return d.to_u32().map(|den| (1, den));
-            }
-            None
-        }
-        // Times[n, Pi] or Times[Pi, n]
-        Value::Call { head, args } if head == "Times" && args.len() == 2 => {
-            match (&args[0], &args[1]) {
-                (Value::Integer(n), Value::Symbol(s)) | (Value::Symbol(s), Value::Integer(n))
-                    if s == "Pi" =>
-                {
-                    if !n.is_negative() && !n.is_zero() {
-                        return n.to_u32().map(|num| (num as i64, 1));
-                    }
-                    None
-                }
-                // Times[n, Divide[Pi, d]] or similar — skip for now
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    let coeff = pi_coefficient(val)?;
+    Some(pi_frac_mod_2(&coeff))
 }
 
 /// Check if `r` is any rational multiple of Pi (not just special angles).
@@ -129,6 +102,94 @@ fn pi_multiple(r: &Float) -> Option<PiFrac> {
 
 fn val_int(n: i64) -> Value {
     Value::Integer(Integer::from(n))
+}
+
+/// Exact rational view of an `Integer`/`Rational` value (`None` otherwise).
+fn rational_of(v: &Value) -> Option<rug::Rational> {
+    match v {
+        Value::Integer(n) => Some(rug::Rational::from(n.clone())),
+        Value::Rational(r) => Some((**r).clone()),
+        _ => None,
+    }
+}
+
+/// Canonical exact value for a rational: an `Integer` when integral, else a `Rational`.
+fn value_of_rational(r: rug::Rational) -> Value {
+    if r.is_integer() {
+        Value::Integer(r.numer().clone())
+    } else {
+        Value::Rational(Box::new(r))
+    }
+}
+
+/// The imaginary unit as `I`.
+fn i_unit() -> Value {
+    Value::Complex { re: 0.0, im: 1.0 }
+}
+
+/// `I * Pi`.
+fn i_pi() -> Value {
+    Value::Call {
+        head: "Times".to_string(),
+        args: vec![i_unit(), Value::Symbol("Pi".to_string())],
+    }
+}
+
+/// `-Infinity`.
+fn neg_infinity() -> Value {
+    Value::Call {
+        head: "Times".to_string(),
+        args: vec![
+            Value::Integer(Integer::from(-1)),
+            Value::Symbol("Infinity".to_string()),
+        ],
+    }
+}
+
+/// Exact coefficient `c` such that `val == c * Pi`, for `val` built from `Pi`
+/// and numeric factors (e.g. `Pi`, `-Pi`, `3 Pi / 2`, `Times[2, Pi]`).
+fn pi_coefficient(val: &Value) -> Option<rug::Rational> {
+    match val {
+        Value::Symbol(s) if s == "Pi" => Some(rug::Rational::from(1)),
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            let num = pi_coefficient(&args[0])?;
+            let den = rational_of(&args[1])?;
+            if den.is_zero() {
+                return None;
+            }
+            Some(num / den)
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut coeff = rug::Rational::from(1);
+            let mut seen_pi = false;
+            for arg in args {
+                if matches!(arg, Value::Symbol(s) if s == "Pi") {
+                    if seen_pi {
+                        return None;
+                    }
+                    seen_pi = true;
+                } else {
+                    let r = rational_of(arg)?;
+                    coeff *= r;
+                }
+            }
+            seen_pi.then_some(coeff)
+        }
+        _ => None,
+    }
+}
+
+/// Reduce a `Pi` coefficient modulo `2`, yielding `(num, den)` in `[0, 2)`.
+fn pi_frac_mod_2(coeff: &rug::Rational) -> (i64, u32) {
+    let two = Integer::from(2);
+    let den2: Integer = coeff.denom().clone() * &two;
+    let (k, _) = coeff.numer().clone().div_rem_floor(den2);
+    let krat = rug::Rational::from(k) * rug::Rational::from(2);
+    let frac = coeff.clone() - krat;
+    (
+        frac.numer().to_i64().unwrap_or(0),
+        frac.denom().to_u32().unwrap_or(1),
+    )
 }
 
 /// Sqrt[n] as a symbolic Call
@@ -428,17 +489,23 @@ pub fn builtin_arctan(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Reciprocal Trigonometric (exact results for special angles) ──
 
+/// 2 / Sqrt[3]  (i.e. 2√3/3)
+fn two_over_sqrt3() -> Value {
+    val_div(val_int(2), val_sqrt(3))
+}
+
 /// Compute exact csc for a known Pi fraction.
 fn exact_csc(num: i64, den: u32) -> Option<Value> {
     match (num, den) {
-        (0, _) | (1, 1) => None,                  // csc(0), csc(π) undefined
-        (1, 2) | (3, 2) => Some(val_int(1)),      // csc(±π/2) = 1 or -1
-        (1, 6) | (5, 6) => Some(val_int(2)),      // csc(π/6) = csc(5π/6) = 2
-        (1, 4) | (3, 4) => Some(val_sqrt(2)),     // csc(π/4) = csc(3π/4) = √2
-        (1, 3) | (2, 3) => Some(sqrt_over(2, 3)), // csc(π/3) = csc(2π/3) = 2√3/3
+        (0, _) | (1, 1) => None,              // csc(0), csc(π) undefined
+        (1, 2) => Some(val_int(1)),           // csc(π/2) = 1
+        (3, 2) => Some(val_int(-1)),          // csc(3π/2) = -1
+        (1, 6) | (5, 6) => Some(val_int(2)),  // csc(π/6) = csc(5π/6) = 2
+        (1, 4) | (3, 4) => Some(val_sqrt(2)), // csc(π/4) = csc(3π/4) = √2
+        (1, 3) | (2, 3) => Some(two_over_sqrt3()),
         (7, 6) | (11, 6) => Some(val_int(-2)),
         (5, 4) | (7, 4) => Some(val_neg(val_sqrt(2))),
-        (4, 3) | (5, 3) => Some(neg_sqrt_over(2, 3)),
+        (4, 3) | (5, 3) => Some(val_neg(two_over_sqrt3())),
         _ => None,
     }
 }
@@ -446,14 +513,14 @@ fn exact_csc(num: i64, den: u32) -> Option<Value> {
 /// Compute exact sec for a known Pi fraction.
 fn exact_sec(num: i64, den: u32) -> Option<Value> {
     match (num, den) {
-        (0, _) => Some(val_int(1)),                // sec(0) = 1
-        (1, 6) | (11, 6) => Some(sqrt_over(2, 3)), // sec(π/6) = sec(11π/6) = 2√3/3
-        (1, 4) | (7, 4) => Some(val_sqrt(2)),      // sec(π/4) = sec(7π/4) = √2
-        (1, 3) | (5, 3) => Some(val_int(2)),       // sec(π/3) = sec(5π/3) = 2
-        (1, 2) | (3, 2) => None,                   // sec(±π/2) undefined
+        (0, _) => Some(val_int(1)),                 // sec(0) = 1
+        (1, 6) | (11, 6) => Some(two_over_sqrt3()), // sec(π/6) = sec(11π/6) = 2√3/3
+        (1, 4) | (7, 4) => Some(val_sqrt(2)),       // sec(π/4) = sec(7π/4) = √2
+        (1, 3) | (5, 3) => Some(val_int(2)),        // sec(π/3) = sec(5π/3) = 2
+        (1, 2) | (3, 2) => None,                    // sec(±π/2) undefined
         (2, 3) | (4, 3) => Some(val_int(-2)),
         (3, 4) | (5, 4) => Some(val_neg(val_sqrt(2))),
-        (5, 6) | (7, 6) => Some(neg_sqrt_over(2, 3)),
+        (5, 6) | (7, 6) => Some(val_neg(two_over_sqrt3())),
         (1, 1) => Some(val_int(-1)), // sec(π) = -1
         _ => None,
     }
@@ -968,21 +1035,29 @@ fn log_natural(v: &Value) -> Result<Value, EvalError> {
     match v {
         // Exact special values
         Value::Integer(n) if *n == 1 => Ok(Value::Integer(Integer::from(0))),
-        // Integer arguments stay symbolic (like Mathematica)
-        Value::Integer(n) => {
-            if n.is_negative() {
-                Err(EvalError::Error("Log of non-positive number".to_string()))
-            } else {
-                Ok(Value::Call {
-                    head: "Log".to_string(),
-                    args: vec![v.clone()],
-                })
-            }
+        // Log[0] = -Infinity
+        Value::Integer(n) if n.is_zero() => Ok(neg_infinity()),
+        // Negative integers: Log[n] = Log[-n] + I*Pi
+        Value::Integer(n) if n.is_negative() => {
+            let abs_log = log_natural(&Value::Integer(n.clone().abs()))?;
+            builtin_plus(&[abs_log, i_pi()])
         }
+        // Positive integer arguments stay symbolic (like Mathematica)
+        Value::Integer(_) => Ok(Value::Call {
+            head: "Log".to_string(),
+            args: vec![v.clone()],
+        }),
         // Float arguments evaluate numerically
         Value::Real(r) => {
-            if r.is_zero() || r.is_sign_negative() {
-                Err(EvalError::Error("Log of non-positive number".to_string()))
+            if r.is_zero() {
+                Ok(neg_infinity())
+            } else if r.is_sign_negative() {
+                let prec = r.prec();
+                let ln_abs = Float::with_val(prec, r).abs().ln();
+                Ok(Value::Complex {
+                    re: ln_abs.to_f64(),
+                    im: std::f64::consts::PI,
+                })
             } else {
                 let prec = r.prec();
                 Ok(Value::Real(Float::with_val(prec, r).ln()))
@@ -1007,13 +1082,16 @@ fn log_natural(v: &Value) -> Result<Value, EvalError> {
 pub fn builtin_log2(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Log2", args, 1)?;
     match &args[0] {
-        Value::Integer(n) if !n.is_zero() && !n.is_negative() => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.log2()))
+        Value::Integer(n) if n.is_zero() => Ok(neg_infinity()),
+        Value::Integer(n) if !n.is_negative() => {
+            if let Some(k) = exact_integer_log(n, &Integer::from(2)) {
+                Ok(Value::Integer(Integer::from(k)))
+            } else {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, n).log2()))
+            }
         }
-        Value::Real(r) if !r.is_zero() && !r.is_sign_negative() => {
-            Ok(Value::Real(r.clone().log2()))
-        }
+        Value::Real(r) if r.is_zero() => Ok(neg_infinity()),
+        Value::Real(r) if !r.is_sign_negative() => Ok(Value::Real(r.clone().log2())),
         _ => Err(EvalError::Error("Log2 of non-positive number".to_string())),
     }
 }
@@ -1021,13 +1099,16 @@ pub fn builtin_log2(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_log10(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Log10", args, 1)?;
     match &args[0] {
-        Value::Integer(n) if !n.is_zero() && !n.is_negative() => {
-            let f = Float::with_val(DEFAULT_PRECISION, n);
-            Ok(Value::Real(f.log10()))
+        Value::Integer(n) if n.is_zero() => Ok(neg_infinity()),
+        Value::Integer(n) if !n.is_negative() => {
+            if let Some(k) = exact_integer_log(n, &Integer::from(10)) {
+                Ok(Value::Integer(Integer::from(k)))
+            } else {
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, n).log10()))
+            }
         }
-        Value::Real(r) if !r.is_zero() && !r.is_sign_negative() => {
-            Ok(Value::Real(r.clone().log10()))
-        }
+        Value::Real(r) if r.is_zero() => Ok(neg_infinity()),
+        Value::Real(r) if !r.is_sign_negative() => Ok(Value::Real(r.clone().log10())),
         _ => Err(EvalError::Error("Log10 of non-positive number".to_string())),
     }
 }
@@ -1114,14 +1195,20 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
         Value::Integer(n) => {
             if n.is_negative() {
                 if *n == -1 {
-                    return Ok(Value::Complex { re: 0.0, im: 1.0 });
+                    return Ok(i_unit());
                 }
-                // Sqrt[-n] = I * Sqrt[n]
+                // Sqrt[-n] = I * Sqrt[n]  (with the integer factor pulled out front)
                 let abs_n = n.clone().abs();
                 let sqrt_n = builtin_sqrt(&[Value::Integer(abs_n)])?;
-                return Ok(Value::Call {
-                    head: "Times".to_string(),
-                    args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_n],
+                return Ok(match sqrt_n {
+                    Value::Integer(k) => Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(k), i_unit()],
+                    },
+                    other => Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![i_unit(), other],
+                    },
                 });
             }
             let (outside, inside) = sqrt_integer(n);
@@ -1133,9 +1220,15 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                 let denom = n.denom().clone();
                 let abs_rational = Value::Rational(Box::new(rug::Rational::from((numer, denom))));
                 let sqrt_part = builtin_sqrt(&[abs_rational])?;
-                return Ok(Value::Call {
-                    head: "Times".to_string(),
-                    args: vec![Value::Complex { re: 0.0, im: 1.0 }, sqrt_part],
+                return Ok(match sqrt_part {
+                    Value::Rational(r) => Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Rational(r), i_unit()],
+                    },
+                    other => Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![i_unit(), other],
+                    },
                 });
             }
             // Sqrt[a/b] = (num_out/den_out) * Sqrt[num_in/den_in]
@@ -1260,14 +1353,15 @@ pub fn builtin_floor(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Floor", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Rational(r) => Ok(Value::Integer(r.clone().floor().numer().clone())),
         Value::Real(r) => {
             let floored = r.clone().floor();
-            let int_val = floored.to_integer().unwrap_or(Integer::from(0));
+            let int_val = floored.to_integer().unwrap_or(0.into());
             Ok(Value::Integer(int_val))
         }
-        _ => Err(EvalError::NoMatch {
+        _ => Ok(Value::Call {
             head: "Floor".to_string(),
-            args: args.to_vec().into(),
+            args: args.to_vec(),
         }),
     }
 }
@@ -1276,15 +1370,48 @@ pub fn builtin_ceiling(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Ceiling", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
+        Value::Rational(r) => Ok(Value::Integer(r.clone().ceil().numer().clone())),
         Value::Real(r) => {
             let ceiled = r.clone().ceil();
-            let int_val = ceiled.to_integer().unwrap_or(Integer::from(0));
+            let int_val = ceiled.to_integer().unwrap_or(0.into());
             Ok(Value::Integer(int_val))
         }
-        _ => Err(EvalError::NoMatch {
+        _ => Ok(Value::Call {
             head: "Ceiling".to_string(),
-            args: args.to_vec().into(),
+            args: args.to_vec(),
         }),
+    }
+}
+
+/// Round half to even (Wolfram `Round` tie-breaking) for an exact rational.
+fn round_half_even_rational(r: &rug::Rational) -> Integer {
+    let floor = r.clone().floor();
+    let frac: rug::Rational = (r - &floor).complete();
+    let half = rug::Rational::from((1, 2));
+    if frac < half {
+        floor.numer().clone()
+    } else if frac > half {
+        floor.numer().clone() + 1
+    } else {
+        let fi = floor.numer().clone();
+        if fi.is_even() { fi } else { fi + 1 }
+    }
+}
+
+/// Round half to even for an MPFR float.
+fn round_half_even_float(r: &Float) -> Integer {
+    let prec = r.prec();
+    let floor = r.clone().floor();
+    let frac: Float = r.clone() - &floor;
+    let half = Float::with_val(prec, 0.5);
+    if frac < half {
+        floor.to_integer().unwrap_or(0.into())
+    } else if frac > half {
+        let next: Float = floor + 1;
+        next.to_integer().unwrap_or(0.into())
+    } else {
+        let fi = floor.to_integer().unwrap_or(0.into());
+        if fi.is_even() { fi } else { fi + 1 }
     }
 }
 
@@ -1292,49 +1419,59 @@ pub fn builtin_round(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Round", args, 1)?;
     match &args[0] {
         Value::Integer(n) => Ok(Value::Integer(n.clone())),
-        Value::Real(r) => {
-            let rounded = r.clone().round();
-            let int_val = rounded.to_integer().unwrap_or(Integer::from(0));
-            Ok(Value::Integer(int_val))
-        }
-        _ => Err(EvalError::NoMatch {
+        Value::Rational(r) => Ok(Value::Integer(round_half_even_rational(r))),
+        Value::Real(r) => Ok(Value::Integer(round_half_even_float(r))),
+        _ => Ok(Value::Call {
             head: "Round".to_string(),
-            args: args.to_vec().into(),
+            args: args.to_vec(),
         }),
     }
 }
 
 // ── Min / Max ──
 
+/// Approximate `Float` view of a numeric value.
+fn float_of(v: &Value) -> Option<Float> {
+    match v {
+        Value::Integer(n) => Some(Float::with_val(DEFAULT_PRECISION, n)),
+        Value::Rational(r) => Some(Float::with_val(DEFAULT_PRECISION, (**r).clone())),
+        Value::Real(r) => Some(r.clone()),
+        _ => None,
+    }
+}
+
+/// Total numeric ordering across `Integer`/`Rational`/`Real` (exact when possible).
+fn numeric_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Some(x.cmp(y)),
+        (Value::Rational(_) | Value::Integer(_), Value::Rational(_) | Value::Integer(_)) => {
+            Some(rational_of(a)?.cmp(&rational_of(b)?))
+        }
+        _ => float_of(a)?.partial_cmp(&float_of(b)?),
+    }
+}
+
 pub fn builtin_max(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_min_args("Max", args, 1)?;
+    if args.is_empty() {
+        return Ok(neg_infinity()); // Max[] = -Infinity
+    }
     let mut max = &args[0];
     for arg in &args[1..] {
-        match (max, arg) {
-            (Value::Integer(a), Value::Integer(b)) if b > a => {
-                max = arg;
-            }
-            (Value::Real(a), Value::Real(b)) if b > a => {
-                max = arg;
-            }
-            _ => {}
+        if matches!(numeric_cmp(arg, max), Some(std::cmp::Ordering::Greater)) {
+            max = arg;
         }
     }
     Ok(max.clone())
 }
 
 pub fn builtin_min(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_min_args("Min", args, 1)?;
+    if args.is_empty() {
+        return Ok(Value::Symbol("Infinity".to_string())); // Min[] = Infinity
+    }
     let mut min = &args[0];
     for arg in &args[1..] {
-        match (min, arg) {
-            (Value::Integer(a), Value::Integer(b)) if b < a => {
-                min = arg;
-            }
-            (Value::Real(a), Value::Real(b)) if b < a => {
-                min = arg;
-            }
-            _ => {}
+        if matches!(numeric_cmp(arg, min), Some(std::cmp::Ordering::Less)) {
+            min = arg;
         }
     }
     Ok(min.clone())
@@ -1344,35 +1481,33 @@ pub fn builtin_min(args: &[Value]) -> Result<Value, EvalError> {
 
 pub fn builtin_mod(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Mod", args, 2)?;
-    match (&args[0], &args[1]) {
-        (Value::Integer(a), Value::Integer(b)) if !b.is_zero() => {
-            let result = a.clone() % b;
-            let result = if result < 0 {
-                result + b.clone().abs()
-            } else {
-                result
-            };
-            Ok(Value::Integer(result))
+    let a = &args[0];
+    let b = &args[1];
+    // Exact integer/rational path: Mod[a, b] = a - b*Floor[a/b], whose residue
+    // takes the sign of `b` (Wolfram semantics).
+    if let (Some(ra), Some(rb)) = (rational_of(a), rational_of(b)) {
+        if rb.is_zero() {
+            return Err(EvalError::Error("Mod: division by zero".to_string()));
         }
-        (Value::Real(a), Value::Real(b)) if !b.is_zero() => {
-            let div = a.clone() / b;
-            let floored = div.floor();
-            let result = a - b * floored;
-            Ok(Value::Real(result))
+        let q = (ra.clone() / rb.clone()).floor();
+        return Ok(value_of_rational(ra - rb * q));
+    }
+    // Approximate path (float residue, sign of `b`).
+    match (a, b) {
+        (Value::Real(x), Value::Real(y)) if !y.is_zero() => {
+            let floored = (x.clone() / y).floor();
+            Ok(Value::Real(x - y * floored))
         }
-        (Value::Integer(a), Value::Real(b)) if !b.is_zero() => {
-            let a_f = Float::with_val(DEFAULT_PRECISION, a);
-            let div = a_f.clone() / b;
-            let floored = div.floor();
-            let result = a_f - b * floored;
-            Ok(Value::Real(result))
+        (Value::Real(x), Value::Integer(y)) if !y.is_zero() => {
+            let yf = Float::with_val(x.prec(), y);
+            let floored = (x.clone() / &yf).floor();
+            Ok(Value::Real(x - yf * floored))
         }
-        (Value::Real(a), Value::Integer(b)) if !b.is_zero() => {
-            let b_f = Float::with_val(DEFAULT_PRECISION, b);
-            let div = a.clone() / &b_f;
-            let floored = div.floor();
-            let result = a - &b_f * floored;
-            Ok(Value::Real(result))
+        (Value::Integer(x), Value::Real(y)) if !y.is_zero() => {
+            let prec = y.prec();
+            let xf = Float::with_val(prec, x);
+            let floored = (xf.clone() / y).floor();
+            Ok(Value::Real(xf - y * floored))
         }
         _ => Err(EvalError::Error(
             "Mod: division by zero or invalid types".to_string(),
@@ -1389,34 +1524,76 @@ pub fn gcd(mut a: Integer, mut b: Integer) -> Integer {
     a.abs()
 }
 
-pub fn builtin_gcd(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_args("GCD", args, 2)?;
-    match (&args[0], &args[1]) {
-        (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(gcd(a.clone(), b.clone()))),
-        _ => Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+/// Least common multiple of two integers (0 if either is 0).
+fn int_lcm(a: Integer, b: Integer) -> Integer {
+    if a.is_zero() || b.is_zero() {
+        return Integer::from(0);
     }
+    (a.clone() * b.clone()).abs() / gcd(a, b)
+}
+
+fn rational_gcd(a: &rug::Rational, b: &rug::Rational) -> rug::Rational {
+    rug::Rational::from(gcd(a.numer().clone(), b.numer().clone()))
+        / int_lcm(a.denom().clone(), b.denom().clone())
+}
+
+fn rational_lcm(a: &rug::Rational, b: &rug::Rational) -> rug::Rational {
+    if a.is_zero() || b.is_zero() {
+        return rug::Rational::from(0);
+    }
+    rug::Rational::from(int_lcm(a.numer().clone(), b.numer().clone()))
+        / gcd(a.denom().clone(), b.denom().clone())
+}
+
+/// Flatten an optional single list argument into its elements (Wolfram `GCD[{..}]`).
+fn flatten_sequence(args: &[Value]) -> Vec<&Value> {
+    if args.len() == 1
+        && let Value::List(items) = &args[0]
+    {
+        return items.iter().collect();
+    }
+    args.iter().collect()
+}
+
+/// Fold `op` over the exact integer/rational arguments of `args`.
+fn fold_exact(
+    name: &str,
+    args: &[Value],
+    op: impl Fn(&rug::Rational, &rug::Rational) -> rug::Rational,
+) -> Result<Value, EvalError> {
+    let vals = flatten_sequence(args);
+    let first = vals
+        .first()
+        .ok_or_else(|| EvalError::Error(format!("{name}: expected at least 1 argument")))?;
+    let mut acc = rational_of(first).ok_or_else(|| EvalError::TypeError {
+        expected: "Integer or Rational".to_string(),
+        got: first.type_name().to_string(),
+    })?;
+    for v in &vals[1..] {
+        let r = rational_of(v).ok_or_else(|| EvalError::TypeError {
+            expected: "Integer or Rational".to_string(),
+            got: v.type_name().to_string(),
+        })?;
+        acc = op(&acc, &r);
+    }
+    if vals.len() == 1 {
+        acc = op(&acc, &acc.clone());
+    }
+    Ok(value_of_rational(acc))
+}
+
+pub fn builtin_gcd(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(Value::Integer(Integer::from(0))); // GCD[] = 0
+    }
+    fold_exact("GCD", args, rational_gcd)
 }
 
 pub fn builtin_lcm(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_args("LCM", args, 2)?;
-    match (&args[0], &args[1]) {
-        (Value::Integer(a), Value::Integer(b)) => {
-            if a.is_zero() || b.is_zero() {
-                return Ok(Value::Integer(Integer::from(0)));
-            }
-            let product = a.clone() * b;
-            let abs_product = product.abs();
-            let gcd_val = gcd(a.clone(), b.clone());
-            Ok(Value::Integer(abs_product / gcd_val))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
+    if args.is_empty() {
+        return Ok(Value::Integer(Integer::from(1))); // LCM[] = 1
     }
+    fold_exact("LCM", args, rational_lcm)
 }
 
 pub fn factorial(n: i64) -> Integer {
@@ -1702,6 +1879,16 @@ pub fn builtin_sign(args: &[Value]) -> Result<Value, EvalError> {
             };
             Ok(Value::Integer(Integer::from(s)))
         }
+        Value::Rational(r) => {
+            let s = if **r > 0 {
+                1i64
+            } else if **r < 0 {
+                -1
+            } else {
+                0
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
         _ => Ok(Value::Call {
             head: "Sign".to_string(),
             args: args.to_vec(),
@@ -1834,19 +2021,36 @@ pub fn builtin_rescale(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-/// Quotient[m, n] — floor(m/n)
+/// Quotient[m, n] — Floor[m/n]
 pub fn builtin_quotient(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Quotient", args, 2)?;
-    match (&args[0], &args[1]) {
-        (Value::Integer(m), Value::Integer(n)) => {
-            if n.is_zero() {
-                return Err(EvalError::Error("Quotient: division by zero".to_string()));
-            }
-            Ok(Value::Integer(Integer::from(m / n)))
+    let a = &args[0];
+    let b = &args[1];
+    if let (Some(ra), Some(rb)) = (rational_of(a), rational_of(b)) {
+        if rb.is_zero() {
+            return Err(EvalError::Error("Quotient: division by zero".to_string()));
+        }
+        return Ok(Value::Integer((ra / rb).floor().numer().clone()));
+    }
+    match (a, b) {
+        (Value::Real(x), Value::Real(y)) if !y.is_zero() => Ok(Value::Integer(
+            (x.clone() / y).floor().to_integer().unwrap_or(0.into()),
+        )),
+        (Value::Real(x), Value::Integer(y)) if !y.is_zero() => {
+            let yf = Float::with_val(x.prec(), y);
+            Ok(Value::Integer(
+                (x.clone() / yf).floor().to_integer().unwrap_or(0.into()),
+            ))
+        }
+        (Value::Integer(x), Value::Real(y)) if !y.is_zero() => {
+            let xf = Float::with_val(y.prec(), x);
+            Ok(Value::Integer(
+                (xf / y).floor().to_integer().unwrap_or(0.into()),
+            ))
         }
         _ => Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: args[0].type_name().to_string(),
+            expected: "Number".to_string(),
+            got: format!("{} and {}", a.type_name(), b.type_name()),
         }),
     }
 }
@@ -1854,38 +2058,9 @@ pub fn builtin_quotient(args: &[Value]) -> Result<Value, EvalError> {
 /// QuotientRemainder[m, n] — {Quotient[m,n], Mod[m,n]}
 pub fn builtin_quotient_remainder(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("QuotientRemainder", args, 2)?;
-    match (&args[0], &args[1]) {
-        (Value::Integer(m), Value::Integer(n)) => {
-            if n.is_zero() {
-                return Err(EvalError::Error(
-                    "QuotientRemainder: division by zero".to_string(),
-                ));
-            }
-            let q = Integer::from(m / n);
-            // Wolfram Mod has the sign of the divisor
-            let r = Integer::from(m % n);
-            let r_adj = if !r.is_zero() && (r < 0) != (*n < 0) {
-                r + n
-            } else {
-                r
-            };
-            let q_adj = Integer::from(m / n);
-            // Recompute consistent with Mod convention
-            let q_final = if !r_adj.is_zero() && q_adj.clone() * n.clone() + r_adj.clone() != *m {
-                q - Integer::from(1)
-            } else {
-                q_adj
-            };
-            Ok(Value::List(vec![
-                Value::Integer(q_final),
-                Value::Integer(r_adj),
-            ]))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "Integer".to_string(),
-            got: args[0].type_name().to_string(),
-        }),
-    }
+    let q = builtin_quotient(args)?;
+    let r = builtin_mod(args)?;
+    Ok(Value::List(vec![q, r]))
 }
 
 /// KroneckerDelta[n1, n2, ...] — 1 if all equal, 0 otherwise
@@ -2066,6 +2241,16 @@ pub fn builtin_real_sign(args: &[Value]) -> Result<Value, EvalError> {
             let s = if r.is_sign_positive() && !r.is_zero() {
                 1i64
             } else if r.is_sign_negative() {
+                -1
+            } else {
+                0
+            };
+            Ok(Value::Integer(Integer::from(s)))
+        }
+        Value::Rational(r) => {
+            let s = if **r > 0 {
+                1i64
+            } else if **r < 0 {
                 -1
             } else {
                 0
@@ -2420,7 +2605,20 @@ mod tests {
 
     #[test]
     fn test_log_negative() {
-        assert!(builtin_log(&[int(-1)]).is_err());
+        // Log[-1] = I Pi
+        let result = builtin_log(&[int(-1)]).unwrap();
+        assert_eq!(result, i_pi());
+        // Log[-2] = Log[2] + I Pi
+        let result2 = builtin_log(&[int(-2)]).unwrap();
+        match result2 {
+            Value::Call { head, args } if head == "Plus" && args.len() == 2 => {}
+            other => panic!("Expected Plus[Log[2], I Pi], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_log_zero() {
+        assert_eq!(builtin_log(&[int(0)]).unwrap(), neg_infinity());
     }
 
     #[test]
@@ -2949,5 +3147,158 @@ mod tests {
             builtin_zero_q(&[real(0.1)]).unwrap(),
             Value::Symbol("False".to_string())
         );
+    }
+
+    // ── Exactness / sign-semantics hardening ──
+
+    fn rat(n: i64, d: i64) -> Value {
+        Value::Rational(Box::new(rug::Rational::from((
+            Integer::from(n),
+            Integer::from(d),
+        ))))
+    }
+
+    fn pi_over(d: u32) -> Value {
+        Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) / d)
+    }
+
+    #[test]
+    fn test_mod_sign_follows_divisor() {
+        // Mod[m, n] has the sign of n
+        assert_eq!(builtin_mod(&[int(10), int(-3)]).unwrap(), int(-2));
+        assert_eq!(builtin_mod(&[int(-10), int(-3)]).unwrap(), int(-1));
+        assert_eq!(builtin_mod(&[int(-10), int(3)]).unwrap(), int(2));
+        assert_eq!(builtin_mod(&[int(10), int(3)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_mod_rational_exact() {
+        assert_eq!(builtin_mod(&[rat(5, 2), int(1)]).unwrap(), rat(1, 2));
+        assert_eq!(builtin_mod(&[rat(-5, 2), int(1)]).unwrap(), rat(1, 2));
+        assert_eq!(builtin_mod(&[int(1), rat(2, 3)]).unwrap(), rat(1, 3));
+    }
+
+    #[test]
+    fn test_quotient_floor_semantics() {
+        assert_eq!(builtin_quotient(&[int(10), int(-3)]).unwrap(), int(-4));
+        assert_eq!(builtin_quotient(&[int(-10), int(3)]).unwrap(), int(-4));
+        assert_eq!(builtin_quotient(&[rat(5, 2), int(1)]).unwrap(), int(2));
+    }
+
+    #[test]
+    fn test_quotient_remainder_consistent() {
+        assert_eq!(
+            builtin_quotient_remainder(&[int(10), int(-3)]).unwrap(),
+            Value::List(vec![int(-4), int(-2)])
+        );
+        assert_eq!(
+            builtin_quotient_remainder(&[int(-10), int(3)]).unwrap(),
+            Value::List(vec![int(-4), int(2)])
+        );
+    }
+
+    #[test]
+    fn test_csc_sec_exact_values() {
+        assert_eq!(builtin_csc(&[pi_over(3)]).unwrap(), two_over_sqrt3());
+        assert_eq!(builtin_sec(&[pi_over(6)]).unwrap(), two_over_sqrt3());
+        // csc(3π/2) = -1
+        let three_pi_over_2 =
+            Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi) * 3u32 / 2u32);
+        assert_eq!(builtin_csc(&[three_pi_over_2]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_pi_multiple_reduction() {
+        let three_pi_over_2 = Value::Call {
+            head: "Divide".to_string(),
+            args: vec![
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![int(3), Value::Symbol("Pi".to_string())],
+                },
+                int(2),
+            ],
+        };
+        assert_eq!(extract_pi_multiple(&three_pi_over_2), Some((3, 2)));
+        // -Pi reduces to Pi modulo 2π
+        let neg_pi = Value::Call {
+            head: "Times".to_string(),
+            args: vec![int(-1), Value::Symbol("Pi".to_string())],
+        };
+        assert_eq!(extract_pi_multiple(&neg_pi), Some((1, 1)));
+        assert_eq!(builtin_csc(&[three_pi_over_2]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_floor_ceiling_rational() {
+        assert_eq!(builtin_floor(&[rat(-3, 2)]).unwrap(), int(-2));
+        assert_eq!(builtin_floor(&[rat(3, 2)]).unwrap(), int(1));
+        assert_eq!(builtin_ceiling(&[rat(3, 2)]).unwrap(), int(2));
+        assert_eq!(builtin_ceiling(&[rat(-3, 2)]).unwrap(), int(-1));
+    }
+
+    #[test]
+    fn test_round_half_to_even() {
+        assert_eq!(builtin_round(&[rat(1, 2)]).unwrap(), int(0));
+        assert_eq!(builtin_round(&[rat(3, 2)]).unwrap(), int(2));
+        assert_eq!(builtin_round(&[rat(5, 2)]).unwrap(), int(2));
+        assert_eq!(builtin_round(&[rat(-5, 2)]).unwrap(), int(-2));
+        assert_eq!(builtin_round(&[real(2.5)]).unwrap(), int(2));
+        assert_eq!(builtin_round(&[real(3.5)]).unwrap(), int(4));
+    }
+
+    #[test]
+    fn test_max_min_mixed_numeric() {
+        assert_eq!(builtin_max(&[int(1), real(2.5)]).unwrap(), real(2.5));
+        assert_eq!(builtin_min(&[real(2.5), int(1)]).unwrap(), int(1));
+        assert_eq!(builtin_max(&[int(1), int(2), rat(3, 2)]).unwrap(), int(2));
+        assert_eq!(builtin_min(&[rat(3, 2), int(1)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_gcd_lcm_variadic_and_rational() {
+        assert_eq!(builtin_gcd(&[int(4), int(6), int(8)]).unwrap(), int(2));
+        assert_eq!(
+            builtin_gcd(&[Value::List(vec![int(4), int(6), int(8)])]).unwrap(),
+            int(2)
+        );
+        assert_eq!(builtin_gcd(&[rat(1, 2), rat(3, 4)]).unwrap(), rat(1, 4));
+        assert_eq!(builtin_lcm(&[int(4), int(6), int(8)]).unwrap(), int(24));
+        assert_eq!(builtin_lcm(&[rat(1, 2), rat(3, 4)]).unwrap(), rat(3, 2));
+    }
+
+    #[test]
+    fn test_log2_log10_exact() {
+        assert_eq!(builtin_log2(&[int(8)]).unwrap(), int(3));
+        assert_eq!(builtin_log10(&[int(1000)]).unwrap(), int(3));
+        assert_eq!(builtin_log2(&[int(0)]).unwrap(), neg_infinity());
+    }
+
+    #[test]
+    fn test_sqrt_negative_integer_factor() {
+        assert_eq!(
+            builtin_sqrt(&[int(-4)]).unwrap(),
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![int(2), i_unit()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_sign_rational() {
+        assert_eq!(builtin_sign(&[rat(-3, 2)]).unwrap(), int(-1));
+        assert_eq!(builtin_sign(&[rat(3, 2)]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_empty_argument_identities() {
+        assert_eq!(builtin_max(&[]).unwrap(), neg_infinity());
+        assert_eq!(
+            builtin_min(&[]).unwrap(),
+            Value::Symbol("Infinity".to_string())
+        );
+        assert_eq!(builtin_gcd(&[]).unwrap(), int(0));
+        assert_eq!(builtin_lcm(&[]).unwrap(), int(1));
     }
 }

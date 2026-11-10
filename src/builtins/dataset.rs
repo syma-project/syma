@@ -95,10 +95,22 @@ pub fn builtin_dataset_q(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Query engine ──
 
+/// A `Missing["KeyAbsent", key]` value, used when a key is absent.
+fn missing_key(key: &str) -> Value {
+    Value::Call {
+        head: "Missing".to_string(),
+        args: vec![
+            Value::Str("KeyAbsent".to_string()),
+            Value::Str(key.to_string()),
+        ],
+    }
+}
+
 /// Execute a call-syntax query on Dataset inner data.
 ///
 /// ds[All, "field"]     -> extract column from all rows
 /// ds[i]                -> row selection (1-indexed)
+/// ds[{i, j}]           -> row selection by a list of positions
 /// ds[i, "field"]       -> cell value
 /// ds[All, {"a","b"}]   -> column subset (returns list of assocs with only those keys)
 pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Value, EvalError> {
@@ -110,23 +122,20 @@ pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Valu
                 // All is transparent
             }
             Value::Integer(n) => {
-                // Row selection from list
-                match &current {
-                    Value::List(items) => {
-                        let i = n.to_i64().unwrap_or(0);
-                        let idx = normalize_index(i, items.len())?;
-                        current = items[idx].clone();
-                    }
-                    _ => {
-                        return Err(EvalError::TypeError {
-                            expected: "List".to_string(),
-                            got: current.type_name().to_string(),
-                        });
-                    }
-                }
+                current = select_row(&current, n.to_i64().unwrap_or(0))?;
             }
             Value::Str(key) => {
                 current = extract_column(&current, key)?;
+            }
+            Value::List(sel)
+                if !sel.is_empty() && sel.iter().all(|x| matches!(x, Value::Integer(_))) =>
+            {
+                // Row selection by a list of positions (e.g. ds[{1, 3}]).
+                let mut rows = Vec::with_capacity(sel.len());
+                for n in sel {
+                    rows.push(select_row(&current, n.to_integer().unwrap_or(0))?);
+                }
+                current = Value::List(rows);
             }
             Value::List(keys) => {
                 // Column subset: keep only specified keys from each assoc
@@ -154,16 +163,31 @@ pub fn dataset_query(data: &Value, indices: &[Value], _env: &Env) -> Result<Valu
     Ok(current)
 }
 
+/// Select one (possibly negative) 1-indexed position from a list.
+fn select_row(data: &Value, index: i64) -> Result<Value, EvalError> {
+    match data {
+        Value::List(items) => {
+            let idx = normalize_index(index, items.len())?;
+            Ok(items[idx].clone())
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "List".to_string(),
+            got: data.type_name().to_string(),
+        }),
+    }
+}
+
 /// Extract a column (by key string) from a list of assocs or a single assoc.
+/// Absent keys produce `Missing["KeyAbsent", key]`, as in Wolfram Language.
 fn extract_column(data: &Value, key: &str) -> Result<Value, EvalError> {
     match data {
         Value::List(items) => {
             let values: Result<Vec<Value>, EvalError> = items
                 .iter()
                 .map(|item| match item {
-                    Value::Assoc(map) => map.get(key).cloned().ok_or_else(|| {
-                        EvalError::Error(format!("Key '{}' not found in association", key))
-                    }),
+                    Value::Assoc(map) => {
+                        Ok(map.get(key).cloned().unwrap_or_else(|| missing_key(key)))
+                    }
                     _ => Err(EvalError::TypeError {
                         expected: "Assoc".to_string(),
                         got: item.type_name().to_string(),
@@ -172,10 +196,7 @@ fn extract_column(data: &Value, key: &str) -> Result<Value, EvalError> {
                 .collect();
             Ok(Value::List(values?))
         }
-        Value::Assoc(map) => map
-            .get(key)
-            .cloned()
-            .ok_or_else(|| EvalError::Error(format!("Key '{}' not found in association", key))),
+        Value::Assoc(map) => Ok(map.get(key).cloned().unwrap_or_else(|| missing_key(key))),
         _ => Err(EvalError::TypeError {
             expected: "List or Assoc".to_string(),
             got: data.type_name().to_string(),
@@ -183,7 +204,8 @@ fn extract_column(data: &Value, key: &str) -> Result<Value, EvalError> {
     }
 }
 
-/// Select a subset of columns from a list of assocs or a single assoc.
+/// Select a subset of columns from a list of assocs or a single assoc. Absent
+/// keys are filled with `Missing["KeyAbsent", key]`.
 fn select_columns(data: &Value, keys: &[&str]) -> Result<Value, EvalError> {
     match data {
         Value::List(items) => {
@@ -193,9 +215,8 @@ fn select_columns(data: &Value, keys: &[&str]) -> Result<Value, EvalError> {
                     Value::Assoc(map) => {
                         let mut new_map = std::collections::HashMap::new();
                         for k in keys {
-                            if let Some(v) = map.get(*k) {
-                                new_map.insert(k.to_string(), v.clone());
-                            }
+                            let v = map.get(*k).cloned().unwrap_or_else(|| missing_key(k));
+                            new_map.insert(k.to_string(), v);
                         }
                         Ok(Value::Assoc(new_map))
                     }
@@ -210,9 +231,8 @@ fn select_columns(data: &Value, keys: &[&str]) -> Result<Value, EvalError> {
         Value::Assoc(map) => {
             let mut new_map = std::collections::HashMap::new();
             for k in keys {
-                if let Some(v) = map.get(*k) {
-                    new_map.insert(k.to_string(), v.clone());
-                }
+                let v = map.get(*k).cloned().unwrap_or_else(|| missing_key(k));
+                new_map.insert(k.to_string(), v);
             }
             Ok(Value::Assoc(new_map))
         }
@@ -498,22 +518,97 @@ mod tests {
         );
     }
 
-    // ── Error cases ──
+    // ── Missing keys ──
 
     #[test]
-    fn test_query_missing_key_error() {
-        // Missing key should produce an error
-        let env = Env::new();
-        builtins::register_builtins(&env);
-        let input = "(
+    fn test_query_missing_key_returns_missing() {
+        // Absent keys produce Missing["KeyAbsent", key] in a query.
+        let result = eval_str(
+            "(
             ds = Dataset[{<|\"a\"->1|>}];
             ds[All, \"x\"]
-        )";
-        let tokens = lexer::tokenize(input).unwrap();
-        let ast = parser::parse(tokens).unwrap();
-        let result = eval_program(&ast, &env);
-        // Should be an error (key not found)
-        assert!(result.is_err());
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Str("KeyAbsent".to_string()),
+                    Value::Str("x".to_string())
+                ],
+            }])
+        );
+    }
+
+    #[test]
+    fn test_query_cell_missing_key_returns_missing() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>}];
+            ds[1, \"x\"]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Str("KeyAbsent".to_string()),
+                    Value::Str("x".to_string())
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_query_column_subset_missing_key() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>}];
+            ds[All, {\"a\", \"z\"}]
+        )",
+        );
+        let mut map = std::collections::HashMap::new();
+        map.insert("a".to_string(), int(1));
+        map.insert(
+            "z".to_string(),
+            Value::Call {
+                head: "Missing".to_string(),
+                args: vec![
+                    Value::Str("KeyAbsent".to_string()),
+                    Value::Str("z".to_string()),
+                ],
+            },
+        );
+        assert_eq!(result, Value::List(vec![Value::Assoc(map)]));
+    }
+
+    // ── Row list selection ──
+
+    #[test]
+    fn test_query_row_list() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1|>, <|\"a\"->2|>, <|\"a\"->3|>}];
+            ds[{3, 1}]
+        )",
+        );
+        assert_eq!(
+            result,
+            Value::List(vec![assoc(vec![("a", int(3))]), assoc(vec![("a", int(1))])])
+        );
+    }
+
+    #[test]
+    fn test_query_row_list_then_column() {
+        let result = eval_str(
+            "(
+            ds = Dataset[{<|\"a\"->1, \"b\"->10|>, <|\"a\"->2, \"b\"->20|>, <|\"a\"->3, \"b\"->30|>}];
+            ds[{1, 3}, \"b\"]
+        )",
+        );
+        assert_eq!(result, Value::List(vec![int(10), int(30)]));
     }
 
     // ── Normal ──

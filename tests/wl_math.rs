@@ -178,7 +178,7 @@ fn linear_algebra() {
     eq("Inverse[{{1, 2}, {3, 4}}]", "{{-2, 1}, {3/2, -1/2}}");
     eq("LinearSolve[{{2, 0}, {0, 4}}, {2, 8}]", "{1, 2}");
     eq("MatrixPower[{{1, 1}, {0, 1}}, 3]", "{{1, 3}, {0, 1}}");
-    eq("Eigenvalues[{{2, 0}, {0, 3}}]", "{2, 3}");
+    eq("Eigenvalues[{{2, 0}, {0, 3}}]", "{3, 2}");
     eq("Norm[{3, 4}]", "5");
 }
 
@@ -193,4 +193,110 @@ fn numeric_accuracy() {
         "FindRoot[Cos[x] == x, {x, 1}][[1, 2]]",
         "0.7390851332151606416",
     );
+}
+
+/// String/structural equality helper.
+fn eqs(expr: &str, expected: &str) {
+    let a = syma_eval(expr);
+    let b = syma_eval(expected);
+    assert_eq!(a, b, "`{expr}` != `{expected}`");
+}
+
+// ── elementary math ──
+#[test]
+fn math_elementary() {
+    eq("Mod[10, 3]", "1");
+    eq("Quotient[10, 3]", "3");
+    eq("GCD[24, 36]", "12");
+    eq("Floor[-2.5]", "-3");
+    eq("Ceiling[-2.5]", "-2");
+    eq("Sign[-3]", "-1");
+    eq("Max[3, 1, 2]", "3");
+    eq("Total[{1, 2, 3}]", "6");
+    eq("Sqrt[16]", "4");
+    eq("2^10", "1024");
+    eq("Log[1]", "0");
+    eq("Sin[0]", "0");
+}
+
+// ── number theory ──
+#[test]
+fn number_theory_x() {
+    eq("Prime[10]", "29");
+    eq("NextPrime[100]", "101");
+    eq("EulerPhi[10]", "4");
+    eq("MoebiusMu[30]", "-1");
+    eq("DivisorSigma[1, 6]", "12");
+    eq("FromDigits[{1, 2, 3}]", "123");
+    eq("PrimePi[100]", "25");
+    eq("Divisors[12]", "{1, 2, 3, 4, 6, 12}");
+    eq("IntegerDigits[1234]", "{1, 2, 3, 4}");
+}
+
+// ── combinatorics ──
+#[test]
+fn combinatorics_x() {
+    eq("Binomial[10, 3]", "120");
+    eq("CatalanNumber[5]", "42");
+    eq("Fibonacci[10]", "55");
+    eq("Factorial[5]", "120");
+    eq("Multinomial[2, 3]", "10");
+    eq("StirlingS2[5, 2]", "15");
+    eq("PartitionsP[5]", "7");
+}
+
+// ── statistics ──
+#[test]
+fn statistics_basic() {
+    eq("Mean[{1, 2, 3, 4}]", "5/2");
+    eq("Median[{1, 2, 3, 4, 5}]", "3");
+    eq("Variance[{1, 2, 3}]", "1");
+    eq("StandardDeviation[{1, 2, 3}]", "1");
+    eq("Quantile[{1, 2, 3, 4}, 0.5]", "5/2");
+}
+
+// ── probability ──
+#[test]
+fn probability_basic() {
+    eq("PDF[NormalDistribution[0, 1], 0]", "0.3989422804014327");
+    eq("CDF[NormalDistribution[0, 1], 0]", "1/2");
+    eq("Mean[NormalDistribution[2, 3]]", "2");
+    eq("Variance[NormalDistribution[2, 3]]", "9");
+    eq("Probability[x > 0, NormalDistribution[0, 1]]", "0.5");
+}
+
+// ── integral transforms ──
+#[test]
+fn transforms_laplace() {
+    eq("LaplaceTransform[t^2, t, s]", "2/s^3");
+    eq("LaplaceTransform[Sin[a t], t, s]", "a/(a^2 + s^2)");
+    eq("LaplaceTransform[Exp[-a t], t, s]", "1/(s + a)");
+    eq("InverseLaplaceTransform[1/s^2, s, t]", "t");
+}
+
+// ── hypergeometric ──
+#[test]
+fn hypergeometric_values() {
+    eq("Hypergeometric1F1[1, 2, 1]", "E - 1");
+    eq("Hypergeometric2F1[1, 1, 2, 1/2]", "2 Log[2]");
+    eq("Hypergeometric0F1[1, 1]", "BesselI[0, 2]");
+}
+
+// ── optimization ──
+#[test]
+fn optimize_basic() {
+    eq("First[FindMinimum[(x - 2)^2, {x, 0}]]", "0");
+    eq("First[Minimize[x^2 - 2 x, x]]", "-1");
+    eq("First[Maximize[-(x - 1)^2 + 3, x]]", "3");
+}
+
+// ── strings ──
+#[test]
+fn strings_basic() {
+    eqs("StringJoin[\"a\", \"b\"]", "\"ab\"");
+    eqs("StringLength[\"abc\"]", "3");
+    eqs("StringReverse[\"abc\"]", "\"cba\"");
+    eqs("ToUpperCase[\"abc\"]", "\"ABC\"");
+    eqs("StringTake[\"abcde\", 3]", "\"abc\"");
+    eqs("StringCount[\"abcabc\", \"bc\"]", "2");
 }

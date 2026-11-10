@@ -1,7 +1,7 @@
 use crate::ast::Expr;
 use crate::env::Env;
 use crate::eval::eval;
-use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
+use crate::pattern::{AttributeChecker, MatchResult, collect_nested_guards, match_pattern};
 use crate::value::EvalError;
 use crate::value::Value;
 use std::collections::HashMap;
@@ -22,8 +22,30 @@ fn value_to_pattern_expr(val: &Value) -> Expr {
         Value::Bool(b) => Expr::Bool(*b),
         Value::Null => Expr::Null,
         Value::Symbol(s) => Expr::Symbol(s.clone()),
+        // Builtins evaluate to `Value::Builtin`; when used as a pattern head
+        // (e.g. `PatternTest[_, EvenQ]`) they must convert back to their name.
+        Value::Builtin(name, _) => Expr::Symbol(name.clone()),
         _ => Expr::Symbol(val.to_string()),
     }
+}
+
+/// Function heads that introduce pattern structure even when none of their
+/// arguments contain a `Value::Pattern` node (for example `Alternatives[1, 2]`
+/// or `RepeatedNull[0]`).
+fn is_pattern_head(head: &str) -> bool {
+    matches!(
+        head,
+        "Alternatives"
+            | "Except"
+            | "Repeated"
+            | "RepeatedNull"
+            | "Condition"
+            | "PatternTest"
+            | "KeyValuePattern"
+            | "HoldPattern"
+            | "Verbatim"
+            | "Optional"
+    )
 }
 
 /// Check if a value tree contains any Pattern nodes.
@@ -31,7 +53,9 @@ fn contains_pattern_value(val: &Value) -> bool {
     match val {
         Value::Pattern(_) => true,
         Value::List(items) => items.iter().any(contains_pattern_value),
-        Value::Call { args, .. } => args.iter().any(contains_pattern_value),
+        Value::Call { head, args } => {
+            is_pattern_head(head) || args.iter().any(contains_pattern_value)
+        }
         _ => false,
     }
 }
@@ -139,6 +163,46 @@ pub fn builtin_free_q(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(Value::Bool(result))
 }
 
+/// Evaluate every guard collected from a matched pattern against `bindings`.
+/// Returns `false` if any guard fails. With no `env` guards are skipped.
+fn guards_pass(
+    pat_expr: &Expr,
+    bindings: &crate::pattern::Bindings,
+    value: &Value,
+    env: Option<&Env>,
+) -> bool {
+    let Some(env) = env else {
+        return true;
+    };
+    let mut guards = Vec::new();
+    collect_nested_guards(pat_expr, &mut guards);
+    if guards.is_empty() {
+        return true;
+    }
+    let slots: Vec<Value> = match value {
+        Value::Call { args, .. } => args.clone(),
+        Value::List(items) => items.clone(),
+        _ => vec![],
+    };
+    for guard in &guards {
+        let guard_env = env.child();
+        for (name, val) in bindings {
+            guard_env.set(name.clone(), val.clone());
+        }
+        guard_env.set("#".to_string(), value.clone());
+        for (i, sv) in slots.iter().enumerate() {
+            guard_env.set(format!("#{}", i + 1), sv.clone());
+        }
+        if !eval(guard, &guard_env)
+            .map(|v| v.to_bool())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Check if a value matches a pattern.
 /// If pattern is a Value::Pattern, use the pattern engine; otherwise use structural equality.
 /// If env is provided, PatternGuard conditions are evaluated.
@@ -158,37 +222,15 @@ fn matches_value(
             // Unwrap hold wrappers for comparison
             matches_value(value, inner, attr_checker, env)
         }
-        Value::Pattern(pat_expr) => {
-            // Handle PatternGuard with guard evaluation
-            if let Expr::PatternGuard { pattern, condition } = pat_expr {
-                if matches!(
-                    match_pattern(pattern, value, attr_checker),
-                    MatchResult::Match(_)
-                ) {
-                    if let Some(env) = env {
-                        let guard_env = env.child();
-                        guard_env.set("#".to_string(), value.clone());
-                        eval(condition, &guard_env)
-                            .map(|v| v.to_bool())
-                            .unwrap_or(false)
-                    } else {
-                        true // no env means we can't evaluate the guard
-                    }
-                } else {
-                    false
-                }
-            } else {
-                matches!(
-                    match_pattern(pat_expr, value, attr_checker),
-                    MatchResult::Match(_)
-                )
-            }
-        }
+        Value::Pattern(pat_expr) => matches!(
+            match_pattern(pat_expr, value, attr_checker),
+            MatchResult::Match(bindings) if guards_pass(pat_expr, &bindings, value, env)
+        ),
         _ if contains_pattern_value(pattern) => {
             let pat_expr = value_to_pattern_expr(pattern);
             matches!(
                 match_pattern(&pat_expr, value, attr_checker),
-                MatchResult::Match(_)
+                MatchResult::Match(bindings) if guards_pass(&pat_expr, &bindings, value, env)
             )
         }
         _ => value.struct_eq(pattern),
@@ -426,6 +468,63 @@ mod tests {
 
     fn test_env() -> crate::env::Env {
         crate::env::Env::new()
+    }
+
+    /// Environment with builtins registered (needed for guard evaluation).
+    fn guard_env() -> crate::env::Env {
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        env
+    }
+
+    #[test]
+    fn test_match_q_condition_call_guard() {
+        // Condition[x_, x > 2] matches only values greater than 2.
+        let pat = Value::Call {
+            head: "Condition".to_string(),
+            args: vec![
+                Value::Pattern(crate::ast::Expr::NamedBlank {
+                    name: "x".to_string(),
+                    type_constraint: None,
+                }),
+                Value::Call {
+                    head: "Greater".to_string(),
+                    args: vec![Value::Symbol("x".to_string()), int(2)],
+                },
+            ],
+        };
+        let env = guard_env();
+        assert_eq!(
+            builtin_match_q(&[int(3), pat.clone()], &env).unwrap(),
+            boolean(true)
+        );
+        assert_eq!(
+            builtin_match_q(&[int(1), pat], &env).unwrap(),
+            boolean(false)
+        );
+    }
+
+    #[test]
+    fn test_match_q_pattern_test_call_guard() {
+        // PatternTest[_, EvenQ] matches only even integers.
+        let pat = Value::Call {
+            head: "PatternTest".to_string(),
+            args: vec![
+                Value::Pattern(crate::ast::Expr::Blank {
+                    type_constraint: None,
+                }),
+                Value::Symbol("EvenQ".to_string()),
+            ],
+        };
+        let env = guard_env();
+        assert_eq!(
+            builtin_match_q(&[int(4), pat.clone()], &env).unwrap(),
+            boolean(true)
+        );
+        assert_eq!(
+            builtin_match_q(&[int(3), pat], &env).unwrap(),
+            boolean(false)
+        );
     }
 
     fn pat_blank() -> Value {

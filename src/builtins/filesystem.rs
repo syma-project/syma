@@ -97,10 +97,16 @@ pub fn builtin_file_name_join(args: &[Value]) -> Result<Value, EvalError> {
     for (i, item) in list.iter().enumerate() {
         match item {
             Value::Str(s) => {
-                if i == 0 && s.starts_with(std::path::MAIN_SEPARATOR) {
-                    pb.push(std::path::MAIN_SEPARATOR_STR);
+                if i == 0 {
+                    pb.push(s);
+                } else {
+                    // A leading separator on later components must not reset the
+                    // accumulated path (Wolfram's FileNameJoin joins instead).
+                    let trimmed = s.trim_start_matches(std::path::MAIN_SEPARATOR);
+                    if !trimmed.is_empty() {
+                        pb.push(trimmed);
+                    }
                 }
-                pb.push(s);
             }
             other => {
                 return Err(EvalError::TypeError {
@@ -235,7 +241,17 @@ pub fn builtin_expand_file_name(args: &[Value]) -> Result<Value, EvalError> {
             "ExpandFileName requires exactly 1 argument".to_string(),
         ));
     }
-    let s = arg_string(args, 0, "ExpandFileName")?;
+    let mut s = arg_string(args, 0, "ExpandFileName")?;
+    // Expand a leading `~` to the home directory (mirrors Import/Export).
+    if (s.starts_with("~/") || s == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        s = if s == "~" {
+            home
+        } else {
+            format!("{}{}", home, &s[1..])
+        };
+    }
     // Try canonicalize first; fall back to std::env::current_dir + join
     match std::fs::canonicalize(&s) {
         Ok(p) => Ok(Value::Str(p.to_string_lossy().into_owned())),
@@ -366,16 +382,35 @@ pub fn builtin_file_names(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
 
+    // A pattern may itself contain a directory part, e.g. `FileNames["src/*.rs"]`.
+    let (subdir, file_pattern) = match pattern.rfind(['/', std::path::MAIN_SEPARATOR]) {
+        Some(idx) => (&pattern[..idx], &pattern[idx + 1..]),
+        None => ("", pattern.as_str()),
+    };
+
     let mut results = Vec::new();
     for dir in &dirs {
-        let entries = match std::fs::read_dir(dir) {
+        let search_dir = if subdir.is_empty() {
+            PathBuf::from(dir)
+        } else {
+            PathBuf::from(dir).join(subdir)
+        };
+        let entries = match std::fs::read_dir(&search_dir) {
             Ok(e) => e,
             Err(_) => continue, // skip non-existent directories
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if glob_match(&pattern, &name) {
-                results.push(Value::Str(name));
+            if glob_match(file_pattern, &name) {
+                let display = if subdir.is_empty() {
+                    name
+                } else {
+                    PathBuf::from(subdir)
+                        .join(&name)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                results.push(Value::Str(display));
             }
         }
     }
@@ -562,6 +597,69 @@ mod tests {
             assert!(!items.is_empty());
         } else {
             panic!("expected list");
+        }
+    }
+
+    // ── Hardening tests ─────────────────────────────────────────────────
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("syma_fs_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_file_name_join_absolute_components() {
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        // A leading separator on a later component must not reset the path.
+        assert_eq!(
+            builtin_file_name_join(&[list(vec![string("/a"), string("b")])]).unwrap(),
+            string(&format!("{}a{}b", sep, sep))
+        );
+        assert_eq!(
+            builtin_file_name_join(&[list(vec![string("/a"), string("/b"), string("c")])]).unwrap(),
+            string(&format!("{}a{}b{}c", sep, sep, sep))
+        );
+    }
+
+    #[test]
+    fn test_file_names_subdir_pattern_with_tempfiles() {
+        let root = tmp_dir("subdir");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.rs"), "a").unwrap();
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        std::fs::write(root.join("sub").join("c.rs"), "c").unwrap();
+
+        let root_s = root.to_string_lossy().into_owned();
+        let sep = std::path::MAIN_SEPARATOR_STR;
+
+        let flat = builtin_file_names(&[string("*.rs"), list(vec![string(&root_s)])]).unwrap();
+        assert_eq!(flat, list(vec![string("a.rs")]));
+
+        let nested = builtin_file_names(&[
+            string(&format!("sub{}*.rs", sep)),
+            list(vec![string(&root_s)]),
+        ])
+        .unwrap();
+        assert_eq!(nested, list(vec![string(&format!("sub{}c.rs", sep))]));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_file_names_missing_dir_is_skipped() {
+        let result =
+            builtin_file_names(&[string("*"), list(vec![string("/nonexistent_dir_syma_xyz")])])
+                .unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_expand_file_name_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            let result = builtin_expand_file_name(&[string("~")]).unwrap();
+            assert_eq!(result, string(&home));
         }
     }
 }

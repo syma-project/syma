@@ -767,25 +767,778 @@ fn is_array_value(val: &Value) -> bool {
 // Formula Simplification (beyond basic Simplify)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// FullSimplify[expr] — more aggressive simplification using multiple strategies.
+/// FullSimplify[expr] — aggressive simplification.
+///
+/// Runs many transformation strategies (basic `Simplify`, `Together`,
+/// `Cancel`, `Apart`, `Expand`, `Factor`, like-term combination, and common
+/// trig identities), recurses bottom-up, and keeps the shortest equivalent
+/// form it can find. It always seeds the search with `Simplify` so the result
+/// is never weaker than plain simplification.
 pub fn builtin_full_simplify(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
             "FullSimplify expects exactly 1 argument".to_string(),
         ));
     }
-    // Apply multiple simplification strategies and pick the shortest
-    let original = &args[0];
-    let strategies: Vec<Value> = vec![
-        crate::builtins::symbolic::builtin_simplify(&[original.clone()])?,
-        builtin_together(&[original.clone()])?,
-        builtin_cancel(&[original.clone()])?,
-    ];
-    let best = strategies
-        .into_iter()
-        .min_by_key(|v| v.to_string().len())
-        .unwrap_or_else(|| original.clone());
-    Ok(best)
+    Ok(full_simplify_value(&args[0]))
+}
+
+/// Recursively full-simplify `val`, descending into subexpressions first.
+fn full_simplify_value(val: &Value) -> Value {
+    let lowered = match val {
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(full_simplify_value).collect(),
+        },
+        Value::List(items) => Value::List(items.iter().map(full_simplify_value).collect()),
+        Value::Sequence(items) => Value::Sequence(items.iter().map(full_simplify_value).collect()),
+        Value::Rule { lhs, rhs, delayed } => Value::Rule {
+            lhs: Box::new(full_simplify_value(lhs)),
+            rhs: Box::new(full_simplify_value(rhs)),
+            delayed: *delayed,
+        },
+        _ => val.clone(),
+    };
+    best_simplification(&lowered)
+}
+
+/// Repeatedly apply candidate rewrites, keeping only strictly shorter
+/// (lower-complexity) forms, until a fixpoint or a small iteration bound.
+fn best_simplification(val: &Value) -> Value {
+    let mut best = base_simplify(val);
+    for _ in 0..4 {
+        let mut improved = false;
+        for cand in simplification_candidates(&best) {
+            if value_complexity(&cand) < value_complexity(&best) {
+                best = cand;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    best
+}
+
+/// Baseline `Simplify` used as a seed and to normalise every candidate.
+fn base_simplify(val: &Value) -> Value {
+    crate::builtins::symbolic::builtin_simplify(&[val.clone()]).unwrap_or_else(|_| val.clone())
+}
+
+/// Total-order complexity: leaf count first, then textual length.
+fn value_complexity(val: &Value) -> (usize, usize) {
+    (count_leaves(val), val.to_string().len())
+}
+
+/// Build every candidate rewrite of `val`, each normalised through `Simplify`.
+fn simplification_candidates(val: &Value) -> Vec<Value> {
+    use crate::builtins::symbolic;
+    use crate::builtins::symbolicmanip;
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut push = |candidate: Value| out.push(base_simplify(&candidate));
+
+    // Combine sums of fractions over a common denominator.
+    let mut together: Option<Value> = None;
+    if let Ok(v) = symbolicmanip::builtin_together(&[val.clone()]) {
+        push(v.clone());
+        together = Some(v);
+    }
+    // Cancel common factors in rational expressions. Done locally because the
+    // registered `Cancel` performs unsound polynomial division when a second
+    // symbol appears (e.g. Cancel[(x + y)/(x y)] == 1/x).
+    push(full_cancel(val));
+    // Partial-fraction decomposition (pairs with Together).
+    if let Ok(v) = symbolicmanip::builtin_apart(&[val.clone()]) {
+        push(v);
+    }
+    // Distribute products over sums, then re-simplify.
+    if let Ok(expanded) = symbolic::builtin_expand(&[val.clone()]) {
+        push(expanded);
+    }
+    // Factor a genuine polynomial (the expanded form avoids `Factor`'s
+    // mishandling of nested unexpanded products), then cancel any common
+    // factor the factorisation exposes.
+    if let Some(factored) = try_factor_polynomial(val) {
+        push(factored.clone());
+        push(full_cancel(&factored));
+    }
+    // Combine fractions (robust to `Times[…] * Divide[…]` terms), then cancel
+    // the common denominator that introduced.
+    let owned = together_value(val);
+    if !owned.struct_eq(val) {
+        push(owned);
+    }
+    if let Some(combined) = together {
+        push(full_cancel(&combined));
+    }
+    // Pythagorean identity Sin[u]^2 + Cos[u]^2 -> 1.
+    push(pythagorean_reduce(val));
+    // Expand double angles so they can cancel against each other.
+    push(expand_double_angles(val));
+
+    out
+}
+
+/// Cancel common factors in the numerator/denominator of `val`.
+///
+/// Works by factorising both sides (when they are genuine polynomials) and
+/// removing matching factors, then attempting an exact polynomial division as
+/// a fallback. This is more reliable than the registered `Cancel`.
+fn full_cancel(val: &Value) -> Value {
+    let (num, den) = match val {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            (args[0].clone(), args[1].clone())
+        }
+        _ => return base_simplify(val),
+    };
+    if is_zero_value(&base_simplify(&num)) {
+        return Value::Integer(Integer::from(0));
+    }
+    if is_one(&den) {
+        return base_simplify(&num);
+    }
+
+    let num_f = base_simplify(&try_factor_polynomial(&num).unwrap_or(num));
+    let den_f = base_simplify(&try_factor_polynomial(&den).unwrap_or(den));
+    let (cancelled_num, cancelled_den) = cancel_factor_lists(&num_f, &den_f);
+
+    if is_one(&cancelled_den) {
+        return base_simplify(&cancelled_num);
+    }
+    if let Some(quotient) = try_exact_poly_divide(&cancelled_num, &cancelled_den) {
+        return base_simplify(&quotient);
+    }
+    base_simplify(&Value::Call {
+        head: "Divide".to_string(),
+        args: vec![cancelled_num, cancelled_den],
+    })
+}
+
+/// Combine a sum of rational terms over a common denominator and cancel.
+///
+/// Unlike the registered `Together`, this understands terms shaped like
+/// `Times[-1, Divide[a, b]]` (a fraction multiplied by extra factors), which
+/// otherwise get left inside the numerator.
+fn together_value(val: &Value) -> Value {
+    let Value::Call { head, args } = val else {
+        return val.clone();
+    };
+    if head != "Plus" {
+        return full_cancel(val);
+    }
+    if !args.iter().any(term_has_denominator) {
+        return val.clone();
+    }
+
+    let fractions: Vec<(Value, Value)> = args.iter().map(as_fraction).collect();
+    let dens: Vec<Value> = fractions.iter().map(|(_, d)| d.clone()).collect();
+    let common = build_product(dens.iter().filter(|d| !is_one(d)).cloned());
+
+    let mut numerator_terms: Vec<Value> = Vec::new();
+    for (n, d) in &fractions {
+        let scale = if is_one(d) {
+            Value::Integer(Integer::from(1))
+        } else {
+            base_simplify(&Value::Call {
+                head: "Divide".to_string(),
+                args: vec![common.clone(), d.clone()],
+            })
+        };
+        numerator_terms.push(Value::Call {
+            head: "Times".to_string(),
+            args: vec![n.clone(), scale],
+        });
+    }
+    let numerator = build_sum(numerator_terms);
+    full_cancel(&Value::Call {
+        head: "Divide".to_string(),
+        args: vec![base_simplify(&numerator), base_simplify(&common)],
+    })
+}
+
+/// True if `term` contains a fraction factor (a `Divide` or negative power).
+fn term_has_denominator(term: &Value) -> bool {
+    match term {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => true,
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            matches!(&args[1], Value::Integer(n) if n.is_negative())
+        }
+        Value::Call { head, args } if head == "Times" => args.iter().any(term_has_denominator),
+        _ => false,
+    }
+}
+
+/// Split a term into `(numerator, denominator)`.
+fn as_fraction(term: &Value) -> (Value, Value) {
+    match term {
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            (args[0].clone(), args[1].clone())
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mut num: Vec<Value> = Vec::new();
+            let mut den: Vec<Value> = Vec::new();
+            for a in args {
+                let (n, d) = as_fraction(a);
+                num.push(n);
+                if !is_one(&d) {
+                    den.push(d);
+                }
+            }
+            (
+                build_product(num.into_iter()),
+                build_product(den.into_iter()),
+            )
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(n) = &args[1]
+                && n.is_negative()
+            {
+                let positive = -n.clone();
+                let d = if positive == 1 {
+                    args[0].clone()
+                } else {
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![args[0].clone(), Value::Integer(positive)],
+                    }
+                };
+                return (Value::Integer(Integer::from(1)), d);
+            }
+            (term.clone(), Value::Integer(Integer::from(1)))
+        }
+        _ => (term.clone(), Value::Integer(Integer::from(1))),
+    }
+}
+
+fn build_product(values: impl Iterator<Item = Value>) -> Value {
+    let items: Vec<Value> = values.collect();
+    match items.len() {
+        0 => Value::Integer(Integer::from(1)),
+        1 => items.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Times".to_string(),
+            args: items,
+        },
+    }
+}
+
+fn build_sum(values: Vec<Value>) -> Value {
+    match values.len() {
+        0 => Value::Integer(Integer::from(0)),
+        1 => values.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Plus".to_string(),
+            args: values,
+        },
+    }
+}
+
+/// Collect a product into `(base, exponent)` pairs (exponents may be negative).
+fn collect_factors(val: &Value, factors: &mut Vec<(Value, Integer)>) {
+    match val {
+        Value::Call { head, args } if head == "Times" => {
+            for a in args {
+                collect_factors(a, factors);
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if let Value::Integer(n) = &args[1] {
+                factors.push((args[0].clone(), n.clone()));
+            } else {
+                factors.push((val.clone(), Integer::from(1)));
+            }
+        }
+        _ => factors.push((val.clone(), Integer::from(1))),
+    }
+}
+
+/// Rebuild a product from `(base, exponent)` pairs (all exponents positive).
+fn rebuild_factors(factors: &[(Value, Integer)]) -> Value {
+    let mut terms: Vec<Value> = Vec::new();
+    for (base, exp) in factors {
+        if exp.is_zero() {
+            continue;
+        }
+        if *exp == 1 {
+            terms.push(base.clone());
+        } else {
+            terms.push(Value::Call {
+                head: "Power".to_string(),
+                args: vec![base.clone(), Value::Integer(exp.clone())],
+            });
+        }
+    }
+    match terms.len() {
+        0 => Value::Integer(Integer::from(1)),
+        1 => terms.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Times".to_string(),
+            args: terms,
+        },
+    }
+}
+
+/// Remove matching factors shared by `num` and `den`.
+fn cancel_factor_lists(num: &Value, den: &Value) -> (Value, Value) {
+    let mut num_factors: Vec<(Value, Integer)> = Vec::new();
+    let mut den_factors: Vec<(Value, Integer)> = Vec::new();
+    collect_factors(num, &mut num_factors);
+    collect_factors(den, &mut den_factors);
+
+    let mut used = vec![false; den_factors.len()];
+    for (nb, ne) in num_factors.iter_mut() {
+        for (j, (db, de)) in den_factors.iter().enumerate() {
+            if !used[j] && factor_eq(db, nb) {
+                used[j] = true;
+                *ne -= de;
+                break;
+            }
+        }
+    }
+    for (j, (db, de)) in den_factors.iter().enumerate() {
+        if !used[j] {
+            num_factors.push((db.clone(), -de.clone()));
+        }
+    }
+
+    let mut num_positive = Vec::new();
+    let mut den_positive = Vec::new();
+    for (base, exp) in num_factors {
+        if exp.is_negative() {
+            den_positive.push((base, -exp));
+        } else {
+            num_positive.push((base, exp));
+        }
+    }
+    (
+        rebuild_factors(&num_positive),
+        rebuild_factors(&den_positive),
+    )
+}
+
+/// Structural equality up to `Plus`/`Times` commutativity, used so that
+/// factors like `x + 1` and `1 + x` are recognised as the same.
+fn factor_eq(a: &Value, b: &Value) -> bool {
+    if a.struct_eq(b) {
+        return true;
+    }
+    match (a, b) {
+        (Value::Call { head: ha, args: aa }, Value::Call { head: hb, args: ab })
+            if (ha == "Plus" || ha == "Times") && ha == hb && aa.len() == ab.len() =>
+        {
+            let mut used = vec![false; ab.len()];
+            aa.iter().all(|x| {
+                for (j, y) in ab.iter().enumerate() {
+                    if !used[j] && factor_eq(x, y) {
+                        used[j] = true;
+                        return true;
+                    }
+                }
+                false
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Exact polynomial division, returning `None` unless the remainder is zero.
+fn try_exact_poly_divide(num: &Value, den: &Value) -> Option<Value> {
+    use crate::builtins::symbolic;
+    let num_e = symbolic::builtin_expand(&[num.clone()]).ok()?;
+    let den_e = symbolic::builtin_expand(&[den.clone()]).ok()?;
+    let var = find_free_symbol(&num_e).or_else(|| find_free_symbol(&den_e))?;
+    if !is_polynomial_in(&num_e, &var) || !is_polynomial_in(&den_e, &var) {
+        return None;
+    }
+    let num_coeffs = symbolic::extract_polynomial_coeffs(&num_e, &var);
+    let den_coeffs = symbolic::extract_polynomial_coeffs(&den_e, &var);
+    if den_coeffs.is_empty() || num_coeffs.len() < den_coeffs.len() {
+        return None;
+    }
+    let den_deg = den_coeffs.len() - 1;
+    let den_lead = den_coeffs[den_deg].clone();
+    if is_zero_value(&den_lead) {
+        return None;
+    }
+
+    let mut remainder = num_coeffs;
+    let quot_deg = remainder.len() - 1 - den_deg;
+    let mut quot: Vec<Value> = vec![Value::Integer(Integer::from(0)); quot_deg + 1];
+
+    for i in (0..=quot_deg).rev() {
+        let j = i + den_deg;
+        let r = remainder[j].clone();
+        let q = base_simplify(&Value::Call {
+            head: "Divide".to_string(),
+            args: vec![r.clone(), den_lead.clone()],
+        });
+        quot[i] = q.clone();
+        for (k, den_k) in den_coeffs.iter().enumerate().take(den_deg + 1) {
+            let idx = i + k;
+            let sub = base_simplify(&Value::Call {
+                head: "Times".to_string(),
+                args: vec![q.clone(), den_k.clone()],
+            });
+            remainder[idx] = base_simplify(&Value::Call {
+                head: "Plus".to_string(),
+                args: vec![
+                    remainder[idx].clone(),
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![Value::Integer(Integer::from(-1)), sub],
+                    },
+                ],
+            });
+        }
+    }
+
+    if !remainder.iter().all(is_zero_value) {
+        return None;
+    }
+
+    // Rebuild the quotient polynomial.
+    let mut terms: Vec<Value> = Vec::new();
+    for (i, c) in quot.iter().enumerate() {
+        if is_zero_value(c) {
+            continue;
+        }
+        if i == 0 {
+            terms.push(c.clone());
+        } else {
+            let power = if i == 1 {
+                Value::Symbol(var.clone())
+            } else {
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![Value::Symbol(var.clone()), Value::Integer(Integer::from(i))],
+                }
+            };
+            terms.push(Value::Call {
+                head: "Times".to_string(),
+                args: vec![c.clone(), power],
+            });
+        }
+    }
+    Some(match terms.len() {
+        0 => Value::Integer(Integer::from(0)),
+        1 => terms.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        },
+    })
+}
+
+fn is_zero_value(val: &Value) -> bool {
+    matches!(val, Value::Integer(n) if n.is_zero())
+}
+
+/// Factor `val` only when it is a genuine polynomial in a single symbol.
+///
+/// The underlying `Factor` builtin silently drops terms that are not polynomial
+/// in the chosen variable (e.g. `Factor[x + Sin[x]] == x`) and mis-handles
+/// products of parenthesised factors (e.g. `Factor[x (x + 2)] == 0`). By
+/// expanding first and vetting every term we avoid both traps.
+fn try_factor_polynomial(val: &Value) -> Option<Value> {
+    let expanded = crate::builtins::symbolic::builtin_expand(&[val.clone()]).ok()?;
+    let var = find_free_symbol(&expanded)?;
+    if !is_polynomial_in(&expanded, &var) {
+        return None;
+    }
+    crate::builtins::symbolic::builtin_factor(&[expanded]).ok()
+}
+
+/// First symbol that is not a known constant.
+fn find_free_symbol(val: &Value) -> Option<String> {
+    match val {
+        Value::Symbol(s) => {
+            if matches!(s.as_str(), "Pi" | "E" | "I" | "True" | "False" | "Null") {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        Value::Call { args, .. } | Value::List(args) | Value::Sequence(args) => {
+            args.iter().find_map(find_free_symbol)
+        }
+        _ => None,
+    }
+}
+
+/// True if every additive term is a non-negative integer power of `var`
+/// multiplied by a `var`-free coefficient.
+fn is_polynomial_in(val: &Value, var: &str) -> bool {
+    match val {
+        Value::Call { head, args } if head == "Plus" => {
+            !args.is_empty() && args.iter().all(|t| poly_degree(t, var).is_some())
+        }
+        _ => poly_degree(val, var).is_some(),
+    }
+}
+
+/// Degree of a single additive term in `var`, or `None` if the term is not a
+/// clean `coeff * var^k` (k >= 0, coeff free of `var`).
+fn poly_degree(term: &Value, var: &str) -> Option<i64> {
+    match term {
+        Value::Symbol(s) if s == var => Some(1),
+        Value::Integer(_) | Value::Real(_) | Value::Rational(_) | Value::Symbol(_) => Some(0),
+        Value::Call { head, args } => match head.as_str() {
+            "Power" if args.len() == 2 && args[0].struct_eq(&Value::Symbol(var.to_string())) => {
+                match &args[1] {
+                    Value::Integer(n) if !n.is_negative() => n.to_i64(),
+                    _ => None,
+                }
+            }
+            "Times" => {
+                let mut degree = 0;
+                for a in args {
+                    degree += poly_degree(a, var)?;
+                }
+                Some(degree)
+            }
+            _ => {
+                if contains_symbol(term, var) {
+                    None
+                } else {
+                    Some(0)
+                }
+            }
+        },
+        _ => None,
+    }
+}
+
+/// True if `val` mentions the symbol `s` anywhere.
+fn contains_symbol(val: &Value, s: &str) -> bool {
+    match val {
+        Value::Symbol(x) => x == s,
+        Value::Call { args, .. } | Value::List(args) | Value::Sequence(args) => {
+            args.iter().any(|a| contains_symbol(a, s))
+        }
+        Value::Rule { lhs, rhs, .. } => contains_symbol(lhs, s) || contains_symbol(rhs, s),
+        _ => false,
+    }
+}
+
+/// Rewrite `Sin[u]^2 + Cos[u]^2 (+ …)` groups into a constant within a `Plus`.
+///
+/// Handles numeric coefficients as long as a matching `Sin`/`Cos` pair shares
+/// the same coefficient, e.g. `2 Sin[u]^2 + 2 Cos[u]^2 -> 2`.
+fn pythagorean_reduce(val: &Value) -> Value {
+    let Value::Call { head, args } = val else {
+        return val.clone();
+    };
+    if head != "Plus" {
+        return val.clone();
+    }
+
+    let mut sins: Vec<(Value, Value)> = Vec::new();
+    let mut coss: Vec<(Value, Value)> = Vec::new();
+    let mut others: Vec<Value> = Vec::new();
+
+    for term in args {
+        match match_trig_square(term) {
+            Some((true, u, c)) => sins.push((u, c)),
+            Some((false, u, c)) => coss.push((u, c)),
+            None => others.push(term.clone()),
+        }
+    }
+    if sins.is_empty() || coss.is_empty() {
+        return val.clone();
+    }
+
+    let mut used_cos = vec![false; coss.len()];
+    let mut constants: Vec<Value> = Vec::new();
+    let mut consumed_sin: Vec<bool> = vec![false; sins.len()];
+    let mut matched = false;
+
+    for i in 0..sins.len() {
+        for j in 0..coss.len() {
+            if !used_cos[j] && coss[j].0.struct_eq(&sins[i].0) && coss[j].1.struct_eq(&sins[i].1) {
+                used_cos[j] = true;
+                consumed_sin[i] = true;
+                constants.push(sins[i].1.clone());
+                matched = true;
+                break;
+            }
+        }
+    }
+    if !matched {
+        return val.clone();
+    }
+
+    for (i, (u, c)) in sins.iter().enumerate() {
+        if !consumed_sin[i] {
+            others.push(rebuild_trig_square(true, u, c));
+        }
+    }
+    for (j, (u, c)) in coss.iter().enumerate() {
+        if !used_cos[j] {
+            others.push(rebuild_trig_square(false, u, c));
+        }
+    }
+    others.extend(constants);
+
+    match others.len() {
+        0 => Value::Integer(Integer::from(0)),
+        1 => others.into_iter().next().unwrap(),
+        _ => Value::Call {
+            head: "Plus".to_string(),
+            args: others,
+        },
+    }
+}
+
+/// Match `Sin[u]^2` / `Cos[u]^2`, optionally with a numeric coefficient.
+/// Returns `(is_sin, u, coefficient)`.
+fn match_trig_square(term: &Value) -> Option<(bool, Value, Value)> {
+    let (coeff, base) = split_numeric_coeff(term);
+    let Value::Call { head, args } = &base else {
+        return None;
+    };
+    if head != "Power" || args.len() != 2 || !matches!(&args[1], Value::Integer(n) if *n == 2) {
+        return None;
+    }
+    let Value::Call { head: fh, args: fa } = &args[0] else {
+        return None;
+    };
+    if fa.len() != 1 {
+        return None;
+    }
+    match fh.as_str() {
+        "Sin" => Some((true, fa[0].clone(), coeff)),
+        "Cos" => Some((false, fa[0].clone(), coeff)),
+        _ => None,
+    }
+}
+
+/// Rebuild `coeff * Sin[u]^2` (or `Cos`).
+fn rebuild_trig_square(is_sin: bool, u: &Value, coeff: &Value) -> Value {
+    let sq = Value::Call {
+        head: "Power".to_string(),
+        args: vec![
+            Value::Call {
+                head: if is_sin { "Sin" } else { "Cos" }.to_string(),
+                args: vec![u.clone()],
+            },
+            Value::Integer(Integer::from(2)),
+        ],
+    };
+    if is_one(coeff) {
+        sq
+    } else {
+        Value::Call {
+            head: "Times".to_string(),
+            args: vec![coeff.clone(), sq],
+        }
+    }
+}
+
+/// Split a product into its numeric coefficient and remaining base.
+fn split_numeric_coeff(term: &Value) -> (Value, Value) {
+    if let Value::Call { head, args } = term
+        && head == "Times"
+    {
+        let mut coeff = Value::Integer(Integer::from(1));
+        let mut rest: Vec<Value> = Vec::new();
+        for a in args {
+            match a {
+                Value::Integer(_) | Value::Rational(_) => {
+                    coeff =
+                        crate::builtins::arithmetic::mul_values_public(&coeff, a).unwrap_or(coeff);
+                }
+                _ => rest.push(a.clone()),
+            }
+        }
+        let base = match rest.len() {
+            0 => Value::Integer(Integer::from(1)),
+            1 => rest.into_iter().next().unwrap(),
+            _ => Value::Call {
+                head: "Times".to_string(),
+                args: rest,
+            },
+        };
+        return (coeff, base);
+    }
+    (Value::Integer(Integer::from(1)), term.clone())
+}
+
+/// Rewrite `Cos[2 u]` -> `Cos[u]^2 - Sin[u]^2` and `Sin[2 u]` -> `2 Sin[u] Cos[u]`.
+fn expand_double_angles(val: &Value) -> Value {
+    match val {
+        Value::Call { head, args } => {
+            let new_args: Vec<Value> = args.iter().map(expand_double_angles).collect();
+            if new_args.len() == 1
+                && (head == "Cos" || head == "Sin")
+                && let Some(u) = match_double_angle(&new_args[0])
+            {
+                let squared = |f: &str| Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![
+                        Value::Call {
+                            head: f.to_string(),
+                            args: vec![u.clone()],
+                        },
+                        Value::Integer(Integer::from(2)),
+                    ],
+                };
+                if head == "Cos" {
+                    return Value::Call {
+                        head: "Plus".to_string(),
+                        args: vec![
+                            squared("Cos"),
+                            Value::Call {
+                                head: "Times".to_string(),
+                                args: vec![Value::Integer(Integer::from(-1)), squared("Sin")],
+                            },
+                        ],
+                    };
+                }
+                return Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Integer(Integer::from(2)),
+                        Value::Call {
+                            head: "Sin".to_string(),
+                            args: vec![u.clone()],
+                        },
+                        Value::Call {
+                            head: "Cos".to_string(),
+                            args: vec![u],
+                        },
+                    ],
+                };
+            }
+            Value::Call {
+                head: head.clone(),
+                args: new_args,
+            }
+        }
+        Value::List(items) => Value::List(items.iter().map(expand_double_angles).collect()),
+        _ => val.clone(),
+    }
+}
+
+/// If `u` is `2 * w` or `w * 2`, return `w`.
+fn match_double_angle(u: &Value) -> Option<Value> {
+    if let Value::Call { head, args } = u
+        && head == "Times"
+        && args.len() == 2
+    {
+        if let Value::Integer(n) = &args[0]
+            && *n == 2
+        {
+            return Some(args[1].clone());
+        }
+        if let Value::Integer(n) = &args[1]
+            && *n == 2
+        {
+            return Some(args[0].clone());
+        }
+    }
+    None
 }
 
 /// Together[expr] — combine sum of rational expressions into a single fraction.
@@ -1322,6 +2075,82 @@ mod tests {
             eval_str("ReplaceList[{a, b}, {a, b} -> z]"),
             list(vec![sym("z")])
         );
+    }
+
+    /// Assert `FullSimplify[input]` is symbolically equivalent to `expected`.
+    fn assert_full_simplify_equiv(input: &str, expected: &str) {
+        let diff = eval_str(&format!("FullSimplify[({input}) - ({expected})]"));
+        assert_eq!(
+            diff,
+            Value::Integer(Integer::from(0)),
+            "FullSimplify[{input}] not equivalent to {expected}, got `{}`",
+            eval_str(&format!("FullSimplify[{input}]"))
+        );
+    }
+
+    #[test]
+    fn test_full_simplify_cancels_rational() {
+        assert_full_simplify_equiv("(x^2 - 1)/(x - 1)", "x + 1");
+        assert_full_simplify_equiv("(x^2 + 2 x + 1)/(x + 1)", "x + 1");
+        assert_full_simplify_equiv("(a^2 - b^2)/(a - b)", "a + b");
+        // Factor ordering: `x + 1` and `1 + x` must still cancel.
+        assert_full_simplify_equiv("(x + 1)/(x^2 - 1)", "1/(x - 1)");
+        assert_full_simplify_equiv("(x^2 - 1)/(x + 1)", "x - 1");
+    }
+
+    #[test]
+    fn test_full_simplify_does_not_drop_nonpolynomial_terms() {
+        // Regression: the underlying `Factor` dropped `Sin[x]` here.
+        assert_full_simplify_equiv("x + Sin[x]", "x + Sin[x]");
+        assert_eq!(eval_str("FullSimplify[x + Sin[x]]"), eval_str("x + Sin[x]"));
+    }
+
+    #[test]
+    fn test_full_simplify_combines_like_terms() {
+        assert_full_simplify_equiv("x + x + 2 x", "4 x");
+    }
+
+    #[test]
+    fn test_full_simplify_together_and_cancel() {
+        // Wrong-gcd regression: Cancel[(x+y)/(x y)] used to yield 1/x.
+        assert_full_simplify_equiv("1/x + 1/y", "(x + y)/(x y)");
+        assert_full_simplify_equiv("1/x + 2/x", "3/x");
+    }
+
+    #[test]
+    fn test_full_simplify_trig_identities() {
+        assert_eq!(eval_str("FullSimplify[Sin[x]^2 + Cos[x]^2]"), int(1));
+        assert_eq!(
+            eval_str("FullSimplify[Cos[2 x] - (Cos[x]^2 - Sin[x]^2)]"),
+            int(0)
+        );
+        assert_eq!(
+            eval_str("FullSimplify[2 Sin[u]^2 + 2 Cos[u]^2 + 3]"),
+            int(5)
+        );
+    }
+
+    #[test]
+    fn test_full_simplify_rational_number() {
+        assert_eq!(eval_str("FullSimplify[6/4]"), eval_str("3/2"));
+    }
+
+    #[test]
+    fn test_full_simplify_at_least_as_strong_as_simplify() {
+        // For any input FullSimplify must not be longer than Simplify's output.
+        for input in [
+            "(x^2 - 1)/(x - 1)",
+            "Sin[x]^2 + Cos[x]^2",
+            "1/x + 1/y + 1/z",
+            "(x^3 - 1)/(x - 1)",
+        ] {
+            let simplified = eval_str(&format!("Simplify[{input}]"));
+            let full = eval_str(&format!("FullSimplify[{input}]"));
+            assert!(
+                full.to_string().len() <= simplified.to_string().len(),
+                "FullSimplify[{input}] = `{full}` longer than Simplify = `{simplified}`"
+            );
+        }
     }
 
     #[test]

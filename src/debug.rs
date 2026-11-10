@@ -163,7 +163,7 @@ pub fn run_debug(path: &str) {
                     dbg.stepping = false;
                     break;
                 }
-                ClientMessage::Next | ClientMessage::StepIn => {
+                ClientMessage::Next | ClientMessage::StepIn | ClientMessage::StepOut => {
                     dbg.stepping = true;
                     break;
                 }
@@ -407,7 +407,123 @@ fn read_client_message() -> Option<ClientMessage> {
                     }
                 }
             }
-            _ => return None,
+            Some(Err(e)) => {
+                eprintln!("[syma debug] stdin read error: {}", e);
+                continue;
+            }
+            None => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_client_commands_camel_case() {
+        match serde_json::from_str::<ClientMessage>(r#"{"command":"continue"}"#).unwrap() {
+            ClientMessage::Continue => {}
+            other => panic!("expected Continue, got {other:?}"),
+        }
+        match serde_json::from_str::<ClientMessage>(r#"{"command":"stepIn"}"#).unwrap() {
+            ClientMessage::StepIn => {}
+            other => panic!("expected StepIn, got {other:?}"),
+        }
+        match serde_json::from_str::<ClientMessage>(r#"{"command":"stepOut"}"#).unwrap() {
+            ClientMessage::StepOut => {}
+            other => panic!("expected StepOut, got {other:?}"),
+        }
+        match serde_json::from_str::<ClientMessage>(
+            r#"{"command":"setBreakpoints","breakpoints":[{"line":3},{"line":7}]}"#,
+        )
+        .unwrap()
+        {
+            ClientMessage::SetBreakpoints { breakpoints } => {
+                let lines: Vec<usize> = breakpoints.into_iter().map(|b| b.line).collect();
+                assert_eq!(lines, vec![3, 7]);
+            }
+            other => panic!("expected SetBreakpoints, got {other:?}"),
+        }
+        match serde_json::from_str::<ClientMessage>(r#"{"command":"evaluate","expression":"x+1"}"#)
+            .unwrap()
+        {
+            ClientMessage::Evaluate { expression } => assert_eq!(expression, "x+1"),
+            other => panic!("expected Evaluate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_server_events() {
+        let stopped = serde_json::to_string(&ServerEvent::Stopped {
+            reason: "breakpoint".to_string(),
+            line: 12,
+        })
+        .unwrap();
+        assert!(stopped.contains(r#""event":"stopped""#), "got: {stopped}");
+        assert!(stopped.contains(r#""line":12"#), "got: {stopped}");
+
+        let terminated = serde_json::to_string(&ServerEvent::Terminated).unwrap();
+        assert!(
+            terminated.contains(r#""event":"terminated""#),
+            "got: {terminated}"
+        );
+
+        let ev = serde_json::to_string(&ServerEvent::EvaluateResult {
+            result: "3".to_string(),
+            value_type: "int".to_string(),
+        })
+        .unwrap();
+        assert!(ev.contains(r#""event":"evaluateResult""#), "got: {ev}");
+        // `type` is the wire name for the value type.
+        assert!(ev.contains(r#""type":"int""#), "got: {ev}");
+    }
+
+    #[test]
+    fn test_debugger_should_pause() {
+        let mut dbg = Debugger::new();
+        assert!(!dbg.should_pause(1) && !dbg.should_pause(2));
+
+        dbg.breakpoints.insert(2);
+        assert!(!dbg.should_pause(1));
+        assert!(dbg.should_pause(2));
+
+        dbg.stepping = true;
+        assert!(dbg.should_pause(99));
+
+        dbg.stepping = false;
+        dbg.stop_requested = true;
+        assert!(dbg.should_pause(5));
+    }
+
+    #[test]
+    fn test_format_value_primitives() {
+        assert_eq!(format_value(&Value::Integer(rug::Integer::from(7))), "7");
+        assert_eq!(format_value(&Value::Str("hi".to_string())), "\"hi\"");
+        assert_eq!(format_value(&Value::Bool(true)), "true");
+        assert_eq!(format_value(&Value::Null), "Null");
+        assert_eq!(format_value(&Value::Symbol("x".to_string())), "x");
+        assert_eq!(
+            format_value(&Value::List(vec![
+                Value::Integer(rug::Integer::from(1)),
+                Value::Integer(rug::Integer::from(2)),
+            ])),
+            "{1, 2}"
+        );
+        assert_eq!(
+            format_value(&Value::List(
+                (0..8)
+                    .map(|i| Value::Integer(rug::Integer::from(i)))
+                    .collect()
+            )),
+            "{...8 items...}"
+        );
+    }
+
+    #[test]
+    fn test_is_constant_filters_builtins() {
+        assert!(is_constant("True"));
+        assert!(is_constant("Pi"));
+        assert!(!is_constant("myVar"));
     }
 }

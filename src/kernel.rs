@@ -165,27 +165,90 @@ impl SymaKernel {
     ///
     /// Accepts `{"input": "2+2"}` and returns the standard KernelResult as JSON.
     /// This is the entry point for the stdin/stdout protocol.
+    ///
+    /// Malformed JSON, non-object requests, non-string `input`, and unknown
+    /// `format` values yield a structured `success: false` response rather than
+    /// silently evaluating the empty string.
     pub fn eval_json(&self, request: &str) -> String {
-        let req: Result<serde_json::Value, _> = serde_json::from_str(request);
-        let (input, format_opt) = match req {
-            Ok(serde_json::Value::Object(ref m)) => {
-                let input = m.get("input").and_then(|v| v.as_str()).unwrap_or("");
-                let format_str = m.get("format").and_then(|v| v.as_str());
-                let fmt = format_str.and_then(|s| match s.to_lowercase().as_str() {
-                    "inputform" => Some(Format::InputForm),
-                    "fullform" => Some(Format::FullForm),
-                    "standardform" => Some(Format::StandardForm),
-                    "outputform" => Some(Format::OutputForm),
-                    _ => None,
-                });
-                (input, fmt)
-            }
-            _ => ("", None),
+        let start = Instant::now();
+
+        let error_response = |msg: String| {
+            let result = KernelResult {
+                success: false,
+                results: None,
+                messages: vec![],
+                error: Some(msg),
+                timing_ms: start.elapsed().as_millis() as u64,
+            };
+            serde_json::to_string(&result).unwrap_or_else(|e| {
+                format!(r#"{{"success":false,"error":"JSON serialisation failed: {e}"}}"#)
+            })
         };
-        let result = self.eval_inner(input, format_opt);
+
+        let parsed: serde_json::Value = match serde_json::from_str(request) {
+            Ok(v) => v,
+            Err(e) => return error_response(format!("Invalid JSON request: {e}")),
+        };
+
+        let map = match &parsed {
+            serde_json::Value::Object(m) => m,
+            other => {
+                return error_response(format!(
+                    "Request must be a JSON object, got {}",
+                    json_type_name(other)
+                ));
+            }
+        };
+
+        let input = match map.get("input") {
+            None => "",
+            Some(serde_json::Value::String(s)) => s.as_str(),
+            Some(other) => {
+                return error_response(format!(
+                    "`input` must be a string, got {}",
+                    json_type_name(other)
+                ));
+            }
+        };
+
+        let fmt = match map.get("format") {
+            None => None,
+            Some(serde_json::Value::String(s)) => match s.to_lowercase().as_str() {
+                "inputform" => Some(Format::InputForm),
+                "fullform" => Some(Format::FullForm),
+                "standardform" => Some(Format::StandardForm),
+                "outputform" => Some(Format::OutputForm),
+                other => {
+                    return error_response(format!(
+                        "Unknown format '{other}' \
+                         (expected inputform|fullform|standardform|outputform)"
+                    ));
+                }
+            },
+            Some(other) => {
+                return error_response(format!(
+                    "`format` must be a string, got {}",
+                    json_type_name(other)
+                ));
+            }
+        };
+
+        let result = self.eval_inner(input, fmt);
         serde_json::to_string(&result).unwrap_or_else(|e| {
             format!(r#"{{"success":false,"error":"JSON serialisation failed: {e}"}}"#)
         })
+    }
+}
+
+/// Human-readable JSON type name for protocol error messages.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -295,6 +358,107 @@ mod tests {
         let response = kernel.eval_json(r#"{}"#);
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(parsed["success"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_eval_json_malformed_is_error() {
+        let kernel = make_kernel();
+        let response = kernel.eval_json("2 + 2");
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Invalid JSON"),
+            "got: {response}"
+        );
+        assert!(parsed["results"].is_null());
+    }
+
+    #[test]
+    fn test_eval_json_non_object_is_error() {
+        let kernel = make_kernel();
+        for req in ["[1, 2, 3]", r#""hello""#, "42", "null", "true"] {
+            let response = kernel.eval_json(req);
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(parsed["success"], false, "request {req} should fail");
+            assert!(
+                parsed["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("must be a JSON object"),
+                "request {req} got: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_eval_json_non_string_input_is_error() {
+        let kernel = make_kernel();
+        let response = kernel.eval_json(r#"{"input": 42}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be a string"),
+            "got: {response}"
+        );
+    }
+
+    #[test]
+    fn test_eval_json_unknown_format_is_error() {
+        let kernel = make_kernel();
+        let response = kernel.eval_json(r#"{"input": "1+1", "format": "bogus"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Unknown format"),
+            "got: {response}"
+        );
+    }
+
+    #[test]
+    fn test_eval_json_non_string_format_is_error() {
+        let kernel = make_kernel();
+        let response = kernel.eval_json(r#"{"input": "1+1", "format": 7}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be a string"),
+            "got: {response}"
+        );
+    }
+
+    #[test]
+    fn test_eval_json_format_case_insensitive() {
+        let kernel = make_kernel();
+        let response = kernel.eval_json(r#"{"input": "Plus[a, b]", "format": "FULLFORM"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], true);
+        let out = parsed["results"][0]["output"].as_str().unwrap_or("");
+        assert!(out.contains("Plus"), "got: {out}");
+    }
+
+    #[test]
+    fn test_eval_json_single_line_framing() {
+        // Every response must be a single line so the line-framed protocol works.
+        let kernel = make_kernel();
+        let response = kernel.eval_json(r#"{"input": "\"a\\nb\""}"#);
+        assert!(
+            !response.contains('\n'),
+            "response contains a raw newline: {response:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["success"], true);
     }
 
     #[test]

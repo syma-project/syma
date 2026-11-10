@@ -120,3 +120,39 @@ pub fn print_error(label: &str, message: &str, source: &str) {
     eprintln!("{}: {}", bold_red(label), message);
     eprintln!("  {}", dim(source));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::Env;
+
+    fn test_env() -> Env {
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        env
+    }
+
+    #[test]
+    fn test_eval_input_basic() {
+        let val = eval_input("1 + 2", &test_env()).expect("should evaluate");
+        assert_eq!(format!("{val}"), "3");
+    }
+
+    #[test]
+    fn test_eval_input_parse_error_is_none() {
+        assert!(eval_input("(1", &test_env()).is_none());
+    }
+
+    #[test]
+    fn test_eval_input_with_results_marks_suppressed() {
+        let results = eval_input_with_results("1;\n2", &test_env()).expect("should evaluate");
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_none(), "trailing `;` should suppress");
+        assert!(results[1].is_some());
+    }
+
+    #[test]
+    fn test_run_file_missing_path_errors() {
+        assert!(run_file("/no/such/syma_file_xyz.syma").is_err());
+    }
+}

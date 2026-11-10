@@ -64,24 +64,38 @@ pub fn builtin_binomial(args: &[Value]) -> Result<Value, EvalError> {
     }
     match (&args[0], &args[1]) {
         (Value::Integer(n), Value::Integer(k)) => {
-            if k.is_negative() || n.is_negative() || *k > *n {
+            // Generalized binomial coefficient: valid for negative `n` too
+            // (C(n, k) = n (n-1) ... (n-k+1) / k!).
+            if k.is_negative() {
                 return Ok(Value::Integer(Integer::from(0)));
             }
-            if k.is_zero() || *k == *n {
+            if k.is_zero() {
+                return Ok(Value::Integer(Integer::from(1)));
+            }
+            if !n.is_negative() && *k > *n {
+                return Ok(Value::Integer(Integer::from(0)));
+            }
+            if !n.is_negative() && *k == *n {
                 return Ok(Value::Integer(Integer::from(1)));
             }
             let k_usize = k
                 .to_usize()
                 .ok_or_else(|| EvalError::Error("Binomial: k too large".to_string()))?;
-            let n_usize = n
-                .to_usize()
-                .ok_or_else(|| EvalError::Error("Binomial: n too large".to_string()))?;
-            // Use symmetry: C(n, k) = C(n, n-k) to minimize work.
-            let k_eff = k_usize.min(n_usize - k_usize);
+            // Use symmetry: C(n, k) = C(n, n-k) to minimize work. Only applies
+            // to non-negative `n`; for negative `n` the generalized product is
+            // used directly.
+            let k_eff = if n.is_negative() {
+                k_usize
+            } else {
+                match (n.clone() - k.clone()).to_usize() {
+                    Some(n_minus_k) => k_usize.min(n_minus_k),
+                    None => k_usize,
+                }
+            };
             let mut result = Integer::from(1);
             for i in 0..k_eff {
                 // Multiply by (n - i), then divide by (i + 1), reducing by GCD each step.
-                let mut numerator = Integer::from(n_usize - i);
+                let mut numerator = n.clone() - Integer::from(i);
                 let mut denominator = Integer::from(i + 1);
                 let g = gcd_int(result.clone(), denominator.clone());
                 result /= g.clone();
@@ -104,19 +118,18 @@ pub fn builtin_binomial(args: &[Value]) -> Result<Value, EvalError> {
 // ── Multinomial ──────────────────────────────────────────────────────────────
 
 /// Multinomial[n1, n2, ...] and Multinomial[{n1, n2, ...}] — the multinomial coefficient.
-/// Returns (n1+n2+...!) / (n1! * n2! * ...).
+/// Returns (n1+n2+...)! / (n1! * n2! * ...). Multinomial[] = Multinomial[{}] = 1.
 pub fn builtin_multinomial(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Error(
-            "Multinomial requires at least 1 argument".to_string(),
-        ));
+        return Ok(Value::Integer(Integer::from(1)));
     }
-    // Handle Multinomial[{n1, n2, ...}] (single list argument)
+    // Handle Multinomial[{n1, n2, ...}] (single list argument); a single bare
+    // integer is a one-element sequence, not a list.
     let ints: Vec<Integer> = if args.len() == 1 {
-        get_list(&args[0])?
-            .iter()
-            .map(to_int)
-            .collect::<Result<Vec<_>, _>>()?
+        match &args[0] {
+            Value::List(items) => items.iter().map(to_int).collect::<Result<Vec<_>, _>>()?,
+            other => vec![to_int(other)?],
+        }
     } else {
         args.iter().map(to_int).collect::<Result<Vec<_>, _>>()?
     };
@@ -274,14 +287,15 @@ pub fn builtin_permutations(args: &[Value]) -> Result<Value, EvalError> {
     let len = items.len();
 
     if args.len() == 1 {
-        // All permutations of length len.
+        // All permutations of length len, with duplicates removed (so that
+        // Permutations[{1, 1}] == {{1, 1}}, matching Mathematica).
         let mut result = Vec::new();
         permute(items, len, &mut result);
-        Ok(Value::List(result))
+        Ok(Value::List(dedup_values(result)))
     } else if args.len() == 2 {
         // Parse spec.
         let perms = generate_permutations(items, &args[1])?;
-        Ok(Value::List(perms))
+        Ok(Value::List(dedup_values(perms)))
     } else {
         Err(EvalError::Error(
             "Permutations: usage is Permutations[list], Permutations[list, k], or Permutations[list, {kmin, kmax}]"
@@ -338,6 +352,17 @@ fn generate_permutations(items: &[Value], spec: &Value) -> Result<Vec<Value>, Ev
     }
 }
 
+/// Remove duplicate values while preserving first-occurrence order.
+fn dedup_values(values: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(values.len());
+    for v in values {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
 /// Recursive backtracking for partial permutations of length k.
 fn partial_permutations(
     items: &[Value],
@@ -369,26 +394,20 @@ fn permute(items: &[Value], n: usize, result: &mut Vec<Value>) {
         result.push(Value::List(vec![]));
         return;
     }
-    if n == 1 {
-        result.push(Value::List(vec![items[0].clone()]));
-        return;
-    }
-    heap_permute(items.to_vec(), n, result);
+    let mut buf = items[..n.min(items.len())].to_vec();
+    permute_backtrack(&mut buf, 0, result);
 }
 
-fn heap_permute(items: Vec<Value>, n: usize, result: &mut Vec<Value>) {
-    if n == 1 {
-        result.push(Value::List(items));
+/// Classic swap-based backtracking permutation generator.
+fn permute_backtrack(buf: &mut [Value], start: usize, result: &mut Vec<Value>) {
+    if start == buf.len() {
+        result.push(Value::List(buf.to_vec()));
         return;
     }
-    let mut items = items;
-    for i in 0..n {
-        heap_permute(items.clone(), n - 1, result);
-        if n % 2 == 1 {
-            items.swap(0, n - 1);
-        } else {
-            items.swap(i, n - 1);
-        }
+    for i in start..buf.len() {
+        buf.swap(start, i);
+        permute_backtrack(buf, start + 1, result);
+        buf.swap(start, i);
     }
 }
 
@@ -782,6 +801,7 @@ fn mul_val(a: &Value, b: &Value) -> Result<Value, EvalError> {
 
 /// Fibonacci[n] — the n-th Fibonacci number using fast doubling.
 /// Fibonacci[n, x] — the Fibonacci polynomial F_n(x).
+/// Negative n uses F_{-n} = (-1)^(n+1) F_n.
 pub fn builtin_fibonacci(args: &[Value]) -> Result<Value, EvalError> {
     if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
@@ -789,22 +809,43 @@ pub fn builtin_fibonacci(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) if !n.is_negative() => {
-            let n_val = n
-                .to_usize()
-                .ok_or_else(|| EvalError::Error("Fibonacci: n too large".to_string()))?;
+        Value::Integer(n) => {
+            let negative = n.is_negative();
+            let m = if negative {
+                (-n.clone())
+                    .to_usize()
+                    .ok_or_else(|| EvalError::Error("Fibonacci: n too large".to_string()))?
+            } else {
+                n.to_usize()
+                    .ok_or_else(|| EvalError::Error("Fibonacci: n too large".to_string()))?
+            };
+            let sign = if negative && m % 2 == 0 { -1 } else { 1 };
             if args.len() == 1 {
                 // Fast doubling
-                let (f_n, _) = fib_pair(n_val);
-                Ok(Value::Integer(f_n))
+                let (f_n, _) = fib_pair(m);
+                Ok(Value::Integer(Integer::from(sign) * f_n))
             } else {
-                // Fibonacci polynomial
-                fibonacci_polynomial(n_val, &args[1])
+                // Fibonacci polynomial, with the sign correction for negative n.
+                let val = fibonacci_polynomial(m, &args[1])?;
+                if sign < 0 { negate_val(&val) } else { Ok(val) }
             }
         }
         _ => Ok(Value::Call {
             head: "Fibonacci".to_string(),
             args: args.to_vec(),
+        }),
+    }
+}
+
+/// Negate a numeric Value, falling back to a symbolic `-1 * x`.
+fn negate_val(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Integer(x) => Ok(Value::Integer(-x.clone())),
+        Value::Real(x) => Ok(Value::Real(-x.clone())),
+        Value::Rational(x) => Ok(Value::Rational(Box::new(-(**x).clone()))),
+        _ => Ok(Value::Call {
+            head: "Times".to_string(),
+            args: vec![Value::Integer(Integer::from(-1)), v.clone()],
         }),
     }
 }
@@ -1235,8 +1276,27 @@ mod tests {
     #[test]
     fn test_binomial_edge() {
         assert_eq!(builtin_binomial(&[int(5), int(6)]).unwrap(), int(0));
-        assert_eq!(builtin_binomial(&[int(-1), int(0)]).unwrap(), int(0));
         assert_eq!(builtin_binomial(&[int(5), int(-1)]).unwrap(), int(0));
+        // Generalized binomial supports negative n.
+        assert_eq!(builtin_binomial(&[int(-1), int(0)]).unwrap(), int(1));
+        assert_eq!(builtin_binomial(&[int(-1), int(1)]).unwrap(), int(-1));
+        assert_eq!(builtin_binomial(&[int(-2), int(3)]).unwrap(), int(-4));
+        assert_eq!(builtin_binomial(&[int(-3), int(2)]).unwrap(), int(6));
+        // Zero numerator from the falling factorial when k > n >= 0.
+        assert_eq!(builtin_binomial(&[int(0), int(3)]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_binomial_exact_large() {
+        // C(100, 50) = 100891344545564193334812497256
+        assert_eq!(
+            builtin_binomial(&[int(100), int(50)]).unwrap(),
+            Value::Integer(Integer::from(100891344545564193334812497256u128))
+        );
+        // C(n, k) == C(n, n-k).
+        let a = builtin_binomial(&[int(80), int(30)]).unwrap();
+        let b = builtin_binomial(&[int(80), int(50)]).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -1273,6 +1333,15 @@ mod tests {
     fn test_multinomial_empty() {
         let result = builtin_multinomial(&[list(vec![])]).unwrap();
         assert_eq!(result, int(1));
+        // No arguments at all is also 1.
+        assert_eq!(builtin_multinomial(&[]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_multinomial_single_integer() {
+        // A bare integer is a one-element sequence: n! / n! = 1.
+        assert_eq!(builtin_multinomial(&[int(5)]).unwrap(), int(1));
+        assert_eq!(builtin_multinomial(&[int(0)]).unwrap(), int(1));
     }
 
     // ── Factorial2 ──────────────────────────────────────────────────────────
@@ -1329,6 +1398,18 @@ mod tests {
         let result = builtin_permutations(&[list(vec![int(1), int(2), int(3)])]).unwrap();
         if let Value::List(perms) = result {
             assert_eq!(perms.len(), 6);
+            // Every one of the six distinct permutations must be present.
+            for expected in [
+                [1, 2, 3],
+                [1, 3, 2],
+                [2, 1, 3],
+                [2, 3, 1],
+                [3, 1, 2],
+                [3, 2, 1],
+            ] {
+                let want = list(expected.iter().map(|&x| int(x)).collect());
+                assert!(perms.contains(&want), "missing permutation {want:?}");
+            }
         } else {
             panic!("Expected List");
         }
@@ -1353,6 +1434,24 @@ mod tests {
         .unwrap();
         if let Value::List(perms) = result {
             assert_eq!(perms.len(), 9);
+        } else {
+            panic!("Expected List");
+        }
+    }
+
+    #[test]
+    fn test_permutations_duplicates() {
+        // Repeated elements yield distinct permutations only.
+        let result = builtin_permutations(&[list(vec![int(1), int(1)])]).unwrap();
+        if let Value::List(perms) = result {
+            assert_eq!(perms.len(), 1);
+            assert_eq!(perms[0], list(vec![int(1), int(1)]));
+        } else {
+            panic!("Expected List");
+        }
+        let result = builtin_permutations(&[list(vec![int(1), int(1), int(2)])]).unwrap();
+        if let Value::List(perms) = result {
+            assert_eq!(perms.len(), 3);
         } else {
             panic!("Expected List");
         }
@@ -1492,6 +1591,15 @@ mod tests {
         assert_eq!(builtin_fibonacci(&[int(3), int(2)]).unwrap(), int(5));
         // F_4(x) = x^3 + 2x
         assert_eq!(builtin_fibonacci(&[int(4), int(2)]).unwrap(), int(12));
+    }
+
+    #[test]
+    fn test_fibonacci_negative() {
+        // F_{-n} = (-1)^(n+1) F_n.
+        assert_eq!(builtin_fibonacci(&[int(-1)]).unwrap(), int(1));
+        assert_eq!(builtin_fibonacci(&[int(-2)]).unwrap(), int(-1));
+        assert_eq!(builtin_fibonacci(&[int(-3)]).unwrap(), int(2));
+        assert_eq!(builtin_fibonacci(&[int(-10)]).unwrap(), int(-55));
     }
 
     // ── CatalanNumber ────────────────────────────────────────────────────────

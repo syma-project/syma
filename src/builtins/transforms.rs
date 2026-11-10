@@ -97,12 +97,8 @@ fn div(a: Value, b: Value) -> Value {
     call("Divide", vec![a, b])
 }
 
-fn factorial(n: i64) -> Value {
-    call("Factorial", vec![int(n)])
-}
-
 /// Convert a `Value` into an `Expr`, handling the variants `table::value_to_expr`
-/// drops (notably `Rational`).
+/// drops (notably `Rational`) at any depth.
 fn value_to_expr_local(v: &Value) -> Expr {
     match v {
         Value::Rational(r) => Expr::Call {
@@ -113,6 +109,15 @@ fn value_to_expr_local(v: &Value) -> Expr {
             ],
         },
         Value::Complex { re, im } => Expr::Complex { re: *re, im: *im },
+        Value::Call { head, args } => Expr::Call {
+            head: Box::new(Expr::Symbol(head.clone())),
+            args: args.iter().map(value_to_expr_local).collect(),
+        },
+        Value::List(items) => Expr::List(items.iter().map(value_to_expr_local).collect()),
+        Value::Sequence(items) => Expr::Call {
+            head: Box::new(Expr::Symbol("Sequence".to_string())),
+            args: items.iter().map(value_to_expr_local).collect(),
+        },
         _ => crate::eval::table::value_to_expr(v),
     }
 }
@@ -287,13 +292,35 @@ where
 
 // ── Laplace transform ───────────────────────────────────────────────────────
 
-fn laplace_monomial(n: i64, shift: &Value, s: &str) -> Value {
+/// If `factor == var^e` with `e` free of `var`, return `e`.
+fn var_exponent(factor: &Value, var: &str) -> Option<Value> {
+    if matches!(factor, Value::Symbol(s) if s == var) {
+        return Some(int(1));
+    }
+    if let Value::Call { head, args } = factor
+        && head == "Power"
+        && args.len() == 2
+        && matches!(&args[0], Value::Symbol(s) if s == var)
+        && !contains_var(&args[1], var)
+    {
+        return Some(args[1].clone());
+    }
+    None
+}
+
+/// `n! / (s - shift)^(n+1)` (as an unevaluated `Divide`), generalized so the
+/// exponent may be symbolic: `Gamma[n+1] / (s - shift)^(n+1)`.
+fn laplace_monomial(n: &Value, shift: &Value, s: &str) -> Value {
     let denom = if is_zero(shift) {
         sym(s)
     } else {
         plus(vec![sym(s), negate(shift)])
     };
-    times(vec![factorial(n), pow(denom, int(-(n + 1)))])
+    let exp = match n {
+        Value::Integer(k) => int(k.to_i64().unwrap_or(0) + 1),
+        other => plus(vec![other.clone(), int(1)]),
+    };
+    div(call("Gamma", vec![exp.clone()]), pow(denom, exp))
 }
 
 fn laplace_trig(kind: &str, a: &Value, sbase: &Value) -> Value {
@@ -310,14 +337,35 @@ fn laplace_trig(kind: &str, a: &Value, sbase: &Value) -> Value {
 
 fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
     let mut n: i64 = 0;
+    let mut n_sym: Option<Value> = None;
     let mut shift = int(0);
     let mut have_shift = false;
+    let mut delta: Option<Value> = None;
     let mut coeff = int(1);
     let mut trig: Option<(&'static str, Value)> = None;
 
     for factor in &factors_of(f) {
-        if let Some(k) = var_power(factor, t) {
-            n += k;
+        if let Value::Call { head, args } = factor
+            && head == "DiracDelta"
+            && args.len() == 1
+        {
+            let (m, c) = affine(&args[0], t)?;
+            if !is_one(&m) || delta.is_some() {
+                return None;
+            }
+            delta = Some(c);
+            continue;
+        }
+        if let Some(e) = var_exponent(factor, t) {
+            match &e {
+                Value::Integer(k) if *k >= 0 => n += k.to_i64()?,
+                _ => {
+                    if n_sym.is_some() || n != 0 {
+                        return None;
+                    }
+                    n_sym = Some(e);
+                }
+            }
             continue;
         }
         if let Some(a) = exp_shift(factor, t) {
@@ -351,14 +399,27 @@ fn laplace_term(f: &Value, t: &str, s: &str, env: &Env) -> Option<Value> {
         plus(vec![sym(s), negate(&shift)])
     };
 
+    // `DiracDelta[t - c]` contributes `E^(c*s)` (with `s` shifted by `shift`).
+    if let Some(c) = delta {
+        let base = if is_zero(&c) {
+            int(1)
+        } else {
+            pow(sym("E"), times(vec![c, sbase]))
+        };
+        return Some(eval_value(times(vec![coeff, base]), env));
+    }
+
     let base = match trig {
         Some((kind, a)) => {
-            if n != 0 {
+            if n != 0 || n_sym.is_some() {
                 return None;
             }
             laplace_trig(kind, &a, &sbase)
         }
-        None => laplace_monomial(n, &shift, s),
+        None => match n_sym {
+            Some(e) => laplace_monomial(&e, &shift, s),
+            None => laplace_monomial(&int(n), &shift, s),
+        },
     };
 
     Some(eval_value(times(vec![coeff, base]), env))
@@ -373,19 +434,34 @@ fn laplace(f: &Value, t: &str, s: &str, env: &Env) -> Value {
     }
 }
 
+/// Interpret a numeric exponent (`Integer` or `Rational`) as a rational.
+fn as_exponent_ratio(v: &Value) -> Option<rug::Rational> {
+    match v {
+        Value::Integer(i) => Some(rug::Rational::from(i.clone())),
+        Value::Rational(r) => Some((**r).clone()),
+        _ => None,
+    }
+}
+
+/// Render a rational back to an `Integer` (when integral) or `Rational`.
+fn ratio_to_value(r: rug::Rational) -> Value {
+    if r.denom() == &Integer::from(1) {
+        Value::Integer(r.numer().clone())
+    } else {
+        Value::Rational(Box::new(r))
+    }
+}
+
 /// Build a `Power`, flattening `Power[Power[x, m], n]` when both exponents are
-/// integers.
+/// numeric (integer or rational).
 fn mk_pow(base: Value, exp: Value) -> Value {
     if let Value::Call { head, args } = &base
         && head == "Power"
         && args.len() == 2
-        && let Value::Integer(m) = &args[1]
-        && let Value::Integer(n) = &exp
+        && let Some(m) = as_exponent_ratio(&args[1])
+        && let Some(n) = as_exponent_ratio(&exp)
     {
-        return pow(
-            args[0].clone(),
-            int(m.to_i64().unwrap_or(0) * n.to_i64().unwrap_or(0)),
-        );
+        return pow(args[0].clone(), ratio_to_value(m * n));
     }
     pow(base, exp)
 }
@@ -404,6 +480,10 @@ fn normalize(v: &Value) -> Value {
             let exp = normalize(&args[1]);
             mk_pow(base, exp)
         }
+        Value::Call { head, args } if head == "Sqrt" && args.len() == 1 => mk_pow(
+            normalize(&args[0]),
+            Value::Rational(Box::new(rug::Rational::from((1, 2)))),
+        ),
         Value::Call { head, args } => Value::Call {
             head: head.clone(),
             args: args.iter().map(normalize).collect(),
@@ -537,16 +617,15 @@ fn scalar_multiple_of_var(n: &Value, var: &str) -> Option<Value> {
 }
 
 fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value> {
-    let mut denoms: Vec<(Value, i64)> = Vec::new();
+    let mut denoms: Vec<(Value, Value)> = Vec::new();
     let mut numerator = int(1);
     for factor in &factors_of(f) {
         if let Value::Call { head, args } = factor
             && head == "Power"
             && args.len() == 2
-            && let Value::Integer(k) = &args[1]
-            && k.is_negative()
+            && is_negative(&args[1])
         {
-            denoms.push((args[0].clone(), -k.to_i64()?));
+            denoms.push((args[0].clone(), eval_value(negate(&args[1]), env)));
             continue;
         }
         numerator = times(vec![numerator, factor.clone()]);
@@ -561,16 +640,18 @@ fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value>
     if denoms.len() != 1 {
         return None;
     }
-    let (d, k) = denoms.pop().unwrap();
+    let (d, nu) = denoms.pop().unwrap();
 
-    let affine_terms = affine(&d, s);
-    if let Some((m, c0)) = affine_terms.as_ref()
-        && !is_zero(m)
+    if let Some((m, c0)) = affine(&d, s)
+        && !is_zero(&m)
         && !contains_var(&numerator, s)
     {
-        let a = div(negate(c0), m.clone());
-        let scale = div(numerator, pow(m.clone(), int(k)));
-        let tap = div(pow(sym(t), int(k - 1)), factorial(k - 1));
+        let a = div(negate(&c0), m.clone());
+        let scale = div(numerator, pow(m, nu.clone()));
+        let tap = div(
+            pow(sym(t), plus(vec![nu.clone(), int(-1)])),
+            call("Gamma", vec![nu]),
+        );
         let ex = if is_zero(&a) {
             int(1)
         } else {
@@ -579,7 +660,7 @@ fn inverse_laplace_term(f: &Value, s: &str, t: &str, env: &Env) -> Option<Value>
         return Some(eval_value(times(vec![scale, tap, ex]), env));
     }
 
-    if k == 1
+    if is_one(&nu)
         && let Some(q) = quad_const(&d, s)
     {
         let (a2, hyper) = if is_negative(&q) {
@@ -622,6 +703,9 @@ fn dirac(x: Value) -> Value {
 }
 
 /// If `u == c*var^2`, return `c`.
+///
+/// Also accepts square-of-linear forms such as `(-t)^2` or `(2 a t)^2`, which
+/// arise from parsing `E^(-t^2)`.
 fn squared_coeff(u: &Value, var: &str) -> Option<Value> {
     if is_var_squared(u, var) {
         return Some(int(1));
@@ -631,52 +715,79 @@ fn squared_coeff(u: &Value, var: &str) -> Option<Value> {
             let mut rest = Vec::new();
             let mut seen = false;
             for f in args {
-                if is_var_squared(f, var) {
+                if !contains_var(f, var) {
+                    rest.push(f.clone());
+                } else {
+                    let c = squared_coeff(f, var)?;
                     if seen {
                         return None;
                     }
                     seen = true;
-                } else if contains_var(f, var) {
-                    return None;
-                } else {
-                    rest.push(f.clone());
+                    rest.push(c);
                 }
             }
             if seen { Some(times(rest)) } else { None }
+        }
+        Value::Call { head, args }
+            if head == "Power"
+                && args.len() == 2
+                && matches!(&args[1], Value::Integer(k) if *k == 2) =>
+        {
+            // base must be linear in `var`: base = c*var.
+            let c = linear_coeff(&args[0], var)?;
+            if is_zero(&c) {
+                return None;
+            }
+            Some(pow(c, int(2)))
         }
         _ => None,
     }
 }
 
-/// Remove a leading `I` factor and return the linear coefficient of the rest.
+/// If `u == I*a*var` (with `a` free of `var`), return `a`.
+///
+/// The `I` may be nested inside a coefficient (`E^(I a t)` parses as
+/// `E^(Times[Times[I, a], t])`), so extract the linear coefficient first and
+/// then strip a top-level `I` factor.
 fn i_linear_coeff(u: &Value, var: &str) -> Option<Value> {
-    if let Value::Call { head, args } = u
-        && head == "Times"
-    {
-        let mut rest = Vec::new();
-        let mut saw_i = false;
-        for f in args {
-            if matches!(f, Value::Symbol(s) if s == "I") {
-                saw_i = true;
-            } else {
-                rest.push(f.clone());
-            }
-        }
-        if saw_i {
-            return linear_coeff(&times(rest), var);
-        }
+    let c = linear_coeff(u, var)?;
+    if is_zero(&c) {
+        return None;
     }
-    None
+    strip_i(&c)
+}
+
+/// If `c == I*a` (with `I` as a multiplicative factor), return `a`.
+fn strip_i(c: &Value) -> Option<Value> {
+    match c {
+        Value::Symbol(s) if s == "I" => Some(int(1)),
+        Value::Call { head, args } if head == "Times" => {
+            let mut rest = Vec::new();
+            let mut saw_i = false;
+            for f in args {
+                if matches!(f, Value::Symbol(s) if s == "I") {
+                    saw_i = true;
+                } else {
+                    rest.push(f.clone());
+                }
+            }
+            if saw_i { Some(times(rest)) } else { None }
+        }
+        _ => None,
+    }
 }
 
 fn sqrt_half(x: &Value) -> Value {
     div(int(1), call("Sqrt", vec![x.clone()]))
 }
 
-fn gauss_result(a: &Value, w: &str) -> Value {
+fn gauss_result(a: &Value, wval: &Value) -> Value {
     // E^(-a t^2) -> 1/Sqrt[2a] E^(-w^2/(4a))
     let amp = sqrt_half(&times(vec![int(2), a.clone()]));
-    let expo = negate(&div(pow(sym(w), int(2)), times(vec![int(4), a.clone()])));
+    let expo = negate(&div(
+        pow(wval.clone(), int(2)),
+        times(vec![int(4), a.clone()]),
+    ));
     times(vec![amp, pow(sym("E"), expo)])
 }
 
@@ -684,7 +795,7 @@ fn super_sqrt_two_pi() -> Value {
     call("Sqrt", vec![times(vec![int(2), sym("Pi")])])
 }
 
-fn fourier_term(f: &Value, t: &str, w: &str, env: &Env) -> Option<Value> {
+fn fourier_term(f: &Value, t: &str, wval: &Value, env: &Env) -> Option<Value> {
     let mut coeff = int(1);
     let mut special: Option<Value> = None;
 
@@ -693,13 +804,16 @@ fn fourier_term(f: &Value, t: &str, w: &str, env: &Env) -> Option<Value> {
         if let Some(u) = exp_argument(factor) {
             if let Some(c) = squared_coeff(&u, t) {
                 let a = negate(&c);
-                set_special(&mut special, gauss_result(&a, w))?;
+                set_special(&mut special, gauss_result(&a, wval))?;
                 continue;
             }
             if let Some(a) = i_linear_coeff(&u, t) {
                 set_special(
                     &mut special,
-                    times(vec![super_sqrt_two_pi(), dirac(plus(vec![sym(w), a]))]),
+                    times(vec![
+                        super_sqrt_two_pi(),
+                        dirac(plus(vec![wval.clone(), a])),
+                    ]),
                 )?;
                 continue;
             }
@@ -707,15 +821,26 @@ fn fourier_term(f: &Value, t: &str, w: &str, env: &Env) -> Option<Value> {
         if let Value::Call { head, args } = factor
             && head == "DiracDelta"
             && args.len() == 1
-            && matches!(&args[0], Value::Symbol(s) if s == t)
+            && let Some((m, c)) = affine(&args[0], t)
+            && is_one(&m)
         {
-            set_special(&mut special, sqrt_half(&times(vec![int(2), sym("Pi")])))?;
+            // ∫ δ(t-c) E^(I w t) dt = E^(I w c); scaled by 1/Sqrt[2π].
+            let amp = sqrt_half(&times(vec![int(2), sym("Pi")]));
+            let ex = if is_zero(&c) {
+                amp
+            } else {
+                times(vec![
+                    amp,
+                    pow(sym("E"), times(vec![sym("I"), c, wval.clone()])),
+                ])
+            };
+            set_special(&mut special, ex)?;
             continue;
         }
         if let Some((kind, a)) = trig_linear(factor, t) {
             let amp = call("Sqrt", vec![div(sym("Pi"), int(2))]);
-            let d1 = dirac(plus(vec![sym(w), negate(&a)]));
-            let d2 = dirac(plus(vec![sym(w), a.clone()]));
+            let d1 = dirac(plus(vec![wval.clone(), negate(&a)]));
+            let d2 = dirac(plus(vec![wval.clone(), a.clone()]));
             let body = match kind {
                 "Cos" => times(vec![amp, plus(vec![d1, d2])]),
                 "Sin" => times(vec![sym("I"), amp, plus(vec![d1, negate(&d2)])]),
@@ -733,7 +858,7 @@ fn fourier_term(f: &Value, t: &str, w: &str, env: &Env) -> Option<Value> {
 
     let base = match special {
         Some(s) => s,
-        None => times(vec![super_sqrt_two_pi(), dirac(sym(w))]),
+        None => times(vec![super_sqrt_two_pi(), dirac(wval.clone())]),
     };
     Some(eval_value(times(vec![coeff, base]), env))
 }
@@ -817,10 +942,26 @@ fn power_z(k: i64, z: &str) -> Value {
     div(plus(terms), denom)
 }
 
+fn z_trig(fn_head: &str, a: &Value, z: &str) -> Value {
+    let zz = sym(z);
+    let ca = call(fn_head, vec![a.clone()]);
+    let den = plus(vec![
+        pow(zz.clone(), int(2)),
+        negate(&times(vec![int(2), zz.clone(), ca.clone()])),
+        int(1),
+    ]);
+    if fn_head == "Cos" || fn_head == "Cosh" {
+        div(times(vec![zz.clone(), plus(vec![zz, negate(&ca)])]), den)
+    } else {
+        div(times(vec![zz, ca]), den)
+    }
+}
+
 fn z_term(f: &Value, n: &str, z: &str, env: &Env) -> Option<Value> {
     let mut coeff = int(1);
     let mut k: i64 = 0;
     let mut geom: Option<Value> = None;
+    let mut trig: Option<(&'static str, Value)> = None;
     for factor in &factors_of(f) {
         if let Some(p) = var_power(factor, n) {
             k += p;
@@ -838,6 +979,13 @@ fn z_term(f: &Value, n: &str, z: &str, env: &Env) -> Option<Value> {
             geom = Some(args[0].clone());
             continue;
         }
+        if let Some((kind, a)) = trig_linear(factor, n) {
+            if trig.is_some() {
+                return None;
+            }
+            trig = Some((kind, a));
+            continue;
+        }
         if !contains_var(factor, n) {
             coeff = times(vec![coeff, factor.clone()]);
             continue;
@@ -845,9 +993,16 @@ fn z_term(f: &Value, n: &str, z: &str, env: &Env) -> Option<Value> {
         return None;
     }
 
-    let base = match geom {
-        Some(a) => geometric_z(&a, k, z)?,
-        None => power_z(k, z),
+    let base = if let Some((kind, a)) = trig {
+        if k != 0 || geom.is_some() {
+            return None;
+        }
+        z_trig(kind, &a, z)
+    } else {
+        match geom {
+            Some(a) => geometric_z(&a, k, z)?,
+            None => power_z(k, z),
+        }
     };
     Some(eval_value(times(vec![coeff, base]), env))
 }
@@ -900,6 +1055,10 @@ fn inverse_z_term(f: &Value, z: &str, n: &str, env: &Env) -> Option<Value> {
         2 => times(vec![
             sym(n),
             pow(a.clone(), plus(vec![sym(n), int(shift - 1)])),
+        ]),
+        3 => times(vec![
+            div(times(vec![sym(n), plus(vec![sym(n), int(-1)])]), int(2)),
+            pow(a.clone(), plus(vec![sym(n), int(shift - 2)])),
         ]),
         _ => return None,
     };
@@ -1471,6 +1630,14 @@ pub fn register(env: &Env) {
     ] {
         env.set_attributes(name, vec!["HoldAll".to_string()]);
     }
+
+    for name in ["FourierTransform", "InverseFourierTransform"] {
+        env.set_option(
+            name,
+            "FourierParameters".to_string(),
+            Value::List(vec![int(0), int(1)]),
+        );
+    }
 }
 
 fn builtin_laplace_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
@@ -1497,55 +1664,156 @@ fn builtin_inverse_laplace_transform(args: &[Value], env: &Env) -> Result<Value,
     Ok(inverse_laplace(&f, &s, &t, env))
 }
 
-fn builtin_fourier_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "FourierTransform requires exactly 3 arguments".to_string(),
-        ));
+/// Split a `Rule`/`RuleDelayed` — possibly still wrapped in a held
+/// `Pattern` — into its unwrapped `(key, value)` parts.
+fn rule_parts(v: &Value) -> Option<(Value, Value)> {
+    match v {
+        Value::Rule { lhs, rhs, .. } => Some((unwrap(lhs), unwrap(rhs))),
+        Value::Pattern(Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs }) => Some((
+            crate::pattern::unwrap_expr_to_value(lhs),
+            crate::pattern::unwrap_expr_to_value(rhs),
+        )),
+        _ => None,
+    }
+}
+
+/// Given `FourierParameters -> {p, q}` (or a list containing it), return
+/// `(p, q)`. The option argument is held, so unwrap patterns first.
+fn parse_fourier_parameters(arg: &Value) -> Option<(Value, Value)> {
+    let v = unwrap(arg);
+    let candidates: Vec<&Value> = match &v {
+        Value::List(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    for c in candidates {
+        if let Some((lhs, rhs)) = rule_parts(c)
+            && matches!(&lhs, Value::Symbol(s) if s == "FourierParameters")
+            && let Value::List(items) = rhs
+            && items.len() == 2
+        {
+            return Some((items[0].clone(), items[1].clone()));
+        }
+    }
+    None
+}
+
+/// Frequency variable used in the output: `w` for the default `q = 1`,
+/// otherwise `q*w`.
+fn freq_var(q: &Value, w: &str) -> Value {
+    if is_one(q) {
+        sym(w)
+    } else {
+        times(vec![q.clone(), sym(w)])
+    }
+}
+
+/// Overall amplitude factor `Sqrt[Abs[q] (2 Pi)^p]` for the generalized
+/// Fourier integrator (see `FourierParameters`).
+fn fourier_scale(p: &Value, q: &Value) -> Value {
+    let absq = call("Abs", vec![q.clone()]);
+    let two_pi = times(vec![int(2), sym("Pi")]);
+    let pw = if is_zero(p) {
+        int(1)
+    } else {
+        pow(two_pi, p.clone())
+    };
+    call("Sqrt", vec![times(vec![absq, pw])])
+}
+
+fn apply_fourier_scale(r: Value, p: &Value, q: &Value, env: &Env) -> Value {
+    if is_zero(p) && is_one(q) {
+        return r;
+    }
+    eval_value(times(vec![r, fourier_scale(p, q)]), env)
+}
+
+/// Reconstruct a `FourierParameters -> {p, q}` rule for unevaluated output.
+fn fourier_option(p: &Value, q: &Value) -> Value {
+    Value::Rule {
+        lhs: Box::new(sym("FourierParameters")),
+        rhs: Box::new(Value::List(vec![p.clone(), q.clone()])),
+        delayed: false,
+    }
+}
+
+/// Parse the common 3-or-4 argument Fourier signature, returning
+/// `(f, t, w, p, q)`.
+fn fourier_args(
+    args: &[Value],
+    name: &str,
+) -> Result<(Value, String, String, Value, Value), EvalError> {
+    if args.len() < 3 || args.len() > 4 {
+        return Err(EvalError::Error(format!(
+            "{name} requires 3 or 4 arguments"
+        )));
     }
     let f = unwrap(&args[0]);
     let t = as_symbol(&args[1], "Symbol")?;
     let w = as_symbol(&args[2], "Symbol")?;
+    let (p, q) = if args.len() == 4 {
+        parse_fourier_parameters(&args[3]).unwrap_or((int(0), int(1)))
+    } else {
+        (int(0), int(1))
+    };
+    Ok((f, t, w, p, q))
+}
+
+fn builtin_fourier_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let (f, t, w, p, q) = fourier_args(args, "FourierTransform")?;
     let f = normalize(&f);
-    match distribute(&f, env, &|x| fourier_term(x, &t, &w, env)) {
-        Some(r) => Ok(eval_value(r, env)),
-        None => Ok(call("FourierTransform", vec![f, sym(&t), sym(&w)])),
+    let wval = freq_var(&q, &w);
+    match distribute(&f, env, &|x| fourier_term(x, &t, &wval, env)) {
+        Some(r) => {
+            let r = eval_value(r, env);
+            Ok(apply_fourier_scale(r, &p, &q, env))
+        }
+        None => {
+            let mut out = vec![f, sym(&t), sym(&w)];
+            if args.len() == 4 {
+                out.push(fourier_option(&p, &q));
+            }
+            Ok(call("FourierTransform", out))
+        }
     }
 }
 
 fn builtin_inverse_fourier_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "InverseFourierTransform requires exactly 3 arguments".to_string(),
-        ));
-    }
-    let f = unwrap(&args[0]);
-    let w = as_symbol(&args[1], "Symbol")?;
-    let t = as_symbol(&args[2], "Symbol")?;
+    let (f, w, t, p, q) = fourier_args(args, "InverseFourierTransform")?;
     let f = normalize(&f);
-    // Reuse the forward matcher with swapped variable roles.
-    match distribute(&f, env, &|x| inverse_fourier_term(x, &w, &t, env)) {
-        Some(r) => Ok(eval_value(r, env)),
-        None => Ok(call("InverseFourierTransform", vec![f, sym(&w), sym(&t)])),
+    let tval = freq_var(&q, &t);
+    match distribute(&f, env, &|x| inverse_fourier_term(x, &w, &tval, env)) {
+        Some(r) => {
+            let r = eval_value(r, env);
+            // Inverse amplitude uses `(2 Pi)^(-p)` rather than `(2 Pi)^p`.
+            Ok(apply_fourier_scale(r, &negate(&p), &q, env))
+        }
+        None => {
+            let mut out = vec![f, sym(&w), sym(&t)];
+            if args.len() == 4 {
+                out.push(fourier_option(&p, &q));
+            }
+            Ok(call("InverseFourierTransform", out))
+        }
     }
 }
 
-fn inverse_fourier_term(f: &Value, w: &str, t: &str, env: &Env) -> Option<Value> {
+fn inverse_fourier_term(f: &Value, w: &str, tval: &Value, env: &Env) -> Option<Value> {
     let mut coeff = int(1);
     let mut special: Option<Value> = None;
     for factor in &factors_of(f) {
         if let Some(u) = exp_argument(factor) {
             if let Some(c) = squared_coeff(&u, w) {
                 let a = negate(&c);
-                set_special(&mut special, gauss_result(&a, t))?;
+                set_special(&mut special, gauss_result(&a, tval))?;
                 continue;
             }
             if let Some(a) = i_linear_coeff(&u, w) {
+                // Inverse kernel is E^(-I t w): a sign flip versus forward.
                 set_special(
                     &mut special,
                     times(vec![
                         call("Sqrt", vec![times(vec![int(2), sym("Pi")])]),
-                        dirac(plus(vec![sym(t), a])),
+                        dirac(plus(vec![tval.clone(), negate(&a)])),
                     ]),
                 )?;
                 continue;
@@ -1554,15 +1822,25 @@ fn inverse_fourier_term(f: &Value, w: &str, t: &str, env: &Env) -> Option<Value>
         if let Value::Call { head, args } = factor
             && head == "DiracDelta"
             && args.len() == 1
-            && matches!(&args[0], Value::Symbol(s) if s == w)
+            && let Some((m, c)) = affine(&args[0], w)
+            && is_one(&m)
         {
-            set_special(&mut special, sqrt_half(&times(vec![int(2), sym("Pi")])))?;
+            let amp = sqrt_half(&times(vec![int(2), sym("Pi")]));
+            let ex = if is_zero(&c) {
+                amp
+            } else {
+                times(vec![
+                    amp,
+                    pow(sym("E"), times(vec![negate(&sym("I")), c, tval.clone()])),
+                ])
+            };
+            set_special(&mut special, ex)?;
             continue;
         }
         if let Some((kind, a)) = trig_linear(factor, w) {
             let amp = call("Sqrt", vec![div(sym("Pi"), int(2))]);
-            let d1 = dirac(plus(vec![sym(t), negate(&a)]));
-            let d2 = dirac(plus(vec![sym(t), a.clone()]));
+            let d1 = dirac(plus(vec![tval.clone(), negate(&a)]));
+            let d2 = dirac(plus(vec![tval.clone(), a.clone()]));
             let body = match kind {
                 "Cos" => times(vec![amp, plus(vec![d1, d2])]),
                 "Sin" => times(vec![
@@ -1585,7 +1863,7 @@ fn inverse_fourier_term(f: &Value, w: &str, t: &str, env: &Env) -> Option<Value>
         Some(s) => s,
         None => times(vec![
             call("Sqrt", vec![times(vec![int(2), sym("Pi")])]),
-            dirac(sym(t)),
+            dirac(tval.clone()),
         ]),
     };
     Some(eval_value(times(vec![coeff, base]), env))
@@ -1665,11 +1943,14 @@ mod tests {
     #[test]
     fn laplace_basic_table() {
         let env = env();
-        assert_eq!(eval_str("LaplaceTransform[1, t, s]", &env), "Power[s, -1]");
-        assert_eq!(eval_str("LaplaceTransform[t, t, s]", &env), "Power[s, -2]");
+        assert_eq!(eval_str("LaplaceTransform[1, t, s]", &env), "Divide[1, s]");
+        assert_eq!(
+            eval_str("LaplaceTransform[t, t, s]", &env),
+            "Divide[1, Power[s, 2]]"
+        );
         assert_eq!(
             eval_str("LaplaceTransform[t^2, t, s]", &env),
-            "Times[2, Power[s, -3]]"
+            "Divide[2, Power[s, 3]]"
         );
     }
 
@@ -1678,11 +1959,11 @@ mod tests {
         let env = env();
         assert_eq!(
             eval_str("LaplaceTransform[E^(a t), t, s]", &env),
-            "Power[Plus[s, Times[-1, a]], -1]"
+            "Divide[1, Plus[s, Times[-1, a]]]"
         );
         assert_eq!(
             eval_str("LaplaceTransform[t^3 E^(2 t), t, s]", &env),
-            "Times[6, Power[Plus[s, -2], -4]]"
+            "Divide[6, Power[Plus[s, -2], 4]]"
         );
     }
 
@@ -1712,7 +1993,7 @@ mod tests {
         let env = env();
         assert_eq!(
             eval_str("LaplaceTransform[1 + 2 t, t, s]", &env),
-            "Plus[Power[s, -1], Times[2, Power[s, -2]]]"
+            "Plus[Divide[1, s], Times[2, Divide[1, Power[s, 2]]]]"
         );
         assert_eq!(
             eval_str("LaplaceTransform[3 Sin[2 t], t, s]", &env),
@@ -1883,5 +2164,102 @@ mod tests {
         let env = env();
         assert!(env.has_attribute("Dt", "HoldAll"));
         assert!(env.has_attribute("FunctionDomain", "HoldAll"));
+    }
+
+    #[test]
+    fn laplace_extended_table() {
+        let env = env();
+        // Dirac delta and shift.
+        assert_eq!(eval_str("LaplaceTransform[DiracDelta[t], t, s]", &env), "1");
+        assert_eq!(
+            eval_str("LaplaceTransform[DiracDelta[t - a], t, s]", &env),
+            "Power[E, Times[-1, a, s]]"
+        );
+        // Damped oscillator.
+        assert_eq!(
+            eval_str("LaplaceTransform[Cos[b t] E^(a t), t, s]", &env),
+            "Divide[Plus[s, Times[-1, a]], Plus[Power[Plus[s, Times[-1, a]], 2], Power[b, 2]]]"
+        );
+        // Fractional powers via Gamma.
+        let sq = eval_str("LaplaceTransform[1/Sqrt[t], t, s]", &env);
+        assert!(sq.contains("Sqrt[Pi]"), "{sq}");
+        let inv = eval_str("LaplaceTransform[Sqrt[t], t, s]", &env);
+        assert!(inv.contains("Gamma"), "{inv}");
+    }
+
+    #[test]
+    fn laplace_damped_unevaluated_forms() {
+        // Linearity is preserved for a sum of table entries.
+        let env = env();
+        assert_eq!(
+            eval_str("LaplaceTransform[2 + 3 E^(a t), t, s]", &env),
+            "Plus[Times[2, Divide[1, s]], Times[3, Divide[1, Plus[s, Times[-1, a]]]]]"
+        );
+    }
+
+    #[test]
+    fn inverse_laplace_fractional() {
+        let env = env();
+        let r = eval_str("InverseLaplaceTransform[1/Sqrt[s], s, t]", &env);
+        assert!(r.contains("Sqrt[Pi]"), "{r}");
+    }
+
+    #[test]
+    fn fourier_imaginary_exponential() {
+        let env = env();
+        assert_eq!(
+            eval_str("FourierTransform[E^(I a t), t, w]", &env),
+            "Times[Sqrt[Times[2, Pi]], DiracDelta[Plus[w, a]]]"
+        );
+        // Inverse flips the sign of the delta argument.
+        let inv = eval_str("InverseFourierTransform[E^(I a w), w, t]", &env);
+        assert!(inv.contains("DiracDelta[Plus[t, Times[-1, a]]]"), "{inv}");
+    }
+
+    #[test]
+    fn fourier_parameters_option() {
+        let env = env();
+        // {0, 1} is the default: unchanged delta amplitude.
+        assert_eq!(
+            eval_str(
+                "FourierTransform[DiracDelta[t], t, w, FourierParameters -> {0, 1}]",
+                &env
+            ),
+            "Divide[1, Sqrt[Times[2, Pi]]]"
+        );
+        // Non-default parameters rescale the result.
+        let scaled = eval_str(
+            "FourierTransform[E^(I a t), t, w, FourierParameters -> {1, 1}]",
+            &env,
+        );
+        assert!(scaled.contains("Sqrt[Times[2, Pi]]"), "{scaled}");
+        // The option is registered as a default.
+        assert!(
+            env.get_options("FourierTransform")
+                .iter()
+                .any(|(k, _)| k == "FourierParameters")
+        );
+    }
+
+    #[test]
+    fn ztransform_trig() {
+        let env = env();
+        assert_eq!(
+            eval_str("ZTransform[Cos[a n], n, z]", &env),
+            "Divide[Times[z, Plus[z, Times[-1, Cos[a]]]], Plus[Power[z, 2], Times[-2, z, Cos[a]], 1]]"
+        );
+        assert_eq!(
+            eval_str("ZTransform[Sin[a n], n, z]", &env),
+            "Divide[Times[z, Sin[a]], Plus[Power[z, 2], Times[-2, z, Sin[a]], 1]]"
+        );
+    }
+
+    #[test]
+    fn inverse_ztransform_cubic() {
+        let env = env();
+        assert_eq!(
+            eval_str("InverseZTransform[z/(z - 1)^3, z, n]", &env),
+            "Divide[Times[n, Plus[n, -1]], 2]"
+        );
     }
 }

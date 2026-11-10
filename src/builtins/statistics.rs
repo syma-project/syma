@@ -3,9 +3,9 @@
 //! Provides core statistical functions: descriptive statistics, probability
 //! distributions, PDF/CDF, and random variate generation.
 
-use crate::value::{EvalError, Value};
-use rug::Float;
+use crate::value::{EvalError, Value, rational_value};
 use rug::Integer;
+use rug::Rational;
 use std::collections::HashMap;
 
 // ── Mathematical helpers (private) ──────────────────────────────────────────
@@ -38,6 +38,10 @@ fn ln_gamma(x: f64) -> f64 {
 }
 
 /// Error function using Horner polynomial (Abramowitz & Stegun 7.1.26, max error 1.5e-7).
+///
+/// Retained as a fast, dependency-free fallback; the accurate path for the
+/// normal CDF goes through the regularized incomplete gamma function.
+#[allow(dead_code)]
 fn erf_approx(x: f64) -> f64 {
     let s = if x >= 0.0 { 1.0_f64 } else { -1.0_f64 };
     let x = x.abs();
@@ -50,8 +54,20 @@ fn erf_approx(x: f64) -> f64 {
 }
 
 /// Standard normal CDF Φ(x) = P(Z ≤ x) for Z ~ N(0, 1).
+///
+/// Uses the regularized lower incomplete gamma function
+/// `Φ(x) = ½ (1 + s·P(½, x²/2))` (with `s = sign(x)`), which is accurate to
+/// ~1e-15 — well inside the 1e-8 conformance tolerance.
 fn normal_cdf(x: f64) -> f64 {
-    (1.0 + erf_approx(x / std::f64::consts::SQRT_2)) / 2.0
+    if x == 0.0 {
+        return 0.5;
+    }
+    let p = regularized_gamma_p(0.5, 0.5 * x * x);
+    if x > 0.0 {
+        0.5 * (1.0 + p)
+    } else {
+        0.5 * (1.0 - p)
+    }
 }
 
 /// Regularized lower incomplete gamma P(a, x).
@@ -228,6 +244,14 @@ fn int(n: i64) -> Value {
     Value::Integer(Integer::from(n))
 }
 
+/// Store a numeric argument, preserving exactness (Integer/Rational stay exact).
+fn num_param(v: &Value) -> Value {
+    match v {
+        Value::Integer(_) | Value::Rational(_) | Value::Real(_) => v.clone(),
+        _ => super::real(super::to_f64(v).unwrap_or(0.0)),
+    }
+}
+
 /// Extract all numeric values from a list as f64, with error on non-numeric.
 fn extract_numbers(items: &[Value]) -> Result<Vec<f64>, EvalError> {
     items
@@ -257,129 +281,397 @@ fn compute_median(nums: &mut [f64]) -> f64 {
     }
 }
 
-// ── Distribution helpers (private) ──────────────────────────────────────────
+// ── Exact-aware numeric ops (private) ───────────────────────────────────────
 
-/// Analytical mean of a distribution (returns None for undefined/infinite mean).
-pub(crate) fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
-    let dist_type = dist.get("Distribution").and_then(|v| match v {
-        Value::Str(s) => Some(s.as_str()),
-        _ => None,
-    })?;
-    match dist_type {
-        "Normal" => dist.get("Mean").and_then(super::to_f64),
-        "Uniform" => {
-            let lo = dist.get("Min").and_then(super::to_f64)?;
-            let hi = dist.get("Max").and_then(super::to_f64)?;
-            Some((lo + hi) / 2.0)
+/// A numeric operand that keeps exactness for exact (Integer/Rational) inputs.
+///
+/// Wolfram-Language semantics: descriptive statistics over exact inputs yield
+/// exact results. `Num` defers the decision to the last moment so that a single
+/// `Real` operand promotes the whole computation to floating point.
+#[derive(Clone)]
+enum Num {
+    Exact(Rational),
+    Real(f64),
+}
+
+impl Num {
+    fn to_f64(&self) -> f64 {
+        match self {
+            Num::Exact(r) => r.to_f64(),
+            Num::Real(x) => *x,
         }
-        "Poisson" => dist.get("Lambda").and_then(super::to_f64),
-        "Binomial" => {
-            let n = dist.get("N").and_then(super::to_f64)?;
-            let p = dist.get("P").and_then(super::to_f64)?;
-            Some(n * p)
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Num::Exact(r) => rational_value(r.numer().clone(), r.denom().clone()),
+            Num::Real(x) => super::real(x),
         }
-        "Bernoulli" => dist.get("P").and_then(super::to_f64),
-        "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
-            Some(1.0 / lambda)
-        }
-        "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(super::to_f64)?;
-            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
-            Some(alpha / lambda)
-        }
-        "ChiSquare" => dist.get("K").and_then(super::to_f64),
-        "StudentT" => {
-            let nu = dist.get("Nu").and_then(super::to_f64)?;
-            if nu > 1.0 { Some(0.0) } else { None }
-        }
-        "Beta" => {
-            let a = dist.get("Alpha").and_then(super::to_f64)?;
-            let b = dist.get("Beta").and_then(super::to_f64)?;
-            Some(a / (a + b))
-        }
-        "LogNormal" => {
-            let mu = dist.get("Mu").and_then(super::to_f64)?;
-            let sigma = dist.get("Sigma").and_then(super::to_f64)?;
-            Some((mu + 0.5 * sigma * sigma).exp())
-        }
-        "Cauchy" => None, // undefined
-        "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(super::to_f64)?;
-            let hi = dist.get("Max").and_then(super::to_f64)?;
-            Some((lo + hi) / 2.0)
-        }
+    }
+
+    fn is_exact(&self) -> bool {
+        matches!(self, Num::Exact(_))
+    }
+}
+
+/// Convert a numeric `Value` to a `Num`, preserving exactness.
+fn to_num(v: &Value) -> Option<Num> {
+    match v {
+        Value::Integer(n) => Some(Num::Exact(Rational::from(n.clone()))),
+        Value::Rational(r) => Some(Num::Exact((**r).clone())),
+        Value::Real(f) => Some(Num::Real(f.to_f64())),
         _ => None,
     }
 }
 
-/// Analytical variance of a distribution.
-pub(crate) fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
-    let dist_type = dist.get("Distribution").and_then(|v| match v {
-        Value::Str(s) => Some(s.as_str()),
+/// Extract all numeric values from a list as `Num`, erroring on non-numeric.
+fn extract_nums(items: &[Value]) -> Result<Vec<Num>, EvalError> {
+    items
+        .iter()
+        .map(|v| {
+            to_num(v).ok_or_else(|| EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: v.type_name().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Sort `Num`s in ascending numeric order.
+fn sort_nums(nums: &mut [Num]) {
+    nums.sort_by(|a, b| {
+        a.to_f64()
+            .partial_cmp(&b.to_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// True if every operand is exact.
+fn all_exact(nums: &[Num]) -> bool {
+    nums.iter().all(Num::is_exact)
+}
+
+/// Exact rational sum, or f64 if any operand is real.
+fn compute_mean_num(nums: &[Num]) -> Num {
+    if all_exact(nums) {
+        let mut sum = Rational::from(0);
+        for n in nums {
+            if let Num::Exact(r) = n {
+                sum += r;
+            }
+        }
+        Num::Exact(sum / Integer::from(nums.len()))
+    } else {
+        Num::Real(nums.iter().map(Num::to_f64).sum::<f64>() / nums.len() as f64)
+    }
+}
+
+/// Median of a mutable slice; exact when all operands are exact.
+fn compute_median_num(nums: &mut [Num]) -> Num {
+    sort_nums(nums);
+    let n = nums.len();
+    if n % 2 == 1 {
+        nums[n / 2].clone()
+    } else if let (Num::Exact(a), Num::Exact(b)) = (&nums[n / 2 - 1], &nums[n / 2]) {
+        let sum: Rational = (a + b).into();
+        Num::Exact(sum / Integer::from(2))
+    } else {
+        Num::Real((nums[n / 2 - 1].to_f64() + nums[n / 2].to_f64()) / 2.0)
+    }
+}
+
+/// Sample variance (n−1 denominator); exact when all operands are exact.
+fn compute_variance_num(nums: &[Num]) -> Option<Num> {
+    let n = nums.len();
+    if n == 0 {
+        return None;
+    }
+    if n == 1 {
+        // Wolfram-Language semantics: the sample variance of one point is 0.
+        return Some(if all_exact(nums) {
+            Num::Exact(Rational::from(0))
+        } else {
+            Num::Real(0.0)
+        });
+    }
+    if all_exact(nums) {
+        let m = match compute_mean_num(nums) {
+            Num::Exact(m) => m,
+            Num::Real(_) => unreachable!("all-exact mean must be exact"),
+        };
+        let mut ss = Rational::from(0);
+        for x in nums {
+            if let Num::Exact(v) = x {
+                let d: Rational = (v - &m).into();
+                let sq: Rational = d.clone() * d;
+                ss += sq;
+            }
+        }
+        Some(Num::Exact(ss / Integer::from(n - 1)))
+    } else {
+        let m = nums.iter().map(Num::to_f64).sum::<f64>() / n as f64;
+        let ss: f64 = nums.iter().map(|x| (x.to_f64() - m).powi(2)).sum();
+        Some(Num::Real(ss / (n - 1) as f64))
+    }
+}
+
+/// Square root that stays exact for perfect-square rationals.
+fn sqrt_num(v: Num) -> Num {
+    match v {
+        Num::Exact(r) => {
+            let num = r.numer().clone();
+            let den = r.denom().clone();
+            if num >= 0 && num.is_perfect_square() && den.is_perfect_square() {
+                Num::Exact(Rational::from((num.sqrt(), den.sqrt())))
+            } else {
+                Num::Real(r.to_f64().sqrt())
+            }
+        }
+        Num::Real(x) => Num::Real(x.sqrt()),
+    }
+}
+
+/// Linearly interpolated quantile; exact when data and `q` are both exact.
+fn compute_quantile_num(nums: &mut [Num], q: &Num) -> Num {
+    sort_nums(nums);
+    let n = nums.len();
+    if n == 1 {
+        return nums[0].clone();
+    }
+    if q.is_exact() && all_exact(nums) {
+        let q = match q {
+            Num::Exact(r) => r,
+            Num::Real(_) => unreachable!(),
+        };
+        let pos: Rational = (q * Integer::from(n - 1)).into();
+        let lo = (pos.to_f64().floor() as usize).min(n - 1);
+        let hi = (lo + 1).min(n - 1);
+        let frac: Rational = (&pos - Integer::from(lo)).into();
+        if let (Num::Exact(a), Num::Exact(b)) = (&nums[lo], &nums[hi]) {
+            let one_minus: Rational = Rational::from(1) - &frac;
+            let val: Rational = a * one_minus + b * frac;
+            return Num::Exact(val);
+        }
+    }
+    let qf = q.to_f64();
+    let pos = qf * (n - 1) as f64;
+    let lo = (pos.floor() as usize).min(n - 1);
+    let hi = (lo + 1).min(n - 1);
+    let frac = pos - lo as f64;
+    Num::Real(nums[lo].to_f64() * (1.0 - frac) + nums[hi].to_f64() * frac)
+}
+
+/// Sample covariance (n−1 denominator); exact when all operands are exact.
+fn compute_covariance_num(a: &[Num], b: &[Num]) -> Num {
+    let n = a.len();
+    if all_exact(a) && all_exact(b) {
+        let (m1, m2) = match (compute_mean_num(a), compute_mean_num(b)) {
+            (Num::Exact(m1), Num::Exact(m2)) => (m1, m2),
+            _ => unreachable!("all-exact mean must be exact"),
+        };
+        let mut s = Rational::from(0);
+        for (x, y) in a.iter().zip(b.iter()) {
+            if let (Num::Exact(x), Num::Exact(y)) = (x, y) {
+                let dx: Rational = (x - &m1).into();
+                let dy: Rational = (y - &m2).into();
+                let prod: Rational = dx * dy;
+                s += prod;
+            }
+        }
+        Num::Exact(s / Integer::from(n - 1))
+    } else {
+        let f = Num::to_f64;
+        let m1 = a.iter().map(f).sum::<f64>() / n as f64;
+        let m2 = b.iter().map(f).sum::<f64>() / n as f64;
+        let mut s = 0.0;
+        for (x, y) in a.iter().zip(b.iter()) {
+            s += (f(x) - m1) * (f(y) - m2);
+        }
+        Num::Real(s / (n - 1) as f64)
+    }
+}
+
+// ── Distribution helpers (private) ──────────────────────────────────────────
+
+/// Read a distribution parameter as a `Num`, preserving exactness.
+fn dist_param(dist: &HashMap<String, Value>, key: &str) -> Option<Num> {
+    dist.get(key).and_then(to_num)
+}
+
+fn dist_type_of(dist: &HashMap<String, Value>) -> Option<&str> {
+    match dist.get("Distribution") {
+        Some(Value::Str(s)) => Some(s.as_str()),
         _ => None,
-    })?;
-    match dist_type {
-        "Normal" => {
-            let sd = dist.get("SD").and_then(super::to_f64)?;
-            Some(sd * sd)
-        }
+    }
+}
+
+fn num_add(a: &Num, b: &Num) -> Num {
+    match (a, b) {
+        (Num::Exact(x), Num::Exact(y)) => Num::Exact((x + y).into()),
+        _ => Num::Real(a.to_f64() + b.to_f64()),
+    }
+}
+
+fn num_sub(a: &Num, b: &Num) -> Num {
+    match (a, b) {
+        (Num::Exact(x), Num::Exact(y)) => Num::Exact((x - y).into()),
+        _ => Num::Real(a.to_f64() - b.to_f64()),
+    }
+}
+
+fn num_mul(a: &Num, b: &Num) -> Num {
+    match (a, b) {
+        (Num::Exact(x), Num::Exact(y)) => Num::Exact((x * y).into()),
+        _ => Num::Real(a.to_f64() * b.to_f64()),
+    }
+}
+
+fn num_div(a: &Num, b: &Num) -> Num {
+    match (a, b) {
+        (Num::Exact(x), Num::Exact(y)) if !y.is_zero() => Num::Exact((x / y).into()),
+        _ => Num::Real(a.to_f64() / b.to_f64()),
+    }
+}
+
+fn num_recip(a: &Num) -> Num {
+    num_div(&Num::Exact(Rational::from(1)), a)
+}
+
+/// Analytical mean of a distribution, kept exact when parameters are exact.
+fn distribution_mean_num(dist: &HashMap<String, Value>) -> Option<Num> {
+    let two = Num::Exact(Rational::from(2));
+    match dist_type_of(dist)? {
+        "Normal" => dist_param(dist, "Mean"),
         "Uniform" => {
-            let lo = dist.get("Min").and_then(super::to_f64)?;
-            let hi = dist.get("Max").and_then(super::to_f64)?;
-            Some((hi - lo).powi(2) / 12.0)
+            let lo = dist_param(dist, "Min")?;
+            let hi = dist_param(dist, "Max")?;
+            Some(num_div(&num_add(&lo, &hi), &two))
         }
-        "Poisson" => dist.get("Lambda").and_then(super::to_f64),
+        "Poisson" => dist_param(dist, "Lambda"),
         "Binomial" => {
-            let n = dist.get("N").and_then(super::to_f64)?;
-            let p = dist.get("P").and_then(super::to_f64)?;
-            Some(n * p * (1.0 - p))
+            let n = dist_param(dist, "N")?;
+            let p = dist_param(dist, "P")?;
+            Some(num_mul(&n, &p))
         }
-        "Bernoulli" => {
-            let p = dist.get("P").and_then(super::to_f64)?;
-            Some(p * (1.0 - p))
-        }
-        "Exponential" => {
-            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
-            Some(1.0 / (lambda * lambda))
-        }
+        "Bernoulli" => dist_param(dist, "P"),
+        "Exponential" => Some(num_recip(&dist_param(dist, "Lambda")?)),
         "Gamma" => {
-            let alpha = dist.get("Alpha").and_then(super::to_f64)?;
-            let lambda = dist.get("Lambda").and_then(super::to_f64)?;
-            Some(alpha / (lambda * lambda))
+            let alpha = dist_param(dist, "Alpha")?;
+            let lambda = dist_param(dist, "Lambda")?;
+            Some(num_div(&alpha, &lambda))
         }
-        "ChiSquare" => {
-            let k = dist.get("K").and_then(super::to_f64)?;
-            Some(2.0 * k)
-        }
+        "ChiSquare" => dist_param(dist, "K"),
         "StudentT" => {
-            let nu = dist.get("Nu").and_then(super::to_f64)?;
-            if nu > 2.0 {
-                Some(nu / (nu - 2.0))
+            if dist_param(dist, "Nu")?.to_f64() > 1.0 {
+                Some(Num::Exact(Rational::from(0)))
             } else {
                 None
             }
         }
         "Beta" => {
-            let a = dist.get("Alpha").and_then(super::to_f64)?;
-            let b = dist.get("Beta").and_then(super::to_f64)?;
-            Some(a * b / ((a + b).powi(2) * (a + b + 1.0)))
+            let a = dist_param(dist, "Alpha")?;
+            let b = dist_param(dist, "Beta")?;
+            Some(num_div(&a, &num_add(&a, &b)))
         }
         "LogNormal" => {
-            let mu = dist.get("Mu").and_then(super::to_f64)?;
-            let sigma = dist.get("Sigma").and_then(super::to_f64)?;
-            let s2 = sigma * sigma;
-            Some((s2.exp() - 1.0) * (2.0 * mu + s2).exp())
+            let mu = dist_param(dist, "Mu")?.to_f64();
+            let sigma = dist_param(dist, "Sigma")?.to_f64();
+            Some(Num::Real((mu + 0.5 * sigma * sigma).exp()))
         }
-        "Cauchy" => None,
+        "Cauchy" => None, // undefined
         "DiscreteUniform" => {
-            let lo = dist.get("Min").and_then(super::to_f64)?;
-            let hi = dist.get("Max").and_then(super::to_f64)?;
-            let n = hi - lo;
-            Some(n * (n + 2.0) / 12.0)
+            let lo = dist_param(dist, "Min")?;
+            let hi = dist_param(dist, "Max")?;
+            Some(num_div(&num_add(&lo, &hi), &two))
         }
         _ => None,
     }
+}
+
+/// Analytical variance of a distribution, kept exact when parameters are exact.
+fn distribution_variance_num(dist: &HashMap<String, Value>) -> Option<Num> {
+    let one = Num::Exact(Rational::from(1));
+    let two = Num::Exact(Rational::from(2));
+    let twelve = Num::Exact(Rational::from(12));
+    match dist_type_of(dist)? {
+        "Normal" => {
+            let sd = dist_param(dist, "SD")?;
+            Some(num_mul(&sd, &sd))
+        }
+        "Uniform" => {
+            let lo = dist_param(dist, "Min")?;
+            let hi = dist_param(dist, "Max")?;
+            let d = num_sub(&hi, &lo);
+            Some(num_div(&num_mul(&d, &d), &twelve))
+        }
+        "Poisson" => dist_param(dist, "Lambda"),
+        "Binomial" => {
+            let n = dist_param(dist, "N")?;
+            let p = dist_param(dist, "P")?;
+            let q = num_sub(&one, &p);
+            Some(num_mul(&num_mul(&n, &p), &q))
+        }
+        "Bernoulli" => {
+            let p = dist_param(dist, "P")?;
+            let q = num_sub(&one, &p);
+            Some(num_mul(&p, &q))
+        }
+        "Exponential" => {
+            let lambda = dist_param(dist, "Lambda")?;
+            let l2 = num_mul(&lambda, &lambda);
+            Some(num_div(&one, &l2))
+        }
+        "Gamma" => {
+            let alpha = dist_param(dist, "Alpha")?;
+            let lambda = dist_param(dist, "Lambda")?;
+            let l2 = num_mul(&lambda, &lambda);
+            Some(num_div(&alpha, &l2))
+        }
+        "ChiSquare" => {
+            let k = dist_param(dist, "K")?;
+            Some(num_mul(&two, &k))
+        }
+        "StudentT" => {
+            let nu = dist_param(dist, "Nu")?;
+            if nu.to_f64() > 2.0 {
+                Some(num_div(&nu, &num_sub(&nu, &two)))
+            } else {
+                None
+            }
+        }
+        "Beta" => {
+            let a = dist_param(dist, "Alpha")?;
+            let b = dist_param(dist, "Beta")?;
+            let s = num_add(&a, &b);
+            let denom = num_mul(&num_mul(&s, &s), &num_add(&s, &one));
+            Some(num_div(&num_mul(&a, &b), &denom))
+        }
+        "LogNormal" => {
+            let mu = dist_param(dist, "Mu")?.to_f64();
+            let sigma = dist_param(dist, "Sigma")?.to_f64();
+            let s2 = sigma * sigma;
+            Some(Num::Real((s2.exp() - 1.0) * (2.0 * mu + s2).exp()))
+        }
+        "Cauchy" => None,
+        "DiscreteUniform" => {
+            let lo = dist_param(dist, "Min")?;
+            let hi = dist_param(dist, "Max")?;
+            let n = num_sub(&hi, &lo);
+            let n_plus_2 = num_add(&n, &two);
+            Some(num_div(&num_mul(&n, &n_plus_2), &twelve))
+        }
+        _ => None,
+    }
+}
+
+/// Analytical mean of a distribution (returns None for undefined/infinite mean).
+pub(crate) fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
+    distribution_mean_num(dist).map(|n| n.to_f64())
+}
+
+/// Analytical variance of a distribution.
+pub(crate) fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
+    distribution_variance_num(dist).map(|n| n.to_f64())
 }
 
 // ── Core builtins ────────────────────────────────────────────────────────────
@@ -395,8 +687,8 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_mean_f64(map) {
-            Some(v) => Ok(super::real(v)),
+        return match distribution_mean_num(map) {
+            Some(v) => Ok(v.into_value()),
             None => Err(EvalError::Error(
                 "Mean: distribution mean is undefined".to_string(),
             )),
@@ -406,13 +698,8 @@ pub fn builtin_mean(args: &[Value]) -> Result<Value, EvalError> {
     if items.is_empty() {
         return Err(EvalError::Error("Mean: list must not be empty".to_string()));
     }
-    let nums = extract_numbers(items)?;
-    let mean = compute_mean(&nums);
-    if mean.fract() == 0.0 && mean.abs() < i64::MAX as f64 {
-        Ok(int(mean as i64))
-    } else {
-        Ok(super::real(mean))
-    }
+    let nums = extract_nums(items)?;
+    Ok(compute_mean_num(&nums).into_value())
 }
 
 /// Median[list] — median value.
@@ -428,13 +715,8 @@ pub fn builtin_median(args: &[Value]) -> Result<Value, EvalError> {
             "Median: list must not be empty".to_string(),
         ));
     }
-    let mut nums = extract_numbers(items)?;
-    let med = compute_median(&mut nums);
-    if med.fract() == 0.0 && med.abs() < i64::MAX as f64 {
-        Ok(int(med as i64))
-    } else {
-        Ok(super::real(med))
-    }
+    let mut nums = extract_nums(items)?;
+    Ok(compute_median_num(&mut nums).into_value())
 }
 
 /// Variance[list] — sample variance (n-1 denominator); Variance[dist] — distribution variance.
@@ -448,24 +730,26 @@ pub fn builtin_variance(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_variance_f64(map) {
-            Some(v) => Ok(super::real(v)),
+        return match distribution_variance_num(map) {
+            Some(v) => Ok(v.into_value()),
             None => Err(EvalError::Error(
                 "Variance: distribution variance is undefined".to_string(),
             )),
         };
     }
     let items = as_list(&args[0])?;
-    let n = items.len();
-    if n < 2 {
+    if items.is_empty() {
         return Err(EvalError::Error(
-            "Variance: need at least 2 data points".to_string(),
+            "Variance: list must not be empty".to_string(),
         ));
     }
-    let nums = extract_numbers(items)?;
-    let mean = compute_mean(&nums);
-    let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    Ok(super::real(ss / (n - 1) as f64))
+    let nums = extract_nums(items)?;
+    match compute_variance_num(&nums) {
+        Some(v) => Ok(v.into_value()),
+        None => Err(EvalError::Error(
+            "Variance: list must not be empty".to_string(),
+        )),
+    }
 }
 
 /// StandardDeviation[list] — sample standard deviation; StandardDeviation[dist] — distribution SD.
@@ -479,18 +763,24 @@ pub fn builtin_standard_deviation(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::Assoc(map) = &args[0]
         && map.contains_key("Distribution")
     {
-        return match distribution_variance_f64(map) {
-            Some(v) => Ok(super::real(v.sqrt())),
+        return match distribution_variance_num(map) {
+            Some(v) => Ok(sqrt_num(v).into_value()),
             None => Err(EvalError::Error(
                 "StandardDeviation: distribution variance is undefined".to_string(),
             )),
         };
     }
-    let var = builtin_variance(args)?;
-    match var {
-        Value::Real(r) => Ok(Value::Real(r.sqrt())),
-        _ => Err(EvalError::Error(
-            "StandardDeviation: unexpected variance result".to_string(),
+    let items = as_list(&args[0])?;
+    if items.is_empty() {
+        return Err(EvalError::Error(
+            "StandardDeviation: list must not be empty".to_string(),
+        ));
+    }
+    let nums = extract_nums(items)?;
+    match compute_variance_num(&nums) {
+        Some(v) => Ok(sqrt_num(v).into_value()),
+        None => Err(EvalError::Error(
+            "StandardDeviation: list must not be empty".to_string(),
         )),
     }
 }
@@ -508,26 +798,18 @@ pub fn builtin_quantile(args: &[Value]) -> Result<Value, EvalError> {
             "Quantile: list must not be empty".to_string(),
         ));
     }
-    let q = super::to_f64(&args[1]).ok_or_else(|| EvalError::TypeError {
+    let q = to_num(&args[1]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[1].type_name().to_string(),
     })?;
-    if !(0.0..=1.0).contains(&q) {
+    let qf = q.to_f64();
+    if !(0.0..=1.0).contains(&qf) {
         return Err(EvalError::Error(
             "Quantile: q must be between 0 and 1".to_string(),
         ));
     }
-    let mut nums = extract_numbers(items)?;
-    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = nums.len();
-    if n == 1 {
-        return Ok(super::real(nums[0]));
-    }
-    let pos = q * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(n - 1);
-    let frac = pos - lo as f64;
-    Ok(super::real(nums[lo] * (1.0 - frac) + nums[hi] * frac))
+    let mut nums = extract_nums(items)?;
+    Ok(compute_quantile_num(&mut nums, &q).into_value())
 }
 
 /// Covariance[list1, list2] — sample covariance.
@@ -552,17 +834,9 @@ pub fn builtin_covariance(args: &[Value]) -> Result<Value, EvalError> {
             "Covariance: need at least 2 data points".to_string(),
         ));
     }
-    let nums1 = extract_numbers(items1)?;
-    let nums2 = extract_numbers(items2)?;
-    let mean1 = compute_mean(&nums1);
-    let mean2 = compute_mean(&nums2);
-    let cov: f64 = nums1
-        .iter()
-        .zip(nums2.iter())
-        .map(|(x, y)| (x - mean1) * (y - mean2))
-        .sum::<f64>()
-        / (n - 1) as f64;
-    Ok(super::real(cov))
+    let nums1 = extract_nums(items1)?;
+    let nums2 = extract_nums(items2)?;
+    Ok(compute_covariance_num(&nums1, &nums2).into_value())
 }
 
 /// Correlation[list1, list2] — Pearson correlation coefficient.
@@ -575,22 +849,20 @@ pub fn builtin_correlation(args: &[Value]) -> Result<Value, EvalError> {
     let cov = builtin_covariance(args)?;
     let sd1 = builtin_standard_deviation(&[args[0].clone()])?;
     let sd2 = builtin_standard_deviation(&[args[1].clone()])?;
-    match (&cov, &sd1, &sd2) {
-        (Value::Real(c), Value::Real(s1), Value::Real(s2)) => {
-            if s1.is_zero() || s2.is_zero() {
-                return Err(EvalError::Error(
-                    "Correlation: standard deviation is zero".to_string(),
-                ));
-            }
-            let prec = c.prec().max(s1.prec()).max(s2.prec());
-            let result =
-                Float::with_val(prec, c) / (Float::with_val(prec, s1) * Float::with_val(prec, s2));
-            Ok(Value::Real(result))
-        }
-        _ => Err(EvalError::Error(
-            "Correlation: unexpected result types".to_string(),
-        )),
+    let c = super::to_f64(&cov)
+        .ok_or_else(|| EvalError::Error("Correlation: covariance is not numeric".to_string()))?;
+    let s1 = super::to_f64(&sd1).ok_or_else(|| {
+        EvalError::Error("Correlation: standard deviation is not numeric".to_string())
+    })?;
+    let s2 = super::to_f64(&sd2).ok_or_else(|| {
+        EvalError::Error("Correlation: standard deviation is not numeric".to_string())
+    })?;
+    if s1 == 0.0 || s2 == 0.0 {
+        return Err(EvalError::Error(
+            "Correlation: standard deviation is zero".to_string(),
+        ));
     }
+    Ok(super::real(c / (s1 * s2)))
 }
 
 // ── New descriptive statistics ───────────────────────────────────────────────
@@ -1054,7 +1326,7 @@ pub fn builtin_binomial_distribution(args: &[Value]) -> Result<Value, EvalError>
         Value::Str("Binomial".to_string()),
     );
     map.insert("N".to_string(), int(n as i64));
-    map.insert("P".to_string(), super::real(p));
+    map.insert("P".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1079,7 +1351,7 @@ pub fn builtin_bernoulli_distribution(args: &[Value]) -> Result<Value, EvalError
         "Distribution".to_string(),
         Value::Str("Bernoulli".to_string()),
     );
-    map.insert("P".to_string(), super::real(p));
+    map.insert("P".to_string(), num_param(&args[0]));
     Ok(Value::Assoc(map))
 }
 
@@ -1104,7 +1376,7 @@ pub fn builtin_exponential_distribution(args: &[Value]) -> Result<Value, EvalErr
         "Distribution".to_string(),
         Value::Str("Exponential".to_string()),
     );
-    map.insert("Lambda".to_string(), super::real(lambda));
+    map.insert("Lambda".to_string(), num_param(&args[0]));
     Ok(Value::Assoc(map))
 }
 
@@ -1130,8 +1402,8 @@ pub fn builtin_gamma_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Gamma".to_string()));
-    map.insert("Alpha".to_string(), super::real(alpha));
-    map.insert("Lambda".to_string(), super::real(lambda));
+    map.insert("Alpha".to_string(), num_param(&args[0]));
+    map.insert("Lambda".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1156,7 +1428,7 @@ pub fn builtin_chi_square_distribution(args: &[Value]) -> Result<Value, EvalErro
         "Distribution".to_string(),
         Value::Str("ChiSquare".to_string()),
     );
-    map.insert("K".to_string(), super::real(k));
+    map.insert("K".to_string(), num_param(&args[0]));
     Ok(Value::Assoc(map))
 }
 
@@ -1181,7 +1453,7 @@ pub fn builtin_student_t_distribution(args: &[Value]) -> Result<Value, EvalError
         "Distribution".to_string(),
         Value::Str("StudentT".to_string()),
     );
-    map.insert("Nu".to_string(), super::real(nu));
+    map.insert("Nu".to_string(), num_param(&args[0]));
     Ok(Value::Assoc(map))
 }
 
@@ -1207,8 +1479,8 @@ pub fn builtin_beta_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Beta".to_string()));
-    map.insert("Alpha".to_string(), super::real(alpha));
-    map.insert("Beta".to_string(), super::real(beta));
+    map.insert("Alpha".to_string(), num_param(&args[0]));
+    map.insert("Beta".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1219,7 +1491,7 @@ pub fn builtin_log_normal_distribution(args: &[Value]) -> Result<Value, EvalErro
             "LogNormalDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let _mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1237,8 +1509,8 @@ pub fn builtin_log_normal_distribution(args: &[Value]) -> Result<Value, EvalErro
         "Distribution".to_string(),
         Value::Str("LogNormal".to_string()),
     );
-    map.insert("Mu".to_string(), super::real(mu));
-    map.insert("Sigma".to_string(), super::real(sigma));
+    map.insert("Mu".to_string(), num_param(&args[0]));
+    map.insert("Sigma".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1249,7 +1521,7 @@ pub fn builtin_cauchy_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "CauchyDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let x0 = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let _x0 = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1264,8 +1536,8 @@ pub fn builtin_cauchy_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Cauchy".to_string()));
-    map.insert("Location".to_string(), super::real(x0));
-    map.insert("Scale".to_string(), super::real(gamma));
+    map.insert("Location".to_string(), num_param(&args[0]));
+    map.insert("Scale".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1319,7 +1591,7 @@ pub fn builtin_normal_distribution(args: &[Value]) -> Result<Value, EvalError> {
             "NormalDistribution requires exactly 2 arguments".to_string(),
         ));
     }
-    let mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
+    let _mu = super::to_f64(&args[0]).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: args[0].type_name().to_string(),
     })?;
@@ -1334,8 +1606,8 @@ pub fn builtin_normal_distribution(args: &[Value]) -> Result<Value, EvalError> {
     }
     let mut map = HashMap::new();
     map.insert("Distribution".to_string(), Value::Str("Normal".to_string()));
-    map.insert("Mean".to_string(), super::real(mu));
-    map.insert("SD".to_string(), super::real(sigma));
+    map.insert("Mean".to_string(), num_param(&args[0]));
+    map.insert("SD".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1364,8 +1636,8 @@ pub fn builtin_uniform_distribution(args: &[Value]) -> Result<Value, EvalError> 
         "Distribution".to_string(),
         Value::Str("Uniform".to_string()),
     );
-    map.insert("Min".to_string(), super::real(lo));
-    map.insert("Max".to_string(), super::real(hi));
+    map.insert("Min".to_string(), num_param(&args[0]));
+    map.insert("Max".to_string(), num_param(&args[1]));
     Ok(Value::Assoc(map))
 }
 
@@ -1390,7 +1662,7 @@ pub fn builtin_poisson_distribution(args: &[Value]) -> Result<Value, EvalError> 
         "Distribution".to_string(),
         Value::Str("Poisson".to_string()),
     );
-    map.insert("Lambda".to_string(), super::real(lambda));
+    map.insert("Lambda".to_string(), num_param(&args[0]));
     Ok(Value::Assoc(map))
 }
 
@@ -2043,7 +2315,7 @@ mod tests {
     }
 
     fn real_val(v: f64) -> Value {
-        Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
+        Value::Real(rug::Float::with_val(crate::value::DEFAULT_PRECISION, v))
     }
 
     fn list(vals: Vec<Value>) -> Value {
@@ -2054,6 +2326,7 @@ mod tests {
         match v {
             Value::Real(r) => (r.to_f64() - expected).abs() < tol,
             Value::Integer(n) => (n.to_f64() - expected).abs() < tol,
+            Value::Rational(r) => (r.to_f64() - expected).abs() < tol,
             _ => false,
         }
     }

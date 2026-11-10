@@ -56,12 +56,6 @@ pub(super) fn eval_plot(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    // Evaluate remaining option args
-    let plot_opts: Vec<Value> = args[2..]
-        .iter()
-        .map(|a| super::eval(a, env))
-        .collect::<Result<_, _>>()?;
-
     // Sample the expression at n_points
     let n_points = 200usize;
     let step = (xmax - xmin) / (n_points - 1) as f64;
@@ -116,13 +110,7 @@ pub(super) fn eval_plot(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
         ]),
     );
     opt_map.insert("Axes".to_string(), Value::Bool(true));
-    for opt in &plot_opts {
-        if let Value::Rule { lhs, rhs, .. } = opt
-            && let Value::Symbol(k) | Value::Str(k) = lhs.as_ref()
-        {
-            opt_map.insert(k.clone(), rhs.as_ref().clone());
-        }
-    }
+    insert_option_rules(&mut opt_map, &args[2..], env);
     let options = Value::Assoc(opt_map);
 
     Ok(Value::Call {
@@ -416,13 +404,7 @@ pub(super) fn eval_discrete_plot(args: &[Expr], env: &Env) -> Result<Value, Eval
         Value::List(vec![make_int(400), make_int(300)]),
     );
     opt_map.insert("Axes".to_string(), Value::Bool(true));
-    for a in &args[2..] {
-        if let Ok(Value::Rule { lhs, rhs, .. }) = super::eval(a, env)
-            && let Value::Symbol(k) | Value::Str(k) = lhs.as_ref()
-        {
-            opt_map.insert(k.clone(), rhs.as_ref().clone());
-        }
-    }
+    insert_option_rules(&mut opt_map, &args[2..], env);
 
     Ok(Value::Call {
         head: "Graphics".to_string(),
@@ -504,13 +486,7 @@ pub(super) fn eval_density_plot(args: &[Expr], env: &Env) -> Result<Value, EvalE
         Value::List(vec![make_int(400), make_int(400)]),
     );
     opt_map.insert("Axes".to_string(), Value::Bool(true));
-    for a in &args[3..] {
-        if let Ok(Value::Rule { lhs, rhs, .. }) = super::eval(a, env)
-            && let Value::Symbol(k) | Value::Str(k) = lhs.as_ref()
-        {
-            opt_map.insert(k.clone(), rhs.as_ref().clone());
-        }
-    }
+    insert_option_rules(&mut opt_map, &args[3..], env);
 
     Ok(Value::Call {
         head: "Graphics".to_string(),
@@ -519,6 +495,25 @@ pub(super) fn eval_density_plot(args: &[Expr], env: &Env) -> Result<Value, EvalE
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
+
+/// Merge option rules (`"key" -> value` or `key -> value`) into an option map.
+///
+/// Option rules are inspected in their raw `Expr` form so the leading pattern
+/// wrapper produced by the evaluator is not an obstacle, and the right-hand
+/// side is evaluated in `env` before being stored.
+fn insert_option_rules(opt_map: &mut HashMap<String, Value>, rules: &[Expr], env: &Env) {
+    for rule in rules {
+        if let Expr::Rule { lhs, rhs } = rule {
+            let key = match lhs.as_ref() {
+                Expr::Symbol(k) | Expr::Str(k) => k.clone(),
+                _ => continue,
+            };
+            if let Ok(v) = super::eval(rhs, env) {
+                opt_map.insert(key, v);
+            }
+        }
+    }
+}
 
 fn make_real(v: f64) -> Value {
     Value::Real(Float::with_val(crate::value::DEFAULT_PRECISION, v))
@@ -575,13 +570,7 @@ fn build_line_graphics(
         .entry("Axes".to_string())
         .or_insert_with(|| Value::Bool(true));
 
-    for a in extra_opts {
-        if let Ok(Value::Rule { lhs, rhs, .. }) = super::eval(a, env)
-            && let Value::Symbol(k) | Value::Str(k) = lhs.as_ref()
-        {
-            opt_map.insert(k.clone(), rhs.as_ref().clone());
-        }
-    }
+    insert_option_rules(&mut opt_map, extra_opts, env);
 
     Ok(Value::Call {
         head: "Graphics".to_string(),

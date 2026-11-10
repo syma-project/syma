@@ -688,7 +688,7 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         self.skip_newlines();
-        let lhs = self.parse_pipe_expr()?;
+        let lhs = self.parse_put_expr()?;
         // Check for assignment-like operators at the lowest precedence level.
         let token = self.peek().clone();
         match token {
@@ -798,6 +798,23 @@ impl Parser {
             }
             _ => Ok(lhs),
         }
+    }
+
+    /// Put infix `expr >> file`, desugared to `Put[expr, file]`.
+    ///
+    /// Binds looser than `//` and `@` but tighter than assignment, so
+    /// `x = value >> "file"` reads as `Set[x, Put[value, "file"]]`.
+    fn parse_put_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_pipe_expr()?;
+        while self.at_after_newlines(&Token::PutOp) {
+            self.advance();
+            let right = self.parse_pipe_expr()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("Put".to_string())),
+                args: vec![left, right],
+            };
+        }
+        Ok(left)
     }
 
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1113,6 +1130,7 @@ impl Parser {
                 | Token::LParen
                 | Token::LAssoc
                 | Token::Not
+                | Token::GetOp
                 | Token::If
                 | Token::Which
                 | Token::Switch
@@ -1295,6 +1313,15 @@ impl Parser {
                 let expr = self.parse_unary_expr()?;
                 Ok(Expr::Call {
                     head: Box::new(Expr::Symbol("Splice".to_string())),
+                    args: vec![expr],
+                })
+            }
+            // Prefix Get: `<< file` desugars to `Get[file]`.
+            Token::GetOp => {
+                self.advance();
+                let expr = self.parse_unary_expr()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol("Get".to_string())),
                     args: vec![expr],
                 })
             }
@@ -1838,7 +1865,7 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> Result<Expr, ParseError> {
         self.skip_newlines();
-        let pattern = self.parse_pattern_pipe()?;
+        let pattern = self.parse_pattern_put()?;
 
         // Check for guard: pattern /; condition
         let result = if self.at(&Token::ColonSlashSemicolon) {
@@ -1928,6 +1955,20 @@ impl Parser {
         } else {
             Ok(result)
         }
+    }
+
+    /// `expr >> file` inside a pattern / call-argument context.
+    fn parse_pattern_put(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_pattern_pipe()?;
+        while self.at_after_newlines(&Token::PutOp) {
+            self.advance();
+            let right = self.parse_pattern_pipe()?;
+            left = Expr::Call {
+                head: Box::new(Expr::Symbol("Put".to_string())),
+                args: vec![left, right],
+            };
+        }
+        Ok(left)
     }
 
     fn parse_pattern_pipe(&mut self) -> Result<Expr, ParseError> {
@@ -2200,6 +2241,7 @@ impl Parser {
                 | Token::LBrace
                 | Token::LAssoc
                 | Token::Not
+                | Token::GetOp
                 | Token::If
                 | Token::Which
                 | Token::Switch
@@ -2272,6 +2314,15 @@ impl Parser {
                 let expr = self.parse_pattern_unary()?;
                 Ok(Expr::Call {
                     head: Box::new(Expr::Symbol("Not".to_string())),
+                    args: vec![expr],
+                })
+            }
+            // Prefix Get in pattern/call-argument context.
+            Token::GetOp => {
+                self.advance();
+                let expr = self.parse_pattern_unary()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol("Get".to_string())),
                     args: vec![expr],
                 })
             }
@@ -3265,6 +3316,86 @@ mod tests {
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Call"),
+        }
+    }
+
+    #[test]
+    fn test_put_operator_desugars() {
+        let expr = parse_one("x >> \"file\"");
+        match expr {
+            Expr::Call { head, args } => {
+                assert_eq!(*head, Expr::Symbol("Put".to_string()));
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Expr::Symbol("x".to_string()));
+                assert_eq!(args[1], Expr::Str("file".to_string()));
+            }
+            _ => panic!("Expected Call, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_get_operator_desugars() {
+        let expr = parse_one("<< \"file\"");
+        match expr {
+            Expr::Call { head, args } => {
+                assert_eq!(*head, Expr::Symbol("Get".to_string()));
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], Expr::Str("file".to_string()));
+            }
+            _ => panic!("Expected Call, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_get_operator_after_factor_is_implicit_mul() {
+        let expr = parse_one("2 << \"file\"");
+        match expr {
+            Expr::Call { head, args } => {
+                assert_eq!(*head, Expr::Symbol("Times".to_string()));
+                assert_eq!(args.len(), 2);
+                match &args[1] {
+                    Expr::Call { head, .. } => {
+                        assert_eq!(**head, Expr::Symbol("Get".to_string()));
+                    }
+                    other => panic!("Expected inner Get call, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Call, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_put_operator_binds_inside_call_arg() {
+        // Call arguments are parsed through the pattern chain, which also
+        // understands `>>`.
+        let expr = parse_one("f[1 >> \"file\"]");
+        match expr {
+            Expr::Call { head, args } => {
+                assert_eq!(*head, Expr::Symbol("f".to_string()));
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Expr::Call { head, .. } => {
+                        assert_eq!(**head, Expr::Symbol("Put".to_string()));
+                    }
+                    other => panic!("Expected inner Put call, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Call, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_put_operator_with_assignment() {
+        // `>>` binds tighter than `=`.
+        let expr = parse_one("x = 1 >> \"file\"");
+        match expr {
+            Expr::Assign { rhs, .. } => match *rhs {
+                Expr::Call { head, .. } => {
+                    assert_eq!(*head, Expr::Symbol("Put".to_string()));
+                }
+                other => panic!("Expected Put on RHS, got {:?}", other),
+            },
+            _ => panic!("Expected Assign, got {:?}", expr),
         }
     }
 

@@ -83,7 +83,10 @@ fn format_from_name(name: &str) -> Option<Format> {
 
 /// Infer a `Format` from a file path extension (lowercased).
 fn format_from_extension(path: &str) -> Option<Format> {
-    let ext = path.rsplit('.').next()?.to_lowercase();
+    let ext = std::path::Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_lowercase();
     match ext.as_str() {
         "json" => Some(Format::JSON),
         "nb" => Some(Format::NB),
@@ -116,134 +119,140 @@ pub fn detect_format(path: &str, format_name: Option<&str>) -> Result<Format, Ev
 
 // ── CSV / TSV helpers ────────────────────────────────────────────────────────
 
-/// Parse a single delimited line (CSV with `,` or TSV with `\t`), handling
-/// double-quoted fields where commas/tabs are allowed.  A pair of `""` inside
-/// a quoted field is a literal `"`.
-fn parse_delimited_line(line: &str, delimiter: u8) -> Vec<String> {
+/// Parse delimited text (CSV/TSV) into records of fields.
+///
+/// Works on whole documents so that quoted fields may contain the delimiter
+/// **and** newlines. Handles `""` as an escaped quote, normalises CRLF line
+/// endings (also inside quoted fields), and skips blank lines. Whitespace
+/// inside fields is preserved so that values survive a round-trip.
+fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
     // Iterate over chars (not bytes) so multi-byte UTF-8 content is preserved.
-    let delimiter = delimiter as char;
-    let mut fields = Vec::new();
-    let mut current = String::new();
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut field = String::new();
     let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
+    let mut row_started = false;
+    let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {
         if in_quotes {
-            if c == '"' {
-                if chars.peek() == Some(&'"') {
-                    current.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = false;
+            match c {
+                '"' => {
+                    if chars.peek() == Some(&'"') {
+                        field.push('"');
+                        chars.next();
+                    } else {
+                        in_quotes = false;
+                    }
                 }
-            } else {
-                current.push(c);
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    field.push('\n');
+                }
+                _ => field.push(c),
             }
-        } else if c == '"' {
-            in_quotes = true;
-        } else if c == delimiter {
-            fields.push(std::mem::take(&mut current));
-        } else {
-            current.push(c);
+            continue;
+        }
+
+        match c {
+            '\r' | '\n' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                row.push(std::mem::take(&mut field));
+                if row_started {
+                    records.push(std::mem::take(&mut row));
+                } else {
+                    row.clear();
+                }
+                row_started = false;
+            }
+            '"' => {
+                in_quotes = true;
+                row_started = true;
+            }
+            c if c == delimiter => {
+                row.push(std::mem::take(&mut field));
+                row_started = true;
+            }
+            _ => {
+                field.push(c);
+                row_started = true;
+            }
         }
     }
-    fields.push(current);
-    fields
+
+    if in_quotes || row_started || !field.is_empty() {
+        row.push(field);
+        records.push(row);
+    }
+    records
 }
 
-/// Check if a string has an unclosed double-quote (odd number of `"` chars).
-fn has_unclosed_quote(s: &str) -> bool {
-    let mut count = 0u32;
-    for &b in s.as_bytes() {
-        if b == b'"' {
-            count += 1;
-        }
+/// Parse a single delimited line into its fields (no newline handling).
+#[allow(dead_code)]
+fn parse_delimited_line(line: &str, delimiter: u8) -> Vec<String> {
+    parse_delimited(line, delimiter as char)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// Convert records into a `Value::List` of `Value::List` rows.
+fn records_to_value(records: Vec<Vec<String>>) -> Value {
+    Value::List(
+        records
+            .into_iter()
+            .map(|row| Value::List(row.into_iter().map(Value::Str).collect()))
+            .collect(),
+    )
+}
+
+/// Quote a field if it contains the delimiter, a quote, or a line break.
+fn quote_field(s: &str, delimiter: char) -> String {
+    if s.contains(delimiter) || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
-    count % 2 == 1
+}
+
+/// Export rows separated by `delimiter`, quoting fields as needed.
+fn export_delimited(value: &Value, delimiter: char) -> Result<String, EvalError> {
+    let rows = value_to_rows(value)?;
+    let mut out = String::new();
+    let sep = delimiter.to_string();
+    for row in &rows {
+        let cols: Vec<String> = row
+            .iter()
+            .map(|v| quote_field(&value_to_csv_field(v), delimiter))
+            .collect();
+        out.push_str(&cols.join(&sep));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 // ── CSV ──────────────────────────────────────────────────────────────────────
 
 fn import_csv(text: &str) -> Result<Value, EvalError> {
-    let mut rows = Vec::new();
-    let mut carry = String::new();
-
-    for raw_line in text.split('\n') {
-        if carry.is_empty() {
-            carry = raw_line.to_string();
-        } else {
-            carry.push('\n');
-            carry.push_str(raw_line);
-        }
-
-        if !has_unclosed_quote(&carry) {
-            let trimmed = carry.trim();
-            if !trimmed.is_empty() {
-                let fields = parse_delimited_line(trimmed, b',');
-                let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
-                rows.push(Value::List(row));
-            }
-            carry.clear();
-        }
-    }
-    // Trailing unclosed quote — include remaining carry as a row
-    if !carry.is_empty() {
-        let trimmed = carry.trim();
-        if !trimmed.is_empty() {
-            let fields = parse_delimited_line(trimmed, b',');
-            let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
-            rows.push(Value::List(row));
-        }
-    }
-    Ok(Value::List(rows))
+    Ok(records_to_value(parse_delimited(text, ',')))
 }
 
 fn export_csv(value: &Value) -> Result<String, EvalError> {
-    let rows = value_to_rows(value)?;
-    let mut out = String::new();
-    for row in &rows {
-        let cols: Vec<String> = row
-            .iter()
-            .map(|v| {
-                let s = value_to_csv_field(v);
-                if s.contains(',') || s.contains('"') || s.contains('\n') {
-                    format!("\"{}\"", s.replace('"', "\"\""))
-                } else {
-                    s
-                }
-            })
-            .collect();
-        out.push_str(&cols.join(","));
-        out.push('\n');
-    }
-    Ok(out)
+    export_delimited(value, ',')
 }
 
 // ── TSV ──────────────────────────────────────────────────────────────────────
 
 fn import_tsv(text: &str) -> Result<Value, EvalError> {
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let fields = parse_delimited_line(trimmed, b'\t');
-        let row: Vec<Value> = fields.into_iter().map(Value::Str).collect();
-        rows.push(Value::List(row));
-    }
-    Ok(Value::List(rows))
+    Ok(records_to_value(parse_delimited(text, '\t')))
 }
 
 fn export_tsv(value: &Value) -> Result<String, EvalError> {
-    let rows = value_to_rows(value)?;
-    let mut out = String::new();
-    for row in &rows {
-        let cols: Vec<String> = row.iter().map(value_to_csv_field).collect();
-        out.push_str(&cols.join("\t"));
-        out.push('\n');
-    }
-    Ok(out)
+    export_delimited(value, '\t')
 }
 
 // ── Table (whitespace-separated) ─────────────────────────────────────────────
@@ -277,6 +286,33 @@ fn export_table(value: &Value) -> Result<String, EvalError> {
 
 // ── HTML ─────────────────────────────────────────────────────────────────────
 
+fn decode_entity(entity: &str) -> String {
+    match entity {
+        "amp" => "&".to_string(),
+        "lt" => "<".to_string(),
+        "gt" => ">".to_string(),
+        "quot" => "\"".to_string(),
+        "apos" => "'".to_string(),
+        "nbsp" => " ".to_string(),
+        _ => {
+            // Numeric character references: &#233; or &#xE9;
+            if let Some(rest) = entity.strip_prefix('#') {
+                let code =
+                    if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        rest.parse::<u32>().ok()
+                    };
+                if let Some(c) = code.and_then(char::from_u32) {
+                    return c.to_string();
+                }
+            }
+            // Unknown named entity — keep it verbatim rather than dropping it.
+            format!("&{};", entity)
+        }
+    }
+}
+
 fn strip_html_tags(text: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
@@ -284,28 +320,46 @@ fn strip_html_tags(text: &str) -> String {
     let mut entity = String::new();
 
     for c in text.chars() {
+        if in_tag {
+            if c == '>' {
+                in_tag = false;
+            }
+            continue;
+        }
+        if in_entity {
+            if c == ';' {
+                in_entity = false;
+                out.push_str(&decode_entity(&entity));
+                entity.clear();
+            } else if c.is_ascii_alphanumeric() || c == '#' {
+                entity.push(c);
+            } else {
+                // Not a well-formed entity — flush it literally and reprocess.
+                in_entity = false;
+                out.push('&');
+                out.push_str(&entity);
+                entity.clear();
+                if c == '<' {
+                    in_tag = true;
+                } else {
+                    out.push(c);
+                }
+            }
+            continue;
+        }
         match c {
             '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            '&' if !in_tag => {
+            '&' => {
                 in_entity = true;
                 entity.clear();
             }
-            ';' if in_entity => {
-                in_entity = false;
-                match entity.as_str() {
-                    "amp" => out.push('&'),
-                    "lt" => out.push('<'),
-                    "gt" => out.push('>'),
-                    "quot" => out.push('"'),
-                    "nbsp" => out.push(' '),
-                    _ => {}
-                }
-            }
-            _ if in_entity => entity.push(c),
-            _ if !in_tag && !in_entity => out.push(c),
-            _ => {}
+            _ => out.push(c),
         }
+    }
+    // Flush a dangling entity (e.g. text ending in "&")
+    if in_entity {
+        out.push('&');
+        out.push_str(&entity);
     }
 
     // Normalise whitespace runs to single spaces
@@ -501,5 +555,110 @@ mod tests {
                 Value::List(vec![Value::Str("α".into()), Value::Str("β".into())]),
             ])
         );
+    }
+
+    #[test]
+    fn test_parse_delimited_crlf_and_blank_lines() {
+        // CRLF endings and blank lines are normalised away.
+        let rows = parse_delimited("a,b\r\nc,d\r\n\r\ne,f\r\n", ',');
+        assert_eq!(
+            rows,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()],
+                vec!["e".to_string(), "f".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_delimited_multiline_quoted_crlf() {
+        // A quoted field may span lines; CRLF inside it becomes LF.
+        let rows = parse_delimited("a,\"b\r\nc\",d", ',');
+        assert_eq!(
+            rows,
+            vec![vec!["a".to_string(), "b\nc".to_string(), "d".to_string()]]
+        );
+    }
+
+    #[test]
+    fn test_parse_delimited_preserves_spaces_and_empty_fields() {
+        let rows = parse_delimited(" a , ,c", ',');
+        assert_eq!(
+            rows,
+            vec![vec![" a ".to_string(), " ".to_string(), "c".to_string()]]
+        );
+    }
+
+    #[test]
+    fn test_tsv_export_quotes_embedded_tab_and_newline() {
+        let data = Value::List(vec![Value::List(vec![
+            Value::Str("a\tb".into()),
+            Value::Str("c\nd".into()),
+            Value::Str("e\"f".into()),
+        ])]);
+        let out = export_tsv(&data).unwrap();
+        // Every special field must be quoted so it round-trips.
+        assert!(out.contains("\"a\tb\""), "out = {:?}", out);
+        assert!(out.contains("\"c\nd\""), "out = {:?}", out);
+        assert!(out.contains("\"e\"\"f\""), "out = {:?}", out);
+        assert_eq!(import_tsv(&out).unwrap(), data);
+    }
+
+    #[test]
+    fn test_csv_roundtrip_special_fields() {
+        let data = Value::List(vec![
+            Value::List(vec![
+                Value::Str(" leading".into()),
+                Value::Str("trailing ".into()),
+                Value::Str("a,b".into()),
+                Value::Str("q\"q".into()),
+                Value::Str("nl\nnl".into()),
+                Value::Str(String::new()),
+            ]),
+            Value::List(vec![
+                Value::Str("café".into()),
+                Value::Str("日本語".into()),
+                Value::Str("x".into()),
+                Value::Str("y".into()),
+                Value::Str("z".into()),
+                Value::Str("w".into()),
+            ]),
+        ]);
+        let out = export_csv(&data).unwrap();
+        assert_eq!(import_csv(&out).unwrap(), data);
+    }
+
+    #[test]
+    fn test_csv_export_remains_simple_for_plain_fields() {
+        let data = Value::List(vec![Value::List(vec![
+            Value::Str("a".into()),
+            Value::Str("b".into()),
+        ])]);
+        assert_eq!(export_csv(&data).unwrap(), "a,b\n");
+    }
+
+    #[test]
+    fn test_html_bare_ampersand_preserved() {
+        // A bare `&` used to swallow the remainder of the text.
+        assert_eq!(
+            import_html("<p>a & b</p>").unwrap(),
+            Value::Str("a & b".into())
+        );
+    }
+
+    #[test]
+    fn test_html_unknown_and_numeric_entities() {
+        assert_eq!(
+            import_html("&copy; &#233; &#xE9;").unwrap(),
+            Value::Str("&copy; é é".into())
+        );
+    }
+
+    #[test]
+    fn test_format_from_extension_uses_path_extension() {
+        assert_eq!(format_from_extension("dir.d/foo.csv"), Some(Format::CSV));
+        assert_eq!(format_from_extension("noext"), None);
+        assert_eq!(format_from_extension("archive.JSON"), Some(Format::JSON));
     }
 }

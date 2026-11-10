@@ -472,7 +472,11 @@ fn parse_poly_call(head: &str, args: &[Value], vars: &[String], whole: &Value) -
                     p.insert(vec![0; vars.len()], pw);
                     Some(p)
                 } else {
-                    None
+                    // Negative power of a variable: keep `whole` as an
+                    // opaque coefficient (rational-function term).
+                    let mut p = VPoly::default();
+                    p.insert(vec![0; vars.len()], whole.clone());
+                    Some(p)
                 }
             }
         }
@@ -486,7 +490,10 @@ fn parse_poly_call(head: &str, args: &[Value], vars: &[String], whole: &Value) -
                 }
                 Some(num.scale(&c_div(&int_value(1), &d)))
             } else {
-                None
+                // Non-constant denominator: treat as opaque coefficient.
+                let mut p = VPoly::default();
+                p.insert(vec![0; vars.len()], whole.clone());
+                Some(p)
             }
         }
         "Subtract" if args.len() == 2 => {
@@ -1026,15 +1033,56 @@ fn rref_solve(mut a: Vec<Vec<Value>>, mut b: Vec<Value>, names: &[String]) -> Op
             return None;
         }
     }
+    // Express pivot variables in terms of the free variables left in the
+    // reduced rows (rows are in RREF, so a pivot row may still carry non-zero
+    // coefficients in free columns).
+    let free: Vec<usize> = (0..cols)
+        .filter(|c| !pivots.iter().any(|(pc, _)| pc == c))
+        .collect();
     let mut out = vec![int_value(0); cols];
     for c in 0..cols {
         if let Some((_, pr)) = pivots.iter().find(|(pc, _)| *pc == c) {
-            out[c] = b[*pr].clone();
+            let mut val = b[*pr].clone();
+            for &fc in &free {
+                if !is_zero_value(&a[*pr][fc]) {
+                    let t = c_mul(&a[*pr][fc], &sym(&names[fc]));
+                    val = c_sub(&val, &t);
+                }
+            }
+            out[c] = val;
         } else {
             out[c] = sym(&names[c]);
         }
     }
     Some(out)
+}
+
+/// Substitute every occurrence of the symbol `name` in `e` with `val`.
+fn subst_symbol(e: &Value, name: &str, val: &Value) -> Value {
+    match e {
+        Value::Symbol(s) if s == name => val.clone(),
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(|a| subst_symbol(a, name, val)).collect(),
+        },
+        Value::List(items) => {
+            Value::List(items.iter().map(|i| subst_symbol(i, name, val)).collect())
+        }
+        _ => e.clone(),
+    }
+}
+
+/// Recursively fold an expression through the simplifier (numeric constants,
+/// identity elements, nested arithmetic).
+fn simplify_deep(v: &Value) -> Value {
+    match v {
+        Value::Call { head, args } => {
+            let sargs: Vec<Value> = args.iter().map(simplify_deep).collect();
+            simplify_call(head, &sargs)
+        }
+        Value::List(items) => Value::List(items.iter().map(simplify_deep).collect()),
+        _ => v.clone(),
+    }
 }
 
 fn row_for_poly(p: &VPoly, active: &[usize]) -> Option<(Vec<Value>, Value)> {
@@ -1508,6 +1556,15 @@ fn reduce_univariate(conjuncts: &[Value], var: &str) -> Option<Value> {
     if let Some(v) = region_condition(&relations, var) {
         return Some(v);
     }
+    // Symbolic-coefficient linear relations: case-split on the sign.
+    let vs = vec![var.to_string()];
+    if relations
+        .iter()
+        .all(|(p, _)| is_linear_active(p, &[0]) || p.is_zero())
+        && let Some(v) = reduce_linear_rel(&relations, &vs, &[0])
+    {
+        return Some(v);
+    }
     // Fallback for symbolic coefficients: solve equalities independently.
     let mut conds: Vec<Value> = Vec::new();
     let mut any_eq = false;
@@ -1537,6 +1594,241 @@ fn reduce_univariate(conjuncts: &[Value], var: &str) -> Option<Value> {
     Some(and(conds))
 }
 
+// ── Multivariate linear relations (equalities + inequalities) ───────────────
+
+/// Parse a conjunction of (possibly chained) relations into polynomial/relation
+/// pairs. Returns `None` when a piece is not polynomial.
+fn parse_relations(conjuncts: &[Value], vars: &[String]) -> Option<Vec<(VPoly, Rel)>> {
+    let mut rels: Vec<(VPoly, Rel)> = Vec::new();
+    for c in conjuncts {
+        match c {
+            Value::Bool(true) => {}
+            Value::Bool(false) => return None,
+            Value::Call { head, args } if args.len() == 2 && rel_from_head(head).is_some() => {
+                let mut ops: Vec<Value> = Vec::new();
+                let mut op_rels: Vec<Rel> = Vec::new();
+                flatten_chain(c, &mut ops, &mut op_rels);
+                for i in 0..op_rels.len() {
+                    let p = parse_poly(&ops[i], vars)?.minus(&parse_poly(&ops[i + 1], vars)?);
+                    rels.push((p, op_rels[i]));
+                }
+            }
+            _ => {
+                let p = parse_poly(c, vars)?;
+                rels.push((p, Rel::Equal));
+            }
+        }
+    }
+    Some(rels)
+}
+
+fn rel_flip(r: Rel) -> Rel {
+    match r {
+        Rel::Less => Rel::Greater,
+        Rel::LessEqual => Rel::GreaterEqual,
+        Rel::Greater => Rel::Less,
+        Rel::GreaterEqual => Rel::LessEqual,
+        other => other,
+    }
+}
+
+fn rel_head(r: Rel) -> &'static str {
+    match r {
+        Rel::Less => "Less",
+        Rel::LessEqual => "LessEqual",
+        Rel::Greater => "Greater",
+        Rel::GreaterEqual => "GreaterEqual",
+        Rel::Equal => "Equal",
+        Rel::Unequal => "Unequal",
+    }
+}
+
+/// Split `p = a*vars[vi] + g`, where `a` may itself be a polynomial in the
+/// other variables (multilinear case), into `(a, g)`.
+fn linear_split(p: &VPoly, vi: usize, vars: &[String]) -> (Value, VPoly) {
+    let mut a_terms: Vec<Value> = Vec::new();
+    let mut g = VPoly::default();
+    for (m, c) in &p.0 {
+        if m[vi] == 0 {
+            g.insert(m.clone(), c.clone());
+        } else {
+            let mut rest = m.clone();
+            rest[vi] = 0;
+            let coeff = if rest.iter().all(|&e| e == 0) {
+                c.clone()
+            } else {
+                c_mul(c, &monomial_expr(&rest, vars))
+            };
+            a_terms.push(coeff);
+        }
+    }
+    let a = if a_terms.is_empty() {
+        int_value(0)
+    } else {
+        simplify_call("Plus", &a_terms)
+    };
+    (a, g)
+}
+
+/// Build `value rel 0`, collapsing numeric values to a Boolean.
+fn const_rel_value(v: &Value, r: Rel) -> Value {
+    if let Some(x) = numeric_f64(v) {
+        let b = match r {
+            Rel::Less => x < 0.0,
+            Rel::LessEqual => x <= 0.0,
+            Rel::Greater => x > 0.0,
+            Rel::GreaterEqual => x >= 0.0,
+            Rel::Equal => x == 0.0,
+            Rel::Unequal => x != 0.0,
+        };
+        return Value::Bool(b);
+    }
+    call(rel_head(r), vec![v.clone(), int_value(0)])
+}
+
+/// Reduce a conjunction of linear (in)equalities over `active`, eliminating the
+/// variables one at a time. Requires numeric leading coefficients.
+fn reduce_linear_rel(rels: &[(VPoly, Rel)], vars: &[String], active: &[usize]) -> Option<Value> {
+    let mut work: Vec<(VPoly, Rel)> = Vec::new();
+    let mut parts: Vec<Value> = Vec::new();
+    for (p, r) in rels {
+        if is_constant_active(p, active) {
+            let total = p.0.values().fold(int_value(0), |acc, c| c_add(&acc, c));
+            match const_rel_value(&total, *r) {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Some(Value::Bool(false)),
+                other => parts.push(other),
+            }
+            continue;
+        }
+        work.push((p.clone(), *r));
+    }
+    if work.is_empty() {
+        return Some(and(parts));
+    }
+    if active.is_empty() {
+        return Some(Value::Bool(false));
+    }
+    let vi = active[0];
+    let rest: Vec<usize> = active[1..].to_vec();
+    if let Some(pos) = work
+        .iter()
+        .position(|(p, r)| *r == Rel::Equal && !is_zero_value(&linear_split(p, vi, vars).0))
+    {
+        // Eliminate `vi` through an equality, then continue on the rest.
+        let (p, _) = work.remove(pos);
+        let (a, g) = linear_split(&p, vi, vars);
+        let value = c_div(&c_neg(&poly_to_value(&g, vars)), &a);
+        parts.push(equal(sym(&vars[vi]), value.clone()));
+        let mut sub_rels: Vec<(VPoly, Rel)> = Vec::new();
+        for (q, r) in &work {
+            let e = poly_to_value(q, vars);
+            let es = subst_symbol(&e, &vars[vi], &value);
+            sub_rels.push((parse_poly(&es, vars)?, *r));
+        }
+        parts.push(reduce_linear_rel(&sub_rels, vars, &rest)?);
+        return Some(and(parts));
+    }
+    // Case-split on a coefficient with unknown sign.
+    if let Some(pos) = work.iter().position(|(p, _)| {
+        !is_constant_active(p, &[vi]) && as_rat(&linear_split(p, vi, vars).0).is_none()
+    }) {
+        let (p, r) = work[pos].clone();
+        let (a, g) = linear_split(&p, vi, vars);
+        let gv = poly_to_value(&g, vars);
+        let isolate = |rel: Rel| -> Option<(VPoly, Rel)> {
+            let bound = c_div(&c_neg(&gv), &a);
+            let e = simplify_call("Plus", &[sym(&vars[vi]), c_neg(&bound)]);
+            Some((parse_poly(&e, vars)?, rel))
+        };
+        let mut branches: Vec<Value> = Vec::new();
+        if r == Rel::Equal {
+            let mut modified = work.clone();
+            modified[pos] = isolate(Rel::Equal)?;
+            branches.push(and(vec![
+                call("Unequal", vec![a.clone(), int_value(0)]),
+                reduce_linear_rel(&modified, vars, active)?,
+            ]));
+            let mut modified0 = work.clone();
+            modified0[pos] = (g.clone(), Rel::Equal);
+            branches.push(and(vec![
+                const_rel_value(&a, Rel::Equal),
+                reduce_linear_rel(&modified0, vars, active)?,
+            ]));
+        } else {
+            for sign in [Rel::Greater, Rel::Less, Rel::Equal] {
+                let mut modified = work.clone();
+                modified[pos] = if sign == Rel::Equal {
+                    (g.clone(), r)
+                } else {
+                    let rel = if sign == Rel::Greater { r } else { rel_flip(r) };
+                    isolate(rel)?
+                };
+                branches.push(and(vec![
+                    const_rel_value(&a, sign),
+                    reduce_linear_rel(&modified, vars, active)?,
+                ]));
+            }
+        }
+        parts.push(or(branches));
+        return Some(and(parts));
+    }
+    let mut lower: Vec<(Value, bool)> = Vec::new();
+    let mut upper: Vec<(Value, bool)> = Vec::new();
+    let mut uneq: Vec<Value> = Vec::new();
+    let mut residual: Vec<(VPoly, Rel)> = Vec::new();
+    for (p, r) in &work {
+        let (a, g) = linear_split(p, vi, vars);
+        if is_zero_value(&a) {
+            residual.push((g, *r));
+            continue;
+        }
+        let ar = as_rat(&a)?;
+        let bound = c_div(&c_neg(&poly_to_value(&g, vars)), &a);
+        let rel = if ar.is_negative() { rel_flip(*r) } else { *r };
+        match rel {
+            Rel::Less => upper.push((bound, true)),
+            Rel::LessEqual => upper.push((bound, false)),
+            Rel::Greater => lower.push((bound, true)),
+            Rel::GreaterEqual => lower.push((bound, false)),
+            Rel::Unequal => uneq.push(bound),
+            Rel::Equal => lower.push((bound, false)),
+        }
+    }
+    // The upper/lower envelope exists iff every bound pair is consistent.
+    for (l, ls) in &lower {
+        for (u, us) in &upper {
+            let diff = c_sub(l, u);
+            let pr = parse_poly(&diff, vars)?;
+            let r = if *ls || *us {
+                Rel::Less
+            } else {
+                Rel::LessEqual
+            };
+            residual.push((pr, r));
+        }
+    }
+    let sub = reduce_linear_rel(&residual, vars, &rest)?;
+    let mut conds: Vec<Value> = parts;
+    for (u, strict) in &upper {
+        conds.push(call(
+            if *strict { "Less" } else { "LessEqual" },
+            vec![sym(&vars[vi]), u.clone()],
+        ));
+    }
+    for (l, strict) in &lower {
+        conds.push(call(
+            if *strict { "Less" } else { "LessEqual" },
+            vec![l.clone(), sym(&vars[vi])],
+        ));
+    }
+    for b in &uneq {
+        conds.push(call("Unequal", vec![sym(&vars[vi]), b.clone()]));
+    }
+    conds.push(sub);
+    Some(and(conds))
+}
+
 // ── Multivariate reduction ──────────────────────────────────────────────────
 
 fn reduce_conjuncts(conjuncts: &[Value], vars: &[String]) -> Option<Value> {
@@ -1553,22 +1845,63 @@ fn reduce_conjuncts(conjuncts: &[Value], vars: &[String]) -> Option<Value> {
     if vars.len() == 1 {
         return reduce_univariate(conjuncts, &vars[0]);
     }
+    let active: Vec<usize> = (0..vars.len()).collect();
+    let rels = parse_relations(conjuncts, vars);
+    // Linear (in)equalities get a dedicated envelope-based reducer.
+    if let Some(rels) = &rels {
+        let all_linear = rels
+            .iter()
+            .all(|(p, _)| is_linear_active(p, &active) || p.is_zero());
+        let has_ineq = rels.iter().any(|(_, r)| *r != Rel::Equal);
+        if all_linear
+            && has_ineq
+            && let Some(v) = reduce_linear_rel(rels, vars, &active)
+        {
+            return Some(v);
+        }
+    }
     let mut polys: Vec<VPoly> = Vec::new();
+    let mut polys_ok = true;
     for c in conjuncts {
         match c {
             Value::Bool(true) => {}
             Value::Bool(false) => return Some(Value::Bool(false)),
             Value::Call { head, args } if head == "Equal" && args.len() == 2 => {
-                let p = parse_poly(&args[0], vars)?.minus(&parse_poly(&args[1], vars)?);
-                polys.push(p);
+                match (parse_poly(&args[0], vars), parse_poly(&args[1], vars)) {
+                    (Some(a), Some(b)) => polys.push(a.minus(&b)),
+                    _ => {
+                        polys_ok = false;
+                        break;
+                    }
+                }
             }
-            _ => {
-                polys.push(parse_poly(c, vars)?);
-            }
+            _ => match parse_poly(c, vars) {
+                Some(p) => polys.push(p),
+                None => {
+                    polys_ok = false;
+                    break;
+                }
+            },
         }
     }
-    let active: Vec<usize> = (0..vars.len()).collect();
-    reduce_active(&polys, vars, &active)
+    if polys_ok && let Some(v) = reduce_active(&polys, vars, &active) {
+        return Some(v);
+    }
+    // Fallback: systems that are multilinear in the variables (e.g. `x y == 1`)
+    // can be solved by isolating one variable at a time.
+    if let Some(rels) = rels
+        && rels.iter().all(|(p, _)| is_multilinear(p, &active))
+        && let Some(v) = reduce_linear_rel(&rels, vars, &active)
+    {
+        return Some(v);
+    }
+    None
+}
+
+/// True when every active variable occurs to power at most one in each term
+/// (i.e. the polynomial is multilinear in the active variables).
+fn is_multilinear(p: &VPoly, active: &[usize]) -> bool {
+    p.0.keys().all(|m| active.iter().all(|&vi| m[vi] <= 1))
 }
 
 fn reduce_system_inputs(items: &[Value], vars: &[String]) -> Option<Value> {
@@ -1595,7 +1928,98 @@ fn reduce_system_inputs(items: &[Value], vars: &[String]) -> Option<Value> {
     reduce_conjuncts(items, vars)
 }
 
+/// Rewrite `Abs[u] rel c` (with `c` a positive number) into equivalent
+/// elementary relations so the polynomial machinery can consume them.
+fn rewrite_abs(e: &Value) -> Value {
+    match e {
+        Value::Call { head, args } if head == "And" || head == "Or" => {
+            call(head, args.iter().map(rewrite_abs).collect())
+        }
+        Value::Call { head, args } if args.len() == 2 => {
+            let l = rewrite_abs(&args[0]);
+            let r = rewrite_abs(&args[1]);
+            match abs_relation(head, &l, &r) {
+                Some(v) => v,
+                None => call(head, vec![l, r]),
+            }
+        }
+        Value::Call { head, args } => call(head, args.iter().map(rewrite_abs).collect()),
+        _ => e.clone(),
+    }
+}
+
+fn abs_relation(head: &str, l: &Value, r: &Value) -> Option<Value> {
+    let (inner, c, flipped) = abs_split(l, r)?;
+    let head = if flipped {
+        flip_rel_head(head)
+    } else {
+        head.to_string()
+    };
+    let negc = c_neg(&c);
+    let mk = |h: &str, a: Value, b: Value| call(h, vec![a, b]);
+    match head.as_str() {
+        "Less" => Some(and(vec![
+            mk("Less", negc, inner.clone()),
+            mk("Less", inner, c),
+        ])),
+        "LessEqual" => Some(and(vec![
+            mk("LessEqual", negc, inner.clone()),
+            mk("LessEqual", inner, c),
+        ])),
+        "Greater" => Some(or(vec![
+            mk("Greater", inner.clone(), c),
+            mk("Less", inner, negc),
+        ])),
+        "GreaterEqual" => Some(or(vec![
+            mk("GreaterEqual", inner.clone(), c),
+            mk("LessEqual", inner, negc),
+        ])),
+        "Equal" => Some(or(vec![
+            mk("Equal", inner.clone(), c),
+            mk("Equal", inner, negc),
+        ])),
+        _ => None,
+    }
+}
+
+fn abs_split(l: &Value, r: &Value) -> Option<(Value, Value, bool)> {
+    let abs_inner = |v: &Value| -> Option<Value> {
+        if let Value::Call { head, args } = v
+            && head == "Abs"
+            && args.len() == 1
+        {
+            Some(args[0].clone())
+        } else {
+            None
+        }
+    };
+    if let (Some(inner), Some(cv)) = (abs_inner(l), numeric_f64(r))
+        && cv > 0.0
+    {
+        return Some((inner, r.clone(), false));
+    }
+    if let (Some(inner), Some(cv)) = (abs_inner(r), numeric_f64(l))
+        && cv > 0.0
+    {
+        return Some((inner, l.clone(), true));
+    }
+    None
+}
+
+fn flip_rel_head(h: &str) -> String {
+    match h {
+        "Less" => "Greater",
+        "LessEqual" => "GreaterEqual",
+        "Greater" => "Less",
+        "GreaterEqual" => "LessEqual",
+        other => other,
+    }
+    .to_string()
+}
+
 fn reduce_value(e: &Value, vars: &[String]) -> Option<Value> {
+    let rewritten = rewrite_abs(e);
+    let e = &rewritten;
     match e {
         Value::Bool(true) => Some(Value::Bool(true)),
         Value::Bool(false) => Some(Value::Bool(false)),
@@ -1754,7 +2178,7 @@ pub fn builtin_reduce(args: &[Value]) -> Result<Value, EvalError> {
         syms
     };
     match reduce_value(&args[0], &vars) {
-        Some(v) => Ok(v),
+        Some(v) => Ok(simplify_deep(&v)),
         None => Ok(Value::Call {
             head: "Reduce".to_string(),
             args: args.clone(),
@@ -1787,7 +2211,7 @@ pub fn builtin_cylindrical_decomposition(args: &[Value]) -> Result<Value, EvalEr
         syms
     };
     match reduce_value(&args[0], &vars) {
-        Some(v) => Ok(v),
+        Some(v) => Ok(simplify_deep(&v)),
         None => Ok(Value::Call {
             head: "CylindricalDecomposition".to_string(),
             args: args.clone(),
@@ -1933,14 +2357,11 @@ pub fn builtin_solve_always(args: &[Value]) -> Result<Value, EvalError> {
                 });
             }
         };
-        for (mono, c) in &p.0 {
-            let mexp = monomial_expr(mono, &vars);
-            let term = if mono.iter().all(|&x| x == 0) {
-                c.clone()
-            } else {
-                c_mul(c, &mexp)
-            };
-            coeff_eqns.push(term);
+        for c in p.0.values() {
+            // A polynomial vanishes identically in `vars` iff each
+            // coefficient (a function of the parameters only) vanishes; the
+            // monomial factors are non-zero and can be dropped.
+            coeff_eqns.push(c.clone());
         }
     }
     let mut syms: Vec<String> = Vec::new();
@@ -2178,17 +2599,23 @@ fn solve_all(
             Some(s) => s,
             None => return Some(vec![]),
         };
+        // Free variables come back as themselves; pin them to 0 and
+        // back-substitute so every reported value is concrete.
+        let mut vals = sol;
+        for k in 0..names.len() {
+            if vals[k].struct_eq(&sym(&names[k])) {
+                for j in 0..vals.len() {
+                    if j != k {
+                        vals[j] = subst_symbol(&vals[j], &names[k], &int_value(0));
+                    }
+                }
+                vals[k] = int_value(0);
+            }
+        }
         let out: Vec<(usize, Value)> = active
             .iter()
             .enumerate()
-            .map(|(k, &vi)| {
-                let v = if sol[k].struct_eq(&sym(&names[k])) {
-                    int_value(0)
-                } else {
-                    sol[k].clone()
-                };
-                (vi, v)
-            })
+            .map(|(k, &vi)| (vi, simplify_deep(&vals[k])))
             .collect();
         return Some(vec![out]);
     }
@@ -2242,6 +2669,107 @@ fn solve_all(
         }
     }
     None
+}
+
+/// Solve[eqns, vars] — exact solutions as a flat rule list whose right-hand
+/// sides list every admissible value (so `var /. Solve[...]` yields the value
+/// set, matching this engine's non-threading ReplaceAll).
+pub fn builtin_solve(args: &[Value]) -> Result<Value, EvalError> {
+    let a = strip_args(args);
+    let uneval = |a: &[Value]| Value::Call {
+        head: "Solve".to_string(),
+        args: a.to_vec(),
+    };
+    if a.len() != 2 {
+        return Ok(uneval(&a));
+    }
+    let vars = match parse_vars(&a[1]) {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(uneval(&a)),
+    };
+    let mut items: Vec<Value> = Vec::new();
+    flatten_conjuncts(&a[0], &mut items);
+    if items.iter().any(|x| matches!(x, Value::Bool(false))) {
+        return Ok(Value::List(vec![]));
+    }
+    if let Some(pos) = items
+        .iter()
+        .position(|x| matches!(x, Value::Call { head, args } if head == "Or" && !args.is_empty()))
+    {
+        let rest: Vec<Value> = items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != pos)
+            .map(|(_, v)| v.clone())
+            .collect();
+        let mut out: Vec<Value> = Vec::new();
+        if let Value::Call { args: oargs, .. } = &items[pos] {
+            for d in oargs {
+                let mut combined = rest.clone();
+                combined.push(d.clone());
+                let e = if combined.len() == 1 {
+                    combined.pop().unwrap()
+                } else {
+                    call("And", combined)
+                };
+                if let Value::List(found) = builtin_solve(&[e, a[1].clone()])? {
+                    out.extend(found);
+                }
+            }
+        }
+        return Ok(Value::List(out));
+    }
+    let equations = match equations_from(&items) {
+        Some(e) => e,
+        None => return Ok(uneval(&a)),
+    };
+    let mut polys: Vec<VPoly> = Vec::new();
+    for e in &equations {
+        match parse_poly(e, &vars) {
+            Some(p) => polys.push(p),
+            None => return Ok(uneval(&a)),
+        }
+    }
+    let active: Vec<usize> = (0..vars.len()).collect();
+    let sols = match solve_all(&polys, &vars, &active) {
+        Some(s) => s,
+        None => return Ok(uneval(&a)),
+    };
+    Ok(solve_result_value(&sols, &vars))
+}
+
+/// Render solution vectors as `{v -> {values}}`, one rule for the first
+/// variable (lists of vectors when the system has several solutions).
+fn solve_result_value(sols: &[Vec<(usize, Value)>], vars: &[String]) -> Value {
+    let value_for = |sol: &[(usize, Value)], i: usize| -> Value {
+        sol.iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| int_value(0))
+    };
+    let rhs = if vars.len() == 1 {
+        Value::List(sols.iter().map(|s| value_for(s, 0)).collect())
+    } else if sols.len() <= 1 {
+        let vals: Vec<Value> = (0..vars.len())
+            .map(|i| {
+                sols.first()
+                    .map(|s| value_for(s, i))
+                    .unwrap_or_else(|| int_value(0))
+            })
+            .collect();
+        Value::List(vals)
+    } else {
+        Value::List(
+            sols.iter()
+                .map(|s| Value::List((0..vars.len()).map(|i| value_for(s, i)).collect()))
+                .collect(),
+        )
+    };
+    Value::List(vec![Value::Rule {
+        lhs: Box::new(sym(&vars[0])),
+        rhs: Box::new(rhs),
+        delayed: false,
+    }])
 }
 
 /// Resolve[expr, vars] — basic quantifier elimination.
@@ -2643,6 +3171,7 @@ pub fn register(env: &Env) {
     register_builtin(env, "GroebnerBasis", builtin_groebner_basis);
     register_builtin(env, "Roots", builtin_roots);
     register_builtin(env, "Reduce", builtin_reduce);
+    register_builtin(env, "Solve", builtin_solve);
     register_builtin(
         env,
         "CylindricalDecomposition",
@@ -2659,6 +3188,7 @@ pub fn register(env: &Env) {
         "GroebnerBasis",
         "Roots",
         "Reduce",
+        "Solve",
         "CylindricalDecomposition",
         "Eliminate",
         "SolveAlways",
@@ -2863,5 +3393,78 @@ mod tests {
             Value::Call { head, .. } => assert_eq!(head, "Reduce"),
             other => panic!("expected unevaluated, got {other}"),
         }
+    }
+
+    #[test]
+    fn test_reduce_multivar_linear_ineq() {
+        let out = eval_str("Reduce[x + y < 1, {x, y}]").to_string();
+        assert!(out.contains("Less[x,"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_multivar_linear_system_free() {
+        // Under-determined system: pivot expressed in terms of the free var.
+        let out = eval_str("Reduce[x + y == 1, {x, y}]").to_string();
+        assert!(out.contains('y'), "got {out}");
+        assert!(!out.contains("Equal[x, 1]"), "free var dropped: {out}");
+    }
+
+    #[test]
+    fn test_reduce_two_ineq_system() {
+        let out = eval_str("Reduce[{x + y > 1, x - y < 2}, {x, y}]").to_string();
+        assert!(out.contains("Less") || out.contains("Greater"), "got {out}");
+        assert!(!out.contains("Reduce["), "unreduced: {out}");
+    }
+
+    #[test]
+    fn test_reduce_symbolic_linear_ineq() {
+        let out = eval_str("Reduce[a x < 1, x]").to_string();
+        assert!(out.contains('a'), "got {out}");
+        assert!(out.contains("Less") || out.contains("Greater"), "got {out}");
+        assert_ne!(out, "Reduce[a x < 1, x]", "got {out}");
+    }
+
+    #[test]
+    fn test_solve_univariate_roots() {
+        let out = eval_str("x /. Solve[x^2 - 1 == 0, x]").to_string();
+        assert!(out.contains("-1") && out.contains('1'), "got {out}");
+    }
+
+    #[test]
+    fn test_solve_system_vector() {
+        let out = eval_str("x /. Solve[{x + y == 3, x - y == 1}, {x, y}][[1]]").to_string();
+        assert!(out.contains('2') && out.contains('1'), "got {out}");
+    }
+
+    #[test]
+    fn test_solve_always_linear_param_no_denominator() {
+        let out = eval_str("SolveAlways[a x + b == 1, x]").to_string();
+        assert!(out.contains("a -> 0"), "got {out}");
+        assert!(out.contains("b -> 1"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_multivar_linear_system_determined() {
+        let out = eval_str("Reduce[{x + y == 3, x - y == 1}, {x, y}]").to_string();
+        assert!(out.contains("Equal[x, 2]"), "got {out}");
+        assert!(out.contains("Equal[y, 1]"), "got {out}");
+    }
+
+    #[test]
+    fn test_reduce_abs_inequality() {
+        let out = eval_str("Reduce[Abs[x] < 1, x]").to_string();
+        assert!(out.contains("Less[-1, x]"), "got {out}");
+        assert!(out.contains("Less[x, 1]"), "got {out}");
+        let out2 = eval_str("Reduce[Abs[x] > 2, x]").to_string();
+        assert!(
+            out2.contains("Less[2, x]") || out2.contains("Less[x, -2]"),
+            "got {out2}"
+        );
+    }
+
+    #[test]
+    fn test_reduce_multilinear_reciprocal() {
+        let out = eval_str("Reduce[x y == 1, {x, y}]").to_string();
+        assert!(out.contains("Equal[x, Divide[1, y]]"), "got {out}");
     }
 }

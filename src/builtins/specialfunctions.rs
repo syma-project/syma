@@ -11,6 +11,23 @@ fn unevaluated(head: &str, args: &[Value]) -> Value {
     }
 }
 
+// Helper: build an exact rational value n/d.
+fn rational(n: i64, d: i64) -> Value {
+    Value::Rational(Box::new(rug::Rational::from((n, d))))
+}
+
+// Helper: build the exact closed form Pi^deg / den.
+fn pi_pow_over(deg: u32, den: i64) -> Value {
+    let pi_pow = crate::builtins::symbolic::simplify_call(
+        "Power",
+        &[
+            Value::Symbol("Pi".to_string()),
+            Value::Integer(Integer::from(deg)),
+        ],
+    );
+    crate::builtins::symbolic::simplify_call("Times", &[pi_pow, rational(1, den)])
+}
+
 // ── Erf / Erfc / ErfInverse ──
 
 const ERF_P: f64 = 0.3275911;
@@ -37,6 +54,7 @@ pub fn builtin_erf(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(0))),
+        Value::Real(r) if r.is_zero() => Ok(Value::Integer(Integer::from(0))),
         Value::Integer(n) => {
             let x = n.to_f64();
             if x.is_infinite() {
@@ -66,6 +84,7 @@ pub fn builtin_erfc(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) if n.is_zero() => Ok(Value::Integer(Integer::from(1))),
+        Value::Real(r) if r.is_zero() => Ok(Value::Integer(Integer::from(1))),
         Value::Integer(n) => {
             let x = n.to_f64();
             if x.is_infinite() {
@@ -154,6 +173,23 @@ pub fn builtin_beta(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match (&args[0], &args[1]) {
+        (Value::Integer(x), Value::Integer(y)) if x.is_positive() && y.is_positive() => {
+            // Exact: B(x, y) = (x-1)! (y-1)! / (x+y-1)! for positive integers.
+            let x = x.to_i64().unwrap_or(1);
+            let y = y.to_i64().unwrap_or(1);
+            let mut num = Integer::from(1);
+            for i in 2..x {
+                num *= i;
+            }
+            for i in 2..y {
+                num *= i;
+            }
+            let mut den = Integer::from(1);
+            for i in 2..(x + y) {
+                den *= i;
+            }
+            Ok(Value::Rational(Box::new(rug::Rational::from((num, den)))))
+        }
         (Value::Integer(x), Value::Integer(y)) => {
             if x.is_negative() || y.is_negative() {
                 return Ok(unevaluated("Beta", args));
@@ -258,6 +294,10 @@ pub fn builtin_zeta(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
+        // Exact closed forms at the special integer arguments.
+        Value::Integer(n) if *n == 0 => Ok(rational(-1, 2)),
+        Value::Integer(n) if *n == 2 => Ok(pi_pow_over(2, 6)),
+        Value::Integer(n) if *n == 4 => Ok(pi_pow_over(4, 90)),
         Value::Integer(n) => {
             if *n <= 1 {
                 return Ok(unevaluated("Zeta", args));
@@ -268,6 +308,7 @@ pub fn builtin_zeta(args: &[Value]) -> Result<Value, EvalError> {
             }
             Ok(Value::Real(compute_zeta_numeric(&f)))
         }
+        Value::Real(r) if r.is_zero() => Ok(super::real(-0.5)),
         Value::Real(r) => {
             if r <= &Float::with_val(DEFAULT_PRECISION, 1.0) {
                 return Ok(unevaluated("Zeta", args));
@@ -328,6 +369,22 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
     let s_val = &args[0];
     let z_val = &args[1];
 
+    // Exact closed forms.
+    match (s_val, z_val) {
+        // Li_2(1) = Pi^2/6
+        (Value::Integer(s), Value::Integer(z)) if *s == 2 && *z == 1 => {
+            return Ok(pi_pow_over(2, 6));
+        }
+        // Li_2(-1) = -Pi^2/12
+        (Value::Integer(s), Value::Integer(z)) if *s == 2 && *z == -1 => {
+            return Ok(crate::builtins::symbolic::simplify_call(
+                "Times",
+                &[rational(-1, 12), pi_pow_over(2, 1)],
+            ));
+        }
+        _ => {}
+    }
+
     if let (Value::Integer(s), _) = (s_val, z_val) {
         if s.is_zero() {
             // Li_0(z) = z / (1 - z)
@@ -352,6 +409,16 @@ pub fn builtin_polylog(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     if let (Some(s), Some(z)) = (super::to_f64(s_val), super::to_f64(z_val)) {
+        // Li_s(1) = Zeta[s] (converges for s > 1); use the zeta machinery so
+        // numeric evaluation under `N` stays accurate (the z-series converges
+        // too slowly at z = 1).
+        if (z - 1.0).abs() < 1e-15 && s > 1.0 {
+            let f = Float::with_val(DEFAULT_PRECISION, s);
+            if let Some(k) = is_small_even_positive(&f) {
+                return Ok(Value::Real(zeta_even(k)));
+            }
+            return Ok(Value::Real(compute_zeta_numeric(&f)));
+        }
         if z.abs() >= 1.0 {
             return Ok(unevaluated("PolyLog", args));
         }
@@ -516,6 +583,18 @@ fn airy_ai_approx(z: f64) -> f64 {
     }
 }
 
+/// Exact Ai(0) = 1 / (3^(2/3) Gamma[2/3]).
+fn airy_ai_zero_exact() -> Value {
+    let sc = crate::builtins::symbolic::simplify_call;
+    let three_pow = sc(
+        "Power",
+        &[Value::Integer(Integer::from(3)), rational(-2, 3)],
+    );
+    let gamma_23 = sc("Gamma", &[rational(2, 3)]);
+    let gamma_inv = sc("Power", &[gamma_23, Value::Integer(Integer::from(-1))]);
+    sc("Times", &[three_pow, gamma_inv])
+}
+
 pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -523,7 +602,11 @@ pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     match &args[0] {
-        Value::Integer(n) if n.is_zero() => Ok(super::real(0.3550280538878172)),
+        // Ai(0) = 1 / (3^(2/3) Gamma[2/3])
+        Value::Integer(n) if n.is_zero() => Ok(airy_ai_zero_exact()),
+        // Under `N` the argument arrives as a real; use the numeric value so it
+        // stays consistent with the numerically-evaluated expected form.
+        Value::Real(r) if r.is_zero() => Ok(super::real(airy_ai_approx(0.0))),
         Value::Integer(n) => Ok(super::real(airy_ai_approx(n.to_f64()))),
         Value::Real(r) => Ok(super::real(airy_ai_approx(r.to_f64()))),
         _ => Ok(unevaluated("AiryAi", args)),
@@ -531,6 +614,121 @@ pub fn builtin_airy_ai(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 // ── BesselJ ──
+
+/// Sqrt[2/(pi z)] — the half-integer Bessel prefactor.
+fn sqrt_two_over_pi_z(z: &Value, pi: &Value, two: &Value) -> Value {
+    let sc = crate::builtins::symbolic::simplify_call;
+    let pi_z = sc("Times", &[pi.clone(), z.clone()]);
+    sc("Sqrt", &[sc("Divide", &[two.clone(), pi_z])])
+}
+
+/// Exact closed form of J_{numer/2}(z) for an odd integer `numer`.
+///
+/// Uses J_{1/2}(z) = Sqrt[2/(Pi z)] Sin[z], J_{-1/2}(z) = Sqrt[2/(Pi z)] Cos[z]
+/// and the recurrence J_{v+1}(z) = (2v/z) J_v(z) - J_{v-1}(z). When `exact` is
+/// false the prefactor constants are numeric reals, matching the shape produced
+/// by `N` (which numericises the order `1/2` to `0.5` before dispatch).
+fn bessel_j_half_symbolic(numer: i64, z: &Value, exact: bool) -> Value {
+    let sc = crate::builtins::symbolic::simplify_call;
+    let (pi, two, neg_one) = if exact {
+        (
+            Value::Symbol("Pi".to_string()),
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(-1)),
+        )
+    } else {
+        (
+            Value::Real(Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi)),
+            super::real(2.0),
+            super::real(-1.0),
+        )
+    };
+    let zinv = sc("Power", &[z.clone(), neg_one.clone()]);
+    let minus_one = Value::Integer(Integer::from(-1));
+    // Coefficients (a, b) with J_v(z) = prefactor * (a Sin[z] + b Cos[z]).
+    let (mut a, mut b);
+    if numer > 0 {
+        a = Value::Integer(Integer::from(1));
+        b = Value::Integer(Integer::from(0));
+        let mut prev_a = Value::Integer(Integer::from(0));
+        let mut prev_b = Value::Integer(Integer::from(1));
+        for i in 0..(numer - 1) / 2 {
+            let coeff = sc(
+                "Times",
+                &[Value::Integer(Integer::from(2 * i + 1)), zinv.clone()],
+            );
+            let na = sc(
+                "Plus",
+                &[
+                    sc("Times", &[coeff.clone(), a.clone()]),
+                    sc("Times", &[minus_one.clone(), prev_a.clone()]),
+                ],
+            );
+            let nb = sc(
+                "Plus",
+                &[
+                    sc("Times", &[coeff, b.clone()]),
+                    sc("Times", &[minus_one.clone(), prev_b.clone()]),
+                ],
+            );
+            prev_a = a;
+            prev_b = b;
+            a = na;
+            b = nb;
+        }
+    } else {
+        a = Value::Integer(Integer::from(0));
+        b = Value::Integer(Integer::from(1));
+        let mut next_a = Value::Integer(Integer::from(1));
+        let mut next_b = Value::Integer(Integer::from(0));
+        for i in 0..((-numer) - 1) / 2 {
+            let coeff = sc(
+                "Times",
+                &[Value::Integer(Integer::from(-(2 * i + 1))), zinv.clone()],
+            );
+            let na = sc(
+                "Plus",
+                &[
+                    sc("Times", &[coeff.clone(), a.clone()]),
+                    sc("Times", &[minus_one.clone(), next_a.clone()]),
+                ],
+            );
+            let nb = sc(
+                "Plus",
+                &[
+                    sc("Times", &[coeff, b.clone()]),
+                    sc("Times", &[minus_one.clone(), next_b.clone()]),
+                ],
+            );
+            next_a = a;
+            next_b = b;
+            a = na;
+            b = nb;
+        }
+    }
+    let aterm = sc("Times", &[a, sc("Sin", &[z.clone()])]);
+    let bterm = sc("Times", &[b, sc("Cos", &[z.clone()])]);
+    let combo = sc("Plus", &[aterm, bterm]);
+    sc("Times", &[sqrt_two_over_pi_z(z, &pi, &two), combo])
+}
+
+/// Extract an odd numerator `m` from a half-integer order value (m/2), where
+/// the order may be an exact `Rational` or a numeric `Real`.
+fn half_integer_bessel_numer(n: &Value) -> Option<i64> {
+    match n {
+        Value::Rational(r) if *r.denom() == 2 && r.numer().is_odd() => r.numer().to_i64(),
+        Value::Real(r) => {
+            let two_x = 2.0 * r.to_f64();
+            let rounded = two_x.round();
+            if (two_x - rounded).abs() < 1e-12 && (rounded as i64) % 2 != 0 {
+                Some(rounded as i64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
 
 pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 2 {
@@ -559,6 +757,12 @@ pub fn builtin_bessel_j(args: &[Value]) -> Result<Value, EvalError> {
             return Ok(Value::Integer(Integer::from(1)));
         }
         return Ok(Value::Integer(Integer::from(0)));
+    }
+
+    // Half-integer order: exact closed form via elementary functions.
+    if let Some(numer) = half_integer_bessel_numer(n_val) {
+        let exact = !matches!(n_val, Value::Real(_));
+        return Ok(bessel_j_half_symbolic(numer, z_val, exact));
     }
 
     match (n_val, z_val) {
@@ -1093,6 +1297,35 @@ fn airy_bi_approx(z: f64) -> f64 {
     }
 }
 
+// ── Gamma (exact special values) ──
+
+/// Gamma[z] with the exact special value Gamma[1/2] = Sqrt[Pi]; otherwise
+/// delegates to the numeric builtin in `math`.
+pub fn builtin_gamma_exact(args: &[Value]) -> Result<Value, EvalError> {
+    if let [Value::Rational(r)] = args
+        && *r.numer() == 1
+        && *r.denom() == 2
+    {
+        return Ok(crate::builtins::symbolic::simplify_call(
+            "Sqrt",
+            &[Value::Symbol("Pi".to_string())],
+        ));
+    }
+    crate::builtins::math::builtin_gamma(args)
+}
+
+// ── HarmonicNumber (value at Infinity) ──
+
+/// HarmonicNumber[Infinity] = Infinity; otherwise delegates to `combinatorics`.
+pub fn builtin_harmonic_number_exact(args: &[Value]) -> Result<Value, EvalError> {
+    if let [Value::Symbol(s)] = args
+        && s == "Infinity"
+    {
+        return Ok(Value::Symbol("Infinity".to_string()));
+    }
+    crate::builtins::combinatorics::builtin_harmonic_number(args)
+}
+
 // ── Registration helper ──
 
 pub fn register_sfs(env: &crate::env::Env) {
@@ -1105,6 +1338,8 @@ pub fn register_sfs(env: &crate::env::Env) {
     register_builtin(env, "InverseErfc", builtin_inverse_erfc);
     register_builtin(env, "Beta", builtin_beta);
     register_builtin(env, "BetaRegularized", builtin_beta_regularized);
+    register_builtin(env, "Gamma", builtin_gamma_exact);
+    register_builtin(env, "HarmonicNumber", builtin_harmonic_number_exact);
     register_builtin(env, "LogGamma", builtin_log_gamma);
     register_builtin(env, "GammaRegularized", builtin_gamma_regularized);
     register_builtin(env, "Zeta", builtin_zeta);
@@ -1200,9 +1435,12 @@ mod tests {
             Value::Integer(Integer::from(3)),
         ])
         .unwrap();
-        if let Value::Real(r) = result {
-            // B(2,3) = 1! * 2! / 4! = 2/24 = 1/12 ≈ 0.08333
-            assert!((r.to_f64() - 1.0 / 12.0).abs() < 1e-8);
+        // B(2,3) = 1! * 2! / 4! = 2/24 = 1/12 (exact rational)
+        if let Value::Rational(r) = result {
+            assert_eq!(*r.numer(), Integer::from(1));
+            assert_eq!(*r.denom(), Integer::from(12));
+        } else {
+            panic!("expected exact rational, got {result:?}");
         }
     }
 
@@ -1240,11 +1478,34 @@ mod tests {
 
     #[test]
     fn test_zeta_even() {
+        // Zeta[2] = Pi^2/6 (exact symbolic form).
         let result = builtin_zeta(&[Value::Integer(Integer::from(2))]).unwrap();
-        if let Value::Real(r) = result {
-            let expected = std::f64::consts::PI * std::f64::consts::PI / 6.0;
-            assert!((r.to_f64() - expected).abs() < 1e-6);
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Times"),
+            "expected symbolic Pi^2/6, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_zeta_zero() {
+        // Zeta[0] = -1/2 (exact).
+        let result = builtin_zeta(&[Value::Integer(Integer::from(0))]).unwrap();
+        if let Value::Rational(r) = result {
+            assert_eq!(*r.numer(), Integer::from(-1));
+            assert_eq!(*r.denom(), Integer::from(2));
+        } else {
+            panic!("expected exact rational -1/2, got {result:?}");
         }
+    }
+
+    #[test]
+    fn test_zeta_four() {
+        // Zeta[4] = Pi^4/90 (exact symbolic form).
+        let result = builtin_zeta(&[Value::Integer(Integer::from(4))]).unwrap();
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Times"),
+            "expected symbolic Pi^4/90, got {result:?}"
+        );
     }
 
     #[test]
@@ -1336,10 +1597,12 @@ mod tests {
 
     #[test]
     fn test_airy_ai_zero() {
+        // Ai(0) = 1/(3^(2/3) Gamma[2/3]) (exact symbolic form).
         let result = builtin_airy_ai(&[Value::Integer(Integer::from(0))]).unwrap();
-        if let Value::Real(r) = result {
-            assert!((r.to_f64() - 0.355028).abs() < 1e-5);
-        }
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Times"),
+            "expected symbolic Ai(0), got {result:?}"
+        );
     }
 
     #[test]
@@ -1426,6 +1689,63 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(result, Value::Integer(n) if n == 0));
+    }
+
+    #[test]
+    fn test_gamma_half_exact() {
+        // Gamma[1/2] = Sqrt[Pi].
+        let result = builtin_gamma_exact(&[rational(1, 2)]).unwrap();
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Sqrt"),
+            "expected Sqrt[Pi], got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_gamma_integer_delegates() {
+        // Gamma[5] = 24 still works through the numeric builtin.
+        let result = builtin_gamma_exact(&[Value::Integer(Integer::from(5))]).unwrap();
+        assert!(matches!(result, Value::Integer(ref n) if *n == 24));
+    }
+
+    #[test]
+    fn test_polylog_two_one_exact() {
+        // PolyLog[2, 1] = Pi^2/6.
+        let result = builtin_polylog(&[
+            Value::Integer(Integer::from(2)),
+            Value::Integer(Integer::from(1)),
+        ])
+        .unwrap();
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Times"),
+            "expected symbolic Pi^2/6, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_erf_real_zero_exact() {
+        // Erf[0.] = 0 exactly (no 1e-9 approximation residue).
+        let result = builtin_erf(&[Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0))]).unwrap();
+        assert!(matches!(result, Value::Integer(ref n) if *n == 0));
+    }
+
+    #[test]
+    fn test_harmonic_number_infinity() {
+        let result = builtin_harmonic_number_exact(&[Value::Symbol("Infinity".to_string())]);
+        assert!(
+            matches!(result.unwrap(), Value::Symbol(ref s) if s == "Infinity"),
+            "expected Infinity"
+        );
+    }
+
+    #[test]
+    fn test_bessel_j_half_symbolic() {
+        // J_{1/2}(x) = Sqrt[2/(Pi x)] Sin[x].
+        let result = builtin_bessel_j(&[rational(1, 2), Value::Symbol("x".to_string())]).unwrap();
+        assert!(
+            matches!(result, Value::Call { ref head, .. } if head == "Times"),
+            "expected symbolic half-order Bessel, got {result:?}"
+        );
     }
 
     #[test]

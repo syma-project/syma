@@ -61,13 +61,144 @@ pub fn builtin_output_form(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+/// TeXForm[expr] — render expr as TeX source (displayed verbatim).
+pub fn builtin_tex_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("TeXForm", args, 1)?;
+    Ok(Value::Formatted {
+        format: Format::Text,
+        value: Box::new(Value::Str(render_tex(&args[0]))),
+    })
+}
+
+// ── TeX rendering for TeXForm ────────────────────────────────────────────────
+
+/// Escape TeX special characters in literal text.
+fn escape_tex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '_' => out.push_str("\\_"),
+            '%' => out.push_str("\\%"),
+            '&' => out.push_str("\\&"),
+            '#' => out.push_str("\\#"),
+            '$' => out.push_str("\\$"),
+            '^' => out.push_str("\\^{}"),
+            '~' => out.push_str("\\~{}"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a symbol name, mapping a few well-known names to TeX commands.
+fn tex_symbol(s: &str) -> String {
+    match s {
+        "Pi" | "pi" => "\\pi".to_string(),
+        "Infinity" => "\\infty".to_string(),
+        "Alpha" | "alpha" => "\\alpha".to_string(),
+        "Beta" | "beta" => "\\beta".to_string(),
+        "Gamma" | "gamma" => "\\gamma".to_string(),
+        "Delta" | "delta" => "\\delta".to_string(),
+        "Theta" | "theta" => "\\theta".to_string(),
+        "Lambda" | "lambda" => "\\lambda".to_string(),
+        "Mu" | "mu" => "\\mu".to_string(),
+        "Sigma" | "sigma" => "\\sigma".to_string(),
+        "Phi" | "phi" => "\\phi".to_string(),
+        "Omega" | "omega" => "\\omega".to_string(),
+        _ => escape_tex(s),
+    }
+}
+
+/// Render `v` for TeX, parenthesizing low-precedence subexpressions.
+fn tex_operand(v: &Value) -> String {
+    let compound = matches!(
+        v,
+        Value::Call { head, .. }
+            if matches!(
+                head.as_str(),
+                "Plus" | "Equal" | "Unequal" | "Less" | "Greater" | "LessEqual"
+                    | "GreaterEqual" | "And" | "Or" | "Rule" | "RuleDelayed"
+            )
+    );
+    if compound {
+        format!("\\left({}\\right)", render_tex(v))
+    } else {
+        render_tex(v)
+    }
+}
+
+/// Render a value as TeX source.
+fn render_tex(v: &Value) -> String {
+    match v {
+        Value::Integer(n) => n.to_string(),
+        Value::Rational(r) => format!("\\frac{{{}}}{{{}}}", r.numer(), r.denom()),
+        Value::Real(r) => Value::Real(r.clone()).to_string(),
+        Value::Bool(b) => format!("\\text{{{}}}", if *b { "True" } else { "False" }),
+        Value::Null => "\\text{Null}".to_string(),
+        Value::Str(s) => format!("\\text{{{}}}", escape_tex(s)),
+        Value::Symbol(s) => tex_symbol(s),
+        Value::List(items) => format!(
+            "\\left\\{{{}\\right\\}}",
+            items.iter().map(render_tex).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Formatted { value, .. } => render_tex(value),
+        Value::Call { head, args } => render_tex_call(head, args),
+        other => escape_tex(&other.to_string()),
+    }
+}
+
+/// Render an infix call as TeX; unknown heads use function-call notation.
+fn render_tex_call(head: &str, args: &[Value]) -> String {
+    let join = |sep: &str| -> String { args.iter().map(tex_operand).collect::<Vec<_>>().join(sep) };
+    match head {
+        "List" => format!(
+            "\\left\\{{{}\\right\\}}",
+            args.iter().map(render_tex).collect::<Vec<_>>().join(", ")
+        ),
+        "Plus" if args.len() >= 2 => join(" + "),
+        "Times" if args.len() >= 2 => join(" "),
+        "Power" if args.len() == 2 => {
+            format!("{}^{{{}}}", tex_operand(&args[0]), render_tex(&args[1]))
+        }
+        "Divide" | "Rational" if args.len() == 2 => format!(
+            "\\frac{{{}}}{{{}}}",
+            render_tex(&args[0]),
+            render_tex(&args[1])
+        ),
+        "Minus" if args.len() == 1 => format!("-{}", tex_operand(&args[0])),
+        "Equal" if args.len() == 2 => join(" = "),
+        "Unequal" if args.len() == 2 => join(" \\neq "),
+        "Less" if args.len() == 2 => join(" < "),
+        "Greater" if args.len() == 2 => join(" > "),
+        "LessEqual" if args.len() == 2 => join(" \\leq "),
+        "GreaterEqual" if args.len() == 2 => join(" \\geq "),
+        "And" if args.len() >= 2 => join(" \\land "),
+        "Or" if args.len() >= 2 => join(" \\lor "),
+        "Not" if args.len() == 1 => format!("\\lnot {}", tex_operand(&args[0])),
+        "Rule" | "RuleDelayed" if args.len() == 2 => join(" \\to "),
+        "Sqrt" if args.len() == 1 => format!("\\sqrt{{{}}}", render_tex(&args[0])),
+        "Abs" if args.len() == 1 => format!("\\left|{}\\right|", render_tex(&args[0])),
+        _ => format!(
+            "{}\\left({}\\right)",
+            tex_symbol(head),
+            args.iter().map(render_tex).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
 /// Short[expr] — display with top-level truncation (default 5 items).
 /// Short[expr, n] — display with at most n top-level items.
 pub fn builtin_short(args: &[Value]) -> Result<Value, EvalError> {
     let n = match args.len() {
         1 => 5usize,
         2 => {
-            let v = args[1].to_integer().unwrap_or(5);
+            let v = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "integer".to_string(),
+                got: args[1].type_name().to_string(),
+            })?;
             if v < 1 {
                 return Err(EvalError::Error(
                     "Short[expr, n] requires n >= 1".to_string(),
@@ -93,7 +224,10 @@ pub fn builtin_shallow(args: &[Value]) -> Result<Value, EvalError> {
     let depth = match args.len() {
         1 => 3usize,
         2 => {
-            let v = args[1].to_integer().unwrap_or(3);
+            let v = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: "integer".to_string(),
+                got: args[1].type_name().to_string(),
+            })?;
             if v < 1 {
                 return Err(EvalError::Error(
                     "Shallow[expr, n] requires n >= 1".to_string(),
@@ -113,44 +247,64 @@ pub fn builtin_shallow(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
-/// NumberForm[expr, n] — display numbers with n significant digits.
+/// Parse the digit-count argument shared by `NumberForm`/`ScientificForm`.
+///
+/// Accepts an integer `n` or a `{n, f}` pair; only `n` significant digits are
+/// currently rendered by the display layer, but validating and unwrapping the
+/// pair keeps `NumberForm[expr, {n, f}]` from silently falling back to 6.
+fn parse_digit_spec(spec: &Value, name: &str) -> Result<usize, EvalError> {
+    let n = match spec {
+        Value::List(pair) if !pair.is_empty() => {
+            pair[0].to_integer().ok_or_else(|| EvalError::TypeError {
+                expected: format!("integer, got {}", pair[0].type_name()),
+                got: name.to_string(),
+            })?
+        }
+        other => other.to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "integer or {n, f}".to_string(),
+            got: other.type_name().to_string(),
+        })?,
+    };
+    if n < 1 {
+        return Err(EvalError::Error(format!("{name} requires n >= 1")));
+    }
+    Ok(n as usize)
+}
+
+/// NumberForm[expr] / NumberForm[expr, n] / NumberForm[expr, {n, f}]
+/// — display numbers with `n` significant digits (default 6).
 pub fn builtin_number_form(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "NumberForm requires exactly 2 arguments: NumberForm[expr, n]".to_string(),
+            "NumberForm requires 1 or 2 arguments: NumberForm[expr, n]".to_string(),
         ));
     }
-    let digits = args[1].to_integer().unwrap_or(6);
-    if digits < 1 {
-        return Err(EvalError::Error(
-            "NumberForm[expr, n] requires n >= 1".to_string(),
-        ));
-    }
+    let digits = if args.len() == 2 {
+        parse_digit_spec(&args[1], "NumberForm")?
+    } else {
+        6
+    };
     Ok(Value::Formatted {
-        format: Format::NumberForm {
-            digits: digits as usize,
-        },
+        format: Format::NumberForm { digits },
         value: Box::new(args[0].clone()),
     })
 }
 
-/// ScientificForm[expr, n] — display numbers in scientific notation with n significant digits.
+/// ScientificForm[expr] / ScientificForm[expr, n] / ScientificForm[expr, {n, f}]
+/// — display numbers in scientific notation with `n` significant digits.
 pub fn builtin_scientific_form(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "ScientificForm requires exactly 2 arguments: ScientificForm[expr, n]".to_string(),
+            "ScientificForm requires 1 or 2 arguments: ScientificForm[expr, n]".to_string(),
         ));
     }
-    let digits = args[1].to_integer().unwrap_or(6);
-    if digits < 1 {
-        return Err(EvalError::Error(
-            "ScientificForm[expr, n] requires n >= 1".to_string(),
-        ));
-    }
+    let digits = if args.len() == 2 {
+        parse_digit_spec(&args[1], "ScientificForm")?
+    } else {
+        6
+    };
     Ok(Value::Formatted {
-        format: Format::ScientificForm {
-            digits: digits as usize,
-        },
+        format: Format::ScientificForm { digits },
         value: Box::new(args[0].clone()),
     })
 }
@@ -250,9 +404,11 @@ pub fn builtin_syntax_length(args: &[Value]) -> Result<Value, EvalError> {
     match lexer::tokenize(&s) {
         Ok(tokens) => match parser::parse(tokens) {
             Ok(_) => Ok(Value::Integer(rug::Integer::from(len))),
-            Err(_) => {
-                // No precise position in ParseError; return a rough heuristic
-                Ok(Value::Integer(rug::Integer::from(0)))
+            Err(e) => {
+                // ParseError carries a line/column span; report the column
+                // (1-based) of the failure, or 0 when unavailable.
+                let pos = e.span.as_ref().map(|sp| sp.col as i64).unwrap_or(0);
+                Ok(Value::Integer(rug::Integer::from(pos)))
             }
         },
         Err(e) => {
@@ -262,83 +418,101 @@ pub fn builtin_syntax_length(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-/// TableForm[list] — format a list as a table.
-/// For 1D list, print each element on its own line.
-/// For 2D list (list of lists), format as aligned columns.
-pub fn builtin_table_form(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_args("TableForm", args, 1)?;
-    match &args[0] {
-        Value::List(rows) => {
-            let mut result = String::new();
-            for (i, row) in rows.iter().enumerate() {
-                if i > 0 {
-                    result.push('\n');
-                }
-                match row {
-                    Value::List(cols) => {
-                        let strs: Vec<String> = cols.iter().map(|c| format!("{c}")).collect();
-                        result.push_str(&strs.join("\t"));
-                    }
-                    _ => result.push_str(&format!("{row}")),
-                }
-            }
-            Ok(Value::Formatted {
-                format: Format::Text,
-                value: Box::new(Value::Str(result)),
-            })
-        }
-        other => Ok(Value::Formatted {
-            format: Format::Text,
-            value: Box::new(Value::Str(format!("{other}"))),
-        }),
-    }
+/// Render a value as a single-line cell string for table layout.
+fn cell_string(v: &Value) -> String {
+    format!("{v}")
 }
 
-/// MatrixForm[list] — format a 2D list as a matrix with brackets.
-/// Each row on its own line, elements aligned.
-pub fn builtin_matrix_form(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_args("MatrixForm", args, 1)?;
-    match &args[0] {
+/// Left- or right-align a grid of cell strings, two spaces between columns.
+/// Trailing padding on each line is trimmed.
+fn align_columns(rows: &[Vec<String>], right: bool) -> String {
+    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; max_cols];
+    for row in rows {
+        for (j, cell) in row.iter().enumerate() {
+            widths[j] = widths[j].max(cell.chars().count());
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let mut line = String::new();
+            for (j, cell) in row.iter().enumerate() {
+                if j > 0 {
+                    line.push_str("  ");
+                }
+                let pad = widths
+                    .get(j)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(cell.chars().count());
+                if right {
+                    line.push_str(&" ".repeat(pad));
+                    line.push_str(cell);
+                } else {
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(pad));
+                }
+            }
+            line.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// TableForm[list] — format a list as a table.
+///
+/// A 1D list prints one element per line; a 2D list (list of lists) left-aligns
+/// columns with two spaces between them.
+pub fn builtin_table_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("TableForm", args, 1)?;
+    let text = match &args[0] {
         Value::List(rows) => {
-            // Collect all row strings first to compute column widths
             let row_strs: Vec<Vec<String>> = rows
                 .iter()
                 .map(|row| match row {
-                    Value::List(cols) => cols.iter().map(|c| format!("{c}")).collect(),
-                    other => vec![format!("{other}")],
+                    Value::List(cols) => cols.iter().map(cell_string).collect(),
+                    other => vec![cell_string(other)],
                 })
                 .collect();
-
-            // Compute max column count and per-column widths
-            let max_cols = row_strs.iter().map(|r| r.len()).max().unwrap_or(0);
-            let mut col_widths = vec![0usize; max_cols];
-            for row in &row_strs {
-                for (j, cell) in row.iter().enumerate() {
-                    col_widths[j] = col_widths[j].max(cell.len());
-                }
+            if row_strs.iter().all(|r| r.len() == 1) {
+                row_strs
+                    .iter()
+                    .map(|r| r[0].clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                align_columns(&row_strs, false)
             }
+        }
+        other => cell_string(other),
+    };
+    Ok(Value::Formatted {
+        format: Format::Text,
+        value: Box::new(Value::Str(text)),
+    })
+}
 
-            // Render rows with alignment and bracket notation
-            let n_rows = row_strs.len();
-            let mut lines: Vec<String> = Vec::with_capacity(n_rows);
-            for row in &row_strs {
-                let mut line = String::new();
-                for (j, cell) in row.iter().enumerate() {
-                    if j > 0 {
-                        line.push_str("  ");
-                    }
-                    let pad = col_widths.get(j).copied().unwrap_or(0);
-                    line.push_str(&format!("{cell:>pad$}"));
-                }
-                lines.push(line);
-            }
-
-            // Find the widest line for bracket alignment
-            let max_line_width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
-
+/// MatrixForm[list] — format a 2D list as a matrix with brackets.
+/// Each row on its own line, numeric columns right-aligned.
+pub fn builtin_matrix_form(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("MatrixForm", args, 1)?;
+    let text = match &args[0] {
+        Value::List(rows) => {
+            let row_strs: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| match row {
+                    Value::List(cols) => cols.iter().map(cell_string).collect(),
+                    other => vec![cell_string(other)],
+                })
+                .collect();
+            let body = align_columns(&row_strs, true);
+            let lines: Vec<&str> = body.split('\n').collect();
+            let max_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            let n_rows = lines.len();
             let mut result = String::new();
             for (i, line) in lines.iter().enumerate() {
-                let padded = format!("{line:<max_line_width$}");
+                let pad = max_width - line.chars().count();
+                let padded = format!("{line}{}", " ".repeat(pad));
                 if n_rows == 1 {
                     result.push_str(&format!("( {padded} )"));
                 } else if i == 0 {
@@ -352,10 +526,14 @@ pub fn builtin_matrix_form(args: &[Value]) -> Result<Value, EvalError> {
                     result.push('\n');
                 }
             }
-            Ok(Value::Str(result))
+            result
         }
-        other => Ok(Value::Str(format!("{other}"))),
-    }
+        other => cell_string(other),
+    };
+    Ok(Value::Formatted {
+        format: Format::Text,
+        value: Box::new(Value::Str(text)),
+    })
 }
 
 /// PaddedForm[expr, n] — format number padded to n digits total.
@@ -464,7 +642,8 @@ pub fn builtin_string_form(args: &[Value]) -> Result<Value, EvalError> {
                             other => result.push_str(&format!("{}", other)),
                         }
                     } else {
-                        // Out of range: leave as-is
+                        // Out of range: leave the slot as-is and warn.
+                        crate::messages::emit("StringForm::sfr", &[num_str.clone()]);
                         result.push('`');
                         result.push_str(&num_str);
                         result.push('`');
@@ -508,6 +687,7 @@ pub const SYMBOLS: &[&str] = &[
     "MatrixForm",
     "PaddedForm",
     "StringForm",
+    "TeXForm",
 ];
 
 /// Register all format builtins in the environment.
@@ -530,6 +710,7 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "MatrixForm", builtin_matrix_form);
     register_builtin(env, "PaddedForm", builtin_padded_form);
     register_builtin(env, "StringForm", builtin_string_form);
+    register_builtin(env, "TeXForm", builtin_tex_form);
 }
 
 #[cfg(test)]
@@ -543,6 +724,354 @@ mod tests {
         let env = crate::env::Env::new();
         crate::builtins::register_builtins(&env);
         crate::eval_input(expr, &env).unwrap_or(Value::Null)
+    }
+
+    // ── InputForm round-trip helpers ──
+
+    fn sym(s: &str) -> Value {
+        Value::Symbol(s.to_string())
+    }
+
+    fn int(n: i64) -> Value {
+        Value::Integer(rug::Integer::from(n))
+    }
+
+    fn call(head: &str, args: Vec<Value>) -> Value {
+        Value::Call {
+            head: head.to_string(),
+            args,
+        }
+    }
+
+    fn render_as(format: Format, v: &Value) -> String {
+        format!(
+            "{}",
+            Value::Formatted {
+                format,
+                value: Box::new(v.clone()),
+            }
+        )
+    }
+
+    /// Evaluate a source string without the stderr noise of `eval_input`.
+    fn eval_str(src: &str) -> Value {
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let exprs = crate::parser::parse(tokens).expect("parse");
+        let env = crate::env::Env::new();
+        crate::builtins::register_builtins(&env);
+        let mut last = Value::Null;
+        for e in &exprs {
+            last = crate::eval::eval(e, &env).expect("eval");
+        }
+        last
+    }
+
+    /// Assert that `v` renders exactly as `expected` and that re-parsing that
+    /// rendering evaluates to the same value as re-parsing `FullForm[v]`.
+    fn assert_input_form(v: Value, expected: &str) {
+        assert_renders(v.clone(), expected);
+        let rendered = render_as(Format::InputForm, &v);
+        let via_input = eval_str(&rendered);
+        let via_full = eval_str(&render_as(Format::FullForm, &v));
+        assert_eq!(
+            via_input.to_string(),
+            via_full.to_string(),
+            "InputForm `{rendered}` did not round-trip"
+        );
+    }
+
+    /// Exact-string assertion only (used where evaluation leaves `Pattern[…]`
+    /// wrappers that make the eval comparison representation-dependent).
+    fn assert_renders(v: Value, expected: &str) {
+        assert_eq!(
+            render_as(Format::InputForm, &v),
+            expected,
+            "InputForm mismatch"
+        );
+    }
+
+    // ── InputForm precedence / round-trip ──
+
+    #[test]
+    fn test_input_form_power_precedence() {
+        // Parenthesize a `Power` base but not a `Power` exponent.
+        assert_input_form(
+            call(
+                "Power",
+                vec![call("Power", vec![sym("x"), sym("y")]), sym("z")],
+            ),
+            "(x^y)^z",
+        );
+        assert_input_form(
+            call(
+                "Power",
+                vec![sym("x"), call("Power", vec![sym("y"), sym("z")])],
+            ),
+            "x^y^z",
+        );
+        assert_input_form(
+            call(
+                "Power",
+                vec![call("Plus", vec![sym("a"), sym("b")]), int(2)],
+            ),
+            "(a + b)^2",
+        );
+        assert_input_form(
+            call(
+                "Power",
+                vec![sym("x"), call("Plus", vec![sym("a"), sym("b")])],
+            ),
+            "x^(a + b)",
+        );
+    }
+
+    #[test]
+    fn test_input_form_times_plus_precedence() {
+        assert_input_form(
+            call(
+                "Times",
+                vec![call("Plus", vec![sym("a"), sym("b")]), sym("c")],
+            ),
+            "(a + b) c",
+        );
+        assert_input_form(
+            call(
+                "Times",
+                vec![sym("a"), call("Plus", vec![sym("b"), sym("c")])],
+            ),
+            "a (b + c)",
+        );
+        // A nested negative factor must be parenthesized (`a -b` would be a sum).
+        assert_input_form(
+            call(
+                "Times",
+                vec![sym("a"), call("Times", vec![int(-1), sym("b")])],
+            ),
+            "a (-b)",
+        );
+    }
+
+    #[test]
+    fn test_input_form_negative_signs() {
+        assert_input_form(call("Times", vec![int(-1), sym("x")]), "-x");
+        assert_input_form(call("Times", vec![int(-2), sym("x"), sym("y")]), "-2 x y");
+        assert_input_form(
+            call(
+                "Plus",
+                vec![sym("a"), call("Times", vec![int(-1), sym("b")])],
+            ),
+            "a - b",
+        );
+        assert_input_form(
+            call("Plus", vec![int(1), call("Times", vec![int(-2), sym("x")])]),
+            "1 - 2 x",
+        );
+    }
+
+    #[test]
+    fn test_input_form_not_and_logic_precedence() {
+        assert_input_form(call("Not", vec![sym("a")]), "!a");
+        assert_input_form(
+            call("Not", vec![call("Equal", vec![sym("a"), sym("b")])]),
+            "!(a == b)",
+        );
+        assert_input_form(
+            call("Not", vec![call("Plus", vec![sym("a"), sym("b")])]),
+            "!(a + b)",
+        );
+        assert_input_form(
+            call("And", vec![call("Or", vec![sym("a"), sym("b")]), sym("c")]),
+            "(a || b) && c",
+        );
+        assert_input_form(
+            call("Or", vec![sym("a"), call("And", vec![sym("b"), sym("c")])]),
+            "a || b && c",
+        );
+        assert_input_form(
+            call(
+                "Times",
+                vec![call("Equal", vec![sym("a"), sym("b")]), sym("c")],
+            ),
+            "(a == b) c",
+        );
+    }
+
+    #[test]
+    fn test_input_form_rule_divide_part_precedence() {
+        assert_renders(
+            call(
+                "Rule",
+                vec![call("Rule", vec![sym("a"), sym("b")]), sym("c")],
+            ),
+            "(a -> b) -> c",
+        );
+        assert_renders(
+            call("Rule", vec![sym("a"), call("Or", vec![sym("b"), sym("c")])]),
+            "a -> b || c",
+        );
+        assert_input_form(
+            call(
+                "Divide",
+                vec![call("Divide", vec![sym("x"), sym("y")]), sym("z")],
+            ),
+            "x/y/z",
+        );
+        assert_input_form(
+            call(
+                "Divide",
+                vec![sym("x"), call("Divide", vec![sym("y"), sym("z")])],
+            ),
+            "x/(y/z)",
+        );
+        assert_input_form(
+            call("Part", vec![call("Plus", vec![sym("a"), sym("b")]), int(1)]),
+            "(a + b)[[1]]",
+        );
+    }
+
+    #[test]
+    fn test_input_form_symmetric_difference_regression() {
+        // Regression: `Minus[Plus[a,b]]` used to render as `-a + b`.
+        let v = call("Minus", vec![call("Plus", vec![sym("a"), sym("b")])]);
+        assert_eq!(render_as(Format::InputForm, &v), "-(a + b)");
+    }
+
+    // ── NumberForm / ScientificForm specs ──
+
+    #[test]
+    fn test_number_form_default_and_pair_spec() {
+        let pi = Value::Real(Float::with_val(DEFAULT_PRECISION, std::f64::consts::PI));
+        // Single-argument form defaults to 6 significant digits.
+        assert!(builtin_number_form(&[pi.clone()]).is_ok());
+        // Pair spec uses its first element as the significant-digit count.
+        let spec = Value::List(vec![int(3), int(2)]);
+        let s = builtin_number_form(&[pi.clone(), spec])
+            .unwrap()
+            .to_string();
+        assert!(
+            s.starts_with("3.14"),
+            "expected 3 significant digits, got {s}"
+        );
+        // Invalid specs error rather than silently defaulting.
+        assert!(builtin_number_form(&[pi.clone(), sym("x")]).is_err());
+        assert!(builtin_number_form(&[pi, int(0)]).is_err());
+    }
+
+    #[test]
+    fn test_scientific_form_pair_spec() {
+        let v = Value::Real(Float::with_val(DEFAULT_PRECISION, 123.456));
+        let spec = Value::List(vec![int(4), int(2)]);
+        let s = builtin_scientific_form(&[v, spec]).unwrap().to_string();
+        assert!(
+            s.contains('\u{b7}'),
+            "scientific form should use ·, got {s}"
+        );
+        assert!(
+            s.contains("10^"),
+            "scientific form should use base-10 power, got {s}"
+        );
+    }
+
+    #[test]
+    fn test_scientific_form_normalizes() {
+        // Regression: rug's `e` exponent used to leak through (`1.23e3·10^0`).
+        let big = Value::Real(Float::with_val(DEFAULT_PRECISION, 1234.5));
+        assert_eq!(
+            builtin_scientific_form(&[big, int(3)]).unwrap().to_string(),
+            "1.23\u{b7}10^3"
+        );
+        let small = Value::Real(Float::with_val(DEFAULT_PRECISION, 0.000123));
+        assert_eq!(
+            builtin_scientific_form(&[small, int(3)])
+                .unwrap()
+                .to_string(),
+            "1.23\u{b7}10^-4"
+        );
+        // Integer rounding carries into the exponent.
+        assert_eq!(
+            builtin_scientific_form(&[int(999), int(2)])
+                .unwrap()
+                .to_string(),
+            "1.0\u{b7}10^3"
+        );
+        assert_eq!(
+            builtin_scientific_form(&[int(-150), int(3)])
+                .unwrap()
+                .to_string(),
+            "-1.50\u{b7}10^2"
+        );
+    }
+
+    // ── TableForm / MatrixForm ──
+
+    #[test]
+    fn test_table_form_aligns_ragged_columns() {
+        let v = Value::List(vec![
+            Value::List(vec![int(1), int(100)]),
+            Value::List(vec![int(20), int(3)]),
+        ]);
+        let s = builtin_table_form(&[v]).unwrap().to_string();
+        let lines: Vec<&str> = s.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        // Column start positions line up across rows.
+        assert_eq!(lines[0].find("100"), lines[1].find('3'));
+    }
+
+    #[test]
+    fn test_matrix_form_returns_text_without_quotes() {
+        let v = Value::List(vec![
+            Value::List(vec![int(1), int(2)]),
+            Value::List(vec![int(3), int(4)]),
+        ]);
+        let out = builtin_matrix_form(&[v]).unwrap();
+        assert!(matches!(
+            out,
+            Value::Formatted {
+                format: Format::Text,
+                ..
+            }
+        ));
+        let s = out.to_string();
+        assert!(
+            !s.starts_with('"'),
+            "MatrixForm should be plain text: {s:?}"
+        );
+        assert!(s.contains('\u{23a1}'));
+    }
+
+    #[test]
+    fn test_matrix_form_single_row_parenthesized() {
+        let v = Value::List(vec![Value::List(vec![int(1), int(2), int(3)])]);
+        let s = builtin_matrix_form(&[v]).unwrap().to_string();
+        assert!(s.starts_with('(') && s.ends_with(')'), "got {s:?}");
+    }
+
+    // ── Argument validation ──
+
+    #[test]
+    fn test_short_shallow_require_integer() {
+        let list = Value::List(vec![int(1), int(2), int(3)]);
+        assert!(builtin_short(&[list.clone(), sym("x")]).is_err());
+        assert!(builtin_shallow(&[list.clone(), sym("x")]).is_err());
+        assert!(builtin_short(&[list.clone(), int(1)]).is_ok());
+        assert!(builtin_shallow(&[list, int(2)]).is_ok());
+    }
+
+    #[test]
+    fn test_base_form_range() {
+        assert!(builtin_base_form(&[int(255), int(1)]).is_err());
+        assert!(builtin_base_form(&[int(255), int(37)]).is_err());
+        assert!(builtin_base_form(&[int(255), int(2)]).is_ok());
+        assert_eq!(
+            builtin_base_form(&[int(255), int(16)]).unwrap().to_string(),
+            "ff(base 16)"
+        );
+    }
+
+    #[test]
+    fn test_string_form_out_of_range_is_left_verbatim() {
+        let out = builtin_string_form(&[Value::Str("a=`2`".to_string()), int(1)]).unwrap();
+        assert_eq!(out.to_string(), "a=`2`");
     }
 
     #[test]
@@ -751,10 +1280,11 @@ mod tests {
         ]);
         let result = builtin_table_form(&[v]).unwrap();
         let s = result.to_string();
-        assert!(s.contains("1"));
-        assert!(s.contains("4"));
-        // Should use tab separator
-        assert!(s.contains('\t'));
+        // Rows are joined by newlines and columns by aligned spaces.
+        assert!(s.contains('\n'));
+        assert!(s.contains("1  2"), "columns should be aligned, got: {s:?}");
+        assert!(s.contains("3  4"), "columns should be aligned, got: {s:?}");
+        assert!(!s.contains('\t'), "TableForm no longer uses tabs: {s:?}");
     }
 
     #[test]
@@ -862,5 +1392,55 @@ mod tests {
         let s = result.to_string();
         // Out of range slot is left as-is
         assert_eq!(s, "val = `5`");
+    }
+
+    // ── TeXForm ──
+
+    #[test]
+    fn test_tex_form_rendering() {
+        assert_eq!(render_tex(&call("Plus", vec![sym("a"), sym("b")])), "a + b");
+        assert_eq!(render_tex(&call("Power", vec![sym("x"), int(2)])), "x^{2}");
+        assert_eq!(
+            render_tex(&call("Divide", vec![sym("a"), sym("b")])),
+            "\\frac{a}{b}"
+        );
+        assert_eq!(
+            render_tex(&Value::Rational(Box::new(rug::Rational::from((1, 2))))),
+            "\\frac{1}{2}"
+        );
+        assert_eq!(render_tex(&call("Sqrt", vec![int(2)])), "\\sqrt{2}");
+        assert_eq!(render_tex(&sym("Pi")), "\\pi");
+        assert_eq!(
+            render_tex(&call(
+                "Power",
+                vec![call("Plus", vec![sym("a"), sym("b")]), int(2)]
+            )),
+            "\\left(a + b\\right)^{2}"
+        );
+    }
+
+    #[test]
+    fn test_tex_form_builtin_wraps_text() {
+        let out = builtin_tex_form(&[call("Plus", vec![sym("a"), sym("b")])]).unwrap();
+        assert!(matches!(
+            out,
+            Value::Formatted {
+                format: Format::Text,
+                ..
+            }
+        ));
+        assert_eq!(out.to_string(), "a + b");
+        assert!(builtin_tex_form(&[]).is_err());
+        assert!(builtin_tex_form(&[int(1), int(2)]).is_err());
+    }
+
+    #[test]
+    fn test_standard_and_output_form_render_infix() {
+        let v = call("Plus", vec![sym("a"), sym("b")]);
+        assert_eq!(
+            builtin_standard_form(&[v.clone()]).unwrap().to_string(),
+            "a + b"
+        );
+        assert_eq!(builtin_output_form(&[v]).unwrap().to_string(), "a + b");
     }
 }

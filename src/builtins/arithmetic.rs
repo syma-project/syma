@@ -33,12 +33,404 @@ pub fn val_to_f64_public(v: &Value) -> Option<f64> {
     val_to_f64(v)
 }
 
-pub fn builtin_plus(args: &[Value]) -> Result<Value, EvalError> {
-    let mut result = Value::Integer(Integer::from(0));
-    for arg in args {
-        result = add_values(&result, arg)?;
+/// Byte that separates factor keys; cannot appear in a `Debug` rendering.
+const FACTOR_KEY_SEP: char = '\u{1}';
+
+/// True for numeric scalars that can be folded exactly (or via `Complex` f64 math).
+fn is_numeric_scalar(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Integer(_) | Value::Rational(_) | Value::Real(_) | Value::Complex { .. }
+    )
+}
+
+/// True when `v` is numerically zero (exact or inexact).
+fn is_zero_scalar(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => n.is_zero(),
+        Value::Rational(r) => r.as_ref().is_zero(),
+        Value::Real(r) => r.is_zero(),
+        Value::Complex { re, im } => *re == 0.0 && *im == 0.0,
+        _ => false,
     }
-    Ok(result)
+}
+
+/// True when `v` is an *exact* zero (Integer/Rational only), matching the
+/// historical zero-shortcut semantics.
+fn is_exact_zero(v: &Value) -> bool {
+    matches!(v, Value::Integer(n) if n.is_zero())
+        || matches!(v, Value::Rational(r) if r.as_ref().is_zero())
+}
+
+/// True when `v` is an exact numeric one.
+fn is_one_scalar(v: &Value) -> bool {
+    matches!(v, Value::Integer(n) if *n == 1)
+        || matches!(v, Value::Rational(r) if r.as_ref() == &Rational::from(1))
+}
+
+/// Add two numeric scalars, returning `None` when either is non-numeric.
+fn scalar_add(a: &Value, b: &Value) -> Option<Result<Value, EvalError>> {
+    let sum = match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Value::Integer(x.clone() + y),
+        (Value::Real(x), Value::Real(y)) => Value::Real(x.clone() + y),
+        (Value::Integer(x), Value::Real(y)) => {
+            Value::Real(Float::with_val(DEFAULT_PRECISION, x) + y)
+        }
+        (Value::Real(x), Value::Integer(y)) => {
+            Value::Real(x + Float::with_val(DEFAULT_PRECISION, y))
+        }
+        (Value::Rational(x), Value::Rational(y)) => {
+            let sum: Rational = (x.as_ref() + y.as_ref()).into();
+            let (num, den) = sum.into_numer_denom();
+            rational_value(num, den)
+        }
+        (Value::Rational(x), Value::Integer(y)) | (Value::Integer(y), Value::Rational(x)) => {
+            let sum: Rational = x.as_ref() + Rational::from(y);
+            let (num, den) = sum.into_numer_denom();
+            rational_value(num, den)
+        }
+        (Value::Rational(x), Value::Real(y)) => {
+            let x_f = Float::with_val(DEFAULT_PRECISION, x.numer())
+                / Float::with_val(DEFAULT_PRECISION, x.denom());
+            Value::Real(x_f + y)
+        }
+        (Value::Real(x), Value::Rational(y)) => {
+            let y_f = Float::with_val(DEFAULT_PRECISION, y.numer())
+                / Float::with_val(DEFAULT_PRECISION, y.denom());
+            Value::Real(x + y_f)
+        }
+        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
+            normalize_complex(r1 + r2, im1 + im2)
+        }
+        (Value::Complex { re, im }, other) => {
+            let v = val_to_f64(other)?;
+            normalize_complex(*re + v, *im)
+        }
+        (other, Value::Complex { re, im }) => {
+            let v = val_to_f64(other)?;
+            normalize_complex(v + *re, *im)
+        }
+        _ => return None,
+    };
+    Some(Ok(sum))
+}
+
+/// A summand split into a numeric coefficient and its non-numeric factors.
+struct SumTerm {
+    coeff: Value,
+    factors: Vec<Value>,
+}
+
+/// Split a term into an exact numeric coefficient plus its symbolic factors.
+///
+/// `Times` factors are flattened, numeric ones folded into the coefficient.
+/// `Divide[a, b]` is split into `a · b⁻¹` (inverting `b`'s factors) so that
+/// `x/2` and `x/3`, or `1/x` and `2/x`, share non-numeric factors and combine.
+/// `Power[base, 0]` collapses.
+fn decompose_sum_term(v: &Value) -> SumTerm {
+    match v {
+        Value::Call { head, args } if head == "Times" => {
+            let mut coeff = Value::Integer(Integer::from(1));
+            let mut factors = Vec::new();
+            for a in args {
+                let d = decompose_sum_term(a);
+                if let Ok(prod) = mul_values(&coeff, &d.coeff) {
+                    coeff = prod;
+                }
+                factors.extend(d.factors);
+            }
+            SumTerm { coeff, factors }
+        }
+        Value::Call { head, args } if head == "Divide" && args.len() == 2 => {
+            let num = decompose_sum_term(&args[0]);
+            let den = decompose_sum_term(&args[1]);
+            if is_numeric_scalar(&den.coeff)
+                && !is_zero_scalar(&den.coeff)
+                && let Ok(quot) = builtin_divide(&[num.coeff, den.coeff])
+            {
+                let mut factors = num.factors;
+                // Move the denominator's factors into the numerator by
+                // inverting their exponents, so `1/x` and `1/y` group under
+                // a common denominator-aware factor.
+                for f in &den.factors {
+                    factors.push(invert_factor(f));
+                }
+                SumTerm {
+                    coeff: quot,
+                    factors,
+                }
+            } else {
+                SumTerm {
+                    coeff: Value::Integer(Integer::from(1)),
+                    factors: vec![v.clone()],
+                }
+            }
+        }
+        Value::Call { head, args } if head == "Power" && args.len() == 2 => {
+            if is_exact_zero(&args[1]) {
+                SumTerm {
+                    coeff: Value::Integer(Integer::from(1)),
+                    factors: Vec::new(),
+                }
+            } else {
+                SumTerm {
+                    coeff: Value::Integer(Integer::from(1)),
+                    factors: vec![v.clone()],
+                }
+            }
+        }
+        _ if is_numeric_scalar(v) => SumTerm {
+            coeff: v.clone(),
+            factors: Vec::new(),
+        },
+        _ => SumTerm {
+            coeff: Value::Integer(Integer::from(1)),
+            factors: vec![v.clone()],
+        },
+    }
+}
+
+/// Invert a factor: `b → b^-1`, `b^e → b^-e`.
+fn invert_factor(f: &Value) -> Value {
+    if let Value::Call { head, args } = f
+        && head == "Power"
+        && args.len() == 2
+    {
+        let neg = builtin_minus(&[args[1].clone()]).unwrap_or_else(|_| Value::Call {
+            head: "Times".to_string(),
+            args: vec![Value::Integer(Integer::from(-1)), args[1].clone()],
+        });
+        return power_val(args[0].clone(), neg);
+    }
+    power_val(f.clone(), Value::Integer(Integer::from(-1)))
+}
+
+/// Canonical key for a multiset of factors, order-independent.
+fn factors_key(factors: &[Value]) -> String {
+    let mut keys: Vec<String> = factors.iter().map(|f| format!("{f:?}")).collect();
+    keys.sort();
+    keys.join(&FACTOR_KEY_SEP.to_string())
+}
+
+/// Multiset intersection of every factor list (order from the first list).
+fn common_factors(lists: &[Vec<Value>]) -> Vec<Value> {
+    let Some(first) = lists.first() else {
+        return Vec::new();
+    };
+    let mut common = first.clone();
+    for list in &lists[1..] {
+        let mut remaining: Vec<Value> = list.clone();
+        common.retain(|c| {
+            if let Some(pos) = remaining.iter().position(|x| x.struct_eq(c)) {
+                remaining.remove(pos);
+                true
+            } else {
+                false
+            }
+        });
+        if common.is_empty() {
+            break;
+        }
+    }
+    common
+}
+
+/// Rewrite a `Times` with negative integer powers as a `Divide`, e.g.
+/// `Times[3, Power[x, -1]] → Divide[3, x]`, matching Mathematica's display.
+fn render_negative_powers(v: Value) -> Value {
+    let Value::Call { head, mut args } = v else {
+        return v;
+    };
+    if head != "Times" {
+        return Value::Call { head, args };
+    }
+    let mut numer: Vec<Value> = Vec::new();
+    let mut denom: Vec<Value> = Vec::new();
+    for a in args.drain(..) {
+        if let Value::Call { head: h, args: pa } = &a
+            && h == "Power"
+            && pa.len() == 2
+            && let Value::Integer(e) = &pa[1]
+            && e.is_negative()
+        {
+            let pos = -e.clone();
+            denom.push(if pos == 1 {
+                pa[0].clone()
+            } else {
+                Value::Call {
+                    head: "Power".to_string(),
+                    args: vec![pa[0].clone(), Value::Integer(pos)],
+                }
+            });
+            continue;
+        }
+        numer.push(a);
+    }
+    if denom.is_empty() {
+        return Value::Call {
+            head: "Times".to_string(),
+            args: numer,
+        };
+    }
+    let numer_v = match numer.len() {
+        0 => Value::Integer(Integer::from(1)),
+        1 => numer.into_iter().next().expect("len checked"),
+        _ => Value::Call {
+            head: "Times".to_string(),
+            args: numer,
+        },
+    };
+    let denom_v = match denom.len() {
+        1 => denom.into_iter().next().expect("len checked"),
+        _ => Value::Call {
+            head: "Times".to_string(),
+            args: denom,
+        },
+    };
+    Value::Call {
+        head: "Divide".to_string(),
+        args: vec![numer_v, denom_v],
+    }
+}
+
+/// Build `coeff * factors` as a single value, keeping the coefficient first.
+fn make_term(coeff: Value, factors: &[Value]) -> Result<Value, EvalError> {
+    if factors.is_empty() {
+        return Ok(coeff);
+    }
+    if is_zero_scalar(&coeff) {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    let mut args: Vec<Value> = Vec::with_capacity(factors.len() + 1);
+    if !is_one_scalar(&coeff) {
+        args.push(coeff);
+    }
+    args.extend_from_slice(factors);
+    Ok(render_negative_powers(builtin_times(&args)?))
+}
+
+/// Combine symbolic summands sharing a non-numeric factor, like Mathematica.
+///
+/// Terms sharing a common factor have it factored out and their residuals
+/// re-summed, so `2 x + 3 x → 5 x` and `a x + b x → (a + b) x`. When no factor
+/// is shared, groups with identical factor multisets have their coefficients
+/// added. Groups that cannot be combined preserve their original shape.
+fn combine_symbolic_terms(terms: &[Value]) -> Result<Vec<Value>, EvalError> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    if terms.len() == 1 {
+        return Ok(vec![terms[0].clone()]);
+    }
+    let decomposed: Vec<SumTerm> = terms.iter().map(decompose_sum_term).collect();
+    let factor_lists: Vec<Vec<Value>> = decomposed.iter().map(|d| d.factors.clone()).collect();
+    let common = common_factors(&factor_lists);
+
+    if !common.is_empty() {
+        let mut residuals = Vec::with_capacity(terms.len());
+        for d in &decomposed {
+            let mut rf = d.factors.clone();
+            for c in &common {
+                if let Some(pos) = rf.iter().position(|x| x.struct_eq(c)) {
+                    rf.remove(pos);
+                }
+            }
+            residuals.push(make_term(d.coeff.clone(), &rf)?);
+        }
+        let inner_terms = combine_symbolic_terms(&residuals)?;
+        let inner = match inner_terms.len() {
+            0 => Value::Integer(Integer::from(0)),
+            1 => inner_terms.into_iter().next().expect("len checked"),
+            _ => Value::Call {
+                head: "Plus".to_string(),
+                args: inner_terms,
+            },
+        };
+        if is_zero_scalar(&inner) {
+            return Ok(vec![Value::Integer(Integer::from(0))]);
+        }
+        let mut prod_args = Vec::with_capacity(common.len() + 1);
+        prod_args.push(inner);
+        prod_args.extend(common);
+        return Ok(vec![render_negative_powers(builtin_times(&prod_args)?)]);
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+    // (factors, coefficient, occurrence count, original term)
+    let mut groups: Vec<(Vec<Value>, Value, usize, Value)> = Vec::new();
+    for (term, d) in terms.iter().zip(decomposed) {
+        let key = factors_key(&d.factors);
+        if let Some(idx) = keys.iter().position(|k| *k == key) {
+            let g = &mut groups[idx];
+            g.1 = add_values(&g.1, &d.coeff)?;
+            g.2 += 1;
+        } else {
+            keys.push(key);
+            groups.push((d.factors, d.coeff, 1, term.clone()));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (factors, coeff, count, orig) in groups {
+        if is_zero_scalar(&coeff) {
+            continue;
+        }
+        if count == 1 {
+            out.push(orig);
+        } else {
+            out.push(make_term(coeff, &factors)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Flatten nested `Plus` arguments in order.
+fn flatten_plus_into(args: &[Value], out: &mut Vec<Value>) {
+    for a in args {
+        if let Value::Call { head, args: inner } = a
+            && head == "Plus"
+        {
+            flatten_plus_into(inner, out);
+        } else {
+            out.push(a.clone());
+        }
+    }
+}
+
+/// Thread addition over list arguments (`Listable`), folding scalars first.
+fn plus_lists(flat: &[Value]) -> Result<Value, EvalError> {
+    let mut lists: Vec<&Vec<Value>> = Vec::new();
+    let mut scalars: Vec<Value> = Vec::new();
+    for v in flat {
+        match v {
+            Value::List(items) => lists.push(items),
+            _ => scalars.push(v.clone()),
+        }
+    }
+    let mut scalar = Value::Integer(Integer::from(0));
+    for s in &scalars {
+        scalar = add_values(&scalar, s)?;
+    }
+    if lists.is_empty() {
+        return Ok(scalar);
+    }
+    let mut acc: Vec<Value> = lists[0].clone();
+    for l in &lists[1..] {
+        if l.len() != acc.len() {
+            return Err(EvalError::Error(
+                "Lists must have same length for addition".to_string(),
+            ));
+        }
+        for (a, b) in acc.iter_mut().zip(l.iter()) {
+            *a = add_values(a, b)?;
+        }
+    }
+    if !is_exact_zero(&scalar) {
+        for a in acc.iter_mut() {
+            *a = add_values(a, &scalar)?;
+        }
+    }
+    Ok(Value::List(acc))
 }
 
 pub fn add_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
@@ -53,221 +445,121 @@ pub fn mul_values_public(a: &Value, b: &Value) -> Result<Value, EvalError> {
     mul_values(a, b)
 }
 
-fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
-    match (a, b) {
-        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() - y)),
-        (Value::Real(x), Value::Real(y)) => Ok(Value::Real(x.clone() - y)),
-        (Value::Integer(x), Value::Real(y)) => {
-            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, x) - y))
-        }
-        (Value::Real(x), Value::Integer(y)) => {
-            Ok(Value::Real(x - Float::with_val(DEFAULT_PRECISION, y)))
-        }
-        (Value::Rational(x), Value::Rational(y)) => {
-            let diff: Rational = (x.as_ref() - y.as_ref()).into();
-            let (num, den) = diff.into_numer_denom();
-            Ok(rational_value(num, den))
-        }
-        (Value::Rational(x), Value::Integer(y)) => {
-            let diff: Rational = x.as_ref() - Rational::from(y);
-            let (num, den) = diff.into_numer_denom();
-            Ok(rational_value(num, den))
-        }
-        (Value::Integer(x), Value::Rational(y)) => {
-            let diff: Rational = Rational::from(x) - y.as_ref();
-            let (num, den) = diff.into_numer_denom();
-            Ok(rational_value(num, den))
-        }
-        (Value::Rational(x), Value::Real(y)) => {
-            let x_f = Float::with_val(DEFAULT_PRECISION, x.numer())
-                / Float::with_val(DEFAULT_PRECISION, x.denom());
-            Ok(Value::Real(x_f - y))
-        }
-        (Value::Real(x), Value::Rational(y)) => {
-            let y_f = Float::with_val(DEFAULT_PRECISION, y.numer())
-                / Float::with_val(DEFAULT_PRECISION, y.denom());
-            Ok(Value::Real(x - y_f))
-        }
-        (Value::List(xs), Value::List(ys)) => {
-            if xs.len() == ys.len() {
-                let result: Result<Vec<Value>, _> = xs
-                    .iter()
-                    .zip(ys.iter())
-                    .map(|(x, y)| sub_values(x, y))
-                    .collect();
-                Ok(Value::List(result?))
-            } else {
-                Err(EvalError::Error(
-                    "Lists must have same length for subtraction".to_string(),
-                ))
-            }
-        }
-        // Complex - Complex
-        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
-            Ok(normalize_complex(r1 - r2, im1 - im2))
-        }
-        // Complex - scalar
-        (Value::Complex { re, im }, other) => {
-            if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(*re - v, *im))
-            } else {
-                Ok(Value::Call {
+pub fn builtin_plus(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    let mut flat: Vec<Value> = Vec::new();
+    flatten_plus_into(args, &mut flat);
+    if flat.is_empty() {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+
+    // Listable: lists thread element-wise instead of combining as like terms.
+    if flat.iter().any(|v| matches!(v, Value::List(_))) {
+        return plus_lists(&flat);
+    }
+
+    // Fold numeric constants exactly, remembering where the first ones appear.
+    let mut const_sum = Value::Integer(Integer::from(0));
+    let mut first_numeric: Option<usize> = None;
+    let mut first_symbolic: Option<usize> = None;
+    let mut symbolic: Vec<Value> = Vec::new();
+    for (i, v) in flat.iter().enumerate() {
+        if is_numeric_scalar(v) {
+            first_numeric.get_or_insert(i);
+            const_sum = match scalar_add(&const_sum, v) {
+                Some(r) => r?,
+                None => Value::Call {
                     head: "Plus".to_string(),
-                    args: vec![
-                        a.clone(),
-                        Value::Call {
-                            head: "Times".to_string(),
-                            args: vec![Value::Integer(Integer::from(-1)), b.clone()],
-                        },
-                    ],
-                })
-            }
+                    args: vec![const_sum, v.clone()],
+                },
+            };
+        } else {
+            first_symbolic.get_or_insert(i);
+            symbolic.push(v.clone());
         }
-        // scalar - Complex
-        (other, Value::Complex { re, im }) => {
-            if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(v - *re, -*im))
-            } else {
-                Ok(Value::Call {
-                    head: "Plus".to_string(),
-                    args: vec![
-                        a.clone(),
-                        Value::Call {
-                            head: "Times".to_string(),
-                            args: vec![Value::Integer(Integer::from(-1)), b.clone()],
-                        },
-                    ],
-                })
-            }
+    }
+
+    let combined = combine_symbolic_terms(&symbolic)?;
+    let const_is_zero = is_exact_zero(&const_sum);
+    let symbolic_first = match (first_symbolic, first_numeric) {
+        (Some(s), Some(n)) => s <= n,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    let mut out: Vec<Value> = Vec::new();
+    if symbolic_first {
+        out.extend(combined);
+        if !const_is_zero {
+            out.push(const_sum);
         }
+    } else {
+        if !const_is_zero {
+            out.push(const_sum);
+        }
+        out.extend(combined);
+    }
+    match out.len() {
+        0 => Ok(Value::Integer(Integer::from(0))),
+        1 => Ok(out.into_iter().next().expect("len checked")),
         _ => Ok(Value::Call {
             head: "Plus".to_string(),
-            args: vec![
-                a.clone(),
-                Value::Call {
-                    head: "Times".to_string(),
-                    args: vec![Value::Integer(Integer::from(-1)), b.clone()],
-                },
-            ],
+            args: out,
         }),
     }
 }
 
 pub fn add_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
-    if matches!(a, Value::Integer(n) if n.is_zero())
-        || matches!(a, Value::Rational(n) if n.is_zero())
-    {
+    if is_exact_zero(a) {
         return Ok(b.clone());
     }
-    if matches!(b, Value::Integer(n) if n.is_zero())
-        || matches!(b, Value::Rational(n) if n.is_zero())
-    {
+    if is_exact_zero(b) {
         return Ok(a.clone());
     }
-    match (a, b) {
-        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x.clone() + y)),
-        (Value::Real(x), Value::Real(y)) => Ok(Value::Real(x.clone() + y)),
-        (Value::Integer(x), Value::Real(y)) => {
-            Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, x) + y))
-        }
-        (Value::Real(x), Value::Integer(y)) => {
-            Ok(Value::Real(x + Float::with_val(DEFAULT_PRECISION, y)))
-        }
-        (Value::Rational(x), Value::Rational(y)) => {
-            let sum: Rational = (x.as_ref() + y.as_ref()).into();
-            let (num, den) = sum.into_numer_denom();
-            Ok(rational_value(num, den))
-        }
-        (Value::Rational(x), Value::Integer(y)) | (Value::Integer(y), Value::Rational(x)) => {
-            let sum: Rational = x.as_ref() + Rational::from(y);
-            let (num, den) = sum.into_numer_denom();
-            Ok(rational_value(num, den))
-        }
-        (Value::Rational(x), Value::Real(y)) => {
-            let x_f = Float::with_val(DEFAULT_PRECISION, x.numer())
-                / Float::with_val(DEFAULT_PRECISION, x.denom());
-            Ok(Value::Real(x_f + y))
-        }
-        (Value::Real(x), Value::Rational(y)) => {
-            let y_f = Float::with_val(DEFAULT_PRECISION, y.numer())
-                / Float::with_val(DEFAULT_PRECISION, y.denom());
-            Ok(Value::Real(x + y_f))
-        }
-        (Value::List(xs), Value::List(ys)) => {
-            if xs.len() == ys.len() {
-                let result: Result<Vec<Value>, _> = xs
-                    .iter()
-                    .zip(ys.iter())
-                    .map(|(x, y)| add_values(x, y))
-                    .collect();
-                Ok(Value::List(result?))
-            } else {
-                Err(EvalError::Error(
-                    "Lists must have same length for addition".to_string(),
-                ))
-            }
-        }
-        // Complex + Complex
-        (Value::Complex { re: r1, im: im1 }, Value::Complex { re: r2, im: im2 }) => {
-            Ok(normalize_complex(r1 + r2, im1 + im2))
-        }
-        // Complex + scalar
-        (Value::Complex { re, im }, other) => {
-            if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(*re + v, *im))
-            } else {
-                Ok(Value::Call {
-                    head: "Plus".to_string(),
-                    args: vec![a.clone(), b.clone()],
-                })
-            }
-        }
-        // scalar + Complex
-        (other, Value::Complex { re, im }) => {
-            if let Some(v) = val_to_f64(other) {
-                Ok(normalize_complex(*re + v, *im))
-            } else {
-                Ok(Value::Call {
-                    head: "Plus".to_string(),
-                    args: vec![a.clone(), b.clone()],
-                })
-            }
-        }
-        // a + a → 2*a
-        _ if a == b => Ok(Value::Call {
-            head: "Times".to_string(),
-            args: vec![Value::Integer(Integer::from(2)), a.clone()],
-        }),
-        // a + (-a) → 0  (where -a is Times[-1, a])
-        (Value::Call { head, args: targs }, _)
-            if head == "Times"
-                && targs.len() == 2
-                && matches!(&targs[0], Value::Integer(n) if *n == -1)
-                && targs[1] == *b =>
-        {
-            Ok(Value::Integer(Integer::from(0)))
-        }
-        // (-a) + a → 0
-        (_, Value::Call { head, args: targs })
-            if head == "Times"
-                && targs.len() == 2
-                && matches!(&targs[0], Value::Integer(n) if *n == -1)
-                && targs[1] == *a =>
-        {
-            Ok(Value::Integer(Integer::from(0)))
-        }
-        _ => Ok(Value::Call {
-            head: "Plus".to_string(),
-            args: vec![a.clone(), b.clone()],
-        }),
+    if let Some(r) = scalar_add(a, b) {
+        return r;
     }
+    if let (Value::List(xs), Value::List(ys)) = (a, b) {
+        if xs.len() != ys.len() {
+            return Err(EvalError::Error(
+                "Lists must have same length for addition".to_string(),
+            ));
+        }
+        let result: Result<Vec<Value>, _> = xs
+            .iter()
+            .zip(ys.iter())
+            .map(|(x, y)| add_values(x, y))
+            .collect();
+        return Ok(Value::List(result?));
+    }
+    builtin_plus(&[a.clone(), b.clone()])
 }
 
-/// Construct a Power value, normalizing `base^1` to just `base`.
+fn sub_values(a: &Value, b: &Value) -> Result<Value, EvalError> {
+    if let (Value::List(xs), Value::List(ys)) = (a, b) {
+        if xs.len() != ys.len() {
+            return Err(EvalError::Error(
+                "Lists must have same length for subtraction".to_string(),
+            ));
+        }
+        let result: Result<Vec<Value>, _> = xs
+            .iter()
+            .zip(ys.iter())
+            .map(|(x, y)| sub_values(x, y))
+            .collect();
+        return Ok(Value::List(result?));
+    }
+    let neg = builtin_times(&[Value::Integer(Integer::from(-1)), b.clone()])?;
+    add_values(a, &neg)
+}
+
+/// Construct a Power value, normalizing `base^1 → base` and `base^0 → 1`.
 fn power_val(base: Value, exp: Value) -> Value {
-    if matches!(&exp, Value::Integer(n) if *n == 1)
-        || matches!(&exp, Value::Rational(n) if *n.numer() == 1 && *n.denom() == 1)
-    {
+    if is_exact_zero(&exp) {
+        Value::Integer(Integer::from(1))
+    } else if is_one_scalar(&exp) {
         base
     } else {
         Value::Call {
@@ -931,8 +1223,7 @@ pub fn builtin_minus(args: &[Value]) -> Result<Value, EvalError> {
             }),
         }
     } else if args.len() == 2 {
-        let neg = builtin_minus(&[args[1].clone()])?;
-        add_values(&args[0], &neg)
+        sub_values(&args[0], &args[1])
     } else {
         Err(EvalError::Error(
             "Minus requires 1 or 2 arguments".to_string(),
@@ -1225,6 +1516,27 @@ mod tests {
     fn list(vals: Vec<Value>) -> Value {
         Value::List(vals)
     }
+    fn sym(name: &str) -> Value {
+        Value::Symbol(name.to_string())
+    }
+    fn times(args: Vec<Value>) -> Value {
+        Value::Call {
+            head: "Times".to_string(),
+            args,
+        }
+    }
+    fn power(base: Value, exp: Value) -> Value {
+        Value::Call {
+            head: "Power".to_string(),
+            args: vec![base, exp],
+        }
+    }
+    fn plus(args: Vec<Value>) -> Value {
+        Value::Call {
+            head: "Plus".to_string(),
+            args,
+        }
+    }
 
     #[test]
     fn test_plus_integers() {
@@ -1380,6 +1692,77 @@ mod tests {
             args: vec![arg],
         };
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_plus_combines_like_numeric_terms() {
+        // 2 x + 3 x → 5 x
+        let result =
+            builtin_plus(&[times(vec![int(2), sym("x")]), times(vec![int(3), sym("x")])]).unwrap();
+        assert_eq!(result, times(vec![int(5), sym("x")]));
+    }
+
+    #[test]
+    fn test_plus_combines_symbolic_coefficients() {
+        // a x + b x → (a + b) x
+        let result = builtin_plus(&[
+            times(vec![sym("a"), sym("x")]),
+            times(vec![sym("b"), sym("x")]),
+        ])
+        .unwrap();
+        assert_eq!(
+            result,
+            times(vec![plus(vec![sym("a"), sym("b")]), sym("x")])
+        );
+    }
+
+    #[test]
+    fn test_plus_cancels_like_terms() {
+        // 3 x^2 - 3 x^2 → 0
+        let term = times(vec![int(3), power(sym("x"), int(2))]);
+        let neg = times(vec![int(-3), power(sym("x"), int(2))]);
+        assert_eq!(builtin_plus(&[term, neg]).unwrap(), int(0));
+        // x - x → 0
+        assert_eq!(builtin_minus(&[sym("x"), sym("x")]).unwrap(), int(0));
+    }
+
+    #[test]
+    fn test_plus_combines_rational_coefficients() {
+        // x/2 + x/3 → 5/6 x
+        let hx = Value::Call {
+            head: "Divide".to_string(),
+            args: vec![sym("x"), int(2)],
+        };
+        let tx = Value::Call {
+            head: "Divide".to_string(),
+            args: vec![sym("x"), int(3)],
+        };
+        assert_eq!(
+            builtin_plus(&[hx, tx]).unwrap(),
+            times(vec![rat(5, 6), sym("x")])
+        );
+    }
+
+    #[test]
+    fn test_plus_preserves_uncombined_shape() {
+        // x + 3 stays a Plus with the same operands.
+        assert_eq!(
+            builtin_plus(&[sym("x"), int(3)]).unwrap(),
+            plus(vec![sym("x"), int(3)])
+        );
+    }
+
+    #[test]
+    fn test_times_merges_opposite_powers() {
+        // x^2 * x^-2 → 1, and Times[2, x, x^-1] → 2
+        assert_eq!(
+            builtin_times(&[power(sym("x"), int(2)), power(sym("x"), int(-2))]).unwrap(),
+            int(1)
+        );
+        assert_eq!(
+            builtin_times(&[int(2), sym("x"), power(sym("x"), int(-1))]).unwrap(),
+            int(2)
+        );
     }
 
     #[test]

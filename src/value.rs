@@ -501,12 +501,18 @@ pub enum EvalError {
     UnknownSymbol(String),
     /// User-thrown error.
     Thrown(Box<Value>),
-    /// Return[expr] — return from a function.
+    /// `Throw[value, tag]` — a tagged throw, caught by `Catch[expr, tag]`.
+    ThrownTagged { value: Box<Value>, tag: Box<Value> },
+    /// `Return[expr]` — return from a function.
     Return(Box<Value>),
-    /// Break[] — break from a loop.
+    /// `Break[]` — break from a loop.
     Break,
-    /// Continue[] — skip to next iteration in a loop.
+    /// `Continue[]` — skip to next iteration in a loop.
     Continue,
+    /// `Abort[]` — abort evaluation; caught by `CheckAbort`/`Catch`.
+    Abort,
+    /// `Goto[tag]` — non-local jump to the enclosing `Label[tag]`.
+    Goto(String),
     /// General error message.
     Error(String),
     /// FFI / foreign-function error.
@@ -535,9 +541,14 @@ impl fmt::Display for EvalError {
             }
             EvalError::UnknownSymbol(s) => write!(f, "Unknown symbol: {}", s),
             EvalError::Thrown(v) => write!(f, "Thrown: {}", v.as_ref()),
+            EvalError::ThrownTagged { value, tag } => {
+                write!(f, "Thrown: {} (tag {})", value.as_ref(), tag.as_ref())
+            }
             EvalError::Return(v) => write!(f, "Return: {}", v.as_ref()),
             EvalError::Break => write!(f, "Break"),
             EvalError::Continue => write!(f, "Continue"),
+            EvalError::Abort => write!(f, "Abort[]"),
+            EvalError::Goto(tag) => write!(f, "Goto[{}]", tag),
             EvalError::Error(s) => write!(f, "{}", s),
             EvalError::FfiError(s) => write!(f, "FFI error: {}", s),
         }
@@ -1662,148 +1673,239 @@ fn format_dataset(data: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
 // ── Format display helpers ──────────────────────────────────────────────────────
 
+/// Binding strengths for InputForm infix rendering.
+///
+/// Higher numbers bind tighter. These mirror the parser's precedence ladder
+/// (`parse_at_expr` … `parse_unary_expr`) so that re-parsing rendered output
+/// recovers the same expression.
+const PREC_AT: u8 = 2; // f @ x / f @@ x   (right-associative)
+const PREC_RULE: u8 = 3; // lhs -> rhs      (right-associative)
+const PREC_OR: u8 = 4;
+const PREC_AND: u8 = 5;
+const PREC_CMP: u8 = 6; // == != < > <= >= <>
+const PREC_ADD: u8 = 7;
+const PREC_MUL: u8 = 8; // * / /@ and implicit multiplication
+const PREC_POW: u8 = 9; // ^               (right-associative)
+const PREC_UNARY: u8 = 10; // prefix - and !
+const PREC_ATOM: u8 = 12;
+
+/// Binding strength of `v` when rendered in infix InputForm.
+fn input_prec(v: &Value) -> u8 {
+    match v {
+        Value::Call { head, args } => match head.as_str() {
+            "Apply" if args.len() == 2 => PREC_AT,
+            "Rule" | "RuleDelayed" if args.len() == 2 => PREC_RULE,
+            "Or" if args.len() >= 2 => PREC_OR,
+            "And" if args.len() >= 2 => PREC_AND,
+            "Equal" | "Unequal" | "Less" | "Greater" | "LessEqual" | "GreaterEqual"
+                if args.len() == 2 =>
+            {
+                PREC_CMP
+            }
+            "StringJoin" if args.len() >= 2 => PREC_CMP,
+            "Plus" if args.len() >= 2 => PREC_ADD,
+            "Times" | "Divide" | "Map" if args.len() == 2 => PREC_MUL,
+            "Times" if args.len() >= 2 => PREC_MUL,
+            "Power" if args.len() == 2 => PREC_POW,
+            "Minus" | "Not" if args.len() == 1 => PREC_UNARY,
+            _ => PREC_ATOM,
+        },
+        _ => PREC_ATOM,
+    }
+}
+
+/// Write `v` as the operand of an operator with precedence `parent`, wrapping
+/// it in parentheses when it binds looser (or, when `strict`, equally loose).
+/// `strict` is used for the right operand of left-associative operators and
+/// the left operand of right-associative ones.
+fn write_input_child(
+    v: &Value,
+    parent: u8,
+    strict: bool,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    let prec = input_prec(v);
+    if prec < parent || (strict && prec == parent) {
+        write!(f, "(")?;
+        format_input_form(v, f)?;
+        write!(f, ")")
+    } else {
+        format_input_form(v, f)
+    }
+}
+
+/// True when `v` renders with a leading `-` (a negative literal, `Minus[…]`,
+/// or a `Times[…]` whose first factor is negative).
+fn renders_negative(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n < 0,
+        Value::Rational(r) => r.is_negative(),
+        Value::Real(r) => r.is_sign_negative() && !r.is_zero(),
+        Value::Call { head, args } => match head.as_str() {
+            "Times" => args.first().is_some_and(renders_negative),
+            "Minus" => args.len() == 1,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// True when `v` is exactly the number `-1`.
+fn is_minus_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n == -1,
+        Value::Rational(r) => **r == -1,
+        Value::Real(r) => r.to_f64() == -1.0,
+        _ => false,
+    }
+}
+
+/// Write `v` (which is known to render negatively) without its leading sign.
+fn format_input_abs(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::Integer(n) if *n < 0 => write!(f, "{}", n.clone().abs()),
+        Value::Rational(r) if r.is_negative() => write!(f, "{}", (*r.clone()).abs()),
+        Value::Real(r) if r.is_sign_negative() => write!(f, "{}", Value::Real(-r.clone())),
+        Value::Call { head, args } if head == "Minus" && args.len() == 1 => {
+            format_input_form(&args[0], f)
+        }
+        Value::Call { head, args } if head == "Times" && !args.is_empty() => {
+            // Drop a leading `-1` coefficient so `-x` renders as `-x`, not `-1 x`.
+            if is_minus_one(&args[0]) && args.len() > 1 {
+                for (i, arg) in args[1..].iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write_input_factor(arg, i == 0, f)?;
+                }
+                Ok(())
+            } else {
+                format_input_abs(&args[0], f)?;
+                for arg in &args[1..] {
+                    write!(f, " ")?;
+                    write_input_factor(arg, false, f)?;
+                }
+                Ok(())
+            }
+        }
+        _ => format_input_form(v, f),
+    }
+}
+
+/// Write a single `Times` factor. The leading factor emits its sign directly;
+/// later factors wrap a sign in parentheses (`a -b` would parse as `a - b`).
+fn write_input_factor(v: &Value, first: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if renders_negative(v) {
+        if first {
+            write!(f, "-")?;
+            format_input_abs(v, f)
+        } else {
+            write!(f, "(-")?;
+            format_input_abs(v, f)?;
+            write!(f, ")")
+        }
+    } else {
+        write_input_child(v, PREC_MUL, false, f)
+    }
+}
+
 /// Format a value in InputForm (infix notation) — recursive.
 ///
 /// Common operators are rendered with infix syntax:
-/// `Plus[a, b]` → `a + b`, `Times[a, b]` → `a * b`, etc.
-/// Child values are also formatted in InputForm recursively.
+/// `Plus[a, b]` → `a + b`, `Times[a, b]` → `a b`, etc.
+/// Child values are also formatted in InputForm recursively, parenthesized
+/// according to their precedence so the output re-parses to the same value.
 fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match v {
         Value::Call { head, args } => {
-            // Known infix operators
+            // Known infix operators. Operands are parenthesized according to
+            // `input_prec` so the rendered text re-parses to the same value.
             match head.as_str() {
                 "Plus" if args.len() == 1 => format_input_form(&args[0], f),
                 "Plus" => {
                     for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
+                        if i == 0 {
+                            if renders_negative(arg) {
+                                write!(f, "-")?;
+                                format_input_abs(arg, f)?;
+                            } else {
+                                write_input_child(arg, PREC_ADD, false, f)?;
+                            }
+                        } else if renders_negative(arg) {
+                            write!(f, " - ")?;
+                            format_input_abs(arg, f)?;
+                        } else {
                             write!(f, " + ")?;
+                            write_input_child(arg, PREC_ADD, false, f)?;
                         }
-                        format_input_form(arg, f)?;
                     }
                     Ok(())
                 }
                 "Times" if args.is_empty() => write!(f, "Times[]"),
                 "Times" => {
-                    for (i, arg) in args.iter().enumerate() {
+                    // A leading `-1` coefficient is written as a bare `-`.
+                    let start = usize::from(args.len() > 1 && is_minus_one(&args[0]));
+                    if start == 1 {
+                        write!(f, "-")?;
+                    }
+                    for (i, arg) in args[start..].iter().enumerate() {
                         if i > 0 {
                             write!(f, " ")?;
                         }
-                        let needs_parens = matches!(arg, Value::Call { head: h, .. } if h == "Plus")
-                            || is_negative_number(arg)
-                            || (match arg {
-                                Value::Call {
-                                    head: h, args: pa, ..
-                                } if h == "Power" && pa.len() >= 2 => {
-                                    matches!(
-                                        &pa[0],
-                                        Value::Call { head: b, .. }
-                                            if b == "Plus" || b == "Times"
-                                    )
-                                }
-                                _ => false,
-                            });
-                        if needs_parens {
-                            write!(f, "(")?;
-                            format_input_form(arg, f)?;
-                            write!(f, ")")?;
-                        } else {
-                            format_input_form(arg, f)?;
-                        }
+                        write_input_factor(arg, i == 0, f)?;
                     }
                     Ok(())
                 }
                 "Power" if args.len() == 2 => {
-                    let base = &args[0];
-                    let exp = &args[1];
-                    if matches!(
-                        base,
-                        Value::Call { head: h, .. } if h == "Times" || h == "Plus"
-                    ) {
-                        write!(f, "(")?;
-                        format_input_form(base, f)?;
-                        write!(f, ")")?;
-                    } else {
-                        format_input_form(base, f)?;
-                    }
+                    write_input_child(&args[0], PREC_POW, true, f)?;
                     write!(f, "^")?;
-                    if matches!(
-                        exp,
-                        Value::Call { head: h, .. } if h == "Plus" || h == "Times" || h == "Divide"
-                    ) {
-                        write!(f, "(")?;
-                        format_input_form(exp, f)?;
-                        write!(f, ")")
-                    } else {
-                        format_input_form(exp, f)
-                    }
+                    write_input_child(&args[1], PREC_POW, false, f)
                 }
                 "Divide" if args.len() == 2 => {
-                    let numer = &args[0];
-                    let needs_numer_parens = matches!(
-                        numer,
-                        Value::Call { head: h, .. } if h == "Plus" || h == "Times"
-                    );
-                    if needs_numer_parens {
-                        write!(f, "(")?;
-                        format_input_form(numer, f)?;
-                        write!(f, ")")?;
-                    } else {
-                        format_input_form(numer, f)?;
-                    }
+                    write_input_child(&args[0], PREC_MUL, false, f)?;
                     write!(f, "/")?;
-                    let denom = &args[1];
-                    if matches!(
-                        denom,
-                        Value::Call { head: h, .. } if h == "Plus" || h == "Times"
-                    ) {
-                        write!(f, "(")?;
-                        format_input_form(denom, f)?;
-                        write!(f, ")")?;
-                    } else {
-                        format_input_form(denom, f)?;
-                    }
-                    Ok(())
+                    write_input_child(&args[1], PREC_POW, false, f)
                 }
                 "Minus" if args.len() == 1 => {
                     write!(f, "-")?;
-                    format_input_form(&args[0], f)
+                    write_input_child(&args[0], PREC_UNARY, false, f)
                 }
                 "Equal" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " == ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "Unequal" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " != ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "Less" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " < ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "Greater" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " > ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "LessEqual" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " <= ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "GreaterEqual" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_CMP, false, f)?;
                     write!(f, " >= ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_CMP, true, f)
                 }
                 "And" if args.len() >= 2 => {
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
                             write!(f, " && ")?;
                         }
-                        format_input_form(arg, f)?;
+                        write_input_child(arg, PREC_AND, false, f)?;
                     }
                     Ok(())
                 }
@@ -1812,23 +1914,23 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                         if i > 0 {
                             write!(f, " || ")?;
                         }
-                        format_input_form(arg, f)?;
+                        write_input_child(arg, PREC_OR, false, f)?;
                     }
                     Ok(())
                 }
                 "Not" if args.len() == 1 => {
                     write!(f, "!")?;
-                    format_input_form(&args[0], f)
+                    write_input_child(&args[0], PREC_UNARY, false, f)
                 }
                 "Rule" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_RULE, true, f)?;
                     write!(f, " -> ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_RULE, false, f)
                 }
                 "RuleDelayed" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_RULE, true, f)?;
                     write!(f, " :> ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_RULE, false, f)
                 }
                 "List" => {
                     write!(f, "{{")?;
@@ -1841,7 +1943,7 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     write!(f, "}}")
                 }
                 "Part" if args.len() >= 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_UNARY, false, f)?;
                     write!(f, "[[")?;
                     for (i, arg) in args[1..].iter().enumerate() {
                         if i > 0 {
@@ -1852,21 +1954,21 @@ fn format_input_form(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     write!(f, "]]")
                 }
                 "Apply" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_AT, true, f)?;
                     write!(f, " @@ ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_AT, false, f)
                 }
                 "Map" if args.len() == 2 => {
-                    format_input_form(&args[0], f)?;
+                    write_input_child(&args[0], PREC_MUL, false, f)?;
                     write!(f, " /@ ")?;
-                    format_input_form(&args[1], f)
+                    write_input_child(&args[1], PREC_POW, false, f)
                 }
                 "StringJoin" if args.len() >= 2 => {
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
                             write!(f, " <> ")?;
                         }
-                        format_input_form(arg, f)?;
+                        write_input_child(arg, PREC_CMP, false, f)?;
                     }
                     Ok(())
                 }
@@ -2174,37 +2276,75 @@ fn format_number_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> f
     }
 }
 
+/// Render a decimal string (optionally carrying an `e`/`@` exponent, as
+/// produced by `rug`) as normalized scientific notation `m·10^e` with at most
+/// `digits` significant digits, e.g. `1.23·10^3`.
+fn to_scientific(raw: &str, digits: usize) -> String {
+    let digits = digits.max(1);
+    let (mantissa, exp10) = match raw.find(['e', '@']) {
+        Some(p) => (&raw[..p], raw[p + 1..].parse::<i64>().unwrap_or(0)),
+        None => (raw, 0),
+    };
+    let negative = mantissa.starts_with('-');
+    let body = mantissa.trim_start_matches(['-', '+']);
+    let int_len = body.find('.').unwrap_or(body.len());
+    let mut ds: Vec<u8> = body.bytes().filter(|b| b.is_ascii_digit()).collect();
+    if ds.is_empty() {
+        return format!("{}·10^0", mantissa);
+    }
+    let mut exp = exp10 + int_len as i64 - 1;
+    // Drop leading zeros, lowering the exponent accordingly.
+    let lead = ds.iter().take_while(|&&d| d == b'0').count();
+    if lead > 0 {
+        ds.drain(..lead);
+        exp -= lead as i64;
+    }
+    if ds.is_empty() {
+        return "0·10^0".to_string();
+    }
+    // Round to `digits` significant digits.
+    if ds.len() > digits {
+        let round_up = ds[digits] >= b'5';
+        ds.truncate(digits);
+        if round_up {
+            let mut i = digits;
+            loop {
+                if i == 0 {
+                    ds.insert(0, b'1');
+                    exp += 1;
+                    break;
+                }
+                i -= 1;
+                if ds[i] == b'9' {
+                    ds[i] = b'0';
+                } else {
+                    ds[i] += 1;
+                    break;
+                }
+            }
+            ds.truncate(digits);
+        }
+    }
+    let sign = if negative { "-" } else { "" };
+    let first = ds[0] as char;
+    if ds.len() == 1 {
+        format!("{sign}{first}·10^{exp}")
+    } else {
+        let rest: String = ds[1..].iter().map(|&b| b as char).collect();
+        format!("{sign}{first}.{rest}·10^{exp}")
+    }
+}
+
 /// Format a number in scientific notation with the given significant digits.
 fn format_scientific_form(v: &Value, digits: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match v {
-        Value::Integer(n) => {
-            let negative = *n < 0;
-            let s = n.clone().abs().to_string();
-            let exp = s.len() as i64 - 1;
-            let sign = if negative { "-" } else { "" };
-            let first = &s[..1];
-            let rest = &s[1..];
-            if rest.is_empty() {
-                write!(f, "{}{}·10^{}", sign, first, exp)
-            } else {
-                write!(f, "{}{}.{}·10^{}", sign, first, rest, exp)
-            }
-        }
+        Value::Integer(n) => write!(f, "{}", to_scientific(&n.to_string(), digits)),
         Value::Real(r) => {
             let prec_bits = ((digits as f64) / std::f64::consts::LOG10_2).ceil() as u32;
             let rounded = Float::with_val(prec_bits.max(64), r);
-            // Use rug's to_string_radix with exponent marker '@'
+            // `rug` emits an `e` (radix 10) or `@` exponent suffix.
             let raw = rounded.to_string_radix(10, Some(digits.max(1)));
-            // raw is like "3.14159@0" (mantissa @ exponent)
-            if let Some(at) = raw.find('@') {
-                let mantissa = &raw[..at];
-                let exp: i64 = raw[at + 1..].parse().unwrap_or(0);
-                let adjusted_exp = exp + (mantissa.len() - 2) as i64; // account for decimal point
-                write!(f, "{}·10^{}", mantissa, adjusted_exp)
-            } else {
-                // No exponent, probably 0
-                write!(f, "{}·10^{}", raw, 0)
-            }
+            write!(f, "{}", to_scientific(&raw, digits))
         }
         Value::Rational(r) => {
             let f_val = Float::with_val(64, r.numer()) / Float::with_val(64, r.denom());

@@ -4,7 +4,6 @@
 //! DonutChart, BubbleChart, WaterfallChart, RegionPlot, and ContourPlot.
 
 use crate::value::{EvalError, Value};
-use std::collections::HashMap;
 
 // ── Color Palette ──────────────────────────────────────────────────────────────
 
@@ -82,6 +81,36 @@ fn format_tick(v: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// Escape text for safe inclusion in SVG content/attributes.
+fn escape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Widen a degenerate `[lo, hi]` interval so coordinate transforms stay finite.
+fn guard_range(lo: f64, hi: f64) -> (f64, f64) {
+    if !lo.is_finite() || !hi.is_finite() {
+        return (-1.0, 1.0);
+    }
+    let (lo, hi) = if hi < lo { (hi, lo) } else { (lo, hi) };
+    if (hi - lo).abs() < 1e-12 {
+        let c = (lo + hi) / 2.0;
+        (c - 1.0, c + 1.0)
+    } else {
+        (lo, hi)
+    }
+}
+
 /// Build a complete SVG wrapper with axes for cartesian charts.
 #[allow(clippy::too_many_arguments)]
 fn svg_with_axes(
@@ -94,7 +123,12 @@ fn svg_with_axes(
     y_max: f64,
     x_label: &str,
     y_label: &str,
+    grid_lines: bool,
 ) -> String {
+    // Guard against degenerate spans so the coordinate transform is finite.
+    let (x_min, x_max) = guard_range(x_min, x_max);
+    let (y_min, y_max) = guard_range(y_min, y_max);
+
     let plot_w = width - MARGIN_LEFT - MARGIN_RIGHT;
     let plot_h = height - MARGIN_TOP - MARGIN_BOTTOM;
 
@@ -107,22 +141,24 @@ fn svg_with_axes(
         width as i32, height as i32, width as i32, height as i32
     ));
 
-    // Grid lines (horizontal)
-    for tick in &axis_ticks(y_min, y_max) {
-        let sy = ty(*tick);
-        svg.push_str(&format!(
-            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
-            MARGIN_LEFT, sy, MARGIN_LEFT + plot_w, sy, EEE
-        ));
-    }
+    if grid_lines {
+        // Grid lines (horizontal)
+        for tick in &axis_ticks(y_min, y_max) {
+            let sy = ty(*tick);
+            svg.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
+                MARGIN_LEFT, sy, MARGIN_LEFT + plot_w, sy, EEE
+            ));
+        }
 
-    // Grid lines (vertical)
-    for tick in &axis_ticks(x_min, x_max) {
-        let sx = tx(*tick);
-        svg.push_str(&format!(
-            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
-            sx, MARGIN_TOP, sx, MARGIN_TOP + plot_h, EEE
-        ));
+        // Grid lines (vertical)
+        for tick in &axis_ticks(x_min, x_max) {
+            let sx = tx(*tick);
+            svg.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"1\"/>\n",
+                sx, MARGIN_TOP, sx, MARGIN_TOP + plot_h, EEE
+            ));
+        }
     }
 
     // Plot content
@@ -192,7 +228,7 @@ fn svg_with_axes(
             MARGIN_LEFT + plot_w / 2.0,
             MARGIN_TOP + plot_h + 45.0,
             AXIS_COLOR,
-            x_label
+            escape_xml(x_label)
         ));
     }
     if !y_label.is_empty() {
@@ -203,7 +239,7 @@ fn svg_with_axes(
             AXIS_COLOR,
             14.0,
             MARGIN_TOP + plot_h / 2.0,
-            y_label
+            escape_xml(y_label)
         ));
     }
 
@@ -229,11 +265,18 @@ fn map_to_svg(
     width: f64,
     height: f64,
 ) -> (f64, f64) {
+    let (x_min, x_max) = guard_range(x_min, x_max);
+    let (y_min, y_max) = guard_range(y_min, y_max);
     let plot_w = width - MARGIN_LEFT - MARGIN_RIGHT;
     let plot_h = height - MARGIN_TOP - MARGIN_BOTTOM;
     let sx = MARGIN_LEFT + (x - x_min) / (x_max - x_min) * plot_w;
     let sy = MARGIN_TOP + (1.0 - (y - y_min) / (y_max - y_min)) * plot_h;
     (sx, sy)
+}
+
+/// True if a trailing argument is an options carrier (rule or association).
+fn is_option_value(v: &Value) -> bool {
+    matches!(v, Value::Rule { .. } | Value::Assoc(_))
 }
 
 /// Extract chart options from an Assoc value.
@@ -247,13 +290,18 @@ fn parse_chart_options(opts: &Value) -> (f64, f64, bool) {
             && let Value::List(size) = v
             && size.len() >= 2
         {
-            width = super::to_f64(&size[0]).unwrap_or(DEFAULT_WIDTH);
-            height = super::to_f64(&size[1]).unwrap_or(DEFAULT_HEIGHT);
+            width = super::to_f64(&size[0])
+                .filter(|w| w.is_finite() && *w > 0.0)
+                .unwrap_or(DEFAULT_WIDTH);
+            height = super::to_f64(&size[1])
+                .filter(|h| h.is_finite() && *h > 0.0)
+                .unwrap_or(DEFAULT_HEIGHT);
         }
         if let Some(v) = map.get("GridLines") {
             grid_lines = match v {
                 Value::Bool(b) => *b,
                 Value::Symbol(s) => s == "True",
+                Value::List(_) => true,
                 _ => false,
             };
         }
@@ -283,12 +331,8 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 1 {
-        &args[1]
-    } else {
-        &Value::Assoc(HashMap::new())
-    };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
 
     // Parse data as either {v1, v2, ...} or {{x1, y1}, {x2, y2}, ...}
     let bars: Vec<(f64, f64)> = match &data[0] {
@@ -413,6 +457,7 @@ pub fn builtin_bar_chart(args: &[Value]) -> Result<Value, EvalError> {
         y_max_padded,
         "",
         "",
+        grid_lines,
     )))
 }
 
@@ -445,19 +490,14 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 2 {
-        &args[2]
+    // Trailing option args start after the optional bin spec.
+    let opt_start = if args.len() >= 2 && !is_option_value(&args[1]) {
+        2
     } else {
-        if args.len() == 2 {
-            match &args[1] {
-                Value::Assoc(_) => &args[1],
-                _ => &Value::Assoc(HashMap::new()),
-            }
-        } else {
-            &Value::Assoc(HashMap::new())
-        }
+        1
     };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[opt_start..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
 
     let nums: Vec<f64> = data.iter().filter_map(super::to_f64).collect();
     if nums.is_empty() {
@@ -478,7 +518,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
                         "Histogram: need at least 2 bin edges".to_string(),
                     ));
                 }
-                return build_histogram_svg(&nums, &edge_vals, width, height);
+                return build_histogram_svg(&nums, &edge_vals, width, height, grid_lines);
             }
             _ => auto_bins(nums.len()),
         }
@@ -494,7 +534,7 @@ pub fn builtin_histogram(args: &[Value]) -> Result<Value, EvalError> {
     };
     let edges: Vec<f64> = (0..=bins).map(|i| data_min + i as f64 * dx).collect();
 
-    build_histogram_svg(&nums, &edges, width, height)
+    build_histogram_svg(&nums, &edges, width, height, grid_lines)
 }
 
 fn build_histogram_svg(
@@ -502,6 +542,7 @@ fn build_histogram_svg(
     edges: &[f64],
     width: f64,
     height: f64,
+    grid_lines: bool,
 ) -> Result<Value, EvalError> {
     let n_bins = edges.len() - 1;
     if n_bins == 0 {
@@ -555,7 +596,7 @@ fn build_histogram_svg(
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height, x_min, x_max, 0.0, y_max, "", "Count",
+        &content, width, height, x_min, x_max, 0.0, y_max, "", "Count", grid_lines,
     )))
 }
 
@@ -580,12 +621,8 @@ pub fn builtin_pie_chart(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 1 {
-        &args[1]
-    } else {
-        &Value::Assoc(HashMap::new())
-    };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, _grid_lines) = parse_chart_options(&options);
 
     struct PieSlice {
         value: f64,
@@ -700,14 +737,10 @@ pub fn builtin_donut_chart(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 1 {
-        &args[1]
-    } else {
-        &Value::Assoc(HashMap::new())
-    };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, _grid_lines) = parse_chart_options(&options);
 
-    let inner_ratio = if let Value::Assoc(map) = options {
+    let inner_ratio = if let Value::Assoc(map) = &options {
         if let Some(v) = map.get("InnerRadius") {
             super::to_f64(v).unwrap_or(0.4)
         } else {
@@ -840,12 +873,8 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 1 {
-        &args[1]
-    } else {
-        &Value::Assoc(HashMap::new())
-    };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
 
     struct Bubble {
         x: f64,
@@ -940,7 +969,7 @@ pub fn builtin_bubble_chart(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "",
+        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "", grid_lines,
     )))
 }
 
@@ -960,12 +989,8 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let options = if args.len() > 1 {
-        &args[1]
-    } else {
-        &Value::Assoc(HashMap::new())
-    };
-    let (width, height, _) = parse_chart_options(options);
+    let options = super::graphics::merge_options(&args[1..]);
+    let (width, height, grid_lines) = parse_chart_options(&options);
 
     let values: Vec<f64> = data.iter().filter_map(super::to_f64).collect();
     if values.is_empty() {
@@ -1066,7 +1091,7 @@ pub fn builtin_waterfall_chart(args: &[Value]) -> Result<Value, EvalError> {
     }
 
     Ok(Value::Str(svg_with_axes(
-        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "",
+        &content, width, height, x_min_p, x_max_p, y_min_p, y_max_p, "", "", grid_lines,
     )))
 }
 
@@ -1142,7 +1167,7 @@ pub fn builtin_region_plot_eval(
     }
 
     Ok(svg_with_axes(
-        &content, width, height, xmin, xmax, ymin, ymax, "", "",
+        &content, width, height, xmin, xmax, ymin, ymax, "", "", false,
     ))
 }
 
@@ -1202,7 +1227,7 @@ pub fn builtin_contour_plot_eval(
     let range = val_max - val_min;
     if range < 1e-15 {
         return Ok(svg_with_axes(
-            "", width, height, xmin, xmax, ymin, ymax, "", "",
+            "", width, height, xmin, xmax, ymin, ymax, "", "", false,
         ));
     }
     let num_contours = num_contours.max(3);
@@ -1230,7 +1255,7 @@ pub fn builtin_contour_plot_eval(
     }
 
     Ok(svg_with_axes(
-        &content, width, height, xmin, xmax, ymin, ymax, "", "",
+        &content, width, height, xmin, xmax, ymin, ymax, "", "", false,
     ))
 }
 
@@ -1442,6 +1467,7 @@ pub const SYMBOLS: &[&str] = &[
 mod tests {
     use super::*;
     use rug::Integer;
+    use std::collections::HashMap;
 
     fn real_val(v: f64) -> Value {
         Value::Real(rug::Float::with_val(crate::value::DEFAULT_PRECISION, v))
@@ -1771,7 +1797,7 @@ mod tests {
 
     #[test]
     fn test_svg_with_axes() {
-        let svg = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "", "");
+        let svg = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "", "", true);
         assert!(svg.contains("<svg"), "Expected SVG open tag");
         assert!(svg.contains("</svg>"), "Expected SVG close tag");
         assert!(svg.contains("<line"), "Expected axis lines");
@@ -1781,9 +1807,106 @@ mod tests {
     #[test]
     fn test_svg_with_axes_labels() {
         let svg = svg_with_axes(
-            "", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "X Label", "Y Label",
+            "", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "X Label", "Y Label", false,
         );
         assert!(svg.contains("X Label"), "Expected X axis label");
         assert!(svg.contains("Y Label"), "Expected Y axis label");
+    }
+
+    #[test]
+    fn test_escape_xml() {
+        assert_eq!(escape_xml("a<b>&\"c'"), "a&lt;b&gt;&amp;&quot;c&apos;");
+        assert_eq!(escape_xml("plain"), "plain");
+    }
+
+    #[test]
+    fn test_guard_range() {
+        let (lo, hi) = guard_range(5.0, 5.0);
+        assert!(hi > lo);
+        let (lo, hi) = guard_range(9.0, 2.0);
+        assert!(lo < hi);
+        let (lo, hi) = guard_range(f64::NEG_INFINITY, f64::NAN);
+        assert!((lo + 1.0).abs() < 1e-12 && (hi - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_svg_with_axes_grid_lines_toggle() {
+        let with_grid = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "", "", true);
+        assert!(with_grid.contains(EEE), "grid lines expected when enabled");
+        let without_grid = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "", "", false);
+        assert!(
+            !without_grid.contains(EEE),
+            "no grid lines expected when disabled"
+        );
+    }
+
+    #[test]
+    fn test_svg_with_axes_escapes_labels() {
+        let svg = svg_with_axes("", 400.0, 300.0, 0.0, 10.0, 0.0, 100.0, "x<y", "a&b", false);
+        assert!(svg.contains("x&lt;y"));
+        assert!(svg.contains("a&amp;b"));
+    }
+
+    #[test]
+    fn test_svg_with_axes_degenerate_range_finite() {
+        let svg = svg_with_axes("", 400.0, 300.0, 3.0, 3.0, 7.0, 7.0, "", "", true);
+        assert!(
+            !svg.contains("NaN"),
+            "degenerate range produced NaN: {}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_bar_chart_grid_lines_option() {
+        let data = Value::List(vec![int_val(10), int_val(20), int_val(30)]);
+        let mut map = HashMap::new();
+        map.insert("GridLines".to_string(), Value::Bool(true));
+        let result = builtin_bar_chart(&[data, Value::Assoc(map)]).unwrap();
+        match result {
+            Value::Str(svg) => assert!(svg.contains(EEE), "grid lines expected"),
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_histogram_degenerate_data_finite() {
+        // All-identical data must not divide by zero.
+        let data = Value::List(vec![int_val(5), int_val(5), int_val(5)]);
+        let result = builtin_histogram(&[data]).unwrap();
+        match result {
+            Value::Str(svg) => assert!(!svg.contains("NaN")),
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    fn option_rule(key: &str, rhs: crate::ast::Expr) -> Value {
+        Value::Rule {
+            lhs: Box::new(Value::Pattern(crate::ast::Expr::Symbol(key.to_string()))),
+            rhs: Box::new(Value::Pattern(rhs)),
+            delayed: false,
+        }
+    }
+
+    #[test]
+    fn test_bar_chart_grid_lines_rule_option() {
+        let data = Value::List(vec![int_val(10), int_val(20), int_val(30)]);
+        let rule = option_rule("GridLines", crate::ast::Expr::Bool(true));
+        let result = builtin_bar_chart(&[data, rule]).unwrap();
+        match result {
+            Value::Str(svg) => assert!(svg.contains(EEE), "grid lines expected"),
+            _ => panic!("Expected SVG string"),
+        }
+    }
+
+    #[test]
+    fn test_histogram_grid_lines_rule_option() {
+        let data = Value::List(vec![int_val(1), int_val(2), int_val(2), int_val(3)]);
+        let rule = option_rule("GridLines", crate::ast::Expr::Bool(true));
+        let result = builtin_histogram(&[data, rule]).unwrap();
+        match result {
+            Value::Str(svg) => assert!(svg.contains(EEE), "grid lines expected"),
+            _ => panic!("Expected SVG string"),
+        }
     }
 }

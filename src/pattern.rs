@@ -263,7 +263,7 @@ pub fn match_pattern(
         Expr::OptionalNamedBlank {
             name,
             type_constraint,
-            ..
+            default_value,
         } => {
             // Try normal named blank match first
             let normal_match = Expr::NamedBlank {
@@ -273,9 +273,9 @@ pub fn match_pattern(
             match match_pattern(&normal_match, value, attr_checker) {
                 MatchResult::Match(bindings) => MatchResult::Match(bindings),
                 MatchResult::NoMatch => {
-                    // Optional: bind to Null
+                    // Optional: fall back to the supplied default, else Null.
                     let mut bindings = HashMap::new();
-                    bindings.insert(name.clone(), Value::Null);
+                    bindings.insert(name.clone(), optional_default_binding(default_value));
                     MatchResult::Match(bindings)
                 }
             }
@@ -420,18 +420,57 @@ pub fn match_pattern(
                 return MatchResult::NoMatch;
             }
 
-            // Check for Except: Except[pat] matches anything not matching pat
-            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Except") && args.len() == 1 {
-                return match match_pattern(&args[0], value, attr_checker) {
-                    MatchResult::Match(_) => MatchResult::NoMatch,
-                    MatchResult::NoMatch => MatchResult::Match(HashMap::new()),
+            // Check for Except:
+            //   Except[pat]     matches anything not matching pat
+            //   Except[pat, p]  matches anything not matching pat but matching p
+            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Except")
+                && (args.len() == 1 || args.len() == 2)
+            {
+                if let MatchResult::Match(_) = match_pattern(&args[0], value, attr_checker) {
+                    return MatchResult::NoMatch;
+                }
+                return if args.len() == 2 {
+                    // Bindings from the "should match" pattern are kept.
+                    match_pattern(&args[1], value, attr_checker)
+                } else {
+                    MatchResult::Match(HashMap::new())
                 };
             }
 
-            // Check for Repeated: Repeated[pat] matches pat 1+ times in a list.
-            // Repeated[pat, n] matches pat exactly n times in a list.
-            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated") {
-                return match_repeated_pattern(args, value, attr_checker);
+            // Condition[pat, cond] / PatternTest[pat, test] written as calls.
+            // The guard itself is evaluated by the caller (match_pattern has no
+            // environment); here we only need to match the inner pattern.
+            if let Expr::Symbol(s) = head.as_ref()
+                && (s == "Condition" || s == "PatternTest")
+                && args.len() == 2
+            {
+                return match_pattern(&args[0], value, attr_checker);
+            }
+
+            // Optional[pat] / Optional[pat, default]: matches pat, or (when it
+            // fails) matches nothing.
+            if call_head_is(head, "Optional") && (1..=2).contains(&args.len()) {
+                return match match_pattern(&args[0], value, attr_checker) {
+                    MatchResult::Match(b) => MatchResult::Match(b),
+                    MatchResult::NoMatch => {
+                        let mut b = HashMap::new();
+                        bind_optional_call_default(args, &mut b);
+                        MatchResult::Match(b)
+                    }
+                };
+            }
+
+            // Check for Repeated/RepeatedNull: consume a run of list elements.
+            //   Repeated[pat]         1+ times
+            //   Repeated[pat, max]    1..=max times
+            //   Repeated[pat, min, max]
+            //   RepeatedNull[...]     0+ (or bounded) times
+            if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated" || s == "RepeatedNull") {
+                let name = match head.as_ref() {
+                    Expr::Symbol(s) => s.as_str(),
+                    _ => "Repeated",
+                };
+                return match_repeated_pattern(name, args, value, attr_checker);
             }
 
             // Regular call pattern: f[x_, y_]
@@ -504,6 +543,19 @@ pub fn collect_nested_guards(expr: &Expr, guards: &mut Vec<Expr>) {
                 collect_nested_guards(item, guards);
             }
         }
+        // `Condition[pat, cond]` is a guard written as a call.
+        Expr::Call { head, args } if call_head_is(head, "Condition") && args.len() == 2 => {
+            guards.push(args[1].clone());
+            collect_nested_guards(&args[0], guards);
+        }
+        // `PatternTest[pat, test]` applies `test` to the matched value.
+        Expr::Call { head, args } if call_head_is(head, "PatternTest") && args.len() == 2 => {
+            guards.push(Expr::Call {
+                head: Box::new(args[1].clone()),
+                args: vec![Expr::Slot(None)],
+            });
+            collect_nested_guards(&args[0], guards);
+        }
         Expr::Call { head, args } => {
             collect_nested_guards(head, guards);
             for arg in args {
@@ -521,6 +573,108 @@ pub fn collect_nested_guards(expr: &Expr, guards: &mut Vec<Expr>) {
         }
         _ => {}
     }
+}
+
+/// A shallow binding for an unmatched optional pattern: the supplied default
+/// expression converted to a value when it is an atom, otherwise a
+/// `Value::Pattern` (which the evaluator can evaluate later), or `Null`.
+fn optional_default_binding(default_value: &Option<Box<Expr>>) -> Value {
+    match default_value {
+        None => Value::Null,
+        Some(d) => match d.as_ref() {
+            Expr::Integer(n) => Value::Integer(n.clone()),
+            Expr::Real(r) => Value::Real(r.clone()),
+            Expr::Str(s) => Value::Str(s.clone()),
+            Expr::Bool(b) => Value::Bool(*b),
+            Expr::Null => Value::Null,
+            other => Value::Pattern(other.clone()),
+        },
+    }
+}
+
+/// If an `Optional[named_, default]` call falls back to matching nothing, bind
+/// the name to the default (or `Null`).
+fn bind_optional_call_default(args: &[Expr], bindings: &mut Bindings) {
+    if let Some(Expr::NamedBlank { name, .. }) = args.first() {
+        let default = optional_default_binding(&args.get(1).cloned().map(Box::new));
+        bindings.insert(name.clone(), default);
+    }
+}
+
+/// True when a `Call` head is the given symbol.
+fn call_head_is(head: &Expr, name: &str) -> bool {
+    matches!(head, Expr::Symbol(s) if s == name)
+}
+
+/// Parse an integer expression as a `usize`.
+fn expr_usize(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Integer(n) => n.to_usize(),
+        _ => None,
+    }
+}
+
+/// Bounds `(min, max)` for `Repeated`/`RepeatedNull`.
+///
+/// `Repeated[p]` = 1+, `Repeated[p, max]` = 1..=max, `Repeated[p, min, max]`
+/// = min..=max. `RepeatedNull` variants have a default minimum of 0. `max`
+/// is `None` for an unbounded run. Returns `None` for malformed argument lists.
+fn repeated_bounds(head: &str, args: &[Expr]) -> Option<(usize, Option<usize>)> {
+    let default_min = if head == "RepeatedNull" { 0 } else { 1 };
+    let (min, max) = match args.len() {
+        1 => (default_min, None),
+        2 => (default_min, Some(expr_usize(&args[1])?)),
+        3 => (expr_usize(&args[1])?, Some(expr_usize(&args[2])?)),
+        _ => return None,
+    };
+    if let Some(m) = max
+        && m < min
+    {
+        return None;
+    }
+    Some((min, max))
+}
+
+/// Minimum number of list elements a pattern must consume. Optional and null
+/// patterns consume zero; this lets the backtracker reserve room for trailing
+/// mandatory patterns instead of assuming one element each.
+fn min_consume(pat: &Expr) -> usize {
+    match pat {
+        Expr::BlankSequence { .. } => 1,
+        Expr::BlankNullSequence { .. } => 0,
+        Expr::OptionalBlank { .. } | Expr::OptionalNamedBlank { .. } => 0,
+        Expr::Call { head, args } => match head.as_ref() {
+            Expr::Symbol(s) if s == "Repeated" => {
+                repeated_bounds(s, args).map(|(mn, _)| mn).unwrap_or(1)
+            }
+            Expr::Symbol(s) if s == "RepeatedNull" => {
+                repeated_bounds(s, args).map(|(mn, _)| mn).unwrap_or(0)
+            }
+            Expr::Symbol(s) if s == "Optional" => 0,
+            Expr::Symbol(s) if s == "Alternatives" => {
+                args.iter().map(min_consume).min().unwrap_or(0)
+            }
+            Expr::Symbol(s) if s == "Condition" || s == "PatternTest" => {
+                args.first().map(min_consume).unwrap_or(1)
+            }
+            _ => 1,
+        },
+        _ => 1,
+    }
+}
+
+/// Total minimum consumption of a slice of patterns.
+fn min_consume_of(patterns: &[Expr]) -> usize {
+    patterns.iter().map(min_consume).sum()
+}
+
+/// Copy of `patterns` with position `idx` replaced by `replacement`.
+fn replace_pattern(patterns: &[Expr], idx: usize, replacement: &Expr) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(patterns.len());
+    out.extend_from_slice(&patterns[..idx]);
+    out.push(replacement.clone());
+    out.extend_from_slice(&patterns[idx + 1..]);
+    out
 }
 
 /// Recursive backtracking pattern matcher for lists with sequence patterns.
@@ -542,34 +696,20 @@ fn match_sequence_pattern(
         };
     }
 
-    // Base: all values consumed → check if remaining patterns are optional
-    if val_idx == items.len() {
-        let all_optional = patterns[pat_idx..]
-            .iter()
-            .all(|p| matches!(p, Expr::BlankNullSequence { .. }));
-        return if all_optional {
-            let mut b = bindings.clone();
-            for p in &patterns[pat_idx..] {
-                if let Expr::BlankNullSequence { name: Some(n), .. } = p {
-                    b.insert(n.clone(), Value::Sequence(vec![]));
-                }
-            }
-            MatchResult::Match(b)
-        } else {
-            MatchResult::NoMatch
-        };
-    }
-
     match &patterns[pat_idx] {
         Expr::BlankSequence {
             name,
             type_constraint,
         } => {
-            // __ matches 1+ elements. Try from most-greedy to least (backtracking).
+            // __ matches 1+ elements. Try from most-greedy to least
+            // (backtracking), reserving room for the minimum consumption of the
+            // trailing patterns.
             let remaining = items.len() - val_idx;
-            let trailing_count = patterns.len() - pat_idx - 1;
-            // Leave at least 1 element for each trailing non-optional pattern
-            let max_for_seq = remaining.saturating_sub(trailing_count);
+            let tail_min = min_consume_of(&patterns[pat_idx + 1..]);
+            if remaining < tail_min {
+                return MatchResult::NoMatch;
+            }
+            let max_for_seq = remaining - tail_min;
             if max_for_seq < 1 {
                 return MatchResult::NoMatch;
             }
@@ -606,10 +746,12 @@ fn match_sequence_pattern(
         } => {
             // ___ matches 0+ elements.
             let remaining = items.len() - val_idx;
-            let trailing_count = patterns.len() - pat_idx - 1;
-            // Leave at least one element per trailing non-___ pattern
-            let max_for_seq = remaining.saturating_sub(trailing_count);
-            for take in (0..=max_for_seq.min(remaining)).rev() {
+            let tail_min = min_consume_of(&patterns[pat_idx + 1..]);
+            if remaining < tail_min {
+                return MatchResult::NoMatch;
+            }
+            let max_for_seq = remaining - tail_min;
+            for take in (0..=max_for_seq).rev() {
                 if take == 0 {
                     // Match zero elements
                     let mut new_bindings = bindings.clone();
@@ -653,39 +795,34 @@ fn match_sequence_pattern(
             MatchResult::NoMatch
         }
 
-        // Repeated[pat] / Repeated[pat, n] — consume 1+ (or exactly n)
-        // consecutive elements that each match `pat`.
-        Expr::Call { head, args } if matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated") => {
+        // Repeated[pat] / Repeated[pat, ...] / RepeatedNull[...] — consume a
+        // run of consecutive elements that each match `pat`.
+        Expr::Call { head, args }
+            if call_head_is(head, "Repeated") || call_head_is(head, "RepeatedNull") =>
+        {
+            let head_name = if call_head_is(head, "RepeatedNull") {
+                "RepeatedNull"
+            } else {
+                "Repeated"
+            };
             let pat = match args.first() {
                 Some(p) => p,
                 None => return MatchResult::NoMatch,
             };
-            let exact = if args.len() == 2 {
-                match &args[1] {
-                    Expr::Integer(n) => match n.to_usize() {
-                        Some(v) if v > 0 => Some(v),
-                        _ => return MatchResult::NoMatch,
-                    },
-                    _ => return MatchResult::NoMatch,
-                }
-            } else {
-                None
+            let (min_take, max_take) = match repeated_bounds(head_name, args) {
+                Some(b) => b,
+                None => return MatchResult::NoMatch,
             };
             let remaining = items.len() - val_idx;
-            let (min_take, max_take) = match exact {
-                Some(n) => {
-                    if n > remaining {
-                        return MatchResult::NoMatch;
-                    }
-                    (n, n)
-                }
-                None => {
-                    if remaining == 0 {
-                        return MatchResult::NoMatch;
-                    }
-                    (1, remaining)
-                }
-            };
+            let tail_min = min_consume_of(&patterns[pat_idx + 1..]);
+            if remaining < tail_min {
+                return MatchResult::NoMatch;
+            }
+            let room = remaining - tail_min;
+            let max_take = max_take.map(|m| m.min(room)).unwrap_or(room);
+            if max_take < min_take {
+                return MatchResult::NoMatch;
+            }
             for take in (min_take..=max_take).rev() {
                 let mut ok = true;
                 let mut new_bindings = bindings.clone();
@@ -714,6 +851,132 @@ fn match_sequence_pattern(
             MatchResult::NoMatch
         }
 
+        // Optional blank in a sequence: consume one element if it matches,
+        // otherwise fall back to the default (consuming nothing).
+        Expr::OptionalBlank {
+            type_constraint, ..
+        } => {
+            if val_idx < items.len() {
+                let normal = Expr::Blank {
+                    type_constraint: type_constraint.clone(),
+                };
+                if let MatchResult::Match(b) = match_pattern(&normal, &items[val_idx], attr_checker)
+                {
+                    let mut nb = bindings.clone();
+                    nb.extend(b);
+                    if let MatchResult::Match(r) = match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx + 1,
+                        &mut nb,
+                        attr_checker,
+                    ) {
+                        return MatchResult::Match(r);
+                    }
+                }
+            }
+            let mut nb = bindings.clone();
+            if let MatchResult::Match(r) =
+                match_sequence_pattern(patterns, items, pat_idx + 1, val_idx, &mut nb, attr_checker)
+            {
+                return MatchResult::Match(r);
+            }
+            MatchResult::NoMatch
+        }
+
+        Expr::OptionalNamedBlank {
+            name,
+            type_constraint,
+            default_value,
+        } => {
+            if val_idx < items.len() {
+                let normal = Expr::NamedBlank {
+                    name: name.clone(),
+                    type_constraint: type_constraint.clone(),
+                };
+                if let MatchResult::Match(b) = match_pattern(&normal, &items[val_idx], attr_checker)
+                {
+                    let mut nb = bindings.clone();
+                    nb.extend(b);
+                    if let MatchResult::Match(r) = match_sequence_pattern(
+                        patterns,
+                        items,
+                        pat_idx + 1,
+                        val_idx + 1,
+                        &mut nb,
+                        attr_checker,
+                    ) {
+                        return MatchResult::Match(r);
+                    }
+                }
+            }
+            let mut nb = bindings.clone();
+            nb.insert(name.clone(), optional_default_binding(default_value));
+            if let MatchResult::Match(r) =
+                match_sequence_pattern(patterns, items, pat_idx + 1, val_idx, &mut nb, attr_checker)
+            {
+                return MatchResult::Match(r);
+            }
+            MatchResult::NoMatch
+        }
+
+        // Alternatives in sequence position: inline each branch so that
+        // branches of varying length (e.g. `__ | a_`) are handled.
+        Expr::Call { head, args } if call_head_is(head, "Alternatives") => {
+            for alt in args {
+                let new_patterns = replace_pattern(patterns, pat_idx, alt);
+                let mut nb = bindings.clone();
+                if let MatchResult::Match(r) = match_sequence_pattern(
+                    &new_patterns,
+                    items,
+                    pat_idx,
+                    val_idx,
+                    &mut nb,
+                    attr_checker,
+                ) {
+                    return MatchResult::Match(r);
+                }
+            }
+            MatchResult::NoMatch
+        }
+
+        // Condition/PatternTest wrapping a sequence pattern: unwrap and retry.
+        Expr::Call { head, args }
+            if (call_head_is(head, "Condition") || call_head_is(head, "PatternTest"))
+                && args.len() == 2 =>
+        {
+            let new_patterns = replace_pattern(patterns, pat_idx, &args[0]);
+            let mut nb = bindings.clone();
+            match_sequence_pattern(
+                &new_patterns,
+                items,
+                pat_idx,
+                val_idx,
+                &mut nb,
+                attr_checker,
+            )
+        }
+
+        // Optional[pat] as a call: try pat, else consume nothing.
+        Expr::Call { head, args } if call_head_is(head, "Optional") && !args.is_empty() => {
+            let new_patterns = replace_pattern(patterns, pat_idx, &args[0]);
+            let mut nb = bindings.clone();
+            if let MatchResult::Match(r) = match_sequence_pattern(
+                &new_patterns,
+                items,
+                pat_idx,
+                val_idx,
+                &mut nb,
+                attr_checker,
+            ) {
+                return MatchResult::Match(r);
+            }
+            let mut nb = bindings.clone();
+            bind_optional_call_default(args, &mut nb);
+            match_sequence_pattern(patterns, items, pat_idx + 1, val_idx, &mut nb, attr_checker)
+        }
+
         // Regular pattern: match one element
         _ => {
             if val_idx >= items.len() {
@@ -738,13 +1001,23 @@ fn match_sequence_pattern(
 }
 
 /// True for patterns that can consume a variable number of list elements:
-/// BlankSequence (`__`), BlankNullSequence (`___`), and Repeated.
+/// BlankSequence (`__`), BlankNullSequence (`___`), Optional (`_.`/`x_.`),
+/// Repeated, RepeatedNull, and alternatives/condition wrappers of these.
 fn is_sequence_like(p: &Expr) -> bool {
     match p {
-        Expr::BlankSequence { .. } | Expr::BlankNullSequence { .. } => true,
-        Expr::Call { head, .. } => {
-            matches!(head.as_ref(), Expr::Symbol(s) if s == "Repeated")
-        }
+        Expr::BlankSequence { .. }
+        | Expr::BlankNullSequence { .. }
+        | Expr::OptionalBlank { .. }
+        | Expr::OptionalNamedBlank { .. } => true,
+        Expr::Call { head, args } => match head.as_ref() {
+            Expr::Symbol(s) if s == "Repeated" || s == "RepeatedNull" => true,
+            Expr::Symbol(s) if s == "Optional" => true,
+            Expr::Symbol(s) if s == "Alternatives" => args.iter().any(is_sequence_like),
+            Expr::Symbol(s) if s == "Condition" || s == "PatternTest" => {
+                args.first().is_some_and(is_sequence_like)
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -778,11 +1051,15 @@ fn match_list_pattern(
     match_sequence_pattern(patterns, items, 0, 0, &mut bindings, attr_checker)
 }
 
-/// Handle `Repeated[pat]` and `Repeated[pat, n]` in pattern matching.
+/// Handle `Repeated[pat]`, `Repeated[pat, max]`, `Repeated[pat, min, max]`
+/// and the `RepeatedNull` variants against a whole list value.
 ///
-/// `Repeated[pat]` matches `pat` one or more times consecutively in a list.
-/// `Repeated[pat, n]` matches `pat` exactly `n` times in a list.
+/// `Repeated[pat]` matches `pat` one or more times consecutively in a list;
+/// a `max` bound caps the run. `RepeatedNull` allows a zero-length run. A
+/// single-argument pattern must match the whole list, while a bounded pattern
+/// matches a prefix of the requested length (consistent with sequence use).
 fn match_repeated_pattern(
+    head_name: &str,
     args: &[Expr],
     value: &Value,
     attr_checker: Option<&AttributeChecker>,
@@ -797,41 +1074,45 @@ fn match_repeated_pattern(
         None => return MatchResult::NoMatch,
     };
 
-    let count = if args.len() == 2 {
-        match &args[1] {
-            Expr::Integer(n) => match n.to_usize() {
-                Some(v) if v > 0 => v,
-                _ => return MatchResult::NoMatch,
-            },
-            _ => return MatchResult::NoMatch,
-        }
-    } else if args.len() == 1 {
-        if items.is_empty() {
-            return MatchResult::NoMatch;
-        }
-        items.len() // match all items (1+)
-    } else {
-        return MatchResult::NoMatch;
+    let (min, max) = match repeated_bounds(head_name, args) {
+        Some(b) => b,
+        None => return MatchResult::NoMatch,
     };
 
-    if items.len() < count {
+    let n = items.len();
+    if n < min {
         return MatchResult::NoMatch;
     }
 
-    // Try partitioning at `count` — only meaningful partition
-    if count <= items.len() {
-        let matched_items = &items[..count];
+    // A single-argument pattern must match the entire list; bounded patterns
+    // try the largest permitted prefix first, then shrink.
+    let candidates: Vec<usize> = if args.len() == 1 {
+        vec![n]
+    } else {
+        let upper = max.map(|m| m.min(n)).unwrap_or(n);
+        if upper < min {
+            return MatchResult::NoMatch;
+        }
+        (min..=upper).rev().collect()
+    };
+
+    for take in candidates {
         let mut bindings = Bindings::new();
-        for item in matched_items {
+        let mut ok = true;
+        for item in &items[..take] {
             match match_pattern(pat, item, attr_checker) {
                 MatchResult::Match(b) => bindings.extend(b),
-                MatchResult::NoMatch => return MatchResult::NoMatch,
+                MatchResult::NoMatch => {
+                    ok = false;
+                    break;
+                }
             }
         }
-        MatchResult::Match(bindings)
-    } else {
-        MatchResult::NoMatch
+        if ok {
+            return MatchResult::Match(bindings);
+        }
     }
+    MatchResult::NoMatch
 }
 
 /// Handle `KeyValuePattern[{k -> v, ...}]` (and the single-rule form).
@@ -1875,5 +2156,465 @@ mod tests {
         } else {
             panic!("Expected match against pattern value");
         }
+    }
+
+    // ── Helpers for the hardening tests ──
+
+    fn int(n: i64) -> Value {
+        Value::Integer(Integer::from(n))
+    }
+
+    fn named(name: &str) -> Expr {
+        Expr::NamedBlank {
+            name: name.to_string(),
+            type_constraint: None,
+        }
+    }
+
+    fn opt_named(name: &str, default: Option<i64>) -> Expr {
+        Expr::OptionalNamedBlank {
+            name: name.to_string(),
+            type_constraint: None,
+            default_value: default.map(|d| Box::new(Expr::Integer(Integer::from(d)))),
+        }
+    }
+
+    fn alt(branches: Vec<Expr>) -> Expr {
+        Expr::Call {
+            head: Box::new(Expr::Symbol("Alternatives".to_string())),
+            args: branches,
+        }
+    }
+
+    fn repeat(head: &str, inner: Expr, bounds: &[i64]) -> Expr {
+        let mut args = vec![inner];
+        args.extend(bounds.iter().map(|n| Expr::Integer(Integer::from(*n))));
+        Expr::Call {
+            head: Box::new(Expr::Symbol(head.to_string())),
+            args,
+        }
+    }
+
+    fn call(head: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            head: Box::new(Expr::Symbol(head.to_string())),
+            args,
+        }
+    }
+
+    // ── Alternatives ──
+
+    #[test]
+    fn test_alternatives_ordered_first_match_wins() {
+        let pat = alt(vec![int_expr(0), named("x")]);
+        // First branch matches 0.
+        if let MatchResult::Match(b) = match_pattern(&pat, &int(0), None) {
+            assert!(b.is_empty(), "literal branch binds nothing");
+        } else {
+            panic!("expected literal alternative to match");
+        }
+        // Second branch is used for non-zero values and binds x.
+        if let MatchResult::Match(b) = match_pattern(&pat, &int(5), None) {
+            assert_eq!(b.get("x"), Some(&int(5)));
+        } else {
+            panic!("expected fallback alternative to match");
+        }
+    }
+
+    #[test]
+    fn test_alternatives_sequence_branch_consumes_all() {
+        // {(a__ | b_)} on a 3-element list: the sequence branch must be able
+        // to consume the whole run rather than a single element.
+        let pat = Expr::List(vec![alt(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            named("b"),
+        ])]);
+        let val = Value::List(vec![int(1), int(2), int(3)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(
+                b.get("a"),
+                Some(&Value::Sequence(vec![int(1), int(2), int(3)]))
+            );
+        } else {
+            panic!("expected the sequence branch of the alternative to match");
+        }
+    }
+
+    fn int_expr(n: i64) -> Expr {
+        Expr::Integer(Integer::from(n))
+    }
+
+    // ── Except ──
+
+    #[test]
+    fn test_except_two_arg_matches_inner_pattern() {
+        // Except[_Integer, _String] matches strings (not integers).
+        let pat = call(
+            "Except",
+            vec![
+                Expr::Blank {
+                    type_constraint: Some("Integer".to_string()),
+                },
+                Expr::Blank {
+                    type_constraint: Some("String".to_string()),
+                },
+            ],
+        );
+        assert!(matches!(
+            match_pattern(&pat, &Value::Str("a".to_string()), None),
+            MatchResult::Match(_)
+        ));
+        // An integer is excluded by the first pattern.
+        assert!(matches!(
+            match_pattern(&pat, &int(1), None),
+            MatchResult::NoMatch
+        ));
+        // A real matches neither the exclusion nor the required pattern.
+        assert!(matches!(
+            match_pattern(&pat, &Value::Real(rug::Float::with_val(53, 1.5)), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_except_two_arg_keeps_bindings() {
+        let pat = call("Except", vec![Expr::Integer(Integer::from(0)), named("x")]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &int(7), None) {
+            assert_eq!(b.get("x"), Some(&int(7)));
+        } else {
+            panic!("expected Except to keep bindings from its second pattern");
+        }
+    }
+
+    // ── Repeated / RepeatedNull ──
+
+    #[test]
+    fn test_repeated_null_matches_empty_run() {
+        let pat = Expr::List(vec![repeat("RepeatedNull", int_expr(0), &[])]);
+        assert!(matches!(
+            match_pattern(&pat, &Value::List(vec![]), None),
+            MatchResult::Match(_)
+        ));
+        // Still matches a run of zeros.
+        let val = Value::List(vec![int(0), int(0)]);
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn test_repeated_null_bounded_with_trailing() {
+        // {RepeatedNull[0, 2], x_} on {0, 0, 5}: the bounded run takes the two
+        // zeros and x_ takes 5.
+        let pat = Expr::List(vec![repeat("RepeatedNull", int_expr(0), &[2]), named("x")]);
+        let val = Value::List(vec![int(0), int(0), int(5)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("x"), Some(&int(5)));
+        } else {
+            panic!("expected bounded RepeatedNull to match");
+        }
+    }
+
+    #[test]
+    fn test_repeated_min_max_bounds() {
+        // Repeated[_, 2, 3] on a 2- and 3-element list matches, on 4 does not
+        // (as a prefix it must fit the trailing mandatory pattern).
+        let pat = Expr::List(vec![repeat(
+            "Repeated",
+            Expr::Blank {
+                type_constraint: None,
+            },
+            &[2, 3],
+        )]);
+        assert!(matches!(
+            match_pattern(&pat, &Value::List(vec![int(1), int(2)]), None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&pat, &Value::List(vec![int(1), int(2), int(3)]), None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&pat, &Value::List(vec![int(1)]), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_repeated_respects_trailing_mandatory() {
+        // {Repeated[_Integer, 3], x_} on {1,2,3}: the repeated run must leave
+        // one element for x_.
+        let pat = Expr::List(vec![
+            repeat("Repeated", Expr::Symbol("_Integer".to_string()), &[3]),
+            named("x"),
+        ]);
+        let val = Value::List(vec![int(1), int(2), int(3)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("x"), Some(&int(3)));
+        } else {
+            panic!("expected Repeated to backtrack and leave room for x_");
+        }
+    }
+
+    // ── Sequence blanks / optional interaction ──
+
+    #[test]
+    fn test_blank_sequence_before_optional_trailing() {
+        // {a__, b_.} on {1}: a__ takes the element, b_. falls back to Null.
+        let pat = Expr::List(vec![
+            Expr::BlankSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            opt_named("b", None),
+        ]);
+        let val = Value::List(vec![int(1)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("a"), Some(&Value::Sequence(vec![int(1)])));
+            assert_eq!(b.get("b"), Some(&Value::Null));
+        } else {
+            panic!("expected sequence followed by optional to match");
+        }
+    }
+
+    #[test]
+    fn test_optional_in_list_uses_default() {
+        // {a_, b_:5} on {1}: b uses its default 5.
+        let pat = Expr::List(vec![named("a"), opt_named("b", Some(5))]);
+        let val = Value::List(vec![int(1)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("a"), Some(&int(1)));
+            assert_eq!(b.get("b"), Some(&int(5)));
+        } else {
+            panic!("expected optional to apply its default");
+        }
+    }
+
+    #[test]
+    fn test_optional_prefers_consuming_element() {
+        // {a_:9, b_} on {1, 2}: a consumes 1 rather than defaulting.
+        let pat = Expr::List(vec![opt_named("a", Some(9)), named("b")]);
+        let val = Value::List(vec![int(1), int(2)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("a"), Some(&int(1)));
+            assert_eq!(b.get("b"), Some(&int(2)));
+        } else {
+            panic!("expected optional to consume an available element");
+        }
+    }
+
+    #[test]
+    fn test_optional_backtracks_for_mandatory_pattern() {
+        // {a_:9, b_} on {1}: a must default so b_ can take 1.
+        let pat = Expr::List(vec![opt_named("a", Some(9)), named("b")]);
+        let val = Value::List(vec![int(1)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("a"), Some(&int(9)));
+            assert_eq!(b.get("b"), Some(&int(1)));
+        } else {
+            panic!("expected optional to backtrack for the trailing pattern");
+        }
+    }
+
+    #[test]
+    fn test_multiple_null_sequences_with_trailing() {
+        // {___, ___, x_} on {1,2,3}: both null sequences empty, x_ takes 3.
+        let pat = Expr::List(vec![
+            Expr::BlankNullSequence {
+                name: Some("a".to_string()),
+                type_constraint: None,
+            },
+            Expr::BlankNullSequence {
+                name: Some("b".to_string()),
+                type_constraint: None,
+            },
+            named("x"),
+        ]);
+        let val = Value::List(vec![int(1), int(2), int(3)]);
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("x"), Some(&int(3)));
+        } else {
+            panic!("expected null sequences to leave room for x_");
+        }
+    }
+
+    #[test]
+    fn test_optional_call_form_binds_default() {
+        // {a_, Optional[b_, 5]} on {1}: the Optional fallback binds b to 5.
+        let pat = Expr::List(vec![
+            named("a"),
+            call("Optional", vec![named("b"), int_expr(5)]),
+        ]);
+        let val = Value::List(vec![int(1)]);
+        if let MatchResult::Match(bindings) = match_pattern(&pat, &val, None) {
+            assert_eq!(bindings.get("b"), Some(&int(5)));
+        } else {
+            panic!("expected Optional call to fall back to its default");
+        }
+        // With a spare element it consumes and binds that element instead.
+        let val2 = Value::List(vec![int(1), int(2)]);
+        if let MatchResult::Match(bindings) = match_pattern(&pat, &val2, None) {
+            assert_eq!(bindings.get("b"), Some(&int(2)));
+        } else {
+            panic!("expected Optional call to consume an available element");
+        }
+    }
+
+    // ── Condition / PatternTest as calls ──
+
+    #[test]
+    fn test_condition_call_matches_inner_pattern() {
+        let pat = call(
+            "Condition",
+            vec![int_expr(1), Expr::Symbol("True".to_string())],
+        );
+        assert!(matches!(
+            match_pattern(&pat, &int(1), None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&pat, &int(2), None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_patterntest_call_matches_inner_pattern() {
+        let pat = call(
+            "PatternTest",
+            vec![named("x"), Expr::Symbol("EvenQ".to_string())],
+        );
+        if let MatchResult::Match(b) = match_pattern(&pat, &int(4), None) {
+            assert_eq!(b.get("x"), Some(&int(4)));
+        } else {
+            panic!("expected PatternTest to match its inner pattern");
+        }
+    }
+
+    #[test]
+    fn test_collect_nested_guards_condition_and_patterntest() {
+        let pat = Expr::List(vec![
+            call(
+                "Condition",
+                vec![named("a"), Expr::Symbol("g1".to_string())],
+            ),
+            call(
+                "PatternTest",
+                vec![named("b"), Expr::Symbol("g2".to_string())],
+            ),
+        ]);
+        let mut guards = Vec::new();
+        collect_nested_guards(&pat, &mut guards);
+        assert_eq!(guards.len(), 2);
+        // First guard is `g1`; second is the application `g2[#]`.
+        assert_eq!(guards[0], Expr::Symbol("g1".to_string()));
+        match &guards[1] {
+            Expr::Call { head, args } => {
+                assert_eq!(head.as_ref(), &Expr::Symbol("g2".to_string()));
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0], Expr::Slot(None)));
+            }
+            other => panic!("expected g2[#], got {other:?}"),
+        }
+    }
+
+    // ── Structural equality edges ──
+
+    #[test]
+    fn test_nested_literal_structural_match() {
+        let pat = Expr::List(vec![
+            int_expr(1),
+            call("f", vec![Expr::Str("a".to_string())]),
+        ]);
+        let good = Value::List(vec![
+            int(1),
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Str("a".to_string())],
+            },
+        ]);
+        let bad = Value::List(vec![
+            int(1),
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Str("b".to_string())],
+            },
+        ]);
+        assert!(matches!(
+            match_pattern(&pat, &good, None),
+            MatchResult::Match(_)
+        ));
+        assert!(matches!(
+            match_pattern(&pat, &bad, None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    #[test]
+    fn test_verbatim_structural_edge() {
+        let pat = call("Verbatim", vec![call("f", vec![int_expr(1)])]);
+        let good = Value::Call {
+            head: "f".to_string(),
+            args: vec![int(1)],
+        };
+        // f[1] matches, f[2] does not, and the match binds nothing.
+        if let MatchResult::Match(b) = match_pattern(&pat, &good, None) {
+            assert!(b.is_empty());
+        } else {
+            panic!("expected Verbatim to match literally");
+        }
+        let bad = Value::Call {
+            head: "f".to_string(),
+            args: vec![int(2)],
+        };
+        assert!(matches!(
+            match_pattern(&pat, &bad, None),
+            MatchResult::NoMatch
+        ));
+    }
+
+    // ── Pathological backtracking ──
+
+    #[test]
+    fn test_many_sequences_terminates() {
+        // Six consecutive null sequences over 30 elements must resolve.
+        let mut patterns = Vec::new();
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            patterns.push(Expr::BlankNullSequence {
+                name: Some(name.to_string()),
+                type_constraint: None,
+            });
+        }
+        patterns.push(named("last"));
+        let pat = Expr::List(patterns);
+        let val = Value::List((0..30).map(int).collect());
+        if let MatchResult::Match(b) = match_pattern(&pat, &val, None) {
+            assert_eq!(b.get("last"), Some(&int(29)));
+        } else {
+            panic!("expected many-sequence pattern to match");
+        }
+    }
+
+    #[test]
+    fn test_many_sequences_no_match_backtracks() {
+        // A trailing literal that can never be reached forces full backtracking.
+        let mut patterns = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            patterns.push(Expr::BlankSequence {
+                name: Some(name.to_string()),
+                type_constraint: None,
+            });
+        }
+        patterns.push(int_expr(99));
+        let pat = Expr::List(patterns);
+        let val = Value::List((0..20).map(int).collect());
+        assert!(matches!(
+            match_pattern(&pat, &val, None),
+            MatchResult::NoMatch
+        ));
     }
 }

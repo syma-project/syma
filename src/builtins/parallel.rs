@@ -40,7 +40,11 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     /// Create a new thread pool with `n` worker threads.
+    ///
+    /// `n` is clamped to at least 1: a zero-worker pool would otherwise never
+    /// run any queued job and `parallel_batch` would wait forever.
     pub fn new(n: usize) -> Self {
+        let n = n.max(1);
         let state = Arc::new(Mutex::new(PoolState {
             queue: VecDeque::new(),
             shutdown: false,
@@ -89,6 +93,28 @@ impl ThreadPool {
     /// Number of worker threads.
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// If a job is queued, pop it and run it on the calling thread, returning
+    /// `true`. Returns `false` when the queue is empty.
+    ///
+    /// This lets a thread that is blocked waiting for a batch to complete keep
+    /// making progress. It is what makes nested parallelism deadlock-free: if
+    /// every worker is busy running a job that itself submitted a nested
+    /// batch and is waiting, a worker that is waiting can still drain the
+    /// nested queue instead of spinning.
+    fn try_run_one(&self) -> bool {
+        let job = {
+            let mut guard = self.state.lock().unwrap();
+            guard.queue.pop_front()
+        };
+        match job {
+            Some(job) => {
+                let _ = job();
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -184,18 +210,34 @@ pub fn parallel_batch(jobs: Vec<Job>) -> Vec<Result<Value, EvalError>> {
                 let (lock, cvar) = &*completion;
                 let mut count = lock.lock().unwrap();
                 *count += 1;
-                cvar.notify_one();
+                cvar.notify_all();
                 Ok(Value::Null) // placeholder
             }));
         }
 
-        // Wait for all jobs via Condvar — no busy-wait
+        // Wait for all jobs to complete. While waiting we also help drain the
+        // queue (see `try_run_one`), which keeps nested parallelism from
+        // deadlocking when every worker is itself blocked on a nested batch.
         let (lock, cvar) = &*completion;
-        let mut count = lock.lock().unwrap();
-        while *count < n {
-            count = cvar.wait(count).unwrap();
+        loop {
+            let done = {
+                let count = lock.lock().unwrap();
+                *count >= n
+            };
+            if done {
+                break;
+            }
+            if !pool.try_run_one() {
+                // Queue empty: sleep until a running job reports completion.
+                // The completion count is updated under `lock`, so checking
+                // while holding the lock rules out a lost wakeup.
+                let count = lock.lock().unwrap();
+                if *count >= n {
+                    break;
+                }
+                drop(cvar.wait(count).unwrap());
+            }
         }
-        drop(count);
 
         let guard = results.lock().unwrap();
         guard.iter().map(|r| r.clone().unwrap()).collect()
@@ -538,6 +580,190 @@ mod tests {
             panic!("Expected EvalError::Error for panicked job");
         }
 
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_parallel_batch_empty_jobs() {
+        cleanup_pool();
+        launch_kernels(4);
+        let results = parallel_batch(vec![]);
+        assert!(results.is_empty());
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_parallel_batch_preserves_order_despite_completion_order() {
+        cleanup_pool();
+        launch_kernels(4);
+        // Later jobs finish first: job `i` sleeps `n - i` milliseconds, so
+        // completion order is the reverse of submission order.
+        let n = 16usize;
+        let jobs: Vec<Job> = (0..n)
+            .map(|i| {
+                Box::new(move || {
+                    std::thread::sleep(std::time::Duration::from_millis((n - i) as u64));
+                    Ok(Value::Integer(rug::Integer::from(i as i64)))
+                }) as Job
+            })
+            .collect();
+        let results = parallel_batch(jobs);
+        assert_eq!(results.len(), n);
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(
+                r.as_ref().unwrap(),
+                &Value::Integer(rug::Integer::from(i as i64)),
+                "result at index {i} out of order"
+            );
+        }
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_parallel_batch_is_deterministic_across_runs() {
+        cleanup_pool();
+        launch_kernels(4);
+        let run = || {
+            let jobs: Vec<Job> = (0..50)
+                .map(|i| {
+                    Box::new(move || {
+                        std::thread::sleep(std::time::Duration::from_micros((i % 7) as u64));
+                        Ok(Value::Integer(rug::Integer::from(i)))
+                    }) as Job
+                })
+                .collect();
+            parallel_batch(jobs)
+                .into_iter()
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let first = run();
+        assert_eq!(first.len(), 50);
+        for round in 0..3 {
+            assert_eq!(run(), first, "run {round} differed from first run");
+        }
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_parallel_batch_error_stays_at_its_index() {
+        cleanup_pool();
+        launch_kernels(3);
+        let jobs: Vec<Job> = (0..6)
+            .map(|i| {
+                Box::new(move || {
+                    if i == 3 {
+                        Err(EvalError::Error("boom".to_string()))
+                    } else {
+                        Ok(Value::Integer(rug::Integer::from(i)))
+                    }
+                }) as Job
+            })
+            .collect();
+        let results = parallel_batch(jobs);
+        assert_eq!(results.len(), 6);
+        for (i, r) in results.iter().enumerate() {
+            if i == 3 {
+                assert!(r.is_err(), "index 3 should carry the error");
+            } else {
+                assert!(r.is_ok(), "index {i} should be ok");
+            }
+        }
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_pool_zero_workers_is_clamped_to_one() {
+        let pool = ThreadPool::new(0);
+        assert_eq!(pool.size(), 1);
+    }
+
+    #[test]
+    fn test_launch_kernels_zero_clamped_via_pool() {
+        cleanup_pool();
+        launch_kernels(0);
+        assert_eq!(pool_size(), 1);
+        let jobs: Vec<Job> = (0..3)
+            .map(|i| Box::new(move || Ok(Value::Integer(rug::Integer::from(i)))) as Job)
+            .collect();
+        let results = parallel_batch(jobs);
+        assert_eq!(results.len(), 3);
+        cleanup_pool();
+    }
+
+    /// Outer jobs each submit and await a nested batch. Without work-helping a
+    /// single-worker pool deadlocks: the only worker blocks inside the outer job
+    /// waiting on inner jobs that nobody can pick up.
+    #[test]
+    fn test_nested_parallel_batch_single_worker_no_deadlock() {
+        cleanup_pool();
+        launch_kernels(1);
+
+        let outer: Vec<Job> = (0..3)
+            .map(|i| {
+                Box::new(move || {
+                    let inner: Vec<Job> = (0..3)
+                        .map(|j| {
+                            let x = i * 10 + j;
+                            Box::new(move || Ok(Value::Integer(rug::Integer::from(x)))) as Job
+                        })
+                        .collect();
+                    let inner_results = parallel_batch(inner);
+                    let mut acc = Value::Integer(rug::Integer::from(0));
+                    for r in inner_results {
+                        acc = crate::builtins::add_values_public(&acc, &r?)?;
+                    }
+                    Ok(acc)
+                }) as Job
+            })
+            .collect();
+
+        let results = parallel_batch(outer);
+        assert_eq!(results.len(), 3);
+        for (i, r) in results.iter().enumerate() {
+            let expected: i64 = (0..3).map(|j| (i as i64) * 10 + j).sum();
+            assert_eq!(
+                r.as_ref().unwrap(),
+                &Value::Integer(rug::Integer::from(expected)),
+                "outer index {i}"
+            );
+        }
+        cleanup_pool();
+    }
+
+    #[test]
+    fn test_nested_parallel_batch_multi_worker_no_deadlock() {
+        cleanup_pool();
+        launch_kernels(2);
+
+        let outer: Vec<Job> = (0..8)
+            .map(|i| {
+                Box::new(move || {
+                    let inner: Vec<Job> = (0..4)
+                        .map(|j| {
+                            let x = i * 100 + j;
+                            Box::new(move || Ok(Value::Integer(rug::Integer::from(x)))) as Job
+                        })
+                        .collect();
+                    let inner_results = parallel_batch(inner);
+                    let mut acc = Value::Integer(rug::Integer::from(0));
+                    for r in inner_results {
+                        acc = crate::builtins::add_values_public(&acc, &r?)?;
+                    }
+                    Ok(acc)
+                }) as Job
+            })
+            .collect();
+
+        let results = parallel_batch(outer);
+        assert_eq!(results.len(), 8);
+        for (i, r) in results.iter().enumerate() {
+            let expected: i64 = (0..4).map(|j| (i as i64) * 100 + j).sum();
+            assert_eq!(
+                r.as_ref().unwrap(),
+                &Value::Integer(rug::Integer::from(expected))
+            );
+        }
         cleanup_pool();
     }
 }

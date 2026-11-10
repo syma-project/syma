@@ -930,4 +930,29 @@ Cell[BoxData[DynamicBox[Typeset`ToBoxes[var]]], "Input"]
         let code = notebook_to_code(nb).unwrap();
         assert_eq!(code, "a\nb");
     }
+
+    #[test]
+    fn test_nb_crlf_line_endings() {
+        // Notebooks saved on Windows use CRLF; the parser must cope.
+        let nb = "Notebook[{\r\nCell[BoxData[RowBox[{\"1\", \"+\", \"2\"}]], \"Input\"]\r\n}]";
+        let code = notebook_to_code(nb).unwrap();
+        assert!(code.replace(' ', "").contains("1+2"));
+    }
+
+    #[test]
+    fn test_nb_input_cell_with_trailing_options() {
+        // Options after the "Input" tag must not prevent extraction.
+        let nb = r#"Notebook[{
+Cell[BoxData[RowBox[{"f", "[", "x", "]"}]], "Input",
+    CellLabel->"In[3]:=", CellTags->{"a", "b"}]
+}]"#;
+        let code = notebook_to_code(nb).unwrap();
+        assert_eq!(code.trim(), "f[x]");
+    }
+
+    #[test]
+    fn test_nb_unterminated_string_is_error() {
+        let nb = "Notebook[{\nCell[\"oops, \"Input\"]\n}]";
+        assert!(notebook_to_code(nb).is_err());
+    }
 }

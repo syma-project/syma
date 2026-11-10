@@ -109,7 +109,8 @@ fn days_since_epoch_to_ymd(day_offset: i64, _sign: i64) -> (i64, i64, i64) {
     } else {
         // Backward from 1970-01-01
         // day_offset is negative. Let's count backward.
-        let abs_offset = day_offset.abs();
+        // `wrapping_abs` avoids an overflow panic at `i64::MIN`.
+        let abs_offset = day_offset.wrapping_abs();
         // abs_offset = 1 means 1969-12-31, abs_offset = 0 means 1970-01-01
         if abs_offset == 0 {
             return (1970, 1, 1);
@@ -153,8 +154,12 @@ fn day_of_week(year: i64, month: i64, day: i64) -> u32 {
     // Guard against out-of-range months so `t[...]` never panics.
     let month = month.clamp(1, 12);
     let y = if month < 3 { year - 1 } else { year };
-    let dow_sunday =
-        (y + y / 4 - y / 100 + y / 400 + t[(month - 1) as usize] + day).rem_euclid(7) as u32;
+    // Use floor division so the formula stays correct for negative (BC) years.
+    let dow_sunday = (y + y.div_euclid(4) - y.div_euclid(100)
+        + y.div_euclid(400)
+        + t[(month - 1) as usize]
+        + day)
+        .rem_euclid(7) as u32;
     // Convert: Sunday=0 → we want Sunday=6
     if dow_sunday == 0 { 6 } else { dow_sunday - 1 }
 }
@@ -219,20 +224,109 @@ fn extract_datetime(args: &[Value]) -> Result<(i64, i64, i64, i64, i64, f64), Ev
     Ok((y, m, d, h, mi, s))
 }
 
-/// Parse an ISO 8601 date string like "2024-01-15T10:30:00" or "2024-01-15".
+/// Reconstruct a datetime from a `DateObject`-style field map, defaulting
+/// missing fields to Jan 1 1970 00:00:00.
+fn datetime_from_object(
+    fields: &HashMap<String, Value>,
+) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> {
+    let get_i = |key: &str, default: i64| -> Result<i64, EvalError> {
+        match fields.get(key) {
+            None => Ok(default),
+            Some(Value::Integer(n)) => {
+                i64::try_from(n).map_err(|_| EvalError::Error(format!("{} out of range", key)))
+            }
+            Some(Value::Real(r)) => Ok(r.to_f64() as i64),
+            Some(other) => Err(EvalError::TypeError {
+                expected: "Integer".to_string(),
+                got: other.type_name().to_string(),
+            }),
+        }
+    };
+    let get_f = |key: &str| -> Result<f64, EvalError> {
+        match fields.get(key) {
+            None => Ok(0.0),
+            Some(Value::Integer(n)) => Ok(n.to_f64()),
+            Some(Value::Real(r)) => Ok(r.to_f64()),
+            Some(other) => Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: other.type_name().to_string(),
+            }),
+        }
+    };
+    Ok((
+        get_i("year", 1970)?,
+        get_i("month", 1)?,
+        get_i("day", 1)?,
+        get_i("hour", 0)?,
+        get_i("minute", 0)?,
+        get_f("second")?,
+    ))
+}
+
+/// Convert any accepted date specification — a `{y, m, d, ...}` list, an ISO
+/// date string, or a `DateObject` — into datetime components.
+fn date_spec_to_datetime(val: &Value) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> {
+    match val {
+        Value::List(elems) => extract_datetime(elems),
+        Value::Str(s) => parse_iso_date(s),
+        Value::Object { fields, .. } => datetime_from_object(fields),
+        _ => Err(EvalError::TypeError {
+            expected: "List, String, or DateObject".to_string(),
+            got: val.type_name().to_string(),
+        }),
+    }
+}
+
+/// Parse a time-of-day component such as `"10:30:00"`, `"10:30:00.5"` or
+/// `"10:30:00Z"`, ignoring any trailing UTC offset designator.
+fn parse_time_component(t: &str) -> Result<(i64, i64, f64), EvalError> {
+    let t = t.trim();
+    // Drop a trailing `Z` (UTC) before looking for an explicit offset.
+    let t = t.trim_end_matches(['Z', 'z']);
+    // Drop a trailing timezone designator (`+hh:mm`, `-hh:mm`), if any.
+    let tz = t.find(['+', '-']).unwrap_or(t.len());
+    let time = &t[..tz];
+
+    let mut fields = time.split(':');
+    let hour = fields
+        .next()
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0);
+    let minute = fields
+        .next()
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0);
+    // Keep fractional seconds rather than silently truncating them.
+    let second = match fields.next() {
+        Some(f) if !f.is_empty() => f
+            .parse::<f64>()
+            .map_err(|_| EvalError::Error(format!("Invalid second: {}", f)))?,
+        _ => 0.0,
+    };
+    Ok((hour, minute, second))
+}
+
+/// Parse an ISO 8601 date string like `"2024-01-15T10:30:00"` or `"2024-01-15"`.
+///
+/// A leading `-` denotes a negative (proleptic) year, e.g. `"-0044-03-15"`.
 fn parse_iso_date(s: &str) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> {
-    // Try full ISO 8601: "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
-    let core = if s.contains('T') {
-        s.split('T').collect::<Vec<&str>>()[0]
+    let trimmed = s.trim();
+    // Split off the time portion at the first `T` or whitespace.
+    let (date_part, time_part) = if let Some((d, t)) = trimmed.split_once(['T', 't']) {
+        (d, Some(t))
+    } else if let Some((d, t)) = trimmed.split_once(' ') {
+        (d, Some(t))
     } else {
-        s.split_whitespace()
-            .collect::<Vec<&str>>()
-            .first()
-            .copied()
-            .unwrap_or(s)
+        (trimmed, None)
     };
 
-    let parts: Vec<&str> = core.split('-').collect();
+    // Support an optional leading '-' for negative (BC) years.
+    let (neg_year, rest) = match date_part.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, date_part),
+    };
+
+    let parts: Vec<&str> = rest.split('-').collect();
     if parts.len() < 3 {
         return Err(EvalError::Error(format!(
             "Unable to parse date string: {}",
@@ -240,43 +334,22 @@ fn parse_iso_date(s: &str) -> Result<(i64, i64, i64, i64, i64, f64), EvalError> 
         )));
     }
 
-    let year: i64 = parts[0]
+    let mut year: i64 = parts[0]
         .parse()
         .map_err(|_| EvalError::Error("Invalid year".to_string()))?;
+    if neg_year {
+        year = -year;
+    }
     let month: i64 = parts[1]
         .parse()
         .map_err(|_| EvalError::Error("Invalid month".to_string()))?;
-    let day_part = parts[2];
-    // Day might contain time like "15T10:30:00" if no T in date
-    let day_str = day_part.split('T').next().unwrap_or(day_part);
-    let day: i64 = day_str
+    let day: i64 = parts[2]
         .parse()
         .map_err(|_| EvalError::Error("Invalid day".to_string()))?;
 
-    // Parse time part if present
-    let time_str = if s.contains('T') {
-        s.split('T').nth(1)
-    } else if s.contains(' ') {
-        s.split_whitespace().nth(1)
-    } else {
-        None
-    };
-
-    let (hour, minute, second) = if let Some(t) = time_str {
-        let time_parts: Vec<&str> = t.split(':').collect();
-        let h: i64 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let m: i64 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let s: f64 = time_parts
-            .get(2)
-            .and_then(|s| {
-                // Strip fractional seconds and timezone info
-                let num_str = s.split(['.', '+', '-']).next().unwrap_or(s);
-                num_str.parse().ok()
-            })
-            .unwrap_or(0.0);
-        (h, m, s)
-    } else {
-        (0, 0, 0.0)
+    let (hour, minute, second) = match time_part {
+        Some(t) => parse_time_component(t)?,
+        None => (0, 0, 0.0),
     };
 
     Ok((year, month, day, hour, minute, second))
@@ -385,6 +458,12 @@ const MONTH_NAMES: [&str; 12] = [
     "December",
 ];
 
+/// Month name for a (possibly out-of-range) month number, wrapping safely so
+/// indexing never panics.
+fn month_name(month: i64) -> &'static str {
+    MONTH_NAMES[(month - 1).rem_euclid(12) as usize]
+}
+
 // ── Builtin implementations ──
 
 /// `AbsoluteTime[]` or `AbsoluteTime[date]`
@@ -399,16 +478,7 @@ pub fn builtin_absolute_time(args: &[Value]) -> Result<Value, EvalError> {
             Ok(val_real(now))
         }
         1 => {
-            let (y, m, d, h, mi, s) = match &args[0] {
-                Value::List(elems) => extract_datetime(elems)?,
-                Value::Str(s) => parse_iso_date(s)?,
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List or String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
-                }
-            };
+            let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
             let secs = date_to_unix_seconds(y, m, d, h, mi, s);
             Ok(val_real(secs))
         }
@@ -445,23 +515,20 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
             )))
         }
         1 => {
-            // Could be a spec string or a date
+            // A string is interpreted as a format specification; anything else
+            // is interpreted as a date.
             match &args[0] {
                 Value::Str(spec) => {
                     let (y, m, d, h, mi, s) = get_current_datetime();
                     format_date_string(spec, y, m, d, h, mi, s)
                 }
-                Value::List(elems) => {
-                    let (y, m, d, h, mi, s) = extract_datetime(elems)?;
+                other => {
+                    let (y, m, d, h, mi, s) = date_spec_to_datetime(other)?;
                     Ok(Value::Str(format!(
                         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
                         y, m, d, h, mi, s as i64
                     )))
                 }
-                _ => Err(EvalError::TypeError {
-                    expected: "String or List".to_string(),
-                    got: args[0].type_name().to_string(),
-                }),
             }
         }
         2 => {
@@ -475,16 +542,7 @@ pub fn builtin_date_string(args: &[Value]) -> Result<Value, EvalError> {
                     });
                 }
             };
-            let (y, m, d, h, mi, s) = match &args[1] {
-                Value::List(elems) => extract_datetime(elems)?,
-                Value::Str(s) => parse_iso_date(s)?,
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List or String".to_string(),
-                        got: args[1].type_name().to_string(),
-                    });
-                }
-            };
+            let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[1])?;
             format_date_string(&spec, y, m, d, h, mi, s)
         }
         _ => Err(EvalError::Error(
@@ -508,7 +566,7 @@ fn format_date_string(
             y, m, d, h, mi, s as i64
         ),
         "ShortDate" => format!("{:02}/{:02}/{:04}", m, d, y),
-        "LongDate" => format!("{}, {:02}, {:04}", MONTH_NAMES[(m - 1) as usize], d, y),
+        "LongDate" => format!("{}, {:02}, {:04}", month_name(m), d, y),
         "Year" => format!("{:04}", y),
         "Month" => format!("{:02}", m),
         "Day" => format!("{:02}", d),
@@ -528,16 +586,7 @@ pub fn builtin_date_plus(args: &[Value]) -> Result<Value, EvalError> {
             "DatePlus requires exactly 2 arguments".to_string(),
         ));
     }
-    let (y, m, d, h, mi, s) = match &args[0] {
-        Value::List(elems) => extract_datetime(elems)?,
-        Value::Str(s) => parse_iso_date(s)?,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "List or String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
+    let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
 
     let input_len = match &args[0] {
         Value::List(elems) => elems.len(),
@@ -561,26 +610,8 @@ pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
 
-    let dt1 = match &args[0] {
-        Value::List(elems) => extract_datetime(elems)?,
-        Value::Str(s) => parse_iso_date(s)?,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "List or String".to_string(),
-                got: args[0].type_name().to_string(),
-            });
-        }
-    };
-    let dt2 = match &args[1] {
-        Value::List(elems) => extract_datetime(elems)?,
-        Value::Str(s) => parse_iso_date(s)?,
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "List or String".to_string(),
-                got: args[1].type_name().to_string(),
-            });
-        }
-    };
+    let dt1 = date_spec_to_datetime(&args[0])?;
+    let dt2 = date_spec_to_datetime(&args[1])?;
 
     let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
     let secs2 = date_to_unix_seconds(dt2.0, dt2.1, dt2.2, dt2.3, dt2.4, dt2.5);
@@ -608,16 +639,7 @@ pub fn builtin_date_difference(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_date_object(args: &[Value]) -> Result<Value, EvalError> {
     let (y, m, d, h, mi, s) = match args.len() {
         0 => get_current_datetime(),
-        1 => match &args[0] {
-            Value::List(elems) => extract_datetime(elems)?,
-            Value::Str(s) => parse_iso_date(s)?,
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
+        1 => date_spec_to_datetime(&args[0])?,
         _ => {
             return Err(EvalError::Error(
                 "DateObject takes 0 or 1 argument".to_string(),
@@ -644,16 +666,7 @@ pub fn builtin_date_object(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_date_list(args: &[Value]) -> Result<Value, EvalError> {
     let (y, m, d, h, mi, s) = match args.len() {
         0 => get_current_datetime(),
-        1 => match &args[0] {
-            Value::List(elems) => extract_datetime(elems)?,
-            Value::Str(s) => parse_iso_date(s)?,
-            _ => {
-                return Err(EvalError::TypeError {
-                    expected: "List or String".to_string(),
-                    got: args[0].type_name().to_string(),
-                });
-            }
-        },
+        1 => date_spec_to_datetime(&args[0])?,
         _ => {
             return Err(EvalError::Error(
                 "DateList takes 0 or 1 argument".to_string(),
@@ -687,16 +700,7 @@ pub fn builtin_day_name(args: &[Value]) -> Result<Value, EvalError> {
             (y, m, d)
         }
         1 => {
-            let (y, m, d, _, _, _) = match &args[0] {
-                Value::List(elems) => extract_datetime(elems)?,
-                Value::Str(s) => parse_iso_date(s)?,
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List or String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
-                }
-            };
+            let (y, m, d, _, _, _) = date_spec_to_datetime(&args[0])?;
             (y, m, d)
         }
         _ => {
@@ -714,32 +718,15 @@ pub fn builtin_day_name(args: &[Value]) -> Result<Value, EvalError> {
 pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
     match args.len() {
         0 => {
+            // Absolute day count; floor semantics so pre-1970 stays correct.
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap();
-            Ok(val_int((now.as_secs() / 86400) as i64))
+            Ok(val_int((now.as_secs() as i64).div_euclid(86400)))
         }
         2 => {
-            let dt1 = match &args[0] {
-                Value::List(elems) => extract_datetime(elems)?,
-                Value::Str(s) => parse_iso_date(s)?,
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List or String".to_string(),
-                        got: args[0].type_name().to_string(),
-                    });
-                }
-            };
-            let dt2 = match &args[1] {
-                Value::List(elems) => extract_datetime(elems)?,
-                Value::Str(s) => parse_iso_date(s)?,
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List or String".to_string(),
-                        got: args[1].type_name().to_string(),
-                    });
-                }
-            };
+            let dt1 = date_spec_to_datetime(&args[0])?;
+            let dt2 = date_spec_to_datetime(&args[1])?;
             let secs1 = date_to_unix_seconds(dt1.0, dt1.1, dt1.2, dt1.3, dt1.4, dt1.5);
             let secs2 = date_to_unix_seconds(dt2.0, dt2.1, dt2.2, dt2.3, dt2.4, dt2.5);
             let diff_days = ((secs2 - secs1) / 86400.0).round() as i64;
@@ -865,6 +852,89 @@ pub fn builtin_leap_year_q(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Bool(is_leap_year(year)))
 }
 
+/// Absolute day number of 1970-01-01 relative to 1900-01-01 (Mathematica's
+/// `DateValue` origin).
+const UNIX_EPOCH_DAYS_SINCE_1900: i64 = 25_567;
+
+/// `DateValue[date]` or `DateValue[date, granularity]`
+///
+/// Without a granularity, returns the number of days since 1900-01-01.
+/// With one, returns the requested calendar component.
+pub fn builtin_date_value(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "DateValue takes 1 or 2 arguments".to_string(),
+        ));
+    }
+
+    let (y, m, d, h, mi, s) = match &args[0] {
+        // A bare number is an absolute day number (days since 1900-01-01).
+        Value::Integer(i) => {
+            unix_seconds_to_datetime((i.to_f64() - UNIX_EPOCH_DAYS_SINCE_1900 as f64) * 86400.0)
+        }
+        Value::Real(r) => {
+            unix_seconds_to_datetime((r.to_f64() - UNIX_EPOCH_DAYS_SINCE_1900 as f64) * 86400.0)
+        }
+        other => date_spec_to_datetime(other)?,
+    };
+    if args.len() == 1 {
+        let unix = date_to_unix_seconds(y, m, d, h, mi, s);
+        let days = (unix / 86400.0).floor() as i64 + UNIX_EPOCH_DAYS_SINCE_1900;
+        return Ok(val_int(days));
+    }
+
+    let granularity = match &args[1] {
+        Value::Str(s) => s.as_str(),
+        Value::Symbol(s) => s.as_str(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "String".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    match granularity {
+        "Year" => Ok(val_int(y)),
+        "Month" => Ok(val_int(m)),
+        "Day" => Ok(val_int(d)),
+        "Hour" => Ok(val_int(h)),
+        "Minute" => Ok(val_int(mi)),
+        "Second" => Ok(val_int(s as i64)),
+        // Mathematica convention: Monday = 1, ..., Sunday = 7.
+        "DayOfWeek" => Ok(val_int(day_of_week(y, m, d) as i64 + 1)),
+        _ => Err(EvalError::Error(format!(
+            "Unknown DateValue granularity: {}",
+            granularity
+        ))),
+    }
+}
+
+/// `DayPlus[date, n]` — add `n` days to a date, preserving input shape.
+pub fn builtin_day_plus(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "DayPlus requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let (y, m, d, h, mi, s) = date_spec_to_datetime(&args[0])?;
+    let days = match &args[1] {
+        Value::Integer(n) => n.to_f64(),
+        Value::Real(r) => r.to_f64(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: args[1].type_name().to_string(),
+            });
+        }
+    };
+    let input_len = match &args[0] {
+        Value::List(elems) => elems.len(),
+        _ => 6,
+    };
+    let base = date_to_unix_seconds(y, m, d, h, mi, s);
+    Ok(format_datetime_components(base + days * 86400.0, input_len))
+}
+
 // ── Registration ──
 
 /// Register all date/time builtins in the environment.
@@ -877,6 +947,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "DateList", builtin_date_list);
     register_builtin(env, "DateObject", builtin_date_object);
     register_builtin(env, "DatePlus", builtin_date_plus);
+    register_builtin(env, "DayPlus", builtin_day_plus);
+    register_builtin(env, "DateValue", builtin_date_value);
     register_builtin(env, "DateDifference", builtin_date_difference);
     register_builtin(env, "DayName", builtin_day_name);
     register_builtin(env, "DayCount", builtin_day_count);
@@ -1175,6 +1247,176 @@ mod tests {
         assert_eq!(
             builtin_day_name(&[date(13)]).unwrap(),
             Value::Str("Sunday".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_iso_date_negative_year() {
+        let (y, m, d, h, mi, s) = parse_iso_date("-0044-03-15").unwrap();
+        assert_eq!((y, m, d, h, mi, s), (-44, 3, 15, 0, 0, 0.0));
+        let (y, _, _, _, _, _) = parse_iso_date("-0001-01-01").unwrap();
+        assert_eq!(y, -1);
+    }
+
+    #[test]
+    fn test_parse_iso_date_fractional_and_timezone() {
+        // Fractional seconds are preserved rather than truncated.
+        let (_, _, _, h, mi, s) = parse_iso_date("2024-01-15T10:30:00.25").unwrap();
+        assert_eq!((h, mi), (10, 30));
+        assert!((s - 0.25).abs() < 1e-12);
+
+        // Trailing timezone designators are accepted and ignored.
+        let (_, _, _, h, _, s) = parse_iso_date("2024-01-15T10:30:00Z").unwrap();
+        assert_eq!((h, s), (10, 0.0));
+        let (_, _, _, h, _, _) = parse_iso_date("2024-01-15T10:30:00+02:00").unwrap();
+        assert_eq!(h, 10);
+    }
+
+    #[test]
+    fn test_format_date_string_out_of_range_month() {
+        // LongDate used to panic indexing MONTH_NAMES for months outside 1..=12.
+        assert_eq!(
+            format_date_string("LongDate", 2024, 0, 1, 0, 0, 0.0).unwrap(),
+            Value::Str("December, 01, 2024".to_string())
+        );
+        assert_eq!(
+            format_date_string("LongDate", 2024, 13, 1, 0, 0, 0.0).unwrap(),
+            Value::Str("January, 01, 2024".to_string())
+        );
+    }
+
+    #[test]
+    fn test_date_object_roundtrip_through_spec_parser() {
+        let obj = builtin_date_object(&[Value::List(vec![
+            val_int(2024),
+            val_int(2),
+            val_int(29),
+            val_int(12),
+            val_int(30),
+            val_int(15),
+        ])])
+        .unwrap();
+        let (y, m, d, h, mi, s) = date_spec_to_datetime(&obj).unwrap();
+        assert_eq!((y, m, d, h, mi), (2024, 2, 29, 12, 30));
+        assert_eq!(s, 15.0);
+
+        // ...and AbsoluteTime accepts the object.
+        assert_eq!(
+            builtin_absolute_time(&[obj]).unwrap(),
+            val_real(date_to_unix_seconds(2024, 2, 29, 12, 30, 15.0))
+        );
+    }
+
+    #[test]
+    fn test_builtin_date_value_days_since_1900() {
+        let d = |y, m, day| Value::List(vec![val_int(y), val_int(m), val_int(day)]);
+        assert_eq!(
+            builtin_date_value(&[d(1970, 1, 1)]).unwrap(),
+            val_int(25_567)
+        );
+        assert_eq!(builtin_date_value(&[d(1900, 1, 1)]).unwrap(), val_int(0));
+        assert_eq!(
+            builtin_date_value(&[d(1969, 12, 31)]).unwrap(),
+            val_int(25_566)
+        );
+    }
+
+    #[test]
+    fn test_builtin_date_value_granularities() {
+        let date = Value::List(vec![val_int(2024), val_int(1), val_int(1)]);
+        assert_eq!(
+            builtin_date_value(&[date.clone(), Value::Str("Year".to_string())]).unwrap(),
+            val_int(2024)
+        );
+        assert_eq!(
+            builtin_date_value(&[date.clone(), Value::Str("Month".to_string())]).unwrap(),
+            val_int(1)
+        );
+        assert_eq!(
+            builtin_date_value(&[date.clone(), Value::Str("Day".to_string())]).unwrap(),
+            val_int(1)
+        );
+        // 2024-01-01 was a Monday → Mathematica Monday = 1.
+        assert_eq!(
+            builtin_date_value(&[date, Value::Str("DayOfWeek".to_string())]).unwrap(),
+            val_int(1)
+        );
+    }
+
+    #[test]
+    fn test_builtin_day_plus_leap_and_rollover() {
+        let out = builtin_day_plus(&[
+            Value::List(vec![val_int(2024), val_int(2), val_int(28)]),
+            val_int(1),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![val_int(2024), val_int(2), val_int(29)])
+        );
+
+        let out = builtin_day_plus(&[
+            Value::List(vec![val_int(2023), val_int(2), val_int(28)]),
+            val_int(1),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![val_int(2023), val_int(3), val_int(1)])
+        );
+    }
+
+    #[test]
+    fn test_builtin_day_plus_negative() {
+        let out = builtin_day_plus(&[
+            Value::List(vec![val_int(1970), val_int(1), val_int(1)]),
+            val_int(-1),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            Value::List(vec![val_int(1969), val_int(12), val_int(31)])
+        );
+    }
+
+    #[test]
+    fn test_absolute_time_negative_and_roundtrip() {
+        let out = builtin_absolute_time(&[Value::List(vec![
+            val_int(1969),
+            val_int(12),
+            val_int(31),
+            val_int(23),
+            val_int(59),
+            val_int(59),
+        ])])
+        .unwrap();
+        assert_eq!(out, val_real(-1.0));
+
+        // Leap-day round-trip.
+        let secs = date_to_unix_seconds(1968, 2, 29, 6, 0, 0.0);
+        assert_eq!(unix_seconds_to_datetime(secs), (1968, 2, 29, 6, 0, 0.0));
+    }
+
+    #[test]
+    fn test_days_since_epoch_to_ymd_leap_boundary() {
+        // 366 days before epoch lands on the leap-day year boundary.
+        assert_eq!(days_since_epoch_to_ymd(-366, -1), (1968, 12, 31));
+        assert_eq!(days_since_epoch_to_ymd(-365, -1), (1969, 1, 1));
+    }
+
+    #[test]
+    fn test_day_of_week_negative_year_proleptic() {
+        // 1969-07-20 (Apollo 11 landing) was a Sunday.
+        assert_eq!(day_of_week(1969, 7, 20), 6);
+        // Sanity across the epoch.
+        assert_eq!(day_of_week(1970, 1, 1), 3); // Thursday
+    }
+
+    #[test]
+    fn test_date_value_number_identity() {
+        assert_eq!(
+            builtin_date_value(&[val_int(25_567)]).unwrap(),
+            val_int(25_567)
         );
     }
 }

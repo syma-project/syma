@@ -835,4 +835,38 @@ mod tests {
         let result = builtin_notebook_convert(&[]);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_machine_integer_q_wrong_arity() {
+        assert!(builtin_machine_integer_q(&[]).is_err());
+        assert!(
+            builtin_machine_integer_q(&[
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2))
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_to_packed_array_mixed_int_real() {
+        let list = Value::List(vec![
+            Value::Integer(Integer::from(1)),
+            Value::Real(rug::Float::with_val(53, 2.5)),
+        ]);
+        let result = builtin_to_packed_array(&[list]).unwrap();
+        assert!(matches!(result, Value::PackedArray(PackedArrayType::Real64(v)) if v.len() == 2));
+    }
+
+    #[test]
+    fn test_to_packed_array_already_packed_passthrough() {
+        let pa = Value::PackedArray(PackedArrayType::Integer64(vec![1, 2]));
+        assert_eq!(builtin_to_packed_array(&[pa.clone()]).unwrap(), pa);
+    }
+
+    #[test]
+    fn test_from_packed_array_non_packed_passthrough() {
+        let list = Value::List(vec![Value::Integer(Integer::from(1))]);
+        assert_eq!(builtin_from_packed_array(&[list.clone()]).unwrap(), list);
+    }
 }

@@ -1,3 +1,4 @@
+use crate::ast::Expr;
 use crate::env::Env;
 use crate::eval::apply_function;
 use crate::value::EvalError;
@@ -22,15 +23,52 @@ fn value_to_key(v: &Value) -> String {
     }
 }
 
-/// Extract a string key from a Value (Str or Symbol).
+/// Canonical string key for a value used as an association key.
+///
+/// Association keys are stored in canonical string form (see `value_to_key`),
+/// so any value can be used for membership/lookup — this mirrors Wolfram
+/// Language, where association keys may be arbitrary expressions, as closely
+/// as the string-keyed representation allows.
 fn key_to_string(v: &Value) -> Result<String, EvalError> {
+    Ok(value_to_key(v))
+}
+
+/// A `Missing["KeyAbsent", key]` value, used when a key is absent.
+fn missing_key(key: &Value) -> Value {
+    Value::Call {
+        head: "Missing".to_string(),
+        args: vec![Value::Str("KeyAbsent".to_string()), key.clone()],
+    }
+}
+
+/// Evaluate a held `Value::Pattern` expression, falling back to a structural
+/// unwrap when evaluation fails.
+fn eval_pattern(expr: &Expr, env: &Env) -> Value {
+    crate::eval::eval(expr, env).unwrap_or_else(|_| crate::pattern::unwrap_expr_to_value(expr))
+}
+
+/// Unwrap and evaluate a possibly pattern-held value. Rules produced by the
+/// evaluator keep their sides wrapped in `Value::Pattern`, so consumers of
+/// rules (e.g. `AssociateTo`) must evaluate them to get usable keys/values.
+fn eval_held(v: &Value, env: &Env) -> Value {
     match v {
-        Value::Str(s) => Ok(s.clone()),
-        Value::Symbol(s) => Ok(s.clone()),
-        _ => Err(EvalError::TypeError {
-            expected: "String or Symbol".to_string(),
-            got: v.type_name().to_string(),
-        }),
+        Value::Pattern(expr) => eval_pattern(expr, env),
+        other => other.clone(),
+    }
+}
+
+/// Split a `Rule`/`RuleDelayed` — possibly held as a `Value::Pattern` — into its
+/// canonical key string and evaluated value.
+fn rule_entry(rule: &Value, env: &Env) -> Option<(String, Value)> {
+    match rule {
+        Value::Rule { lhs, rhs, .. } => {
+            Some((value_to_key(&eval_held(lhs, env)), eval_held(rhs, env)))
+        }
+        Value::Pattern(Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs }) => Some((
+            value_to_key(&eval_pattern(lhs, env)),
+            eval_pattern(rhs, env),
+        )),
+        _ => None,
     }
 }
 
@@ -320,8 +358,8 @@ pub fn builtin_key_free_q(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── AssociateTo ────────────────────────────────────────────────────────────
 
-pub fn builtin_associate_to(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 2 || args.len() > 2 {
+pub fn builtin_associate_to(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
         return Err(EvalError::Error(
             "AssociateTo requires exactly 2 arguments: assoc and rules".to_string(),
         ));
@@ -329,30 +367,32 @@ pub fn builtin_associate_to(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::Assoc(map) => {
             let mut new_map = map.clone();
-            let additions = &args[1];
-            match additions {
-                Value::Rule { lhs, rhs, .. } => {
-                    let key = value_to_key(lhs);
-                    new_map.insert(key, rhs.as_ref().clone());
-                }
+            match &args[1] {
                 Value::List(items) => {
                     for item in items {
-                        if let Value::Rule { lhs, rhs, .. } = item {
-                            let key = value_to_key(lhs);
-                            new_map.insert(key, rhs.as_ref().clone());
-                        } else {
-                            return Err(EvalError::Error(
-                                "AssociateTo: each element must be a Rule".to_string(),
-                            ));
+                        match rule_entry(item, env) {
+                            Some((key, value)) => {
+                                new_map.insert(key, value);
+                            }
+                            None => {
+                                return Err(EvalError::Error(
+                                    "AssociateTo: each element must be a Rule".to_string(),
+                                ));
+                            }
                         }
                     }
                 }
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "Rule or List of Rules".to_string(),
-                        got: additions.type_name().to_string(),
-                    });
-                }
+                single => match rule_entry(single, env) {
+                    Some((key, value)) => {
+                        new_map.insert(key, value);
+                    }
+                    None => {
+                        return Err(EvalError::TypeError {
+                            expected: "Rule or List of Rules".to_string(),
+                            got: single.type_name().to_string(),
+                        });
+                    }
+                },
             }
             Ok(Value::Assoc(new_map))
         }
@@ -430,10 +470,13 @@ pub fn builtin_counts_by(args: &[Value], env: &Env) -> Result<Value, EvalError> 
 
 // ── GroupBy ────────────────────────────────────────────────────────────────
 
+/// GroupBy[list, f] groups the elements of list by the values of f.
+/// `GroupBy[list, f, red]` reduces each group by applying `red` to the list of
+/// grouped elements.
 pub fn builtin_group_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "GroupBy requires exactly 2 arguments: list and f".to_string(),
+            "GroupBy requires 2 or 3 arguments: list, f and optional reducer".to_string(),
         ));
     }
     match &args[0] {
@@ -447,7 +490,12 @@ pub fn builtin_group_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
             let mut map = HashMap::with_capacity(groups.len());
             for (k, vals) in groups {
-                map.insert(k, Value::List(vals));
+                let group = Value::List(vals);
+                let value = match args.get(2) {
+                    Some(red) => apply_function(red, std::slice::from_ref(&group), env)?,
+                    None => group,
+                };
+                map.insert(k, value);
             }
             Ok(Value::Assoc(map))
         }
@@ -460,15 +508,19 @@ pub fn builtin_group_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
 // ── Merge ──────────────────────────────────────────────────────────────────
 
+/// Merge[{assoc1, assoc2, ...}] merges associations; `Merge[list, f]` combines
+/// collisions by applying `f` to the colliding values as separate arguments
+/// (`f[v1, v2, ...]`), matching Wolfram Language. Without a combiner the last
+/// value for a duplicated key wins.
 pub fn builtin_merge(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "Merge requires exactly 2 arguments: list of assocs and combiner".to_string(),
+            "Merge requires 1 or 2 arguments: list of assocs and optional combiner".to_string(),
         ));
     }
     match &args[0] {
         Value::List(assocs) => {
-            let combiner = &args[1];
+            let combiner = args.get(1);
             let mut merged: HashMap<String, Vec<Value>> = HashMap::new();
             for assoc in assocs {
                 match assoc {
@@ -486,12 +538,15 @@ pub fn builtin_merge(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
             let mut result = HashMap::with_capacity(merged.len());
             for (k, vals) in merged {
-                if vals.len() == 1 {
-                    result.insert(k, vals.into_iter().next().unwrap());
+                let combined = if vals.len() == 1 {
+                    vals.into_iter().next().unwrap()
                 } else {
-                    let combined = apply_function(combiner, &[Value::List(vals)], env)?;
-                    result.insert(k, combined);
-                }
+                    match combiner {
+                        Some(f) => apply_function(f, &vals, env)?,
+                        None => vals.into_iter().last().unwrap(),
+                    }
+                };
+                result.insert(k, combined);
             }
             Ok(Value::Assoc(result))
         }
@@ -626,7 +681,8 @@ pub fn builtin_key_complement(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Keys ────────────────────────────────────────────────────────────────
 
-/// Keys[assoc] gives a list of the keys in an association.
+/// Keys[assoc] gives a list of the keys in an association. `Keys` also maps
+/// over a list of associations.
 pub fn builtin_keys(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -641,6 +697,13 @@ pub fn builtin_keys(args: &[Value]) -> Result<Value, EvalError> {
                 keys.into_iter().map(|k| Value::Str(k.clone())).collect(),
             ))
         }
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(builtin_keys(std::slice::from_ref(item))?);
+            }
+            Ok(Value::List(out))
+        }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
             got: args[0].type_name().to_string(),
@@ -650,7 +713,8 @@ pub fn builtin_keys(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Values ──────────────────────────────────────────────────────────────
 
-/// Values[assoc] gives a list of the values in an association.
+/// Values[assoc] gives a list of the values in an association. `Values` also
+/// maps over a list of associations.
 pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -665,6 +729,13 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
                 keys.into_iter().map(|k| map[k].clone()).collect(),
             ))
         }
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(builtin_values(std::slice::from_ref(item))?);
+            }
+            Ok(Value::List(out))
+        }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),
             got: args[0].type_name().to_string(),
@@ -674,55 +745,99 @@ pub fn builtin_values(args: &[Value]) -> Result<Value, EvalError> {
 
 // ── Lookup ──────────────────────────────────────────────────────────────
 
-/// Lookup[assoc, key] returns the value associated with key, or Missing[key].
+/// Lookup[assoc, key] returns the value associated with key, or
+/// `Missing["KeyAbsent", key]` when the key is absent.
+///
+/// Also supports:
+///   Lookup[assoc, key, default]        -> `default` when the key is absent
+///   Lookup[assoc, {k1, k2, ...}]       -> list of lookups
+///   Lookup[{assoc1, assoc2, ...}, key] -> list of lookups
 pub fn builtin_lookup(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Error(
-            "Lookup requires exactly 2 arguments".to_string(),
+            "Lookup requires 2 or 3 arguments".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Assoc(map) => {
-            let key = key_to_string(&args[1])?;
-            match map.get(&key) {
-                Some(val) => Ok(val.clone()),
-                None => Ok(Value::Call {
-                    head: "Missing".to_string(),
-                    args: vec![args[1].clone()],
-                }),
+    lookup_rec(&args[0], &args[1], args.get(2))
+}
+
+fn lookup_rec(target: &Value, key: &Value, default: Option<&Value>) -> Result<Value, EvalError> {
+    match target {
+        Value::Assoc(map) => match key {
+            Value::List(keys) => {
+                let mut out = Vec::with_capacity(keys.len());
+                for k in keys {
+                    out.push(lookup_rec(target, k, default)?);
+                }
+                Ok(Value::List(out))
             }
+            _ => {
+                let k = value_to_key(key);
+                Ok(match map.get(&k) {
+                    Some(v) => v.clone(),
+                    None => match default {
+                        Some(d) => d.clone(),
+                        None => missing_key(key),
+                    },
+                })
+            }
+        },
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(lookup_rec(item, key, default)?);
+            }
+            Ok(Value::List(out))
         }
         _ => Err(EvalError::TypeError {
-            expected: "Assoc".to_string(),
-            got: args[0].type_name().to_string(),
+            expected: "Assoc or List".to_string(),
+            got: target.type_name().to_string(),
         }),
     }
 }
 
 // ── AssociationThread ──────────────────────────────────────────────────────
 
-/// AssociationThread[keys, values] — create an association pairing keys with values.
-pub fn builtin_association_thread(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
+/// AssociationThread[keys, values] — create an association pairing keys with
+/// values. Also accepts the single-argument rule form
+/// `AssociationThread[keys -> values]`.
+pub fn builtin_association_thread(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
         return Err(EvalError::Error(
-            "AssociationThread requires exactly 2 arguments".to_string(),
+            "AssociationThread requires 1 or 2 arguments".to_string(),
         ));
     }
-    let keys = match &args[0] {
+    let (keys, values) = if args.len() == 1 {
+        match &args[0] {
+            Value::Rule { lhs, rhs, .. } => (eval_held(lhs, env), eval_held(rhs, env)),
+            Value::Pattern(Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs }) => {
+                (eval_pattern(lhs, env), eval_pattern(rhs, env))
+            }
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "Rule".to_string(),
+                    got: args[0].type_name().to_string(),
+                });
+            }
+        }
+    } else {
+        (args[0].clone(), args[1].clone())
+    };
+    let keys = match &keys {
         Value::List(l) => l,
         _ => {
             return Err(EvalError::TypeError {
                 expected: "List".to_string(),
-                got: args[0].type_name().to_string(),
+                got: keys.type_name().to_string(),
             });
         }
     };
-    let values = match &args[1] {
+    let values = match values {
         Value::List(l) => l,
         _ => {
             return Err(EvalError::TypeError {
                 expected: "List".to_string(),
-                got: args[1].type_name().to_string(),
+                got: values.type_name().to_string(),
             });
         }
     };
@@ -771,6 +886,13 @@ mod tests {
         let env = Env::new();
         crate::builtins::register_builtins(&env);
         env
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = make_env();
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap()
     }
 
     #[test]
@@ -996,13 +1118,14 @@ mod tests {
 
     #[test]
     fn test_associate_to() {
+        let env = make_env();
         let a = assoc(vec![("a", integer(1))]);
         let rule = Value::Rule {
             lhs: Box::new(string("b")),
             rhs: Box::new(integer(2)),
             delayed: false,
         };
-        let result = builtin_associate_to(&[a, rule]).unwrap();
+        let result = builtin_associate_to(&[a, rule], &env).unwrap();
         match result {
             Value::Assoc(map) => {
                 assert_eq!(map.len(), 2);
@@ -1011,6 +1134,30 @@ mod tests {
             }
             _ => panic!("Expected Assoc"),
         }
+    }
+
+    #[test]
+    fn test_associate_to_via_eval() {
+        // A rule argument arrives with `Value::Pattern`-wrapped sides; the key
+        // must not be the literal `Pattern[...]` and the value must be
+        // evaluated.
+        let result = eval_str("AssociateTo[<|\"a\"->1|>, \"b\"->(1+1)]");
+        assert_eq!(result, assoc(vec![("a", integer(1)), ("b", integer(2))]));
+        let result = eval_str("AssociateTo[<|\"a\"->1|>, {\"b\"->2, \"c\"->3}]");
+        assert_eq!(
+            result,
+            assoc(vec![
+                ("a", integer(1)),
+                ("b", integer(2)),
+                ("c", integer(3)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_association_thread_rule_form_via_eval() {
+        let result = eval_str("AssociationThread[{\"a\", \"b\"} -> {1, 2}]");
+        assert_eq!(result, assoc(vec![("a", integer(1)), ("b", integer(2))]));
     }
 
     #[test]
@@ -1104,10 +1251,10 @@ mod tests {
         let a1 = assoc(vec![("a", integer(1)), ("b", integer(2))]);
         let a2 = assoc(vec![("b", integer(3)), ("c", integer(4))]);
         let assocs = list(vec![a1, a2]);
-        // Use Total as combiner
+        // Plus receives the colliding values as separate arguments.
         let f = Value::Builtin(
-            "Total".to_string(),
-            crate::value::BuiltinFn::Pure(crate::builtins::list::builtin_total),
+            "Plus".to_string(),
+            crate::value::BuiltinFn::Pure(crate::builtins::arithmetic::builtin_plus),
         );
         let result = builtin_merge(&[assocs, f], &env).unwrap();
         match result {
@@ -1249,13 +1396,182 @@ mod tests {
         let a = assoc(vec![("key", integer(42))]);
         let key = Value::Str("nope".to_string());
         let result = builtin_lookup(&[a, key.clone()]).unwrap();
-        // Non-existent keys return Missing["key"]
+        // Absent keys return Missing["KeyAbsent", key].
+        assert_eq!(result, missing_key(&key));
+    }
+
+    #[test]
+    fn test_lookup_default() {
+        let a = assoc(vec![("key", integer(42))]);
+        let result = builtin_lookup(&[a.clone(), string("nope"), integer(0)]).unwrap();
+        assert_eq!(result, integer(0));
+        let result = builtin_lookup(&[a, string("key"), integer(0)]).unwrap();
+        assert_eq!(result, integer(42));
+    }
+
+    #[test]
+    fn test_lookup_key_list() {
+        let a = assoc(vec![("a", integer(1)), ("b", integer(2))]);
+        let result =
+            builtin_lookup(&[a, list(vec![string("a"), string("b"), string("z")])]).unwrap();
         assert_eq!(
             result,
-            Value::Call {
-                head: "Missing".to_string(),
-                args: vec![key],
+            Value::List(vec![integer(1), integer(2), missing_key(&string("z")),])
+        );
+    }
+
+    #[test]
+    fn test_lookup_list_of_assocs() {
+        let a1 = assoc(vec![("a", integer(1))]);
+        let a2 = assoc(vec![("a", integer(2))]);
+        let result = builtin_lookup(&[list(vec![a1, a2]), string("a")]).unwrap();
+        assert_eq!(result, Value::List(vec![integer(1), integer(2)]));
+    }
+
+    #[test]
+    fn test_lookup_numeric_key() {
+        // Keys are stored canonically, so numeric lookups must match.
+        let a = assoc(vec![("1", integer(10))]);
+        assert_eq!(builtin_lookup(&[a, integer(1)]).unwrap(), integer(10));
+    }
+
+    #[test]
+    fn test_key_exists_q_numeric_key() {
+        let a = assoc(vec![("1", integer(10))]);
+        assert_eq!(
+            builtin_key_member_q(&[a, integer(1)]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_association_thread_rule_form() {
+        let env = make_env();
+        let result = builtin_association_thread(
+            &[Value::Rule {
+                lhs: Box::new(list(vec![string("a"), string("b")])),
+                rhs: Box::new(list(vec![integer(1), integer(2)])),
+                delayed: false,
+            }],
+            &env,
+        )
+        .unwrap();
+        match result {
+            Value::Assoc(map) => {
+                assert_eq!(map.get("a"), Some(&integer(1)));
+                assert_eq!(map.get("b"), Some(&integer(2)));
             }
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_keys_values_round_trip() {
+        // Keys/Values are both ordered the same way, so threading them back
+        // together must reproduce the association exactly.
+        let env = make_env();
+        let a = assoc(vec![
+            ("b", integer(2)),
+            ("a", integer(1)),
+            ("c", integer(3)),
+        ]);
+        let keys = builtin_keys(&[a.clone()]).unwrap();
+        let values = builtin_values(&[a.clone()]).unwrap();
+        let rebuilt = builtin_association_thread(&[keys, values], &env).unwrap();
+        assert_eq!(rebuilt, a);
+    }
+
+    #[test]
+    fn test_keys_over_list_of_assocs() {
+        let a1 = assoc(vec![("a", integer(1))]);
+        let a2 = assoc(vec![("b", integer(2))]);
+        let result = builtin_keys(&[list(vec![a1, a2])]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![list(vec![string("a")]), list(vec![string("b")]),])
+        );
+    }
+
+    #[test]
+    fn test_merge_combiner_separate_args() {
+        // WL applies the combiner to the colliding values as separate
+        // arguments, i.e. f[v1, v2] (not f[{v1, v2}]).
+        let env = make_env();
+        let f = Value::Builtin(
+            "argcount".to_string(),
+            crate::value::BuiltinFn::Pure(|args| Ok(integer(args.len() as i64))),
+        );
+        let a1 = assoc(vec![("x", integer(1))]);
+        let a2 = assoc(vec![("x", integer(2)), ("y", integer(3))]);
+        let result = builtin_merge(&[list(vec![a1, a2]), f], &env).unwrap();
+        match result {
+            Value::Assoc(map) => {
+                assert_eq!(map.get("x"), Some(&integer(2)));
+                assert_eq!(map.get("y"), Some(&integer(3)));
+            }
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_merge_without_combiner_last_wins() {
+        let env = make_env();
+        let a1 = assoc(vec![("x", integer(1))]);
+        let a2 = assoc(vec![("x", integer(2))]);
+        let result = builtin_merge(&[list(vec![a1, a2])], &env).unwrap();
+        match result {
+            Value::Assoc(map) => assert_eq!(map.get("x"), Some(&integer(2))),
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_group_by_reducer() {
+        let env = make_env();
+        let items = list(vec![integer(1), integer(2), integer(3), integer(4)]);
+        let f = Value::Builtin(
+            "evenq".to_string(),
+            crate::value::BuiltinFn::Pure(|args| match &args[0] {
+                Value::Integer(n) => Ok(Value::Str(if n.to_i64().unwrap_or(0) % 2 == 0 {
+                    "even".to_string()
+                } else {
+                    "odd".to_string()
+                })),
+                _ => Err(EvalError::Error("expected integer".to_string())),
+            }),
+        );
+        let red = Value::Builtin(
+            "Total".to_string(),
+            crate::value::BuiltinFn::Pure(crate::builtins::list::builtin_total),
+        );
+        let result = builtin_group_by(&[items, f, red], &env).unwrap();
+        match result {
+            Value::Assoc(map) => {
+                assert_eq!(map.get("even"), Some(&integer(6)));
+                assert_eq!(map.get("odd"), Some(&integer(4)));
+            }
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_tally_first_occurrence_order() {
+        // Tally lives in list.rs; verify the WL common case (first-occurrence
+        // order, structural equality) without editing that module.
+        let result = crate::builtins::list::builtin_tally(&[list(vec![
+            string("b"),
+            string("a"),
+            string("b"),
+            string("c"),
+        ])])
+        .unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![string("b"), integer(2)]),
+                list(vec![string("a"), integer(1)]),
+                list(vec![string("c"), integer(1)]),
+            ])
         );
     }
 }

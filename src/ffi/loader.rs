@@ -50,6 +50,11 @@ pub fn library_function(lib: &Value, symbol: &str, sig: NativeSig) -> Result<Val
 
 /// Call a `Value::NativeFunction` with Syma arguments.
 pub fn call_native(fn_ptr: usize, sig: &NativeSig, args: &[Value]) -> Result<Value, EvalError> {
+    if fn_ptr == 0 {
+        return Err(EvalError::FfiError(
+            "native function pointer is null".to_string(),
+        ));
+    }
     if args.len() != sig.params.len() {
         return Err(EvalError::Error(format!(
             "expected {} arguments, got {}",
@@ -168,6 +173,17 @@ fn arg_class(ty: &NativeType) -> u32 {
     }
 }
 
+/// Base-3 encoding of the parameter register classes, most-significant first.
+///
+/// `wrapping_*` is used so that signatures wider than 20 parameters do not
+/// panic in debug builds (3^21 exceeds `u32`); such signatures are reported as
+/// unsupported after the key is computed.
+fn sig_key(params: &[NativeType]) -> u32 {
+    params
+        .iter()
+        .fold(0u32, |k, p| k.wrapping_mul(3).wrapping_add(arg_class(p)))
+}
+
 /// Call a C function via the correct ABI, returning raw return-value bits.
 ///
 /// Supports up to six parameters (covering essentially all real-world uses)
@@ -179,10 +195,13 @@ unsafe fn dispatch_call(
     params: &[NativeType],
     ret: &NativeType,
 ) -> Result<u64, EvalError> {
-    let mut key = 0u32;
-    for p in params {
-        key = key * 3 + arg_class(p);
+    if params.len() > 6 {
+        return Err(EvalError::FfiError(format!(
+            "too many arguments for direct FFI call ({}); use an extension for wider signatures",
+            params.len()
+        )));
     }
+    let key = sig_key(params);
     Ok(match (args.len(), key) {
         (0, 0) => call_typed!(fn_ptr, ret, args, []),
         (1, 0) => call_typed!(fn_ptr, ret, args, [u64]),
@@ -1417,5 +1436,223 @@ mod tests {
         };
         let out = call_native(fn_ptr, &signature, &[Value::Integer(Integer::from(-7))]).unwrap();
         assert_eq!(out, Value::Integer(Integer::from(7)));
+    }
+
+    fn libm_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "libSystem.B.dylib"
+        } else {
+            "libm.so.6"
+        }
+    }
+
+    /// Build a callable for `symbol` with `sig`, or `None` if the library is
+    /// unavailable on this host.  The caller must keep `env` alive so the
+    /// returned function pointer stays valid.
+    fn resolve(env: &Env, lib: &str, symbol: &str, sig: NativeSig) -> Option<usize> {
+        let lib = load_native_library(lib, env).ok()?;
+        let f = library_function(&lib, symbol, sig).ok()?;
+        match f {
+            Value::NativeFunction { fn_ptr, .. } => Some(fn_ptr),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_call_native_sqrt_f64() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::F64],
+            ret: NativeType::F64,
+        };
+        let Some(fn_ptr) = resolve(&env, libm_name(), "sqrt", sig.clone()) else {
+            return;
+        };
+        let out =
+            call_native(fn_ptr, &sig, &[Value::Real(rug::Float::with_val(64, 2.25))]).unwrap();
+        match out {
+            Value::Real(r) => assert!((r.to_f64() - 1.5).abs() < 1e-12),
+            other => panic!("expected real, got {other:?}"),
+        }
+    }
+
+    /// `double ldexp(double, int)` mixes an SSE-register double with a
+    /// general-purpose int, exercising the mixed-class dispatch arm.
+    #[test]
+    fn test_call_native_ldexp_mixed_f64_i32() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::F64, NativeType::I32],
+            ret: NativeType::F64,
+        };
+        let Some(fn_ptr) = resolve(&env, libm_name(), "ldexp", sig.clone()) else {
+            return;
+        };
+        let out = call_native(
+            fn_ptr,
+            &sig,
+            &[
+                Value::Real(rug::Float::with_val(64, 1.5)),
+                Value::Integer(Integer::from(3)),
+            ],
+        )
+        .unwrap();
+        match out {
+            Value::Real(r) => assert!((r.to_f64() - 12.0).abs() < 1e-12),
+            other => panic!("expected real, got {other:?}"),
+        }
+    }
+
+    /// `long labs(long)` exercises the 64-bit integer path.
+    #[test]
+    fn test_call_native_labs_i64() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::I64],
+            ret: NativeType::I64,
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "labs", sig.clone()) else {
+            return;
+        };
+        let out = call_native(
+            fn_ptr,
+            &sig,
+            &[Value::Integer(Integer::from(-123_456_789_012i64))],
+        )
+        .unwrap();
+        assert_eq!(out, Value::Integer(Integer::from(123_456_789_012i64)));
+    }
+
+    /// `char *strchr(const char *, int)` returns a pointer into the *argument*
+    /// buffer, verifying both the string argument and the string return path
+    /// (and that the argument buffer outlives the call).
+    #[test]
+    fn test_call_native_strchr_cstring_return() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::CString, NativeType::I32],
+            ret: NativeType::CString,
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "strchr", sig.clone()) else {
+            return;
+        };
+        let out = call_native(
+            fn_ptr,
+            &sig,
+            &[
+                Value::Str("hello".to_string()),
+                Value::Integer(Integer::from(b'l' as i32)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(out, Value::Str("llo".to_string()));
+    }
+
+    #[test]
+    fn test_call_native_wrong_arity_errors() {
+        let env = Env::new();
+        let sig = NativeSig {
+            params: vec![NativeType::I32, NativeType::I32],
+            ret: NativeType::I32,
+        };
+        let Some(fn_ptr) = resolve(&env, libc_name(), "abs", sig.clone()) else {
+            return;
+        };
+        // `abs` only takes one argument; calling with one against a 2-param
+        // signature must be rejected.
+        let err = call_native(fn_ptr, &sig, &[Value::Integer(1.into())]).unwrap_err();
+        assert!(err.to_string().contains("expected 2 arguments"));
+    }
+
+    #[test]
+    fn test_sig_key_encoding() {
+        assert_eq!(sig_key(&[]), 0);
+        assert_eq!(sig_key(&[NativeType::F64]), 2);
+        assert_eq!(sig_key(&[NativeType::F32, NativeType::U64]), 3);
+        assert_eq!(sig_key(&[NativeType::F64, NativeType::F32]), 7);
+        assert_eq!(
+            sig_key(&[NativeType::F64, NativeType::F64, NativeType::F64]),
+            26
+        );
+        // Wider than 20 parameters must not overflow/panic.
+        let wide = vec![NativeType::F64; 21];
+        let _ = sig_key(&wide);
+    }
+
+    #[test]
+    fn test_call_native_null_fn_ptr_errors() {
+        let sig = NativeSig {
+            params: vec![],
+            ret: NativeType::Void,
+        };
+        let err = call_native(0, &sig, &[]).unwrap_err();
+        assert!(err.to_string().contains("null"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_sig_roundtrip() {
+        use crate::value::Value;
+        let rule = Value::Rule {
+            lhs: Box::new(Value::List(vec![
+                Value::Str("Real64".into()),
+                Value::Str("Integer32".into()),
+            ])),
+            rhs: Box::new(Value::Str("CString".into())),
+            delayed: false,
+        };
+        let sig = parse_sig(&rule).unwrap();
+        assert_eq!(sig.params, vec![NativeType::F64, NativeType::I32]);
+        assert_eq!(sig.ret, NativeType::CString);
+    }
+
+    #[test]
+    fn test_parse_sig_errors() {
+        use crate::value::Value;
+        // Not a Rule.
+        assert!(parse_sig(&Value::Integer(1.into())).is_err());
+        // Unknown type name.
+        let bad = Value::Rule {
+            lhs: Box::new(Value::List(vec![Value::Str("Nope".into())])),
+            rhs: Box::new(Value::Str("Void".into())),
+            delayed: false,
+        };
+        assert!(parse_sig(&bad).is_err());
+        // Non-string type.
+        let bad2 = Value::Rule {
+            lhs: Box::new(Value::Integer(3.into())),
+            rhs: Box::new(Value::Str("Void".into())),
+            delayed: false,
+        };
+        assert!(parse_sig(&bad2).is_err());
+    }
+
+    #[test]
+    fn test_library_function_missing_symbol() {
+        let env = Env::new();
+        let Ok(lib) = load_native_library(libc_name(), &env) else {
+            return;
+        };
+        let sig = NativeSig {
+            params: vec![],
+            ret: NativeType::Void,
+        };
+        assert!(library_function(&lib, "syma_no_such_symbol_xyz", sig).is_err());
+    }
+
+    #[test]
+    fn test_load_native_library_reuses_handle() {
+        let env = Env::new();
+        let Ok(a) = load_native_library(libc_name(), &env) else {
+            return;
+        };
+        let Ok(b) = load_native_library(libc_name(), &env) else {
+            return;
+        };
+        match (a, b) {
+            (Value::NativeLib { handle: ha, .. }, Value::NativeLib { handle: hb, .. }) => {
+                assert!(std::sync::Arc::ptr_eq(&ha, &hb));
+            }
+            _ => panic!("expected native libs"),
+        }
     }
 }

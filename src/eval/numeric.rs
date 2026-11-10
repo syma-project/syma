@@ -40,6 +40,30 @@ pub(super) fn numeric_eval_expr(
         // Recursively evaluate calls at the requested precision.
         Expr::Call { head, args } => {
             if let Expr::Symbol(name) = head.as_ref() {
+                // `N` is a special form in `eval` (it never reaches
+                // `apply_function`), so a *nested* `N[...]` — e.g. inside the
+                // argument of an enclosing `N` — must be dispatched here too.
+                // Otherwise the inner `N` would fall through to the generic
+                // `apply_function` branch, which has no `N` builtin, and stay
+                // unevaluated (`N[3.14..., 20.0]`).
+                if name == "N" {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(EvalError::Error("N requires 1 or 2 arguments".to_string()));
+                    }
+                    let inner_bits = if args.len() == 2 {
+                        match super::eval(&args[1], env)? {
+                            Value::Integer(n) => {
+                                let d = u32::try_from(&n).unwrap_or(DEFAULT_PRECISION);
+                                ((d as f64) * std::f64::consts::LOG2_10).ceil() as u32
+                            }
+                            _ => DEFAULT_PRECISION,
+                        }
+                    } else {
+                        DEFAULT_PRECISION
+                    };
+                    return numeric_eval_expr(&args[0], inner_bits.max(1), env);
+                }
+
                 // NHold* attributes: prevent numeric evaluation of certain arguments
                 let nhold_all = env.has_attribute(name, "NHoldAll");
                 let nhold_first = env.has_attribute(name, "NHoldFirst");
@@ -80,6 +104,35 @@ pub(super) fn numeric_eval_expr(
                     }
                     "Sqrt" => try_sqrt_float("Sqrt", &evaluated_args, prec_bits, env),
                     "Abs" => try_unary_float("Abs", &evaluated_args, prec_bits, env, |f| f.abs()),
+                    // `Part` indices must stay exact integers; numeric
+                    // evaluation of `1` would otherwise yield `1.0`, which
+                    // `Part` rejects. The indexed expression is still
+                    // evaluated numerically.
+                    "Part" if evaluated_args.len() >= 2 => {
+                        let mut vals = Vec::with_capacity(args.len());
+                        vals.push(evaluated_args[0].clone());
+                        for a in &args[1..] {
+                            vals.push(super::eval(a, env)?);
+                        }
+                        let head_val = super::eval(head, env)?;
+                        coerce_to_float(super::apply_function(&head_val, &vals, env)?, prec_bits)
+                    }
+                    // Equality/inequality: keep the comparison symbolic when
+                    // the operands are not all numeric and not structurally
+                    // identical, so equation-based functions called inside
+                    // `N` (e.g. `N[FindRoot[Cos[x] == x, {x, 1}]]`) can still
+                    // inspect the equation instead of receiving `False`.
+                    "Equal" | "Unequal"
+                        if !evaluated_args
+                            .iter()
+                            .all(|a| to_float(a, prec_bits).is_some())
+                            && !evaluated_args.windows(2).all(|w| w[0].struct_eq(&w[1])) =>
+                    {
+                        Ok(Value::Call {
+                            head: name.clone(),
+                            args: evaluated_args,
+                        })
+                    }
                     // For numeric evaluation of other functions, compute with the
                     // numeric args; if that fails (special forms handled in eval)
                     // fall back to normal evaluation and coerce the result.

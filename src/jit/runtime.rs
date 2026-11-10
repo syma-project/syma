@@ -149,9 +149,9 @@ pub extern "C" fn jit_neg(ctx: &mut JitContext, dst: u32, src: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_not(ctx: &mut JitContext, dst: u32, src: u32) {
     if (dst as usize) < ctx.nregs as usize && (src as usize) < ctx.nregs as usize {
-        let val = unsafe { &*ctx.regs.add(src as usize) };
+        let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
         unsafe {
-            *ctx.regs.add(dst as usize) = Value::Bool(!val.is_truthy());
+            *ctx.regs.add(dst as usize) = crate::builtins::logical::not_value(val);
         }
     }
 }
@@ -162,13 +162,10 @@ pub extern "C" fn jit_and(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
         && (a as usize) < ctx.nregs as usize
         && (b as usize) < ctx.nregs as usize
     {
-        // Mirror `builtin_and`: first falsey operand, else the last operand.
+        // Match `builtin_and`.
         let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
-        let out = if !va.is_truthy() {
-            va
-        } else {
-            unsafe { (*ctx.regs.add(b as usize)).clone() }
-        };
+        let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
+        let out = crate::builtins::logical::and_values(va, vb);
         unsafe {
             *ctx.regs.add(dst as usize) = out;
         }
@@ -181,13 +178,10 @@ pub extern "C" fn jit_or(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
         && (a as usize) < ctx.nregs as usize
         && (b as usize) < ctx.nregs as usize
     {
-        // Mirror `builtin_or`: first truthy operand, else the last operand.
+        // Match `builtin_or`.
         let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
-        let out = if va.is_truthy() {
-            va
-        } else {
-            unsafe { (*ctx.regs.add(b as usize)).clone() }
-        };
+        let vb = unsafe { (*ctx.regs.add(b as usize)).clone() };
+        let out = crate::builtins::logical::or_values(va, vb);
         unsafe {
             *ctx.regs.add(dst as usize) = out;
         }
@@ -424,6 +418,7 @@ mod tests {
             constants,
             nregs,
             nparams: 0,
+            param_names: vec![],
         }
     }
 
