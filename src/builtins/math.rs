@@ -1919,6 +1919,52 @@ pub fn builtin_unit_step(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::Integer(Integer::from(1)))
 }
 
+/// HeavisideTheta[x] — 0 for x<0, 1 for x>0; `HeavisideTheta[0]` stays
+/// symbolic. Multi-argument form is the product, so a single negative
+/// argument makes the whole expression 0.
+pub fn builtin_heaviside_theta(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_min_args("HeavisideTheta", args, 1)?;
+    let mut has_zero = false;
+    for arg in args {
+        match arg {
+            Value::Integer(n) => {
+                if *n < 0 {
+                    return Ok(Value::Integer(Integer::from(0)));
+                } else if n.is_zero() {
+                    has_zero = true;
+                }
+            }
+            Value::Rational(r) => {
+                if **r < 0 {
+                    return Ok(Value::Integer(Integer::from(0)));
+                } else if r.is_zero() {
+                    has_zero = true;
+                }
+            }
+            Value::Real(r) => {
+                if r.is_sign_negative() && !r.is_zero() {
+                    return Ok(Value::Integer(Integer::from(0)));
+                } else if r.is_zero() {
+                    has_zero = true;
+                }
+            }
+            _ => {
+                return Ok(Value::Call {
+                    head: "HeavisideTheta".to_string(),
+                    args: args.to_vec(),
+                });
+            }
+        }
+    }
+    if has_zero {
+        return Ok(Value::Call {
+            head: "HeavisideTheta".to_string(),
+            args: args.to_vec(),
+        });
+    }
+    Ok(Value::Integer(Integer::from(1)))
+}
+
 /// Boole[expr] — 1 if True, 0 if False
 pub fn builtin_boole(args: &[Value]) -> Result<Value, EvalError> {
     super::require_args("Boole", args, 1)?;
@@ -3300,5 +3346,15 @@ mod tests {
         );
         assert_eq!(builtin_gcd(&[]).unwrap(), int(0));
         assert_eq!(builtin_lcm(&[]).unwrap(), int(1));
+    }
+
+    #[test]
+    fn test_heaviside_theta() {
+        assert_eq!(builtin_heaviside_theta(&[int(-3)]).unwrap(), int(0));
+        assert_eq!(builtin_heaviside_theta(&[int(3)]).unwrap(), int(1));
+        assert_eq!(
+            builtin_heaviside_theta(&[int(0)]).unwrap().to_string(),
+            "HeavisideTheta[0]"
+        );
     }
 }

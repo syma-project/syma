@@ -4,6 +4,7 @@ use crate::eval::apply_function;
 use crate::pattern::{AttributeChecker, MatchResult, match_pattern};
 use crate::value::EvalError;
 use crate::value::Value;
+use rug::Rational;
 use std::collections::HashMap;
 
 use super::list::compare_values;
@@ -130,6 +131,79 @@ pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
         Value::Dataset(inner) => {
             // Unwrap Dataset to inner data
             Ok(inner.as_ref().clone())
+        }
+        // Normal[series] — strip the O-term, giving the underlying polynomial.
+        Value::SeriesData {
+            variable,
+            expansion_point,
+            coefficients,
+            min_exponent,
+            denominator,
+            ..
+        } => {
+            let zero = Value::Integer(0.into());
+            let base = if (**expansion_point).struct_eq(&zero) {
+                (**variable).clone()
+            } else {
+                Value::Call {
+                    head: "Plus".to_string(),
+                    args: vec![
+                        (**variable).clone(),
+                        Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![Value::Integer((-1).into()), (**expansion_point).clone()],
+                        },
+                    ],
+                }
+            };
+            let num_zero = |v: &Value| {
+                matches!(v, Value::Integer(i) if i.is_zero())
+                    || matches!(v, Value::Rational(r) if r.is_zero())
+                    || matches!(v, Value::Real(r) if r.is_zero())
+            };
+            let num_one = |v: &Value| {
+                matches!(v, Value::Integer(i) if *i == 1)
+                    || matches!(v, Value::Rational(r) if **r == 1)
+            };
+            let mut terms: Vec<Value> = Vec::new();
+            for (i, c) in coefficients.iter().enumerate() {
+                if num_zero(c) {
+                    continue;
+                }
+                let e = i64::from(*min_exponent) + i as i64;
+                let exp = if *denominator == 1 {
+                    Value::Integer(e.into())
+                } else {
+                    Value::Rational(Box::new(Rational::from((e, i64::from(*denominator)))))
+                };
+                let power = if *denominator == 1 && e == 1 {
+                    base.clone()
+                } else {
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![base.clone(), exp],
+                    }
+                };
+                let term = if *denominator == 1 && e == 0 {
+                    c.clone()
+                } else if num_one(c) {
+                    power
+                } else {
+                    Value::Call {
+                        head: "Times".to_string(),
+                        args: vec![c.clone(), power],
+                    }
+                };
+                terms.push(term);
+            }
+            match terms.len() {
+                0 => Ok(zero),
+                1 => Ok(terms.pop().unwrap()),
+                _ => Ok(Value::Call {
+                    head: "Plus".to_string(),
+                    args: terms,
+                }),
+            }
         }
         _ => Err(EvalError::TypeError {
             expected: "Assoc".to_string(),

@@ -2199,12 +2199,47 @@ pub fn builtin_square_free_part(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+/// FareySequence[n] — fractions between 0 and 1 with denominator at most `n`,
+/// in increasing order.
+pub fn builtin_farey_sequence(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "FareySequence requires exactly 1 argument".to_string(),
+        ));
+    }
+    let n = match &args[0] {
+        Value::Integer(i) if !i.is_negative() => i.to_i64().unwrap_or(1),
+        _ => return Ok(unevaluated_call("FareySequence", args)),
+    };
+    if n == 0 {
+        return Ok(Value::List(vec![
+            Value::Integer(rug::Integer::from(0)),
+            Value::Integer(rug::Integer::from(1)),
+        ]));
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let (mut a, mut b, mut c, mut d) = (0i64, 1i64, 1i64, n);
+    while c <= n {
+        out.push(Value::Rational(Box::new(rug::Rational::from((a, b)))));
+        let k = (n + b) / d;
+        let (na, nb) = (c, d);
+        let (nc, nd) = (k * c - a, k * d - b);
+        a = na;
+        b = nb;
+        c = nc;
+        d = nd;
+    }
+    out.push(Value::Integer(rug::Integer::from(1)));
+    Ok(Value::List(out))
+}
+
 /// Register the additional number-theory builtins defined in this module.
 pub fn register(env: &Env) {
     super::register_builtin(env, "ExtendedGCD", builtin_extended_gcd);
     super::register_builtin(env, "MantissaExponent", builtin_mantissa_exponent);
     super::register_builtin(env, "ExpMantissa", builtin_exp_mantissa);
     super::register_builtin(env, "SquareFreePart", builtin_square_free_part);
+    super::register_builtin(env, "FareySequence", builtin_farey_sequence);
 }
 
 #[cfg(test)]

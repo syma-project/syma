@@ -369,6 +369,12 @@ pub fn builtin_normal(args: &[Value]) -> Result<Value, EvalError> {
     {
         return Ok(Value::List(pairs));
     }
+    if args.len() == 1
+        && super::linalgmore::is_sparse(&args[0])
+        && let Some(dense) = super::linalgmore::normal_dense(&args[0])
+    {
+        return Ok(dense);
+    }
     super::association::builtin_normal(args)
 }
 

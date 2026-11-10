@@ -300,3 +300,149 @@ fn strings_basic() {
     eqs("StringTake[\"abcde\", 3]", "\"abc\"");
     eqs("StringCount[\"abcabc\", \"bc\"]", "2");
 }
+
+// ── graph basics ──
+#[test]
+fn graph_basic() {
+    eq("VertexCount[Graph[{1 <-> 2, 2 <-> 3}]]", "3");
+    eq("EdgeCount[Graph[{1 <-> 2, 2 <-> 3}]]", "2");
+    eq("GraphDistance[Graph[{1 <-> 2, 2 <-> 3}], 1, 3]", "2");
+    eq(
+        "Length[ConnectedComponents[Graph[{1 <-> 2, 3 <-> 4}]]]",
+        "2",
+    );
+    // Complement of a 2-path on 3 vertices has exactly the missing edge.
+    eq(
+        "VertexCount[GraphComplement[Graph[{1 <-> 2, 2 <-> 3}]]]",
+        "3",
+    );
+    eq("EdgeCount[GraphComplement[Graph[{1 <-> 2, 2 <-> 3}]]]", "1");
+    // A spanning tree of the triangle keeps 3 vertices and 2 edges.
+    eq(
+        "EdgeCount[FindSpanningTree[Graph[{1 <-> 2, 2 <-> 3, 3 <-> 1}]]]",
+        "2",
+    );
+}
+
+// ── linear algebra: decompositions ──
+#[test]
+fn linalg_decompositions() {
+    // Cholesky: M == L . Transpose[L].
+    eq(
+        "Norm[{{4, 1}, {1, 3}} - Dot[CholeskyDecomposition[{{4, 1}, {1, 3}}], Transpose[CholeskyDecomposition[{{4, 1}, {1, 3}}]]]]",
+        "0",
+    );
+    // QR: M == q . r.
+    eq(
+        "Norm[{{1, 2}, {3, 4}} - (QRDecomposition[{{1, 2}, {3, 4}}][[1]] . QRDecomposition[{{1, 2}, {3, 4}}][[2]])]",
+        "0",
+    );
+    // SVD: M == u . DiagonalMatrix[s] . Transpose[v].
+    eq(
+        "Norm[{{1, 2}, {3, 4}} - Dot[Dot[SingularValueDecomposition[{{1, 2}, {3, 4}}][[1]], DiagonalMatrix[SingularValueDecomposition[{{1, 2}, {3, 4}}][[2]]]], Transpose[SingularValueDecomposition[{{1, 2}, {3, 4}}][[3]]]]]",
+        "0",
+    );
+    eq("Adjugate[{{1, 2}, {3, 4}}]", "{{4, -2}, {-3, 1}}");
+    eq(
+        "ConjugateTranspose[{{1, 2 I}, {3, 4}}]",
+        "{{1, 3}, {-2 I, 4}}",
+    );
+    eq("Dimensions[LeviCivitaTensor[3]]", "{3, 3, 3}");
+    // Fully antisymmetric: even/odd permutations of (1,2,3) / repeated index.
+    eq("LeviCivitaTensor[3][[1, 2, 3]]", "1");
+    eq("LeviCivitaTensor[3][[2, 3, 1]]", "1");
+    eq("LeviCivitaTensor[3][[2, 1, 3]]", "-1");
+    eq("LeviCivitaTensor[3][[1, 1, 2]]", "0");
+}
+
+// ── statistics extras ──
+#[test]
+fn stats_extra() {
+    eq("SurvivalFunction[ExponentialDistribution[2], 0]", "1");
+    eq("Commonest[{1, 2, 2, 3, 3}]", "{2, 3}");
+    eq("SpearmanRho[{1, 2, 3}, {1, 2, 3}]", "1");
+    eq("SpearmanRho[{1, 2, 3}, {3, 2, 1}]", "-1");
+}
+
+// ── combinatorics extras ──
+#[test]
+fn combinatorics_extra() {
+    eq("BellNumber[4]", "15");
+    eq("BellB[5]", "52");
+    eq("Derangements[4]", "9");
+    eq("EulerE[10]", "-50521");
+    eq("PermutationSignature[{2, 3, 1}]", "1");
+    eq("Signature[{1, 3, 2}]", "-1");
+    eq("Signature[{1, 2, 3}]", "1");
+}
+
+// ── special functions extras ──
+#[test]
+fn special_extra() {
+    eq("ChebyshevT[3, 1/2]", "-1");
+    eq("ChebyshevT[4, 1/2]", "-1/2");
+    eq("ProductLog[1]", "0.5671432904097838");
+    // Y_1^0(θ, φ) is proportional to Cos[θ], which vanishes at θ = π/2.
+    eq("N[SphericalHarmonicY[1, 0, Pi/2, 0]]", "0");
+    eq("AiryAiPrime[0]", "-1/3^(1/3)/Gamma[1/3]");
+}
+
+// ── units ──
+#[test]
+fn units_extra() {
+    eq(
+        "QuantityMagnitude[UnitConvert[Quantity[1, \"Mile\"], \"Kilometer\"]]",
+        "1.609344",
+    );
+    eq(
+        "QuantityMagnitude[UnitConvert[Quantity[0, \"Celsius\"], \"Kelvin\"]]",
+        "273.15",
+    );
+    eq(
+        "QuantityMagnitude[UnitConvert[Quantity[1, \"Hour\"], \"Second\"]]",
+        "3600",
+    );
+}
+
+// ── strings extras ──
+#[test]
+fn strings_extra() {
+    eqs("LowerCase[\"ABC\", 2]", "\"AbC\"");
+    eqs("ToTitleCase[\"hello wORLD\"]", "\"Hello World\"");
+    // `bc` occurs twice in `abcabc` (positions {2,3} and {5,6}).
+    eq("Length[StringPosition[\"abcabc\", \"bc\"]]", "2");
+    eqs("StringPosition[\"abcabc\", \"bc\"]", "{{2, 3}, {5, 6}}");
+}
+
+// ── associations extras ──
+#[test]
+fn assoc_extra() {
+    eq("Lookup[<|\"a\" -> 1|>, \"a\"]", "1");
+    eqs("Values[<|\"x\" -> 1|>]", "{1}");
+    // Counts keys are stored in canonical string form, so numeric keys are
+    // looked up by value (`Lookup[..., 1]` finds the `"1"` key).
+    eq("Lookup[Counts[{1, 1, 2}], 1]", "2");
+    eq("Lookup[Counts[{1, 1, 2}], 2]", "1");
+    eq("Length[Counts[{1, 1, 2}]]", "2");
+}
+
+// ── calculus extras ──
+#[test]
+fn calculus_extra() {
+    eq("SeriesCoefficient[1/(1 - x), {x, 0, n}]", "1");
+    // InverseSeries of Sin: x + x^3/6 + 3 x^5/40 + O[x]^6.
+    eq(
+        "SeriesCoefficient[InverseSeries[Series[Sin[x], {x, 0, 5}]], {x, 0, 3}]",
+        "1/6",
+    );
+    eq(
+        "SeriesCoefficient[InverseSeries[Series[Sin[x], {x, 0, 5}]], {x, 0, 5}]",
+        "3/40",
+    );
+    eqs(
+        "Normal[InverseSeries[Series[Sin[x], {x, 0, 5}]]]",
+        "x + 1/6 x^3 + 3/40 x^5",
+    );
+    eq("LaplaceTransform[t^3, t, s]", "6/s^4");
+    eq("ZTransform[a^n, n, z]", "z/(z - a)");
+}

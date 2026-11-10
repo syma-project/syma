@@ -18,7 +18,105 @@ use crate::value::{BuiltinFn, EvalError, Value};
 use rug::Integer;
 
 /// Register the builtins implemented in this module.
+fn truthy(v: &Value) -> bool {
+    matches!(v, Value::Bool(true)) || matches!(v, Value::Symbol(s) if s == "True")
+}
+
+/// Assert[test, tag?] — returns `Null`, emitting a message when `test` fails.
+pub fn builtin_assert(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(unevaluated_values("Assert", args));
+    }
+    if truthy(&args[0]) {
+        return Ok(Value::Null);
+    }
+    if matches!(&args[0], Value::Bool(false))
+        || matches!(&args[0], Value::Symbol(s) if s == "False")
+    {
+        crate::messages::emit("Assert::asrt", &[format!("{}", args[0])]);
+        return Ok(Value::Null);
+    }
+    Ok(unevaluated_values("Assert", args))
+}
+
+fn outcome_value(name: &str, actual: Value, expected: Value, success: bool) -> Value {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "Outcome".to_string(),
+        Value::Str(if success { "Success" } else { "Failure" }.to_string()),
+    );
+    map.insert("TestID".to_string(), Value::Str(name.to_string()));
+    map.insert("ActualOutput".to_string(), actual);
+    map.insert("ExpectedOutput".to_string(), expected);
+    Value::Call {
+        head: "TestResultObject".to_string(),
+        args: vec![Value::Assoc(map)],
+    }
+}
+
+/// VerificationTest[test] / VerificationTest[actual, expected] — a test result.
+pub fn builtin_verification_test(args: &[Value]) -> Result<Value, EvalError> {
+    let (actual, expected, success) = match args.len() {
+        1 => {
+            let ok = truthy(&args[0]);
+            (args[0].clone(), Value::Bool(true), ok)
+        }
+        2 => {
+            let ok = args[0].struct_eq(&args[1]);
+            (args[0].clone(), args[1].clone(), ok)
+        }
+        _ => return Ok(unevaluated_values("VerificationTest", args)),
+    };
+    Ok(outcome_value("VerificationTest", actual, expected, success))
+}
+
+/// TestReport[tests] — aggregate counts for a list of test results.
+pub fn builtin_test_report(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Ok(unevaluated_values("TestReport", args));
+    }
+    let items: Vec<&Value> = match &args[0] {
+        Value::List(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    let mut success = 0i64;
+    let mut failure = 0i64;
+    for it in &items {
+        if let Value::Call { head, args: a } = it
+            && head == "TestResultObject"
+            && let Some(Value::Assoc(map)) = a.first()
+            && let Some(Value::Str(outcome)) = map.get("Outcome")
+        {
+            if outcome == "Success" {
+                success += 1;
+            } else {
+                failure += 1;
+            }
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "TestsCount".to_string(),
+        Value::Integer(rug::Integer::from(items.len() as i64)),
+    );
+    map.insert(
+        "SuccessCount".to_string(),
+        Value::Integer(rug::Integer::from(success)),
+    );
+    map.insert(
+        "FailureCount".to_string(),
+        Value::Integer(rug::Integer::from(failure)),
+    );
+    Ok(Value::Call {
+        head: "TestReportObject".to_string(),
+        args: vec![Value::Assoc(map)],
+    })
+}
+
 pub fn register(env: &Env) {
+    register_pure(env, "Assert", builtin_assert);
+    register_pure(env, "VerificationTest", builtin_verification_test);
+    register_pure(env, "TestReport", builtin_test_report);
     register_pure(env, "Throw", builtin_throw);
     register_pure(env, "Abort", builtin_abort);
     register_pure(env, "Label", builtin_label);
@@ -818,5 +916,26 @@ mod tests {
             eval_str("Check[TimeConstrained[Error[\"x\"], 0, 5], 42]"),
             int(5)
         );
+    }
+
+    #[test]
+    fn test_assert_true_is_null() {
+        assert_eq!(eval_str("Assert[1 == 1]"), Value::Null);
+    }
+
+    #[test]
+    fn test_verification_test_outcome() {
+        let out = eval_str("VerificationTest[1 == 1]").to_string();
+        assert!(out.contains("\"Outcome\" -> \"Success\""), "got {out}");
+        let out = eval_str("VerificationTest[1, 2]").to_string();
+        assert!(out.contains("\"Outcome\" -> \"Failure\""), "got {out}");
+    }
+
+    #[test]
+    fn test_test_report_counts() {
+        let out =
+            eval_str("TestReport[{VerificationTest[True], VerificationTest[False]}]").to_string();
+        assert!(out.contains("\"TestsCount\" -> 2"), "got {out}");
+        assert!(out.contains("\"FailureCount\" -> 1"), "got {out}");
     }
 }

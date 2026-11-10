@@ -101,6 +101,7 @@ pub fn builtin_length(args: &[Value]) -> Result<Value, EvalError> {
     match &args[0] {
         Value::List(items) => Ok(Value::Integer(Integer::from(items.len() as i64))),
         Value::Str(s) => Ok(Value::Integer(Integer::from(s.chars().count() as i64))),
+        Value::Assoc(map) => Ok(Value::Integer(Integer::from(map.len() as i64))),
         Value::Call {
             args: call_args, ..
         } => Ok(Value::Integer(Integer::from(call_args.len() as i64))),
@@ -2529,21 +2530,20 @@ pub fn builtin_thread(args: &[Value]) -> Result<Value, EvalError> {
             if call_args.is_empty() {
                 return Ok(args[0].clone());
             }
-            let mut lists: Vec<&[Value]> = Vec::with_capacity(call_args.len());
+            // Non-list arguments are broadcast (Wolfram threads a single list
+            // over scalar arguments). Threading length comes from the first
+            // list argument.
+            let len = call_args
+                .iter()
+                .find_map(|a| match a {
+                    Value::List(items) => Some(items.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
             for arg in call_args {
-                match arg {
-                    Value::List(items) => lists.push(items.as_slice()),
-                    _ => {
-                        return Err(EvalError::TypeError {
-                            expected: "all arguments must be Lists of equal length".to_string(),
-                            got: arg.type_name().to_string(),
-                        });
-                    }
-                }
-            }
-            let len = lists[0].len();
-            for l in &lists[1..] {
-                if l.len() != len {
+                if let Value::List(items) = arg
+                    && items.len() != len
+                {
                     return Err(EvalError::Error(
                         "Thread: all lists must have the same length".to_string(),
                     ));
@@ -2551,7 +2551,13 @@ pub fn builtin_thread(args: &[Value]) -> Result<Value, EvalError> {
             }
             let mut result = Vec::with_capacity(len);
             for i in 0..len {
-                let threaded_args: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
+                let threaded_args: Vec<Value> = call_args
+                    .iter()
+                    .map(|a| match a {
+                        Value::List(items) => items[i].clone(),
+                        other => other.clone(),
+                    })
+                    .collect();
                 result.push(Value::Call {
                     head: head.clone(),
                     args: threaded_args,
@@ -2998,65 +3004,6 @@ pub fn builtin_map_if(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         }
     }
     Ok(Value::List(result))
-}
-
-// ── LongestCommonSubsequence ───────────────────────────────────────────────
-
-/// LongestCommonSubsequence[list1, list2] — finds the LCS of two lists or strings.
-pub fn builtin_longest_common_subsequence(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::Error(
-            "LongestCommonSubsequence requires exactly 2 arguments".to_string(),
-        ));
-    }
-    match (&args[0], &args[1]) {
-        (Value::Str(s1), Value::Str(s2)) => {
-            let chars1: Vec<char> = s1.chars().collect();
-            let chars2: Vec<char> = s2.chars().collect();
-            let lcs_chars = lcs_generic(&chars1, &chars2);
-            Ok(Value::Str(lcs_chars.into_iter().collect()))
-        }
-        (Value::List(l1), Value::List(l2)) => {
-            let lcs = lcs_generic(l1, l2);
-            Ok(Value::List(lcs))
-        }
-        _ => Err(EvalError::TypeError {
-            expected: "two Lists or two Strings".to_string(),
-            got: format!("{} and {}", args[0].type_name(), args[1].type_name()),
-        }),
-    }
-}
-
-/// Generic LCS using dynamic programming.
-fn lcs_generic<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
-    let m = a.len();
-    let n = b.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
-            }
-        }
-    }
-    // Backtrack
-    let mut result = Vec::new();
-    let (mut i, mut j) = (m, n);
-    while i > 0 && j > 0 {
-        if a[i - 1] == b[j - 1] {
-            result.push(a[i - 1].clone());
-            i -= 1;
-            j -= 1;
-        } else if dp[i - 1][j] >= dp[i][j - 1] {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
-    }
-    result.reverse();
-    result
 }
 
 // ── LongestCommonSubsequencePositions ──────────────────────────────────────

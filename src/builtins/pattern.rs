@@ -77,7 +77,12 @@ pub fn builtin_head(args: &[Value]) -> Result<Value, EvalError> {
             "Head requires exactly 1 argument".to_string(),
         ));
     }
-    Ok(Value::Symbol(args[0].type_name().to_string()))
+    // A compound call's head is its explicit head symbol (e.g. `f[1]` → `f`).
+    let name = match &args[0] {
+        Value::Call { head, .. } => head.clone(),
+        other => other.type_name().to_string(),
+    };
+    Ok(Value::Symbol(name))
 }
 
 pub fn builtin_type_of(args: &[Value]) -> Result<Value, EvalError> {

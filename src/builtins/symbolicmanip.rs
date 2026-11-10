@@ -3282,6 +3282,34 @@ pub fn builtin_series_coefficient(args: &[Value]) -> Result<Value, EvalError> {
     };
     let x0 = &list_args[1];
     let n_arg = &list_args[2];
+
+    // Direct extraction from an existing SeriesData (e.g. the result of
+    // InverseSeries / Series), instead of re-deriving via derivatives.
+    if let Value::SeriesData {
+        variable,
+        expansion_point,
+        coefficients,
+        min_exponent,
+        denominator,
+        ..
+    } = &args[0]
+    {
+        let same_var = matches!(&**variable, Value::Symbol(s) if s == &var);
+        if same_var
+            && (**expansion_point).struct_eq(x0)
+            && let Some(n) = value_to_i64(n_arg)
+        {
+            // coeffs[i] pairs with exponent (min_exponent + i) / denominator.
+            let target = n * i64::from(*denominator);
+            for (i, c) in coefficients.iter().enumerate() {
+                if i64::from(*min_exponent) + i as i64 == target {
+                    return Ok(c.clone());
+                }
+            }
+            return Ok(Value::Integer(Integer::from(0)));
+        }
+    }
+
     match value_to_i64(n_arg) {
         Some(n) => Ok(series_coefficient(&args[0], &var, x0, n)),
         // Symbolic order, e.g. SeriesCoefficient[1/(1 - x), {x, 0, n}].

@@ -2429,10 +2429,12 @@ pub fn builtin_levi_civita_tensor(args: &[Value]) -> Result<Value, EvalError> {
         return Ok(unevaluated("LeviCivitaTensor", args));
     }
     let n = match &args[0] {
-        Value::Integer(i) => match i.to_usize() {
-            Some(n) if n >= 1 => n,
-            _ => return Ok(unevaluated("LeviCivitaTensor", args)),
-        },
+        Value::Integer(i) => i.to_usize(),
+        Value::Real(r) if r.is_integer() => r.to_integer().and_then(|i| i.to_usize()),
+        _ => None,
+    };
+    let n = match n {
+        Some(n) if n >= 1 => n,
         _ => return Ok(unevaluated("LeviCivitaTensor", args)),
     };
     let mut idx = Vec::with_capacity(n);
@@ -2715,10 +2717,401 @@ pub fn builtin_positive_semidefinite_matrix_q(args: &[Value]) -> Result<Value, E
 
 // ── Registration ────────────────────────────────────────────────────────────
 
+// ── Sparse arrays ───────────────────────────────────────────────────────────
+
+/// Is `v` a (symbolic) `SparseArray`?
+pub fn is_sparse(v: &Value) -> bool {
+    matches!(v, Value::Call { head, .. } if head == "SparseArray")
+}
+
+fn is_zero_value(v: &Value) -> bool {
+    matches!(v, Value::Integer(i) if i.is_zero())
+        || matches!(v, Value::Rational(r) if r.is_zero())
+        || matches!(v, Value::Real(r) if r.is_zero())
+}
+
+/// Split a `SparseArray[rules, dims, default?]` into its parts.
+fn sparse_parts(v: &Value) -> Option<(Vec<Value>, Vec<usize>, Value)> {
+    let Value::Call { head, args } = v else {
+        return None;
+    };
+    if head != "SparseArray" || args.len() < 2 {
+        return None;
+    }
+    let rules = match &args[0] {
+        Value::List(r) => r
+            .iter()
+            .filter_map(|x| {
+                rule_position(x).map(|(pos, val)| Value::Rule {
+                    lhs: Box::new(Value::List(pos)),
+                    rhs: Box::new(val),
+                    delayed: false,
+                })
+            })
+            .collect(),
+        _ => return None,
+    };
+    let dims = dims_of(&unwrap_value(&args[1]))?;
+    let default = args
+        .get(2)
+        .map(unwrap_value)
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    Some((rules, dims, default))
+}
+
+fn dims_of(v: &Value) -> Option<Vec<usize>> {
+    match v {
+        Value::Integer(i) => {
+            let n = i.to_usize()?;
+            if n == 0 { None } else { Some(vec![n]) }
+        }
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(usize::try_from(it.to_integer()?).ok()?);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Infer the dimensions from a rule set's positions.
+fn infer_dims(rules: &[Value]) -> Option<Vec<usize>> {
+    let mut dims: Vec<usize> = Vec::new();
+    for r in rules {
+        let Some((pos, _)) = rule_position(r) else {
+            continue;
+        };
+        for (i, c) in pos.iter().enumerate() {
+            let idx = usize::try_from(c.to_integer()?).ok()?;
+            if i >= dims.len() {
+                dims.push(idx);
+            } else if idx > dims[i] {
+                dims[i] = idx;
+            }
+        }
+    }
+    if dims.is_empty() {
+        Some(vec![0])
+    } else {
+        Some(dims)
+    }
+}
+
+/// Recursively collect positional rules of a dense (ragged) list.
+fn dense_rules(v: &Value, prefix: &mut Vec<Value>, out: &mut Vec<Value>) {
+    match v {
+        Value::List(items) => {
+            for (i, it) in items.iter().enumerate() {
+                prefix.push(Value::Integer(Integer::from(i as i64 + 1)));
+                dense_rules(it, prefix, out);
+                prefix.pop();
+            }
+        }
+        _ => {
+            if !is_zero_value(v) {
+                out.push(Value::Rule {
+                    lhs: Box::new(Value::List(prefix.clone())),
+                    rhs: Box::new(v.clone()),
+                    delayed: false,
+                });
+            }
+        }
+    }
+}
+
+fn list_shape(v: &Value) -> Vec<usize> {
+    let mut shape = Vec::new();
+    let mut cur = v;
+    while let Value::List(items) = cur {
+        shape.push(items.len());
+        if items.is_empty() {
+            break;
+        }
+        cur = &items[0];
+    }
+    shape
+}
+
+/// Unwrap a `Value::Pattern` (parsed rule operands) into a plain value.
+fn unwrap_value(v: &Value) -> Value {
+    match v {
+        Value::Pattern(e) => crate::pattern::unwrap_expr_to_value(e),
+        _ => v.clone(),
+    }
+}
+
+/// Normalise a rule into `(position list, value)`; `None` if not a position
+/// rule.
+fn rule_position(r: &Value) -> Option<(Vec<Value>, Value)> {
+    let Value::Rule { lhs, rhs, .. } = r else {
+        return None;
+    };
+    match unwrap_value(lhs) {
+        Value::List(pos) => Some((pos, unwrap_value(rhs))),
+        _ => None,
+    }
+}
+
+/// SparseArray[rules] / SparseArray[rules, dims] / SparseArray[dense, ...].
+pub fn builtin_sparse_array(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || unevaluated("SparseArray", args);
+    if args.is_empty() || args.len() > 3 {
+        return Ok(uneval());
+    }
+    let default = args
+        .get(2)
+        .map(unwrap_value)
+        .unwrap_or(Value::Integer(Integer::from(0)));
+    // First argument: rules or dense array.
+    let (rules_raw, dims) = match &args[0] {
+        Value::List(items) if items.iter().all(|x| matches!(x, Value::Rule { .. })) => {
+            let dims = match args.get(1) {
+                Some(d) => match dims_of(&unwrap_value(d)) {
+                    Some(d) => d,
+                    None => return Ok(uneval()),
+                },
+                None => match infer_dims(items) {
+                    Some(d) => d,
+                    None => return Ok(uneval()),
+                },
+            };
+            (items.clone(), dims)
+        }
+        Value::List(_) => {
+            let dims = match args.get(1) {
+                Some(d) => match dims_of(&unwrap_value(d)) {
+                    Some(d) => d,
+                    None => return Ok(uneval()),
+                },
+                None => list_shape(&args[0]),
+            };
+            let mut rules = Vec::new();
+            let mut prefix = Vec::new();
+            dense_rules(&args[0], &mut prefix, &mut rules);
+            (rules, dims)
+        }
+        _ => return Ok(uneval()),
+    };
+    // Normalise rules (unwrap parsed `Pattern` operands).
+    let mut rules = Vec::with_capacity(rules_raw.len());
+    for r in &rules_raw {
+        match rule_position(r) {
+            Some((pos, val)) => rules.push(Value::Rule {
+                lhs: Box::new(Value::List(pos)),
+                rhs: Box::new(val),
+                delayed: false,
+            }),
+            None => return Ok(uneval()),
+        }
+    }
+    let mut out = vec![Value::List(rules), dims_value(&dims)];
+    if !is_zero_value(&default) {
+        out.push(default);
+    }
+    Ok(Value::Call {
+        head: "SparseArray".to_string(),
+        args: out,
+    })
+}
+
+fn dims_value(dims: &[usize]) -> Value {
+    Value::List(
+        dims.iter()
+            .map(|d| Value::Integer(Integer::from(*d as i64)))
+            .collect(),
+    )
+}
+
+/// SparseArrayQ[expr] — True if `expr` is a SparseArray.
+pub fn builtin_sparse_array_q(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "SparseArrayQ requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(Value::Bool(is_sparse(&args[0])))
+}
+
+/// ArrayRules[expr] — positional rules for a sparse or dense array.
+pub fn builtin_array_rules(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ArrayRules requires exactly 1 argument".to_string(),
+        ));
+    }
+    if let Some((rules, dims, default)) = sparse_parts(&args[0]) {
+        let mut out = rules;
+        // A trailing default rule with blank positions, as Wolfram emits.
+        let rank = dims.len().max(1);
+        let blanks: Vec<Value> = (0..rank)
+            .map(|_| {
+                Value::Pattern(crate::ast::Expr::Blank {
+                    type_constraint: None,
+                })
+            })
+            .collect();
+        out.push(Value::Rule {
+            lhs: Box::new(Value::List(blanks)),
+            rhs: Box::new(default),
+            delayed: false,
+        });
+        return Ok(Value::List(out));
+    }
+    // Dense array.
+    let mut rules = Vec::new();
+    let mut prefix = Vec::new();
+    dense_rules(&args[0], &mut prefix, &mut rules);
+    Ok(Value::List(rules))
+}
+
+/// Materialise a sparse array into a dense nested list.
+pub fn normal_dense(v: &Value) -> Option<Value> {
+    let (rules, dims, default) = sparse_parts(v)?;
+    fn build(dims: &[usize], default: &Value) -> Value {
+        if dims.is_empty() {
+            return default.clone();
+        }
+        Value::List((0..dims[0]).map(|_| build(&dims[1..], default)).collect())
+    }
+    let mut dense = build(&dims, &default);
+    for r in &rules {
+        let Some((pos, val)) = rule_position(r) else {
+            continue;
+        };
+        if let Some(slot) = list_slot_mut(&mut dense, &pos) {
+            *slot = val;
+        }
+    }
+    Some(dense)
+}
+
+fn list_slot_mut<'a>(mut v: &'a mut Value, pos: &[Value]) -> Option<&'a mut Value> {
+    for p in pos {
+        let idx = usize::try_from(p.to_integer()?).ok()?;
+        let Value::List(items) = v else {
+            return None;
+        };
+        let idx = idx.checked_sub(1)?;
+        v = items.get_mut(idx)?;
+    }
+    Some(v)
+}
+
+/// Numeric product of two values when both are numeric.
+fn num_mul(a: &Value, b: &Value) -> Option<Value> {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => Some(Value::Integer(x.clone() * y.clone())),
+        (Value::Rational(x), Value::Rational(y)) => {
+            Some(Value::Rational(Box::new((**x).clone() * (**y).clone())))
+        }
+        _ => {
+            let x = super::to_f64(a)?;
+            let y = super::to_f64(b)?;
+            Some(super::real(x * y))
+        }
+    }
+}
+
+/// Numeric sum of a list of values when all are numeric.
+fn num_sum(vals: &[Value]) -> Option<Value> {
+    let mut acc: Option<Value> = None;
+    for v in vals {
+        acc = Some(match (acc, v) {
+            (None, v) => v.clone(),
+            (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(a + b),
+            (Some(Value::Rational(a)), Value::Rational(b)) => {
+                Value::Rational(Box::new((*a).clone() + (**b).clone()))
+            }
+            (Some(a), b) => super::real(super::to_f64(&a)? + super::to_f64(b)?),
+        });
+    }
+    acc
+}
+
+/// SparseMatrixMultiply[a, b] — matrix product of two (sparse or dense) arrays,
+/// returned as a `SparseArray`.
+pub fn builtin_sparse_matrix_multiply(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "SparseMatrixMultiply requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let to_dense = |v: &Value| -> Option<Value> {
+        if is_sparse(v) {
+            normal_dense(v)
+        } else {
+            Some(v.clone())
+        }
+    };
+    let (Some(a), Some(b)) = (to_dense(&args[0]), to_dense(&args[1])) else {
+        return Ok(unevaluated("SparseMatrixMultiply", args));
+    };
+    let (Value::List(ar), Value::List(br)) = (&a, &b) else {
+        return Ok(unevaluated("SparseMatrixMultiply", args));
+    };
+    let n = ar.len();
+    let m = br
+        .first()
+        .map(|r| match r {
+            Value::List(c) => c.len(),
+            _ => 0,
+        })
+        .unwrap_or(0);
+    if m == 0 {
+        return Ok(unevaluated("SparseMatrixMultiply", args));
+    }
+    let mut rows: Vec<Value> = Vec::with_capacity(n);
+    for i in 0..n {
+        let Value::List(arow) = &ar[i] else {
+            return Ok(unevaluated("SparseMatrixMultiply", args));
+        };
+        let mut row: Vec<Value> = Vec::with_capacity(m);
+        for j in 0..m {
+            let mut terms: Vec<Value> = Vec::new();
+            for (k, av) in arow.iter().enumerate() {
+                let bkj = match br.get(k) {
+                    Some(Value::List(brow)) => brow.get(j).cloned(),
+                    _ => None,
+                };
+                if let Some(bv) = bkj {
+                    if is_zero_value(av) || is_zero_value(&bv) {
+                        continue;
+                    }
+                    terms.push(match num_mul(av, &bv) {
+                        Some(v) => v,
+                        None => Value::Call {
+                            head: "Times".to_string(),
+                            args: vec![av.clone(), bv],
+                        },
+                    });
+                }
+            }
+            row.push(if terms.is_empty() {
+                Value::Integer(Integer::from(0))
+            } else if terms.len() == 1 {
+                terms.pop().unwrap()
+            } else {
+                num_sum(&terms).unwrap_or(Value::Call {
+                    head: "Plus".to_string(),
+                    args: terms,
+                })
+            });
+        }
+        rows.push(Value::List(row));
+    }
+    builtin_sparse_array(&[Value::List(rows)])
+}
+
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
     #[allow(clippy::type_complexity)]
     let funcs: &[(&str, fn(&[Value]) -> Result<Value, EvalError>)] = &[
+        ("SparseArray", builtin_sparse_array),
+        ("SparseArrayQ", builtin_sparse_array_q),
+        ("ArrayRules", builtin_array_rules),
+        ("SparseMatrixMultiply", builtin_sparse_matrix_multiply),
         ("LUDecomposition", builtin_lu_decomposition),
         ("QRDecomposition", builtin_qr_decomposition),
         ("Eigensystem", builtin_eigensystem),
@@ -3515,5 +3908,56 @@ mod tests {
                 .unwrap(),
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn test_sparse_array_roundtrip() {
+        let sa = builtin_sparse_array(&[Value::List(vec![
+            Value::Rule {
+                lhs: Box::new(Value::List(vec![int(1), int(1)])),
+                rhs: Box::new(int(5)),
+                delayed: false,
+            },
+            Value::Rule {
+                lhs: Box::new(Value::List(vec![int(2), int(2)])),
+                rhs: Box::new(int(7)),
+                delayed: false,
+            },
+        ])])
+        .unwrap();
+        assert!(is_sparse(&sa));
+        assert_eq!(
+            builtin_sparse_array_q(&[sa.clone()]).unwrap(),
+            Value::Bool(true)
+        );
+        let dense = normal_dense(&sa).unwrap();
+        assert_eq!(dense.to_string(), "{{5, 0}, {0, 7}}");
+    }
+
+    #[test]
+    fn test_array_rules_dense() {
+        let dense = Value::List(vec![int(3), int(0), int(4)]);
+        let rules = builtin_array_rules(&[dense]).unwrap().to_string();
+        assert!(rules.contains("3"), "got {rules}");
+        assert!(rules.contains("4"), "got {rules}");
+    }
+
+    #[test]
+    fn test_sparse_matrix_multiply() {
+        let a = builtin_sparse_array(&[Value::List(vec![Value::Rule {
+            lhs: Box::new(Value::List(vec![int(1), int(1)])),
+            rhs: Box::new(int(2)),
+            delayed: false,
+        }])])
+        .unwrap();
+        let b = builtin_sparse_array(&[Value::List(vec![Value::Rule {
+            lhs: Box::new(Value::List(vec![int(1), int(1)])),
+            rhs: Box::new(int(3)),
+            delayed: false,
+        }])])
+        .unwrap();
+        let prod = builtin_sparse_matrix_multiply(&[a, b]).unwrap();
+        let dense = normal_dense(&prod).unwrap();
+        assert_eq!(dense.to_string(), "{{6}}");
     }
 }

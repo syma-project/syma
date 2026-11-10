@@ -519,6 +519,78 @@ pub fn builtin_undulate(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(flatten_all(&args[0])))
 }
 
+// ── Applied operator forms ──────────────────────────────────────────────────
+
+/// Build `f[##]` (or `f @@ Reverse[{##}]` when the arguments are reversed).
+fn applied_body(fname: &str, reverse: bool) -> Expr {
+    if !reverse {
+        return Expr::Call {
+            head: Box::new(Expr::Symbol(fname.to_string())),
+            args: vec![Expr::SlotSequence(None)],
+        };
+    }
+    let reversed = Expr::Call {
+        head: Box::new(Expr::Symbol("Reverse".to_string())),
+        args: vec![Expr::List(vec![Expr::SlotSequence(None)])],
+    };
+    Expr::Call {
+        head: Box::new(Expr::Symbol(fname.to_string())),
+        args: vec![Expr::Call {
+            head: Box::new(Expr::Symbol("Apply".to_string())),
+            args: vec![Expr::Symbol("Sequence".to_string()), reversed],
+        }],
+    }
+}
+
+/// Create an operator that applies `f` to its arguments (reversed if asked).
+fn make_applied_operator(f: &Value, parent: &Env, reverse: bool) -> Value {
+    let (child, names) = func_env_with_stored(parent, Rc::new(vec![f.clone()]));
+    Value::PureFunction {
+        body: applied_body(&names[0], reverse),
+        slot_count: 0,
+        params: vec![],
+        env: Some(child),
+    }
+}
+
+/// CurryApplied[f, n] — operator form of `Curry`.
+pub fn builtin_curry_applied(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    builtin_curry(args, env)
+}
+
+/// OperatorApplied[f, n] — operator applying `f` to `n` arguments
+/// (`OperatorApplied[f, n][a1, …, an] == f[a1, …, an]`).
+pub fn builtin_operator_applied(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "OperatorApplied requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    Ok(make_applied_operator(&args[0], env, false))
+}
+
+/// ReverseApplied[f] — operator applying `f` to reversed arguments.
+pub fn builtin_reverse_applied(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "ReverseApplied requires exactly 1 argument".to_string(),
+        ));
+    }
+    Ok(make_applied_operator(&args[0], env, true))
+}
+
+/// Construct[f, x, …] — `f` applied to the arguments; `Construct[f]` is an
+/// operator form.
+pub fn builtin_construct(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    match args.len() {
+        0 => Err(EvalError::Error(
+            "Construct requires at least 1 argument".to_string(),
+        )),
+        1 => Ok(make_applied_operator(&args[0], env, false)),
+        _ => apply_function(&args[0], &args[1..], env),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,6 +1262,51 @@ mod tests {
                 head: "f".to_string(),
                 args: vec![Value::Symbol("a".to_string())],
             }
+        );
+    }
+
+    fn eval_str(input: &str) -> Value {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        let tokens = crate::lexer::tokenize(input).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap()
+    }
+
+    #[test]
+    fn test_curry_applied() {
+        assert_eq!(eval_str("CurryApplied[f, 2][a][b]").to_string(), "f[a, b]");
+    }
+
+    #[test]
+    fn test_operator_applied() {
+        assert_eq!(eval_str("OperatorApplied[Plus, 2][3, 4]").to_string(), "7");
+        assert_eq!(
+            eval_str("OperatorApplied[f, 2][a, b]").to_string(),
+            "f[a, b]"
+        );
+    }
+
+    #[test]
+    fn test_reverse_applied() {
+        assert_eq!(
+            eval_str("ReverseApplied[f][a, b, c]").to_string(),
+            "f[c, b, a]"
+        );
+    }
+
+    #[test]
+    fn test_construct() {
+        assert_eq!(eval_str("Construct[f, x, y]").to_string(), "f[x, y]");
+        assert_eq!(eval_str("Construct[Plus, 1, 2]").to_string(), "3");
+        assert_eq!(eval_str("Construct[f][a, b]").to_string(), "f[a, b]");
+    }
+
+    #[test]
+    fn test_thread_broadcasts_scalars() {
+        assert_eq!(
+            eval_str("Thread[f[{a, b}, c]]").to_string(),
+            "{f[a, c], f[b, c]}"
         );
     }
 }

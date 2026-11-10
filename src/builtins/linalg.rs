@@ -276,29 +276,41 @@ fn exact_sqrt_rational(r: &Rational) -> Option<Rational> {
 
 // ── Builtins ────────────────────────────────────────────────────────────────
 
-/// Dimensions[m] — returns {rows, cols} for a matrix or {n} for a vector.
+/// Dimensions[m] — returns the dimensions of a (rectangular) array.
+///
+/// Descends through successive levels while every element at a level is a list
+/// of the same length, so `Dimensions[{{1,2},{3,4}}] -> {2,2}` and
+/// `Dimensions[LeviCivitaTensor[3]] -> {3,3,3}`. Ragged arrays stop early
+/// (e.g. `Dimensions[{{1,2},{3}}] -> {2}`), matching Wolfram Language.
 pub fn builtin_dimensions(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
             "Dimensions requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::List(items) if items.is_empty() => Ok(Value::List(vec![int(0)])),
-        Value::List(items) => {
-            if let Value::List(row) = &items[0] {
-                // Matrix
-                Ok(Value::List(vec![
-                    int(items.len() as i64),
-                    int(row.len() as i64),
-                ]))
-            } else {
-                // Vector
-                Ok(Value::List(vec![int(items.len() as i64)]))
-            }
+    let mut dims: Vec<Value> = Vec::new();
+    let mut cur = &args[0];
+    while let Value::List(items) = cur {
+        dims.push(int(items.len() as i64));
+        if items.is_empty() {
+            break;
         }
-        _ => Ok(Value::List(vec![int(0)])),
+        let Value::List(first) = &items[0] else { break };
+        let n = first.len();
+        // Only descend when the level is rectangular (all same-length lists).
+        if !items
+            .iter()
+            .all(|it| matches!(it, Value::List(sub) if sub.len() == n))
+        {
+            break;
+        }
+        cur = &items[0];
     }
+    if dims.is_empty() {
+        // Atoms (and anything with no list levels) report {0}, as before.
+        return Ok(Value::List(vec![int(0)]));
+    }
+    Ok(Value::List(dims))
 }
 
 /// Dot[a, b] — generalized dot product / matrix multiply (exact arithmetic).

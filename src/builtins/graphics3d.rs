@@ -591,6 +591,68 @@ pub fn builtin_cuboid(args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
+/// `Cone[{{x1,y1,z1},{x2,y2,z2}}, r?]` — a right circular cone.
+pub fn builtin_cone(args: &[Value]) -> Result<Value, EvalError> {
+    cone_cylinder("Cone", args)
+}
+
+/// `Tetrahedron[{p1,p2,p3,p4}]` or `Tetrahedron[p1,p2,p3,p4]` — a simplex.
+pub fn builtin_tetrahedron(args: &[Value]) -> Result<Value, EvalError> {
+    let pts: Vec<&Value> = if args.len() == 1 {
+        match &args[0] {
+            Value::List(items) if items.len() == 4 => items.iter().collect(),
+            _ => return Ok(unevaluated("Tetrahedron", args)),
+        }
+    } else if args.len() == 4 {
+        args.iter().collect()
+    } else {
+        return Ok(unevaluated("Tetrahedron", args));
+    };
+    for p in &pts {
+        match p {
+            Value::List(coords) if coords.len() == 3 => {
+                for c in coords {
+                    super::require_f64(c, "Tetrahedron", 1)?;
+                }
+            }
+            _ => return Ok(unevaluated("Tetrahedron", args)),
+        }
+    }
+    Ok(Value::Call {
+        head: "Tetrahedron".to_string(),
+        args: vec![Value::List(pts.into_iter().cloned().collect())],
+    })
+}
+
+fn cone_cylinder(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(unevaluated(name, args));
+    }
+    // First argument: a list of exactly two 3-D endpoints.
+    match &args[0] {
+        Value::List(points) if points.len() == 2 => {
+            for p in points {
+                match p {
+                    Value::List(coords) if coords.len() == 3 => {
+                        for c in coords {
+                            super::require_f64(c, name, 1)?;
+                        }
+                    }
+                    _ => return Ok(unevaluated(name, args)),
+                }
+            }
+        }
+        _ => return Ok(unevaluated(name, args)),
+    }
+    if args.len() == 2 && super::to_f64(&args[1]).is_none() {
+        return Ok(unevaluated(name, args));
+    }
+    Ok(Value::Call {
+        head: name.to_string(),
+        args: args.to_vec(),
+    })
+}
+
 // ── Projection helpers ──────────────────────────────────────────────────────
 
 /// Fixed screen-space projector over an axis-aligned world bounding box.
@@ -1979,6 +2041,8 @@ pub fn register(env: &Env) {
     register_builtin(env, "Graphics3D", builtin_graphics3d);
     register_builtin_env(env, "GraphicsComplex", builtin_graphics_complex);
     register_builtin(env, "Cuboid", builtin_cuboid);
+    register_builtin(env, "Cone", builtin_cone);
+    register_builtin(env, "Tetrahedron", builtin_tetrahedron);
     register_builtin(env, "ListContourPlot", builtin_list_contour_plot);
     register_builtin(env, "ListDensityPlot", builtin_list_density_plot);
     register_builtin(env, "ListStreamPlot", builtin_list_stream_plot);
@@ -2416,5 +2480,16 @@ mod tests {
             .collect();
         let segs = marching_squares_segments(&grid, 0.0);
         assert!(segs.len() >= 8, "expected contour ring, got {}", segs.len());
+    }
+
+    #[test]
+    fn test_cone_and_tetrahedron() {
+        let cone = eval_str("Cone[{{0,0,0},{0,0,1}}, 1]");
+        assert!(matches!(&cone, Value::Call { head, .. } if head == "Cone"));
+        let tet = eval_str("Tetrahedron[{{0,0,0},{1,0,0},{0,1,0},{0,0,1}}]");
+        assert!(matches!(&tet, Value::Call { head, .. } if head == "Tetrahedron"));
+        // Invalid endpoint count stays unevaluated rather than erroring.
+        let bad = eval_str("Cone[{{0,0,0}}, 1]");
+        assert!(matches!(&bad, Value::Call { head, .. } if head == "Cone"));
     }
 }

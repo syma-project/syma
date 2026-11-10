@@ -2648,11 +2648,17 @@ pub fn builtin_circle(args: &[Value]) -> Result<Value, EvalError> {
 /// Disk[{cx, cy}, r] — filled circle with center and radius.
 /// Disk[{cx, cy}, {rx, ry}] — filled ellipse.
 pub fn builtin_disk(args: &[Value]) -> Result<Value, EvalError> {
-    super::require_min_args("Disk", args, 1)?;
     if args.len() > 2 {
         return Err(EvalError::Error(
-            "Disk requires 1 or 2 arguments".to_string(),
+            "Disk requires at most 2 arguments".to_string(),
         ));
+    }
+    if args.is_empty() {
+        // Disk[] — the unit disk.
+        return Ok(Value::Call {
+            head: "Disk".to_string(),
+            args: vec![],
+        });
     }
     match &args[0] {
         Value::List(coords) => {
@@ -3073,7 +3079,8 @@ pub fn register(env: &crate::env::Env) {
     register_builtin(env, "Legended", builtin_legended);
 
     // Containers
-    register_builtin(env, "GraphicsComplex", builtin_graphics_complex);
+    // `GraphicsComplex` is registered eagerly by `graphics3d::register`; the
+    // Graphics package must not shadow it when it loads lazily.
     register_builtin(env, "GraphicsRow", builtin_graphics_row);
     register_builtin(env, "GraphicsColumn", builtin_graphics_column);
 }

@@ -1573,7 +1573,12 @@ fn fourier_sincos(args: &[Value], env: &Env, is_sin: bool, name: &str) -> Result
 //
 // MellinTransform[f,t,z]        = Integrate[t^(z-1) f(t), {t, 0, Infinity}]
 // InverseMellinTransform[F,z,t] = (1/(2 Pi I)) Integrate[F(z) t^(-z), z]
+//
+// `calculusmore::register` owns the registered `MellinTransform` /
+// `InverseMellinTransform` builtins; this table-driven implementation and its
+// unit tests are retained, so the helpers are marked `allow(dead_code)`.
 
+#[allow(dead_code)]
 fn mellin_term(f: &Value, t: &str, z: &str, env: &Env) -> Option<Value> {
     // 1/(1+t) <-> Pi/Sin[Pi z].
     if let Value::Call { head, args } = f
@@ -1668,6 +1673,7 @@ fn mellin_term(f: &Value, t: &str, z: &str, env: &Env) -> Option<Value> {
     Some(eval_value(times(vec![coeff, body]), env))
 }
 
+#[allow(dead_code)]
 fn mellin(f: &Value, t: &str, z: &str, env: &Env) -> Value {
     let f = normalize(f);
     match distribute(&f, env, &|x| mellin_term(x, t, z, env)) {
@@ -1677,6 +1683,7 @@ fn mellin(f: &Value, t: &str, z: &str, env: &Env) -> Value {
 }
 
 /// If a factor is `Gamma[g]` with `g = z + p`, return `p`.
+#[allow(dead_code)]
 fn gamma_shift(f: &Value, z: &str) -> Option<Value> {
     for factor in factors_of(f) {
         if let Value::Call { head, args } = factor
@@ -1693,6 +1700,7 @@ fn gamma_shift(f: &Value, z: &str) -> Option<Value> {
 
 /// If `factor == b^(-z)` (in any of the equivalent forms `b^(-z)`,
 /// `(b^z)^(-1)`), return `b`.
+#[allow(dead_code)]
 fn neg_z_base(factor: &Value, z: &str) -> Option<Value> {
     let Value::Call { head, args } = factor else {
         return None;
@@ -1720,6 +1728,7 @@ fn neg_z_base(factor: &Value, z: &str) -> Option<Value> {
 }
 
 /// If a factor is `b^(-z)`, return `b`.
+#[allow(dead_code)]
 fn recip_z_base(f: &Value, z: &str) -> Option<Value> {
     for factor in factors_of(f) {
         if let Some(b) = neg_z_base(&factor, z) {
@@ -1730,6 +1739,7 @@ fn recip_z_base(f: &Value, z: &str) -> Option<Value> {
 }
 
 /// True when a factor is `{Sin,Cos}[Pi z / 2]`.
+#[allow(dead_code)]
 fn half_pi_trig(f: &Value, z: &str, is_sin: bool, env: &Env) -> bool {
     let want_head = if is_sin { "Sin" } else { "Cos" };
     for factor in factors_of(f) {
@@ -1751,6 +1761,7 @@ fn half_pi_trig(f: &Value, z: &str, is_sin: bool, env: &Env) -> bool {
 
 /// If `f` has a factor `Gamma[z/2]`, return the remaining constant coefficient
 /// (so `f == coeff * Gamma[z/2]`); otherwise `None`.
+#[allow(dead_code)]
 fn half_gamma_coeff(f: &Value, z: &str) -> Option<Value> {
     let half = Value::Rational(Box::new(rug::Rational::from((1, 2))));
     let mut coeff = int(1);
@@ -1778,6 +1789,7 @@ fn half_gamma_coeff(f: &Value, z: &str) -> Option<Value> {
     if found { Some(coeff) } else { None }
 }
 
+#[allow(dead_code)]
 fn inverse_mellin_term(f: &Value, z: &str, t: &str, env: &Env) -> Option<Value> {
     // Pi/Sin[Pi z] <-> 1/(1+t).
     if mellin_cauchy(f, z, env).is_some() {
@@ -1827,6 +1839,7 @@ fn inverse_mellin_term(f: &Value, z: &str, t: &str, env: &Env) -> Option<Value> 
 }
 
 /// True when `f == Pi / Sin[Pi z]` (up to a constant factor of `Pi`).
+#[allow(dead_code)]
 fn mellin_cauchy(f: &Value, z: &str, env: &Env) -> Option<Value> {
     let mut has_pi = false;
     let mut ok = false;
@@ -1852,6 +1865,7 @@ fn mellin_cauchy(f: &Value, z: &str, env: &Env) -> Option<Value> {
     if ok && has_pi { Some(f.clone()) } else { None }
 }
 
+#[allow(dead_code)]
 fn inverse_mellin(f: &Value, z: &str, t: &str, env: &Env) -> Value {
     let f = normalize(f);
     match distribute(&f, env, &|x| inverse_mellin_term(x, z, t, env)) {
@@ -2612,23 +2626,18 @@ pub fn register(env: &Env) {
     );
     register_builtin_env(env, "ZTransform", builtin_ztransform);
     register_builtin_env(env, "InverseZTransform", builtin_inverse_ztransform);
-    register_builtin_env(env, "FourierSinTransform", builtin_fourier_sin_transform);
+    // `FourierSinTransform`, `FourierCosTransform`, `MellinTransform` and
+    // `InverseMellinTransform` are owned by `calculusmore::register`, which
+    // runs later; only the inverse Fourier transforms are registered here.
     register_builtin_env(
         env,
         "InverseFourierSinTransform",
         builtin_inverse_fourier_sin_transform,
     );
-    register_builtin_env(env, "FourierCosTransform", builtin_fourier_cos_transform);
     register_builtin_env(
         env,
         "InverseFourierCosTransform",
         builtin_inverse_fourier_cos_transform,
-    );
-    register_builtin_env(env, "MellinTransform", builtin_mellin_transform);
-    register_builtin_env(
-        env,
-        "InverseMellinTransform",
-        builtin_inverse_mellin_transform,
     );
     register_builtin_env(env, "Dt", builtin_dt);
     register_builtin_env(env, "FunctionDomain", builtin_function_domain);
@@ -2692,44 +2701,12 @@ fn builtin_inverse_laplace_transform(args: &[Value], env: &Env) -> Result<Value,
     Ok(inverse_laplace(&f, &s, &t, env))
 }
 
-fn builtin_fourier_sin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    fourier_sincos(args, env, true, "FourierSinTransform")
-}
-
 fn builtin_inverse_fourier_sin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     fourier_sincos(args, env, true, "InverseFourierSinTransform")
 }
 
-fn builtin_fourier_cos_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    fourier_sincos(args, env, false, "FourierCosTransform")
-}
-
 fn builtin_inverse_fourier_cos_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     fourier_sincos(args, env, false, "InverseFourierCosTransform")
-}
-
-fn builtin_mellin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "MellinTransform requires exactly 3 arguments".to_string(),
-        ));
-    }
-    let f = unwrap(&args[0]);
-    let t = as_symbol(&args[1], "Symbol")?;
-    let z = as_symbol(&args[2], "Symbol")?;
-    Ok(mellin(&f, &t, &z, env))
-}
-
-fn builtin_inverse_mellin_transform(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() != 3 {
-        return Err(EvalError::Error(
-            "InverseMellinTransform requires exactly 3 arguments".to_string(),
-        ));
-    }
-    let f = unwrap(&args[0]);
-    let z = as_symbol(&args[1], "Symbol")?;
-    let t = as_symbol(&args[2], "Symbol")?;
-    Ok(inverse_mellin(&f, &z, &t, env))
 }
 
 /// Split a `Rule`/`RuleDelayed` — possibly still wrapped in a held

@@ -150,8 +150,14 @@ pub fn builtin_random_real(args: &[Value]) -> Result<Value, EvalError> {
                 let result = min + r * (max - min);
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, result)))
             }
+            // RandomReal[max] — a real in [0, max].
+            other if other.to_real().is_some() => {
+                let max = other.to_real().unwrap();
+                let r = (next_random() as f64) / (u64::MAX as f64);
+                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, r * max)))
+            }
             _ => Err(EvalError::TypeError {
-                expected: "{min, max}".to_string(),
+                expected: "{min, max} or max".to_string(),
                 got: args[0].type_name().to_string(),
             }),
         },
@@ -202,6 +208,118 @@ pub fn builtin_random_choice(args: &[Value]) -> Result<Value, EvalError> {
             got: args[0].type_name().to_string(),
         }),
     }
+}
+
+/// Draw a uniform `f64` in `[min, max)`.
+fn uniform_real(min: f64, max: f64) -> f64 {
+    let r = (next_random() as f64) / (u64::MAX as f64);
+    min + r * (max - min)
+}
+
+/// Parse a complex range spec into `(remin, remax, imin, imax)`.
+fn parse_complex_spec(v: &Value) -> Option<(f64, f64, f64, f64)> {
+    match v {
+        Value::List(items) if items.len() == 2 => {
+            // {{rmin, rmax}, {imin, imax}} or {min, max}
+            if let (Value::List(re), Value::List(im)) = (&items[0], &items[1]) {
+                if re.len() == 2 && im.len() == 2 {
+                    return Some((
+                        re[0].to_real()?,
+                        re[1].to_real()?,
+                        im[0].to_real()?,
+                        im[1].to_real()?,
+                    ));
+                }
+                None
+            } else {
+                let min = items[0].to_real()?;
+                let max = items[1].to_real()?;
+                Some((min, max, min, max))
+            }
+        }
+        _ => {
+            let max = v.to_real()?;
+            Some((0.0, max, 0.0, max))
+        }
+    }
+}
+
+fn random_complex_value(rem: f64, rex: f64, imm: f64, imx: f64) -> Value {
+    Value::Complex {
+        re: uniform_real(rem, rex),
+        im: uniform_real(imm, imx),
+    }
+}
+
+fn random_complex_array(dims: &[usize], rem: f64, rex: f64, imm: f64, imx: f64) -> Value {
+    if dims.is_empty() {
+        random_complex_value(rem, rex, imm, imx)
+    } else {
+        let mut items = Vec::with_capacity(dims[0]);
+        for _ in 0..dims[0] {
+            items.push(random_complex_array(&dims[1..], rem, rex, imm, imx));
+        }
+        Value::List(items)
+    }
+}
+
+/// RandomComplex[spec?, dims?] — a pseudorandom complex number.
+pub fn builtin_random_complex(args: &[Value]) -> Result<Value, EvalError> {
+    let (spec, dims) = match args.len() {
+        0 => (None, None),
+        1 => (Some(&args[0]), None),
+        2 => (Some(&args[0]), Some(parse_dims(&args[1])?)),
+        _ => {
+            return Err(EvalError::NoMatch {
+                head: "RandomComplex".to_string(),
+                args: Box::new(args.to_vec()),
+            });
+        }
+    };
+    let (rem, rex, imm, imx) = match spec {
+        Some(s) => parse_complex_spec(s).ok_or_else(|| EvalError::TypeError {
+            expected: "range spec".to_string(),
+            got: s.type_name().to_string(),
+        })?,
+        None => (0.0, 1.0, 0.0, 1.0),
+    };
+    match dims {
+        Some(d) => Ok(random_complex_array(&d, rem, rex, imm, imx)),
+        None => Ok(random_complex_value(rem, rex, imm, imx)),
+    }
+}
+
+/// RandomArray[dist, dims?] — array of pseudorandom variates. Delegates to
+/// `RandomVariate`, expanding a dimension list into a nested array.
+pub fn builtin_random_array(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "RandomArray requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    if args.len() == 2
+        && let Value::List(_) = &args[1]
+    {
+        let dims = parse_dims(&args[1])?;
+        return Ok(random_variate_array(&args[0], &dims));
+    }
+    super::statistics::builtin_random_variate(args)
+}
+
+fn random_variate_array(dist: &Value, dims: &[usize]) -> Value {
+    if dims.is_empty() {
+        return super::statistics::builtin_random_variate(std::slice::from_ref(dist)).unwrap_or(
+            Value::Call {
+                head: "RandomArray".to_string(),
+                args: vec![dist.clone()],
+            },
+        );
+    }
+    Value::List(
+        (0..dims[0])
+            .map(|_| random_variate_array(dist, &dims[1..]))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -262,5 +380,47 @@ mod tests {
     fn test_random_real_wrong_dims_type() {
         let result = builtin_random_real(&[list(vec![real(0.0), real(1.0)]), real(5.0)]);
         assert!(matches!(result, Err(EvalError::TypeError { .. })));
+    }
+
+    #[test]
+    fn test_random_real_max_argument() {
+        let v = builtin_random_real(&[int(3)]).unwrap();
+        let f = super::super::to_f64(&v).unwrap();
+        assert!((0.0..=3.0).contains(&f));
+    }
+
+    #[test]
+    fn test_random_complex_bounds() {
+        let v = builtin_random_complex(&[int(2)]).unwrap();
+        let Value::Complex { re, im } = v else {
+            panic!("expected complex");
+        };
+        assert!((0.0..=2.0).contains(&re) && (0.0..=2.0).contains(&im));
+    }
+
+    #[test]
+    fn test_random_complex_array() {
+        let v = builtin_random_complex(&[int(2), list(vec![int(2), int(3)])]).unwrap();
+        let Value::List(rows) = v else {
+            panic!("expected list");
+        };
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_random_array_dims() {
+        let mut dist = std::collections::HashMap::new();
+        dist.insert("Distribution".to_string(), Value::Str("Normal".to_string()));
+        dist.insert("Mean".to_string(), real(0.0));
+        dist.insert("SD".to_string(), real(1.0));
+        let v = builtin_random_array(&[Value::Assoc(dist), list(vec![int(2), int(3)])]).unwrap();
+        let Value::List(rows) = v else {
+            panic!("expected list");
+        };
+        assert_eq!(rows.len(), 2);
+        let Value::List(cols) = &rows[0] else {
+            panic!("expected nested list");
+        };
+        assert_eq!(cols.len(), 3);
     }
 }

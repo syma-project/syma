@@ -30,6 +30,20 @@ fn non_neg_int(val: &Value) -> Result<Integer, EvalError> {
     }
 }
 
+/// Extract a non-negative integer index, accepting also integral `Real`s.
+///
+/// `N[...]` numericizes integer arguments to reals, so combinatorial functions
+/// such as `BellNumber`/`Derangements`/`EulerE` must still evaluate under it.
+fn non_neg_usize(v: &Value) -> Option<usize> {
+    match v {
+        Value::Integer(i) if !i.is_negative() => i.to_usize(),
+        Value::Real(r) if r.is_integer() && !r.is_sign_negative() => {
+            r.to_integer().and_then(|i| i.to_usize())
+        }
+        _ => None,
+    }
+}
+
 /// Extract any integer from a Value.
 fn to_int(val: &Value) -> Result<Integer, EvalError> {
     match val {
@@ -1062,37 +1076,22 @@ pub fn builtin_bell_b(args: &[Value]) -> Result<Value, EvalError> {
             "BellB requires 1 or 2 arguments".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Integer(n) if !n.is_negative() => {
-            let n_val = n
-                .to_usize()
-                .ok_or_else(|| EvalError::Error("BellB: n too large".to_string()))?;
-            if args.len() == 1 {
-                // Bell number via Bell triangle
-                Ok(Value::Integer(bell_number(n_val)))
-            } else {
-                // BellB[n, k] — partial Bell polynomial (number of partitions into k blocks)
-                match &args[1] {
-                    Value::Integer(k) if !k.is_negative() => {
-                        let k_val = k
-                            .to_usize()
-                            .ok_or_else(|| EvalError::Error("BellB: k too large".to_string()))?;
-                        // BellB[n, k] in Wolfram Language = StirlingS2[n, k]
-                        // (the number of partitions of n elements into exactly k non-empty subsets)
-                        Ok(Value::Integer(stirling_s2_val(n_val, k_val)))
-                    }
-                    _ => Ok(Value::Call {
-                        head: "BellB".to_string(),
-                        args: args.to_vec(),
-                    }),
-                }
-            }
+    if let Some(n_val) = non_neg_usize(&args[0]) {
+        if args.len() == 1 {
+            // Bell number via Bell triangle
+            return Ok(Value::Integer(bell_number(n_val)));
         }
-        _ => Ok(Value::Call {
-            head: "BellB".to_string(),
-            args: args.to_vec(),
-        }),
+        // BellB[n, k] — partial Bell polynomial (number of partitions into k blocks)
+        if let Some(k_val) = non_neg_usize(&args[1]) {
+            // BellB[n, k] in Wolfram Language = StirlingS2[n, k]
+            // (the number of partitions of n elements into exactly k non-empty subsets)
+            return Ok(Value::Integer(stirling_s2_val(n_val, k_val)));
+        }
     }
+    Ok(Value::Call {
+        head: "BellB".to_string(),
+        args: args.to_vec(),
+    })
 }
 
 /// Compute StirlingS2(n, k) as a plain value.
@@ -1156,13 +1155,10 @@ pub fn builtin_derangements(args: &[Value]) -> Result<Value, EvalError> {
             "Derangements requires exactly 1 argument".to_string(),
         ));
     }
+    if let Some(n_val) = non_neg_usize(&args[0]) {
+        return Ok(Value::Integer(subfactorial_val(n_val)));
+    }
     match &args[0] {
-        Value::Integer(n) if !n.is_negative() => {
-            let n_val = n
-                .to_usize()
-                .ok_or_else(|| EvalError::Error("Derangements: n too large".to_string()))?;
-            Ok(Value::Integer(subfactorial_val(n_val)))
-        }
         Value::List(items) => {
             let mut result = Vec::new();
             let used = vec![false; items.len()];
@@ -1222,18 +1218,13 @@ pub fn builtin_euler_e(args: &[Value]) -> Result<Value, EvalError> {
             "EulerE requires exactly 1 argument".to_string(),
         ));
     }
-    match &args[0] {
-        Value::Integer(n) if !n.is_negative() => {
-            let n_val = n
-                .to_usize()
-                .ok_or_else(|| EvalError::Error("EulerE: n too large".to_string()))?;
-            Ok(Value::Integer(euler_number_e(n_val)))
-        }
-        _ => Ok(Value::Call {
-            head: "EulerE".to_string(),
-            args: args.to_vec(),
-        }),
+    if let Some(n_val) = non_neg_usize(&args[0]) {
+        return Ok(Value::Integer(euler_number_e(n_val)));
     }
+    Ok(Value::Call {
+        head: "EulerE".to_string(),
+        args: args.to_vec(),
+    })
 }
 
 /// Euler (secant) number E_n; zero for odd n.
@@ -1847,8 +1838,138 @@ fn integer_factorial(n: &Integer) -> Integer {
 }
 
 /// Register the combinatorics builtins. Called from `super::register_builtins`.
+/// Add polynomial `b` to `a` in place (ascending coefficients).
+fn poly_add(a: &mut Vec<Integer>, b: &[Integer]) {
+    if b.len() > a.len() {
+        a.resize(b.len(), Integer::from(0));
+    }
+    for (i, c) in b.iter().enumerate() {
+        a[i] += c;
+    }
+}
+
+/// Render an integer-coefficient polynomial in `q` in canonical form.
+fn poly_to_value(coeffs: &[Integer], q: &Value) -> Value {
+    let mut terms: Vec<Value> = Vec::new();
+    for (k, c) in coeffs.iter().enumerate() {
+        if c.is_zero() {
+            continue;
+        }
+        let power = match k {
+            0 => None,
+            1 => Some(q.clone()),
+            _ => Some(Value::Call {
+                head: "Power".to_string(),
+                args: vec![q.clone(), Value::Integer(Integer::from(k as i64))],
+            }),
+        };
+        match power {
+            None => terms.push(Value::Integer(c.clone())),
+            Some(p) if *c == 1 => terms.push(p),
+            Some(p) => terms.push(Value::Call {
+                head: "Times".to_string(),
+                args: vec![Value::Integer(c.clone()), p],
+            }),
+        }
+    }
+    if terms.is_empty() {
+        Value::Integer(Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        }
+    }
+}
+
+/// Gaussian binomial coefficient as a polynomial in `q` (DP recurrence).
+fn q_binomial_poly(n: usize, m: usize, q: &Value) -> Value {
+    let mut dp: Vec<Vec<Integer>> = vec![Vec::new(); m + 1];
+    dp[0] = vec![Integer::from(1)];
+    for i in 1..=n {
+        for j in (1..=m.min(i)).rev() {
+            let shift = i - j;
+            let mut add = vec![Integer::from(0); shift];
+            add.extend(dp[j - 1].iter().cloned());
+            let mut cur = std::mem::take(&mut dp[j]);
+            poly_add(&mut cur, &add);
+            dp[j] = cur;
+        }
+    }
+    poly_to_value(&dp[m], q)
+}
+
+/// QBinomial[n, m, q] — the Gaussian (q-) binomial coefficient
+/// `Π_{i=1}^{m} (1 - q^{n-m+i}) / (1 - q^i)`.
+pub fn builtin_q_binomial(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Error(
+            "QBinomial requires exactly 3 arguments".to_string(),
+        ));
+    }
+    let n = non_neg_int(&args[0])?;
+    let m = non_neg_int(&args[1])?;
+    if m > n {
+        return Ok(Value::Integer(Integer::from(0)));
+    }
+    let m_u = m.to_usize().unwrap_or(0);
+    let n_u = n.to_usize().unwrap_or(0);
+    match &args[2] {
+        Value::Integer(_) | Value::Rational(_) => {
+            let q: rug::Rational = match &args[2] {
+                Value::Integer(i) => rug::Rational::from(i.clone()),
+                Value::Rational(r) => (**r).clone(),
+                _ => unreachable!(),
+            };
+            if q == 1 {
+                return builtin_binomial(&[args[0].clone(), args[1].clone()]);
+            }
+            let qpow = |e: usize| -> rug::Rational {
+                let mut acc = rug::Rational::from(1);
+                for _ in 0..e {
+                    acc *= &q;
+                }
+                acc
+            };
+            let mut num = rug::Rational::from(1);
+            let mut den = rug::Rational::from(1);
+            for i in 1..=m_u {
+                num *= rug::Rational::from(1) - qpow(n_u - m_u + i);
+                den *= rug::Rational::from(1) - qpow(i);
+            }
+            Ok(Value::Rational(Box::new(num / den)))
+        }
+        Value::Real(_) => {
+            let Some(q) = super::to_f64(&args[2]) else {
+                return Ok(Value::Call {
+                    head: "QBinomial".to_string(),
+                    args: args.to_vec(),
+                });
+            };
+            if q == 1.0 {
+                return builtin_binomial(&[args[0].clone(), args[1].clone()]);
+            }
+            let mut num = 1.0_f64;
+            let mut den = 1.0_f64;
+            for i in 1..=m_u {
+                num *= 1.0 - q.powi((n_u - m_u + i) as i32);
+                den *= 1.0 - q.powi(i as i32);
+            }
+            Ok(super::real(num / den))
+        }
+        Value::Symbol(_) => Ok(q_binomial_poly(n_u, m_u, &args[2])),
+        _ => Ok(Value::Call {
+            head: "QBinomial".to_string(),
+            args: args.to_vec(),
+        }),
+    }
+}
+
 pub fn register(env: &Env) {
     super::register_builtin(env, "Binomial", builtin_binomial);
+    super::register_builtin(env, "QBinomial", builtin_q_binomial);
     super::register_builtin(env, "Multinomial", builtin_multinomial);
     super::register_builtin(env, "Factorial2", builtin_factorial2);
     super::register_builtin(env, "AlternatingFactorial", builtin_alternating_factorial);
@@ -2753,5 +2874,28 @@ mod tests {
         } else {
             panic!("Expected List");
         }
+    }
+
+    #[test]
+    fn test_q_binomial_exact() {
+        assert_eq!(
+            builtin_q_binomial(&[int(5), int(2), int(1)]).unwrap(),
+            int(10)
+        );
+        assert_eq!(
+            builtin_q_binomial(&[int(6), int(3), int(2)]).unwrap(),
+            int(1395)
+        );
+    }
+
+    #[test]
+    fn test_q_binomial_symbolic() {
+        let out = builtin_q_binomial(&[int(5), int(2), Value::Symbol("q".to_string())])
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            out,
+            "Plus[1, q, Times[2, Power[q, 2]], Times[2, Power[q, 3]], Times[2, Power[q, 4]], Power[q, 5], Power[q, 6]]"
+        );
     }
 }

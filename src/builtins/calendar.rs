@@ -748,6 +748,13 @@ pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
                 .unwrap();
             Ok(val_int((now.as_secs() as i64).div_euclid(86400)))
         }
+        1 => {
+            // Days since 1900-01-01.
+            let dt = date_spec_to_datetime(&args[0])?;
+            let secs = date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5);
+            let base = date_to_unix_seconds(1900, 1, 1, 0, 0, 0.0);
+            Ok(val_int(((secs - base) / 86400.0).round() as i64))
+        }
         2 => {
             let dt1 = date_spec_to_datetime(&args[0])?;
             let dt2 = date_spec_to_datetime(&args[1])?;
@@ -757,7 +764,7 @@ pub fn builtin_day_count(args: &[Value]) -> Result<Value, EvalError> {
             Ok(val_int(diff_days))
         }
         _ => Err(EvalError::Error(
-            "DayCount takes 0 or 2 arguments".to_string(),
+            "DayCount takes 0, 1, or 2 arguments".to_string(),
         )),
     }
 }
@@ -962,8 +969,249 @@ pub fn builtin_day_plus(args: &[Value]) -> Result<Value, EvalError> {
 // ── Registration ──
 
 /// Register all date/time builtins in the environment.
+/// Julian Date (JD) of a datetime, as a real number.
+fn julian_from_datetime(dt: (i64, i64, i64, i64, i64, f64)) -> f64 {
+    date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5) / 86400.0 + 2440587.5
+}
+
+/// Build a date list from a datetime, keeping `n` components (min 3).
+fn datetime_to_datelist(dt: (i64, i64, i64, i64, i64, f64), n: usize) -> Value {
+    let mut out = vec![val_int(dt.0), val_int(dt.1), val_int(dt.2)];
+    if n >= 4 {
+        out.push(val_int(dt.3));
+    }
+    if n >= 5 {
+        out.push(val_int(dt.4));
+    }
+    if n >= 6 {
+        out.push(val_real(dt.5));
+    }
+    Value::List(out)
+}
+
+fn datelist_len(v: &Value) -> usize {
+    match v {
+        Value::List(items) => items.len().max(3),
+        _ => 6,
+    }
+}
+
+/// JulianDate[date?] — Julian Date number (or the current one).
+pub fn builtin_julian_date(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        0 => Ok(val_real(julian_from_datetime(get_current_datetime()))),
+        1 => {
+            let dt = date_spec_to_datetime(&args[0])?;
+            Ok(val_real(julian_from_datetime(dt)))
+        }
+        _ => Err(EvalError::Error(
+            "JulianDate takes 0 or 1 argument".to_string(),
+        )),
+    }
+}
+
+/// FromJulianDate[jd] — date list for a Julian Date number.
+pub fn builtin_from_julian_date(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(EvalError::Error(
+            "FromJulianDate requires 1 or 2 arguments".to_string(),
+        ));
+    }
+    let jd = match &args[0] {
+        Value::Integer(i) => i.to_f64(),
+        Value::Real(r) => r.to_f64(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "Number".to_string(),
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    let secs = (jd - 2440587.5) * 86400.0;
+    let dt = unix_seconds_to_datetime(secs);
+    Ok(datetime_to_datelist(dt, 6))
+}
+
+/// Weekday index (0=Monday..6=Sunday) from a name or number.
+fn weekday_index(v: &Value) -> Option<i64> {
+    match v {
+        Value::Symbol(s) => {
+            for (i, name) in DAY_NAMES.iter().enumerate() {
+                if name.eq_ignore_ascii_case(s) {
+                    return Some(i as i64);
+                }
+            }
+            for (i, name) in DAY_SHORT_NAMES.iter().enumerate() {
+                if name.eq_ignore_ascii_case(s) {
+                    return Some(i as i64);
+                }
+            }
+            None
+        }
+        Value::Integer(n) => {
+            let n = n.to_i64()?;
+            // Monday=1 .. Sunday=7
+            if (1..=7).contains(&n) {
+                Some(n - 1)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// DayRange[start, end, step?, daytype?] — consecutive dates.
+pub fn builtin_day_range(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "DayRange".to_string(),
+        args: args.to_vec(),
+    };
+    if args.len() < 2 || args.len() > 4 {
+        return Ok(uneval());
+    }
+    let (Ok(start), Ok(end)) = (
+        date_spec_to_datetime(&args[0]),
+        date_spec_to_datetime(&args[1]),
+    ) else {
+        return Ok(uneval());
+    };
+    let step = if args.len() >= 3 {
+        match &args[2] {
+            Value::Integer(i) => i.to_i64().unwrap_or(1),
+            Value::Real(r) => r.to_f64() as i64,
+            _ => 1,
+        }
+    } else {
+        1
+    };
+    let step = if step == 0 { 1 } else { step };
+    let want = args.get(3).and_then(weekday_index);
+    let start_secs = date_to_unix_seconds(start.0, start.1, start.2, start.3, start.4, start.5);
+    let end_secs = date_to_unix_seconds(end.0, end.1, end.2, end.3, end.4, end.5);
+    let n = datelist_len(&args[0]);
+    let mut out = Vec::new();
+    let mut cur = start_secs;
+    let forward = step > 0;
+    let mut guard = 0;
+    while guard < 1_000_000 {
+        guard += 1;
+        if forward && cur > end_secs + 1e-6 {
+            break;
+        }
+        if !forward && cur < end_secs - 1e-6 {
+            break;
+        }
+        let dt = unix_seconds_to_datetime(cur);
+        if want
+            .map(|w| day_of_week(dt.0, dt.1, dt.2) as i64 == w)
+            .unwrap_or(true)
+        {
+            out.push(datetime_to_datelist(dt, n));
+        }
+        cur += step as f64 * 86400.0;
+    }
+    Ok(Value::List(out))
+}
+
+/// DayRound[date, day, convention?] — round `date` to an occurrence of `day`.
+pub fn builtin_day_round(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "DayRound".to_string(),
+        args: args.to_vec(),
+    };
+    if args.len() < 2 || args.len() > 3 {
+        return Ok(uneval());
+    }
+    let Ok(dt) = date_spec_to_datetime(&args[0]) else {
+        return Ok(uneval());
+    };
+    let Some(target) = weekday_index(&args[1]) else {
+        return Ok(uneval());
+    };
+    let convention = match args.get(2) {
+        Some(Value::Str(s)) | Some(Value::Symbol(s)) => s.clone(),
+        _ => "Nearest".to_string(),
+    };
+    let cur = day_of_week(dt.0, dt.1, dt.2) as i64;
+    let fwd = (target - cur).rem_euclid(7);
+    let delta = match convention.as_str() {
+        "Next" => {
+            if fwd == 0 {
+                7
+            } else {
+                fwd
+            }
+        }
+        "Prior" | "Previous" => {
+            if fwd == 0 {
+                -7
+            } else {
+                fwd - 7
+            }
+        }
+        _ => {
+            if fwd <= 3 {
+                fwd
+            } else {
+                fwd - 7
+            }
+        }
+    };
+    let secs = date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5) + delta as f64 * 86400.0;
+    let shifted = unix_seconds_to_datetime(secs);
+    Ok(datetime_to_datelist(shifted, datelist_len(&args[0])))
+}
+
+/// Resolve a time-zone designator to an offset in hours from UTC.
+fn timezone_offset(v: &Value) -> Option<f64> {
+    match v {
+        Value::Integer(i) => Some(i.to_f64()),
+        Value::Real(r) => Some(r.to_f64()),
+        Value::Str(s) | Value::Symbol(s) => match s.as_str() {
+            "UTC" | "GMT" | "Europe/London" => Some(0.0),
+            "America/New_York" => Some(-5.0),
+            "America/Chicago" => Some(-6.0),
+            "America/Denver" => Some(-7.0),
+            "America/Los_Angeles" => Some(-8.0),
+            "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" => Some(1.0),
+            "Asia/Tokyo" => Some(9.0),
+            "Asia/Shanghai" | "Asia/Hong_Kong" => Some(8.0),
+            "Asia/Kolkata" => Some(5.5),
+            "Australia/Sydney" => Some(10.0),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// TimeZoneConvert[date, tz] — reinterpret a UTC date in time zone `tz`.
+pub fn builtin_time_zone_convert(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "TimeZoneConvert".to_string(),
+        args: args.to_vec(),
+    };
+    if args.len() != 2 {
+        return Ok(uneval());
+    }
+    let Ok(dt) = date_spec_to_datetime(&args[0]) else {
+        return Ok(uneval());
+    };
+    let Some(off) = timezone_offset(&args[1]) else {
+        return Ok(uneval());
+    };
+    let secs = date_to_unix_seconds(dt.0, dt.1, dt.2, dt.3, dt.4, dt.5) + off * 3600.0;
+    let shifted = unix_seconds_to_datetime(secs);
+    Ok(datetime_to_datelist(shifted, datelist_len(&args[0]).max(6)))
+}
+
 pub fn register(env: &crate::env::Env) {
     use super::register_builtin;
+    register_builtin(env, "JulianDate", builtin_julian_date);
+    register_builtin(env, "FromJulianDate", builtin_from_julian_date);
+    register_builtin(env, "DayRange", builtin_day_range);
+    register_builtin(env, "DayRound", builtin_day_round);
+    register_builtin(env, "TimeZoneConvert", builtin_time_zone_convert);
     register_builtin(env, "AbsoluteTime", builtin_absolute_time);
     register_builtin(env, "Now", builtin_now);
     register_builtin(env, "Today", builtin_today);
@@ -1473,5 +1721,62 @@ mod tests {
             builtin_date_value(&[val_int(25_567)]).unwrap(),
             val_int(25_567)
         );
+    }
+
+    #[test]
+    fn test_julian_date_roundtrip() {
+        let jd = builtin_julian_date(&[Value::List(vec![val_int(2000), val_int(1), val_int(1)])])
+            .unwrap();
+        let f = super::super::to_f64(&jd).unwrap();
+        assert!((f - 2451544.5).abs() < 1e-9);
+        let back = builtin_from_julian_date(&[val_real(2451544.5)])
+            .unwrap()
+            .to_string();
+        assert_eq!(back, "{2000, 1, 1, 0, 0, 0}");
+    }
+
+    #[test]
+    fn test_day_count_since_1900() {
+        let d =
+            builtin_day_count(&[Value::List(vec![val_int(1900), val_int(1), val_int(1)])]).unwrap();
+        assert_eq!(d, val_int(0));
+    }
+
+    #[test]
+    fn test_day_range_and_round() {
+        let r = builtin_day_range(&[
+            Value::List(vec![val_int(2024), val_int(1), val_int(1)]),
+            Value::List(vec![val_int(2024), val_int(1), val_int(3)]),
+        ])
+        .unwrap();
+        let Value::List(items) = r else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 3);
+
+        // 2024-01-03 is a Wednesday; nearest Monday is 2024-01-01.
+        let rounded = builtin_day_round(&[
+            Value::List(vec![val_int(2024), val_int(1), val_int(3)]),
+            Value::Symbol("Monday".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(rounded.to_string(), "{2024, 1, 1}");
+    }
+
+    #[test]
+    fn test_time_zone_convert() {
+        let out = builtin_time_zone_convert(&[
+            Value::List(vec![
+                val_int(2024),
+                val_int(1),
+                val_int(1),
+                val_int(12),
+                val_int(0),
+                val_int(0),
+            ]),
+            Value::Str("Asia/Tokyo".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(out.to_string(), "{2024, 1, 1, 21, 0, 0}");
     }
 }

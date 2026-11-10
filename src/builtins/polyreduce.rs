@@ -2772,6 +2772,168 @@ fn solve_result_value(sols: &[Vec<(usize, Value)>], vars: &[String]) -> Value {
     }])
 }
 
+/// SolveValues[eqns, vars] — the values of `vars` solving `eqns`, i.e. the
+/// right-hand sides of `Solve`.
+pub fn builtin_solve_values(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = |a: &[Value]| Value::Call {
+        head: "SolveValues".to_string(),
+        args: a.to_vec(),
+    };
+    let a = strip_args(args);
+    if a.len() != 2 {
+        return Ok(uneval(&a));
+    }
+    let Some(vars) = parse_vars(&a[1]) else {
+        return Ok(uneval(&a));
+    };
+    let sol = builtin_solve(&a)?;
+    match sol {
+        Value::Call { ref head, .. } if head == "Solve" => Ok(uneval(&a)),
+        Value::Bool(_) => Ok(sol),
+        Value::List(items) if items.is_empty() => Ok(Value::List(vec![])),
+        Value::List(items) => {
+            let mut out: Vec<Value> = Vec::new();
+            for item in &items {
+                let Value::Rule { rhs, .. } = item else {
+                    return Ok(uneval(&a));
+                };
+                if vars.len() == 1 {
+                    // rhs is already the list of values for the variable.
+                    match &**rhs {
+                        Value::List(vals) => out.extend(vals.iter().cloned()),
+                        other => out.push(other.clone()),
+                    }
+                } else {
+                    // rhs is either a single solution vector or a list of them.
+                    match &**rhs {
+                        Value::List(inner)
+                            if inner
+                                .first()
+                                .map(|x| matches!(x, Value::List(_)))
+                                .unwrap_or(false) =>
+                        {
+                            out.extend(inner.iter().cloned());
+                        }
+                        other => out.push(other.clone()),
+                    }
+                }
+            }
+            Ok(Value::List(out))
+        }
+        other => Ok(other),
+    }
+}
+
+/// ReduceValues[expr, vars] — values of `vars` making `expr` true.
+pub fn builtin_reduce_values(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = |a: &[Value]| Value::Call {
+        head: "ReduceValues".to_string(),
+        args: a.to_vec(),
+    };
+    let a = strip_args(args);
+    if a.len() != 2 {
+        return Ok(uneval(&a));
+    }
+    let Some(vars) = parse_vars(&a[1]) else {
+        return Ok(uneval(&a));
+    };
+    let red = builtin_reduce(&a)?;
+    match red {
+        Value::Call { ref head, .. } if head == "Reduce" => return Ok(uneval(&a)),
+        Value::Bool(true) => return Ok(Value::List(vec![])),
+        Value::Bool(false) => return Ok(Value::List(vec![])),
+        _ => {}
+    }
+    let target = &vars[0];
+    let mut out: Vec<Value> = Vec::new();
+    collect_equal_values(&red, target, &mut out);
+    if out.is_empty() {
+        // Continuous range: `lo < x < hi` → `Interval[{lo, hi}]`.
+        if let Some(bounds) = reduce_interval(&red, target) {
+            return Ok(Value::List(vec![Value::Call {
+                head: "Interval".to_string(),
+                args: vec![Value::List(vec![bounds.0, bounds.1])],
+            }]));
+        }
+        return Ok(uneval(&a));
+    }
+    Ok(Value::List(out))
+}
+
+/// Extract `(lo, hi)` from a condition of comparisons against `target`.
+fn reduce_interval(cond: &Value, target: &str) -> Option<(Value, Value)> {
+    let mut lo: Option<Value> = None;
+    let mut hi: Option<Value> = None;
+    let mut visit = |c: &Value| {
+        let Value::Call { head, args } = c else {
+            return;
+        };
+        let is_target = |v: &Value| matches!(v, Value::Symbol(s) if s == target);
+        match (head.as_str(), args.len()) {
+            // lo < x or lo <= x
+            ("Less" | "LessEqual", 2) if is_target(&args[1]) => lo = Some(args[0].clone()),
+            // x < hi or x <= hi
+            ("Less" | "LessEqual", 2) if is_target(&args[0]) => hi = Some(args[1].clone()),
+            // x > lo or x >= lo
+            ("Greater" | "GreaterEqual", 2) if is_target(&args[0]) => lo = Some(args[1].clone()),
+            // hi > x or hi >= x
+            ("Greater" | "GreaterEqual", 2) if is_target(&args[1]) => hi = Some(args[0].clone()),
+            ("Less" | "LessEqual", 3) if is_target(&args[1]) => {
+                lo = Some(args[0].clone());
+                hi = Some(args[2].clone());
+            }
+            _ => {}
+        }
+    };
+    collect_conjuncts(cond, &mut visit);
+    match (lo, hi) {
+        (Some(lo), Some(hi)) => Some((lo, hi)),
+        (Some(lo), None) => Some((lo, Value::Symbol("Infinity".to_string()))),
+        (None, Some(hi)) => Some((
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    Value::Integer(rug::Integer::from(-1)),
+                    Value::Symbol("Infinity".to_string()),
+                ],
+            },
+            hi,
+        )),
+        (None, None) => None,
+    }
+}
+
+fn collect_conjuncts(cond: &Value, f: &mut impl FnMut(&Value)) {
+    match cond {
+        Value::Call { head, args } if head == "And" || head == "List" => {
+            for a in args {
+                collect_conjuncts(a, f);
+            }
+        }
+        other => f(other),
+    }
+}
+
+/// Collect the right-hand sides of `Equal[target, v]` (either orientation)
+/// appearing in a (possibly conjunctive) condition.
+fn collect_equal_values(cond: &Value, target: &str, out: &mut Vec<Value>) {
+    match cond {
+        Value::Call { head, args } if head == "And" || head == "Or" || head == "List" => {
+            for a in args {
+                collect_equal_values(a, target, out);
+            }
+        }
+        Value::Call { head, args } if head == "Equal" && args.len() == 2 => {
+            if matches!(&args[0], Value::Symbol(s) if s == target) {
+                out.push(args[1].clone());
+            } else if matches!(&args[1], Value::Symbol(s) if s == target) {
+                out.push(args[0].clone());
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Resolve[expr, vars] — basic quantifier elimination.
 pub fn builtin_resolve(args: &[Value]) -> Result<Value, EvalError> {
     let args = strip_args(args);
@@ -3179,6 +3341,8 @@ pub fn register(env: &Env) {
     );
     register_builtin(env, "Eliminate", builtin_eliminate);
     register_builtin(env, "SolveAlways", builtin_solve_always);
+    register_builtin(env, "SolveValues", builtin_solve_values);
+    register_builtin(env, "ReduceValues", builtin_reduce_values);
     register_builtin(env, "FindInstance", builtin_find_instance);
     register_builtin(env, "Resolve", builtin_resolve);
     register_builtin_env(env, "ToRules", builtin_to_rules);
@@ -3189,6 +3353,8 @@ pub fn register(env: &Env) {
         "Roots",
         "Reduce",
         "Solve",
+        "SolveValues",
+        "ReduceValues",
         "CylindricalDecomposition",
         "Eliminate",
         "SolveAlways",

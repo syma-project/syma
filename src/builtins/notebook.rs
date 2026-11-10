@@ -15,7 +15,8 @@ use rug::Integer;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Environment key holding the session's notion of the current directory.
@@ -254,6 +255,56 @@ pub fn builtin_notebook_object(args: &[Value]) -> Result<Value, EvalError> {
 /// `CreateWindow[...]` — symbolic request to open a front-end window.
 pub fn builtin_create_window(args: &[Value]) -> Result<Value, EvalError> {
     inert("CreateWindow", args)
+}
+
+/// Registry of open (in-memory) notebooks, keyed by id.
+static OPEN_NOTEBOOKS: LazyLock<Mutex<HashMap<u64, Value>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_NOTEBOOK: AtomicU64 = AtomicU64::new(1);
+
+/// `CreateDocument[content?]` — create a notebook and return its handle.
+pub fn builtin_create_document(args: &[Value]) -> Result<Value, EvalError> {
+    let id = NEXT_NOTEBOOK.fetch_add(1, Ordering::Relaxed);
+    let content = args.first().cloned().unwrap_or(Value::Null);
+    OPEN_NOTEBOOKS.lock().unwrap().insert(id, content);
+    Ok(Value::Call {
+        head: "NotebookObject".to_string(),
+        args: vec![Value::Integer(rug::Integer::from(id as i64))],
+    })
+}
+
+/// `NotebookSave[nb]` or `NotebookSave[nb, path]` — save a notebook.
+pub fn builtin_notebook_save(args: &[Value]) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Ok(Value::Call {
+            head: "NotebookSave".to_string(),
+            args: args.to_vec(),
+        });
+    }
+    if let Some(Value::Str(path)) = args.get(1) {
+        let id = match &args[0] {
+            Value::Call { head, args: a } if head == "NotebookObject" => {
+                a.first().and_then(|v| v.to_integer()).map(|i| i as u64)
+            }
+            _ => None,
+        };
+        let content = id
+            .and_then(|i| OPEN_NOTEBOOKS.lock().unwrap().get(&i).cloned())
+            .unwrap_or(Value::Null);
+        let text = format!("Notebook[{{Cell[{}]}}]", content);
+        std::fs::write(path, text)
+            .map_err(|e| EvalError::Error(format!("NotebookSave: cannot write '{path}': {e}")))?;
+    }
+    Ok(args[0].clone())
+}
+
+/// `Cell[...]` / `BoxData[...]` — symbolic notebook constructs (kept inert).
+pub fn builtin_cell(args: &[Value]) -> Result<Value, EvalError> {
+    inert("Cell", args)
+}
+
+pub fn builtin_box_data(args: &[Value]) -> Result<Value, EvalError> {
+    inert("BoxData", args)
 }
 
 /// `SetSelectedNotebook[nb]` — select `nb`, returning it.
@@ -558,6 +609,10 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "Notebook", builtin_notebook);
     super::register_builtin(env, "NotebookObject", builtin_notebook_object);
     super::register_builtin(env, "CreateWindow", builtin_create_window);
+    super::register_builtin(env, "CreateDocument", builtin_create_document);
+    super::register_builtin(env, "NotebookSave", builtin_notebook_save);
+    super::register_builtin(env, "Cell", builtin_cell);
+    super::register_builtin(env, "BoxData", builtin_box_data);
     super::register_builtin(env, "SetSelectedNotebook", builtin_set_selected_notebook);
     super::register_builtin(env, "CurrentNotebooks", builtin_current_notebooks);
     super::register_builtin(env, "StreamPosition", builtin_stream_position);
@@ -567,9 +622,8 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "HoldAttributes", builtin_hold_attributes);
 
     // Env-aware builtins.
-    super::register_builtin_env(env, "SymbolName", builtin_symbol_name);
-    super::register_builtin_env(env, "Symbols", builtin_symbols);
-    super::register_builtin_env(env, "Contexts", builtin_contexts);
+    // `SymbolName`/`Symbols`/`Contexts` are owned by `names::register`, which
+    // runs later and is authoritative over these session helpers.
     super::register_builtin_env(env, "BinaryRead", builtin_binary_read);
     super::register_builtin_env(env, "BinaryWrite", builtin_binary_write);
     super::register_builtin_env(env, "ProtectedQ", builtin_protected_q);
@@ -591,6 +645,9 @@ pub fn register(env: &Env) {
         "Notebook",
         "NotebookObject",
         "CreateWindow",
+        "CreateDocument",
+        "NotebookSave",
+        "BoxData",
         "SetSelectedNotebook",
         "CurrentNotebooks",
         "StreamPosition",
@@ -623,6 +680,24 @@ mod tests {
         let env = Env::new();
         crate::builtins::register_builtins(&env);
         env
+    }
+
+    #[test]
+    fn test_create_document_head() {
+        let doc = builtin_create_document(&[]).unwrap();
+        assert!(matches!(&doc, Value::Call { head, .. } if head == "NotebookObject"));
+    }
+
+    #[test]
+    fn test_cell_and_boxdata_symbolic() {
+        assert_eq!(
+            builtin_cell(&[s("hi")]).unwrap().to_string(),
+            "Cell[\"hi\"]"
+        );
+        assert_eq!(
+            builtin_box_data(&[int(1)]).unwrap().to_string(),
+            "BoxData[1]"
+        );
     }
 
     fn s(x: &str) -> Value {

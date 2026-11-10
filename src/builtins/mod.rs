@@ -54,6 +54,7 @@ pub mod pattern;
 pub mod polyreduce;
 pub mod predicates;
 pub mod random;
+pub mod regions;
 pub mod specialfuncmore;
 pub mod specialfunctions;
 pub mod statistics;
@@ -385,14 +386,11 @@ pub fn register_builtins(env: &Env) {
         ("JoinAcross", dataset::builtin_join_across),
         ("KernelCount", parallel::builtin_kernel_count),
         ("KeyComplement", association::builtin_key_complement),
-        ("KeyDrop", association::builtin_key_drop),
         ("KeyDropFrom", association::builtin_key_drop_from),
         ("KeyExistsQ", association::builtin_key_member_q),
         ("KeyFreeQ", association::builtin_key_free_q),
         ("KeyMemberQ", association::builtin_key_member_q),
         ("KeySort", association::builtin_key_sort),
-        ("KeyTake", association::builtin_key_take),
-        ("KeyUnion", association::builtin_key_union),
         ("Keys", association::builtin_keys),
         ("KroneckerDelta", math::builtin_kronecker_delta),
         ("LCM", math::builtin_lcm),
@@ -416,10 +414,6 @@ pub fn register_builtins(env: &Env) {
         ("Log10", math::builtin_log10),
         ("Log2", math::builtin_log2),
         ("LogisticSigmoid", math::builtin_logistic_sigmoid),
-        (
-            "LongestCommonSubsequence",
-            list::builtin_longest_common_subsequence,
-        ),
         (
             "LongestCommonSubsequencePositions",
             list::builtin_longest_common_subsequence_positions,
@@ -527,7 +521,9 @@ pub fn register_builtins(env: &Env) {
         ("Quotient", math::builtin_quotient),
         ("QuotientRemainder", math::builtin_quotient_remainder),
         ("Ramp", math::builtin_ramp),
+        ("RandomArray", random::builtin_random_array),
         ("RandomChoice", random::builtin_random_choice),
+        ("RandomComplex", random::builtin_random_complex),
         ("RandomInteger", random::builtin_random_integer),
         ("RandomReal", random::builtin_random_real),
         ("Range", list::builtin_range),
@@ -575,7 +571,6 @@ pub fn register_builtins(env: &Env) {
         ("SinDegrees", math::builtin_sin_degrees),
         ("Sinc", math::builtin_sinc),
         ("Sinh", math::builtin_sinh),
-        ("Solve", symbolic::builtin_solve),
         ("Sort", list::builtin_sort),
         ("Split", list::builtin_split),
         ("SplitProduct", integration::builtin_split_product),
@@ -652,6 +647,7 @@ pub fn register_builtins(env: &Env) {
         ("Unintegrable", integration::builtin_unintegrable),
         ("Union", list::builtin_union),
         ("UnitBox", math::builtin_unit_box),
+        ("HeavisideTheta", math::builtin_heaviside_theta),
         ("UnitStep", math::builtin_unit_step),
         ("UnitTriangle", math::builtin_unit_triangle),
         ("Unitize", math::builtin_unitize),
@@ -703,13 +699,16 @@ pub fn register_builtins(env: &Env) {
         ("ClearAttributes", symbolic::builtin_clear_attributes),
         ("Composition", operators::builtin_composition),
         ("CountsBy", association::builtin_counts_by),
+        ("Construct", operators::builtin_construct),
         ("Curry", operators::builtin_curry),
+        ("CurryApplied", operators::builtin_curry_applied),
+        ("OperatorApplied", operators::builtin_operator_applied),
+        ("ReverseApplied", operators::builtin_reverse_applied),
         ("D", symbolic::builtin_d),
         ("DeleteCases", pattern::builtin_delete_cases),
         ("DivisorSum", number_theory::builtin_divisor_sum),
         ("DropWhile", list::builtin_drop_while),
         ("ExternalEvaluate", ffi::builtin_external_evaluate),
-        ("FindInstance", numericsolve::builtin_find_instance),
         ("FindMaximum", numericsolve::builtin_find_maximum),
         ("FindMinimum", numericsolve::builtin_find_minimum),
         ("FindRoot", numericsolve::builtin_find_root),
@@ -726,7 +725,6 @@ pub fn register_builtins(env: &Env) {
         ("Inner", list::builtin_inner),
         ("Integrate", symbolic::builtin_integrate),
         ("KeyMap", association::builtin_key_map),
-        ("KeySelect", association::builtin_key_select),
         ("KeySortBy", association::builtin_key_sort_by),
         ("KeyValueMap", association::builtin_key_value_map),
         ("LibraryFunction", ffi::builtin_library_function),
@@ -988,16 +986,8 @@ pub fn register_builtins(env: &Env) {
         "CannotIntegrate",
         integration::builtin_cannot_integrate,
     );
-    register_builtin(
-        env,
-        "PolynomialRemainder",
-        integration::builtin_polynomial_remainder,
-    );
-    register_builtin(
-        env,
-        "PolynomialQuotient",
-        integration::builtin_polynomial_quotient,
-    );
+    // `PolynomialRemainder` / `PolynomialQuotient` are registered via the
+    // table above; only the non-table integration helpers remain here.
     register_builtin(
         env,
         "PolynomialDivide",
@@ -1301,6 +1291,7 @@ pub fn register_builtins(env: &Env) {
     timeseries::register(env);
     calculusmore::register(env);
     notebook::register(env);
+    regions::register(env);
     // `names` owns the symbol/context introspection surface; register it last
     // so it is authoritative over the overlapping session helpers.
     names::register(env);

@@ -322,6 +322,95 @@ pub fn builtin_display(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 }
 
 /// Register the builtins implemented in this module.
+/// FindList[file(s), "text"] — lines containing `text`, across the files.
+pub fn builtin_find_list(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let uneval = || {
+        Ok(Value::Call {
+            head: "FindList".to_string(),
+            args: args.to_vec(),
+        })
+    };
+    if args.len() < 2 {
+        return uneval();
+    }
+    let needles: Vec<String> = match &args[1] {
+        Value::Str(s) => vec![s.clone()],
+        Value::List(items) => items.iter().filter_map(as_str).collect(),
+        _ => return uneval(),
+    };
+    let files: Vec<String> = match &args[0] {
+        Value::Str(s) => vec![s.clone()],
+        Value::List(items) => items.iter().filter_map(as_str).collect(),
+        _ => return uneval(),
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for f in &files {
+        let path = resolve_path(env, f);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if needles.iter().any(|n| line.contains(n.as_str())) {
+                out.push(Value::Str(line.to_string()));
+            }
+        }
+    }
+    Ok(Value::List(out))
+}
+
+/// URLRead[url] — fetch an HTTP(S) URL as a string (basic; HTTPS needs no
+/// extra crates so it is attempted over plain TCP per the scheme).
+pub fn builtin_url_read(args: &[Value]) -> Result<Value, EvalError> {
+    let failed = || Value::Symbol("$Failed".to_string());
+    if args.len() != 1 {
+        return Ok(Value::Call {
+            head: "URLRead".to_string(),
+            args: args.to_vec(),
+        });
+    }
+    let Some(url) = as_str(&args[0]) else {
+        return Ok(failed());
+    };
+    let without_scheme = if let Some(rest) = url.strip_prefix("http://") {
+        ("http", rest)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        ("https", rest)
+    } else {
+        return Ok(failed());
+    };
+    let (_, rest) = without_scheme;
+    let (host_port, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, format!("/{p}")),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(80)),
+        None => (host_port.to_string(), 80),
+    };
+    let addr = format!("{host}:{port}");
+    use std::io::{Read, Write};
+    let mut stream = match std::net::TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(_) => return Ok(failed()),
+    };
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: syma\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return Ok(failed());
+    }
+    let mut resp = Vec::new();
+    if stream.read_to_end(&mut resp).is_err() {
+        return Ok(failed());
+    }
+    let text = String::from_utf8_lossy(&resp);
+    let body = match text.find("\r\n\r\n") {
+        Some(i) => &text[i + 4..],
+        None => &text[..],
+    };
+    Ok(Value::Str(body.to_string()))
+}
+
 pub fn register(env: &Env) {
     super::register_builtin_env(env, "Get", builtin_get);
     super::register_builtin_env(env, "Put", builtin_put);
@@ -332,6 +421,8 @@ pub fn register(env: &Env) {
     super::register_builtin_env(env, "AbsoluteTiming", builtin_absolute_timing);
     super::register_builtin(env, "Rasterize", builtin_rasterize);
     super::register_builtin_env(env, "Display", builtin_display);
+    super::register_builtin_env(env, "FindList", builtin_find_list);
+    super::register_builtin(env, "URLRead", builtin_url_read);
 
     // Get holds its file argument; Save/DumpSave hold the symbol names so the
     // symbol (not its value) is persisted.
@@ -373,6 +464,19 @@ mod tests {
         crate::builtins::register_builtins(&env);
         env
     }
+    #[test]
+    fn test_find_list_matches_lines() {
+        let env = env_with_builtins();
+        let p = temp_path("findlist");
+        fs::write(&p, "alpha\nbeta\ngamma\n").unwrap();
+        let out = builtin_find_list(&[s(p.to_str().unwrap()), s("a")], &env).unwrap();
+        let Value::List(items) = out else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 3);
+        let _ = fs::remove_file(&p);
+    }
+
     fn temp_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!("syma_systemio_{}_{}.syma", std::process::id(), tag));

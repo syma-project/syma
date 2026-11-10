@@ -1904,10 +1904,612 @@ pub fn builtin_airy_bi_prime(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+// ── Symmetric eigen-decomposition (cyclic Jacobi) ───────────────────────────
+
+/// Cyclic Jacobi eigen-decomposition of a real symmetric matrix. Returns
+/// `(eigenvalues, eigenvectors)` where `eigenvectors[i]` is a unit-norm
+/// eigenvector for `eigenvalues[i]`.
+///
+/// Follows the Numerical Recipes `jacobi` scheme (threshold skipping plus an
+/// accumulated diagonal correction `z`) so that large matrices converge
+/// accurately.
+#[allow(clippy::needless_range_loop)]
+fn jacobi_eigen_sym(mat: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let n = mat.len();
+    let mut a = mat.to_vec();
+    for i in 0..n {
+        for j in i..n {
+            a[i][j] = mat[i][j];
+            a[j][i] = mat[i][j];
+        }
+    }
+    let mut v: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            let mut row = vec![0.0; n];
+            row[i] = 1.0;
+            row
+        })
+        .collect();
+    if n <= 1 {
+        return ((0..n).map(|i| a[i][i]).collect(), v);
+    }
+    let rotate = |a: &mut [Vec<f64>], i: usize, j: usize, k: usize, l: usize, s: f64, tau: f64| {
+        let g = a[i][j];
+        let h = a[k][l];
+        a[i][j] = g - s * (h + g * tau);
+        a[k][l] = h + s * (g - h * tau);
+    };
+    for sweep in 0..300 {
+        let mut sm = 0.0;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                sm += a[p][q] * a[p][q];
+            }
+        }
+        if sm <= 1e-302 {
+            break;
+        }
+        let thresh = if sweep < 3 {
+            0.2 * sm / (n * n) as f64
+        } else {
+            0.0
+        };
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let g = 100.0 * a[p][q].abs();
+                if sweep > 3
+                    && (a[p][p].abs() + g) == a[p][p].abs()
+                    && (a[q][q].abs() + g) == a[q][q].abs()
+                {
+                    a[p][q] = 0.0;
+                    continue;
+                }
+                if a[p][q].abs() <= thresh {
+                    continue;
+                }
+                let h = a[q][q] - a[p][p];
+                let mut t = if (h.abs() + g) == h.abs() {
+                    a[p][q] / h
+                } else {
+                    let theta = 0.5 * h / a[p][q];
+                    let mut tt = 1.0 / (theta.abs() + (1.0 + theta * theta).sqrt());
+                    if theta < 0.0 {
+                        tt = -tt;
+                    }
+                    tt
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+                let tau = s / (1.0 + c);
+                t *= a[p][q];
+                a[p][p] -= t;
+                a[q][q] += t;
+                a[p][q] = 0.0;
+                for j in 0..p {
+                    rotate(&mut a, j, p, j, q, s, tau);
+                }
+                for j in (p + 1)..q {
+                    rotate(&mut a, p, j, j, q, s, tau);
+                }
+                for j in (q + 1)..n {
+                    rotate(&mut a, p, j, q, j, s, tau);
+                }
+                for j in 0..n {
+                    let gv = v[j][p];
+                    let hv = v[j][q];
+                    v[j][p] = gv - s * (hv + gv * tau);
+                    v[j][q] = hv + s * (gv - hv * tau);
+                }
+            }
+        }
+    }
+    if n == 3 {
+        eprintln!("A final = {a:?}");
+        eprintln!("V = {v:?}");
+    }
+    let evals: Vec<f64> = (0..n).map(|i| a[i][i]).collect();
+    let evecs: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|i| v[i][j]).collect()).collect();
+    (evals, evecs)
+}
+
+/// Gauss–Laguerre nodes and weights for `∫_0^∞ e^{-x} f(x) dx` via the
+/// Golub–Welsch construction, using a symmetric tridiagonal Jacobi matrix.
+fn gauss_laguerre(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut mat = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        mat[i][i] = (2 * i + 1) as f64;
+        if i + 1 < n {
+            mat[i][i + 1] = (i + 1) as f64;
+            mat[i + 1][i] = (i + 1) as f64;
+        }
+    }
+    let (evals, evecs) = jacobi_eigen_sym(&mat);
+    let mut pairs: Vec<(f64, f64)> = evals
+        .into_iter()
+        .zip(evecs)
+        .map(|(e, vec)| (e, vec[0] * vec[0]))
+        .collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    (
+        pairs.iter().map(|p| p.0).collect(),
+        pairs.iter().map(|p| p.1).collect(),
+    )
+}
+
+// ── HypergeometricU ─────────────────────────────────────────────────────────
+
+/// `U(a, b, z)` via the two-`_1F_1` connection formula (assumes `b` is not a
+/// positive integer, so that neither `Γ(1-b)` nor `Γ(b-1)` is singular).
+fn hyper_u_1f1(a: f64, b: f64, z: f64) -> f64 {
+    let t1 = gamma_fn(1.0 - b) / gamma_fn(1.0 + a - b) * confluent_1f1(a, b, z);
+    let t2 =
+        gamma_fn(b - 1.0) / gamma_fn(a) * z.powf(1.0 - b) * confluent_1f1(1.0 + a - b, 2.0 - b, z);
+    t1 + t2
+}
+
+/// `U(a, b, z)` by numerical integration, valid for `a > 0`, `z > 0`.
+///
+/// The weight is rescaled to `e^{-s}` (`t = s/z`) so the slowly decaying
+/// `(1+t)^{b-a-1}` factor stays polynomial, avoiding the exponential
+/// blow-up of a naive `e^{-(z-1)t}` integrand.
+fn hyper_u_integral(a: f64, b: f64, z: f64) -> f64 {
+    let (nodes, weights) = gauss_laguerre(100);
+    let mut sum = 0.0_f64;
+    for (s, w) in nodes.iter().zip(weights.iter()) {
+        let t = s / z;
+        sum += w * t.powf(a - 1.0) * (1.0 + t).powf(b - a - 1.0);
+    }
+    sum / (gamma_fn(a) * z)
+}
+
+/// HypergeometricU[a, b, z] — confluent hypergeometric function of the second
+/// kind (Tricomi function). Falls back to `HypergeometricU[a, b, z]`.
+pub fn builtin_hypergeometric_u(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("HypergeometricU", args, 3)?;
+    let (Some(a), Some(b), Some(z)) = (
+        super::to_f64(&args[0]),
+        super::to_f64(&args[1]),
+        super::to_f64(&args[2]),
+    ) else {
+        return Ok(unevaluated("HypergeometricU", args));
+    };
+    let b_is_int = (b - b.round()).abs() < 1e-12;
+    // z == 0: U(a, b, 0) = Γ(1-b)/Γ(1+a-b) for Re(b) < 1.
+    if z == 0.0 {
+        if b < 1.0 && !b_is_int {
+            let v = gamma_fn(1.0 - b) / gamma_fn(1.0 + a - b);
+            if v.is_finite() {
+                return Ok(super::real(v));
+            }
+        }
+        return Ok(unevaluated("HypergeometricU", args));
+    }
+    let v = if a > 0.0 && z > 0.0 {
+        hyper_u_integral(a, b, z)
+    } else if !b_is_int {
+        hyper_u_1f1(a, b, z)
+    } else {
+        // Integer b (and a ≤ 0 or z < 0): nudge b off the integer so the
+        // connection formula is non-singular.
+        hyper_u_1f1(a, b + 1e-9, z)
+    };
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("HypergeometricU", args))
+    }
+}
+
+// ── Mathieu characteristic values ───────────────────────────────────────────
+
+/// Smallest eigenvalue of a symmetric tridiagonal matrix given by `diag` and
+/// `off`. `which` selects the 0-based eigenvalue in ascending order.
+fn tridiag_eigenvalue(diag: &[f64], off: &[f64], which: usize) -> Option<f64> {
+    let n = diag.len();
+    if which >= n {
+        return None;
+    }
+    let mut mat = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        mat[i][i] = diag[i];
+        if i + 1 < n {
+            mat[i][i + 1] = off[i];
+            mat[i + 1][i] = off[i];
+        }
+    }
+    let (mut evals, _) = jacobi_eigen_sym(&mat);
+    evals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(evals[which])
+}
+
+/// Characteristic value of the Mathieu equation, computed as an eigenvalue of
+/// the truncated Fourier system. `even` = `a_n(q)`, otherwise `b_n(q)`.
+fn mathieu_char(even: bool, n: i64, q: f64) -> Option<f64> {
+    if n == 0 {
+        // a_0(q); b_0 is defined as a_0 in the common convention.
+        let k = 40usize;
+        let diag: Vec<f64> = (0..=k).map(|j| ((2 * j) as f64).powi(2)).collect();
+        let mut off = vec![q; k];
+        off[0] = std::f64::consts::SQRT_2 * q;
+        return tridiag_eigenvalue(&diag, &off, 0);
+    }
+    // Enough terms that the truncation tail is negligible.
+    let extra = 40 + (q.abs().sqrt() as usize) * 4;
+    if n % 2 == 1 {
+        let m = ((n - 1) / 2) as usize;
+        let k = m + extra;
+        let mut diag: Vec<f64> = (0..=k).map(|j| ((2 * j + 1) as f64).powi(2)).collect();
+        if even {
+            diag[0] += q;
+        } else {
+            diag[0] -= q;
+        }
+        let off = vec![-q; k];
+        tridiag_eigenvalue(&diag, &off, m)
+    } else if even {
+        let m = (n / 2) as usize;
+        let k = m + extra;
+        let diag: Vec<f64> = (0..=k).map(|j| ((2 * j) as f64).powi(2)).collect();
+        let mut off = vec![-q; k];
+        off[0] = -std::f64::consts::SQRT_2 * q;
+        tridiag_eigenvalue(&diag, &off, m)
+    } else {
+        let m = (n / 2) as usize;
+        let k = m + extra;
+        // Basis sin(2j z), j = 1..k.
+        let diag: Vec<f64> = (1..=k).map(|j| ((2 * j) as f64).powi(2)).collect();
+        let off = vec![-q; k - 1];
+        tridiag_eigenvalue(&diag, &off, m - 1)
+    }
+}
+
+/// MathieuCharacteristicA[r, q] — even Mathieu characteristic value.
+pub fn builtin_mathieu_characteristic_a(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("MathieuCharacteristicA", args, 2)?;
+    let (Some(r), Some(q)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("MathieuCharacteristicA", args));
+    };
+    if (r - r.round()).abs() > 1e-12 || r < 0.0 {
+        return Ok(unevaluated("MathieuCharacteristicA", args));
+    }
+    let v = mathieu_char(true, r.round() as i64, q);
+    match v {
+        Some(v) if v.is_finite() => Ok(super::real(v)),
+        _ => Ok(unevaluated("MathieuCharacteristicA", args)),
+    }
+}
+
+/// MathieuCharacteristicB[r, q] — odd Mathieu characteristic value.
+pub fn builtin_mathieu_characteristic_b(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("MathieuCharacteristicB", args, 2)?;
+    let (Some(r), Some(q)) = (super::to_f64(&args[0]), super::to_f64(&args[1])) else {
+        return Ok(unevaluated("MathieuCharacteristicB", args));
+    };
+    if (r - r.round()).abs() > 1e-12 || r < 0.0 {
+        return Ok(unevaluated("MathieuCharacteristicB", args));
+    }
+    let n = r.round() as i64;
+    let v = mathieu_char(false, n, q);
+    match v {
+        Some(v) if v.is_finite() => Ok(super::real(v)),
+        _ => Ok(unevaluated("MathieuCharacteristicB", args)),
+    }
+}
+
+// ── SpheroidalS1 ────────────────────────────────────────────────────────────
+
+/// Norm squared of the associated Legendre function `P_l^m` on `[-1, 1]`:
+/// `2/(2l+1) · (l+m)!/(l-m)!`.
+fn assoc_legendre_norm2(l: i64, m: i64) -> f64 {
+    2.0 / (2 * l + 1) as f64 * factorial_small((l + m) as u32) / factorial_small((l - m) as u32)
+}
+
+/// Angular prolate spheroidal function `S_{mn}(γ, η)` of the first kind, via
+/// diagonalisation of the spheroidal operator in the associated Legendre basis.
+fn spheroidal_s1(n: i64, m: i64, gamma: f64, eta: f64) -> f64 {
+    if gamma == 0.0 {
+        return assoc_legendre(n, m, eta);
+    }
+    let kmax = (n - m + 24) as usize;
+    let size = kmax + 1;
+    let mut mat = vec![vec![0.0; size]; size];
+    // Diagonal: eigenvalue of the (unperturbed) angular operator.
+    for (i, row) in mat.iter_mut().enumerate() {
+        let l = (m + i as i64) as f64;
+        row[i] = l * (l + 1.0);
+    }
+    // Off-diagonal ↦ c² η² in the *normalised* Legendre basis. Using
+    // η P_l^m = a_l P_{l+1}^m + b_l P_{l-1}^m with
+    // a_l = (l-m+1)/(2l+1), b_l = (l+m)/(2l+1).
+    let c2 = gamma * gamma;
+    for (i, row) in mat.iter_mut().enumerate() {
+        let l = m + i as i64;
+        let a_l = (l - m + 1) as f64 / (2 * l + 1) as f64;
+        let b_l = (l + m) as f64 / (2 * l + 1) as f64;
+        let a_lp1 = (l + 1 - m + 1) as f64 / (2 * (l + 1) + 1) as f64;
+        let b_lp1 = (l + 1 + m) as f64 / (2 * (l + 1) + 1) as f64;
+        let a_lm1 = (l - 1 - m + 1) as f64 / (2 * (l - 1) + 1) as f64;
+        let b_lm1 = (l - 1 + m) as f64 / (2 * (l - 1) + 1) as f64;
+        // η² P_l → c_{l+2} P_{l+2} + c_l P_l + c_{l-2} P_{l-2}
+        let c2v = a_l * a_lp1;
+        let c0v = a_l * b_lp1 + b_l * a_lm1;
+        let cm2v = b_l * b_lm1;
+        for (k, ck) in [(l + 2, c2v), (l, c0v), (l - 2, cm2v)] {
+            if ck == 0.0 || k < m {
+                continue;
+            }
+            let j = (k - m) as usize;
+            if j >= size {
+                continue;
+            }
+            // <P_k|η²|P_l>_norm = ck * ||P_k||/||P_l||
+            let ratio = (assoc_legendre_norm2(k, m) / assoc_legendre_norm2(l, m)).sqrt();
+            row[j] += c2 * ck * ratio;
+        }
+    }
+    let (evals, evecs) = jacobi_eigen_sym(&mat);
+    let mut order: Vec<usize> = (0..size).collect();
+    order.sort_by(|&a, &b| evals[a].partial_cmp(&evals[b]).unwrap());
+    let want = (n - m) as usize;
+    if want >= size {
+        return assoc_legendre(n, m, eta);
+    }
+    let idx = order[want];
+    let vec = &evecs[idx];
+    let pivot = vec[want];
+    if pivot.abs() < 1e-14 {
+        return assoc_legendre(n, m, eta);
+    }
+    let mut sum = 0.0_f64;
+    for (i, &vi) in vec.iter().enumerate() {
+        let l = m + i as i64;
+        sum += (vi / pivot) * assoc_legendre(l, m, eta) / assoc_legendre_norm2(l, m).sqrt();
+    }
+    // Rescale so that the η-independent normalisation matches P_n^m at γ = 0.
+    sum * assoc_legendre_norm2(n, m).sqrt()
+}
+
+/// SpheroidalS1[n, m, γ, η] — angular prolate spheroidal function of the first
+/// kind. Falls back to `SpheroidalS1[n, m, γ, η]`.
+pub fn builtin_spheroidal_s1(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("SpheroidalS1", args, 4)?;
+    let (Some(n), Some(m), Some(g), Some(eta)) = (
+        super::to_f64(&args[0]),
+        super::to_f64(&args[1]),
+        super::to_f64(&args[2]),
+        super::to_f64(&args[3]),
+    ) else {
+        // For γ = 0 the function degenerates to the associated Legendre
+        // function, which we can return symbolically.
+        if let (Value::Integer(ni), Value::Integer(mi), Some(gv)) =
+            (&args[0], &args[1], super::to_f64(&args[2]))
+            && gv == 0.0
+            && let (Some(ni), Some(mi)) = (ni.to_i64(), mi.to_i64())
+            && ni >= 0
+            && mi >= 0
+            && mi <= ni
+        {
+            return Ok(Value::Call {
+                head: "LegendreP".to_string(),
+                args: vec![
+                    Value::Integer(rug::Integer::from(ni)),
+                    Value::Integer(rug::Integer::from(mi)),
+                    args[3].clone(),
+                ],
+            });
+        }
+        return Ok(unevaluated("SpheroidalS1", args));
+    };
+    if (n - n.round()).abs() > 1e-12 || (m - m.round()).abs() > 1e-12 || n < 0.0 || m < 0.0 || m > n
+    {
+        return Ok(unevaluated("SpheroidalS1", args));
+    }
+    let v = spheroidal_s1(n.round() as i64, m.round() as i64, g, eta);
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("SpheroidalS1", args))
+    }
+}
+
+// ── CoulombF ────────────────────────────────────────────────────────────────
+
+/// `|Γ(1 + iη)| = sqrt(πη / sinh(πη))`.
+fn gamma_abs_1_i_eta(eta: f64) -> f64 {
+    if eta == 0.0 {
+        return 1.0;
+    }
+    let x = std::f64::consts::PI * eta;
+    (x / x.sinh()).abs().sqrt()
+}
+
+/// Regular Coulomb wave function `F_L(η, ρ)` via the Taylor series
+/// (Abramowitz & Stegun 14.1).
+fn coulomb_f(l: i64, eta: f64, rho: f64) -> f64 {
+    let lf = l as f64;
+    // Normalisation constant C_L(η).
+    let mut norm = 2.0_f64.powi(l as i32)
+        * (-(std::f64::consts::PI) * eta / 2.0).exp()
+        * gamma_abs_1_i_eta(eta)
+        / gamma_fn(2.0 * lf + 2.0);
+    for j in 1..=l {
+        let jf = j as f64;
+        norm *= (jf * jf + eta * eta).sqrt();
+    }
+    // Series Σ a_k ρ^k with a_0 = 1, a_1 = η/(L+1) and
+    // a_{k+1} = (2η k a_k - a_{k-1}) / ((k+1)(k+2L+2)).
+    let mut prev = 1.0_f64; // a_0
+    let mut cur = eta / (lf + 1.0); // a_1
+    let mut sum = 1.0 + cur * rho; // includes a_0 ρ^0 and a_1 ρ^1
+    let mut kk = 1.0_f64;
+    loop {
+        kk += 1.0;
+        let next = (2.0 * eta * (kk - 1.0) * cur - prev) / (kk * (kk + 2.0 * lf + 1.0));
+        let term = next * rho.powi(kk as i32);
+        sum += term;
+        prev = cur;
+        cur = next;
+        // Zero coefficients interleave for η = 0, so require the whole tail
+        // (`prev`, `cur`, `next`) to be negligible before stopping.
+        if (next.abs() < 1e-18 && cur.abs() < 1e-18 && prev.abs() < 1e-18) || kk > 500.0 {
+            break;
+        }
+    }
+    norm * rho.powf(lf + 1.0) * sum
+}
+
+/// CoulombF[l, η, ρ] — regular Coulomb wave function.
+pub fn builtin_coulomb_f(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("CoulombF", args, 3)?;
+    let (Some(l), Some(eta), Some(rho)) = (
+        super::to_f64(&args[0]),
+        super::to_f64(&args[1]),
+        super::to_f64(&args[2]),
+    ) else {
+        return Ok(unevaluated("CoulombF", args));
+    };
+    if (l - l.round()).abs() > 1e-12 || l < 0.0 {
+        return Ok(unevaluated("CoulombF", args));
+    }
+    let v = coulomb_f(l.round() as i64, eta, rho);
+    if v.is_finite() {
+        Ok(super::real(v))
+    } else {
+        Ok(unevaluated("CoulombF", args))
+    }
+}
+
+// ── ZernikeR ────────────────────────────────────────────────────────────────
+
+/// ZernikeR[n, m, ρ] — Zernike radial polynomial `R_n^m(ρ)`.
+pub fn builtin_zernike_r(args: &[Value]) -> Result<Value, EvalError> {
+    super::require_args("ZernikeR", args, 3)?;
+    let ni = match &args[0] {
+        Value::Integer(n) => n.to_i64().unwrap_or(-1),
+        _ => return Ok(unevaluated("ZernikeR", args)),
+    };
+    let mi = match &args[1] {
+        Value::Integer(m) => m.to_i64().unwrap_or(-1),
+        _ => return Ok(unevaluated("ZernikeR", args)),
+    };
+    if ni < 0 || mi < 0 || mi > ni || (ni - mi) % 2 != 0 {
+        return Ok(unevaluated("ZernikeR", args));
+    }
+    // Coefficients of R_n^m as an exact rational polynomial in ρ, indexed by
+    // power of ρ.
+    let half = (ni - mi) / 2;
+    let mut coeffs: Vec<rug::Rational> = vec![rug::Rational::from(0); (ni + 1) as usize];
+    for k in 0..=half {
+        let num = factorial_rat(ni - k);
+        let den =
+            factorial_rat(k) * factorial_rat((ni + mi) / 2 - k) * factorial_rat((ni - mi) / 2 - k);
+        let mut c = num / den;
+        if k % 2 == 1 {
+            c = -c;
+        }
+        coeffs[(ni - 2 * k) as usize] = c;
+    }
+    if let Some(rho) = super::to_f64(&args[2]) {
+        // Numeric evaluation via Horner-free direct sum.
+        let mut sum = 0.0_f64;
+        for (p, c) in coeffs.iter().enumerate() {
+            if !c.is_zero() {
+                sum += c.to_f64() * rho.powi(p as i32);
+            }
+        }
+        return Ok(super::real(sum));
+    }
+    // Symbolic: build a polynomial in the given variable.
+    let var = args[2].clone();
+    let mut terms: Vec<Value> = Vec::new();
+    for (p, c) in coeffs.iter().enumerate() {
+        if c.is_zero() {
+            continue;
+        }
+        let rho_pow = if p == 0 {
+            Value::Integer(rug::Integer::from(1))
+        } else if p == 1 {
+            var.clone()
+        } else {
+            Value::Call {
+                head: "Power".to_string(),
+                args: vec![var.clone(), Value::Integer(rug::Integer::from(p as i64))],
+            }
+        };
+        let coeff = Value::Rational(Box::new(c.clone()));
+        let term = if p == 0 {
+            coeff
+        } else {
+            Value::Call {
+                head: "Times".to_string(),
+                args: vec![coeff, rho_pow],
+            }
+        };
+        terms.push(term);
+    }
+    let result = if terms.is_empty() {
+        Value::Integer(rug::Integer::from(0))
+    } else if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        Value::Call {
+            head: "Plus".to_string(),
+            args: terms,
+        }
+    };
+    // Reduce to canonical form using the evaluator's simplifier.
+    Ok(simplify_plus_times(result))
+}
+
+/// Factorial of a non-negative integer as an exact rational.
+fn factorial_rat(n: i64) -> rug::Rational {
+    let mut p = rug::Integer::from(1);
+    for k in 2..=n {
+        p *= rug::Integer::from(k);
+    }
+    rug::Rational::from(p)
+}
+
+/// Best-effort canonicalisation of a `Plus`/`Times` polynomial so that numeric
+/// coefficients collapse (e.g. `Times[-1, Power[ρ, 2]]` → `-ρ^2`).
+fn simplify_plus_times(v: Value) -> Value {
+    match v {
+        Value::Call { head, args } if head == "Plus" => {
+            let mapped: Vec<Value> = args.into_iter().map(simplify_plus_times).collect();
+            Value::Call {
+                head: "Plus".to_string(),
+                args: mapped,
+            }
+        }
+        Value::Call { head, args } if head == "Times" => {
+            let mapped: Vec<Value> = args.into_iter().map(simplify_plus_times).collect();
+            Value::Call {
+                head: "Times".to_string(),
+                args: mapped,
+            }
+        }
+        other => other,
+    }
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register the builtins implemented in this module.
 pub fn register(env: &Env) {
+    super::register_builtin(env, "HypergeometricU", builtin_hypergeometric_u);
+    super::register_builtin(
+        env,
+        "MathieuCharacteristicA",
+        builtin_mathieu_characteristic_a,
+    );
+    super::register_builtin(
+        env,
+        "MathieuCharacteristicB",
+        builtin_mathieu_characteristic_b,
+    );
+    super::register_builtin(env, "SpheroidalS1", builtin_spheroidal_s1);
+    super::register_builtin(env, "CoulombF", builtin_coulomb_f);
+    super::register_builtin(env, "ZernikeR", builtin_zernike_r);
     super::register_builtin(env, "Hypergeometric0F1", builtin_hypergeometric_0f1);
     super::register_builtin(env, "Hypergeometric1F1", builtin_hypergeometric_1f1);
     super::register_builtin(env, "Hypergeometric2F1", builtin_hypergeometric_2f1);
@@ -2716,5 +3318,156 @@ mod tests {
             &builtin_spherical_harmonic_y(&[i(1), i(2), r(0.5), i(0)]).unwrap(),
             "SphericalHarmonicY",
         );
+    }
+
+    #[test]
+    fn test_jacobi_eigen_exact_for_small_matrix() {
+        let m = vec![
+            vec![4.0, 1.0, 0.0],
+            vec![1.0, 3.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let (ev, evec) = jacobi_eigen_sym(&m);
+        let mut sorted = ev.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Characteristic roots: 3 ± √3 and 3.
+        assert!((sorted[0] - (3.0 - 3.0_f64.sqrt())).abs() < 1e-10);
+        assert!((sorted[1] - 3.0).abs() < 1e-10);
+        assert!((sorted[2] - (3.0 + 3.0_f64.sqrt())).abs() < 1e-10);
+        for (i, e) in ev.iter().enumerate() {
+            let mut r = 0.0;
+            for row in 0..3 {
+                let mut av = 0.0;
+                for c in 0..3 {
+                    av += m[row][c] * evec[i][c];
+                }
+                r += (av - e * evec[i][row]).abs();
+            }
+            assert!(r < 1e-10, "residual {r}");
+        }
+    }
+
+    #[test]
+    fn test_gauss_laguerre_moments() {
+        for n in [4usize, 16, 64] {
+            let (nodes, weights) = gauss_laguerre(n);
+            let sum: f64 = weights.iter().sum();
+            let m1: f64 = nodes.iter().zip(&weights).map(|(x, w)| x * w).sum();
+            assert!((sum - 1.0).abs() < 1e-9);
+            assert!((m1 - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_hypergeometric_u() {
+        // U(1, 2, z) = 1/z.
+        close(
+            &builtin_hypergeometric_u(&[r(1.0), r(2.0), r(4.0)]).unwrap(),
+            0.25,
+            1e-9,
+        );
+        // U(2, 3, z) = 1/z².
+        close(
+            &builtin_hypergeometric_u(&[r(2.0), r(3.0), r(2.0)]).unwrap(),
+            0.25,
+            1e-9,
+        );
+        // U(1, 1, 1) = e·E₁(1).
+        close(
+            &builtin_hypergeometric_u(&[r(1.0), r(1.0), r(1.0)]).unwrap(),
+            0.596347362323194,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_mathieu_characteristic_small_q() {
+        // a₀(0) = 0, a₁(0) = 1, a₂(0) = 4.
+        close(
+            &builtin_mathieu_characteristic_a(&[r(0.0), r(0.0)]).unwrap(),
+            0.0,
+            1e-12,
+        );
+        close(
+            &builtin_mathieu_characteristic_a(&[r(1.0), r(0.0)]).unwrap(),
+            1.0,
+            1e-12,
+        );
+        close(
+            &builtin_mathieu_characteristic_a(&[r(2.0), r(0.0)]).unwrap(),
+            4.0,
+            1e-12,
+        );
+        // a₀(q) ≈ -q²/2 + 7q⁴/128 for small q; b₂(q) ≈ 4 - q²/12.
+        close(
+            &builtin_mathieu_characteristic_a(&[r(0.0), r(0.1)]).unwrap(),
+            -0.005 + 7.0 * 1e-4 / 128.0,
+            1e-6,
+        );
+        close(
+            &builtin_mathieu_characteristic_b(&[r(2.0), r(0.1)]).unwrap(),
+            4.0 - 0.01 / 12.0,
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn test_spheroidal_s1_limit() {
+        // At γ = 0 the function is the associated Legendre function.
+        close(
+            &builtin_spheroidal_s1(&[i(2), i(0), r(0.0), r(0.5)]).unwrap(),
+            -0.125,
+            1e-9,
+        );
+        close(
+            &builtin_spheroidal_s1(&[i(1), i(1), r(0.0), r(0.5)]).unwrap(),
+            -0.8660254037844386,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_coulomb_f() {
+        // F₀(0, ρ) = sin ρ; F₁(0, ρ) = sin ρ/ρ - cos ρ.
+        close(
+            &builtin_coulomb_f(&[i(0), r(0.0), r(1.0)]).unwrap(),
+            1.0_f64.sin(),
+            1e-9,
+        );
+        close(
+            &builtin_coulomb_f(&[i(1), r(0.0), r(1.0)]).unwrap(),
+            1.0_f64.sin() - 1.0_f64.cos(),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_zernike_r() {
+        eq_zernike("ZernikeR[2, 0, 1/2]", -0.5);
+        eq_zernike("ZernikeR[4, 2, 1/2]", -0.5);
+        // R_3^1(ρ) = 3ρ³ - 2ρ.
+        close(
+            &builtin_zernike_r(&[i(3), i(1), r(0.5)]).unwrap(),
+            -0.625,
+            1e-12,
+        );
+    }
+
+    fn eq_zernike(expr: &str, want: f64) {
+        use crate::builtins;
+        use crate::env::Env;
+        use crate::eval::eval_program;
+        use crate::lexer;
+        use crate::parser;
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let tokens = lexer::tokenize(expr).unwrap();
+        let ast = parser::parse(tokens).unwrap();
+        let v = eval_program(&ast, &env).unwrap();
+        if let Value::Real(x) = v {
+            assert!((x.to_f64() - want).abs() < 1e-12, "{expr} => {x}");
+        } else {
+            panic!("{expr} => {v:?}");
+        }
     }
 }

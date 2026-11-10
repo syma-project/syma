@@ -23,18 +23,6 @@ fn unevaluated(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
-/// String form of a value when used as an association key.
-fn value_to_key(v: &Value) -> String {
-    match v {
-        Value::Str(s) | Value::Symbol(s) => s.clone(),
-        Value::Integer(n) => n.to_string(),
-        Value::Real(r) => r.to_string(),
-        Value::Bool(true) => "True".to_string(),
-        Value::Bool(false) => "False".to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// True for `Missing[...]` values.
 fn is_missing(v: &Value) -> bool {
     matches!(v, Value::Call { head, .. } if head == "Missing")
@@ -192,35 +180,6 @@ pub fn builtin_key_value_pattern(args: &[Value]) -> Result<Value, EvalError> {
         head: Box::new(Expr::Symbol("KeyValuePattern".to_string())),
         args: vec![inner],
     }))
-}
-
-// ── AssociationMap ─────────────────────────────────────────────────────────
-
-/// `AssociationMap[f, list]` maps each element to `<|f[item] -> item|>`;
-/// `AssociationMap[f, k1, k2, ...]` maps `<|f[k1, ..., kn] -> {k1, ..., kn]|>`.
-pub fn builtin_association_map(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return unevaluated("AssociationMap", args);
-    }
-    let f = &args[0];
-    if args.len() == 2 {
-        let items = match &args[1] {
-            Value::List(items) => items,
-            _ => return unevaluated("AssociationMap", args),
-        };
-        let mut map = HashMap::with_capacity(items.len());
-        for item in items {
-            let key = apply_function(f, std::slice::from_ref(item), env)?;
-            map.insert(value_to_key(&key), item.clone());
-        }
-        Ok(Value::Assoc(map))
-    } else {
-        let keys = &args[1..];
-        let key = apply_function(f, keys, env)?;
-        let mut map = HashMap::with_capacity(1);
-        map.insert(value_to_key(&key), Value::List(keys.to_vec()));
-        Ok(Value::Assoc(map))
-    }
 }
 
 // ── KeyUnion ───────────────────────────────────────────────────────────────
@@ -448,7 +407,8 @@ pub fn register(env: &Env) {
         vec!["HoldAll".to_string(), "Locked".to_string()],
     );
 
-    super::register_builtin_env(env, "AssociationMap", builtin_association_map);
+    // `AssociationMap` is owned by `association::register`, which runs later;
+    // `KeyUnion` is owned here.
     super::register_builtin(env, "KeyUnion", builtin_key_union);
     super::register_builtin(env, "TakeLargest", builtin_take_largest);
     super::register_builtin(env, "TakeSmallest", builtin_take_smallest);

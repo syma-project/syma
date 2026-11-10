@@ -17,7 +17,7 @@ pub fn register(env: &Env) {
     super::register_builtin(env, "LinearOptimization", builtin_linear_optimization);
     super::register_builtin(env, "LinearProgramming", builtin_linear_optimization);
     super::register_builtin_env(env, "Interpolation", builtin_interpolation);
-    super::register_builtin_env(env, "InterpolatingFunction", builtin_interpolating_function);
+    // `InterpolatingFunction` is owned by `dsolve::register`, which runs later.
     super::register_builtin_env(env, "MinValue", builtin_min_value);
     super::register_builtin_env(env, "MaxValue", builtin_max_value);
     super::register_builtin_env(env, "NonlinearModelFit", builtin_nonlinear_model_fit);
@@ -1219,35 +1219,6 @@ fn hermite_eval(data: &Value, t: f64) -> Option<f64> {
     let h01 = -2.0 * s3 + 3.0 * s2;
     let h11 = s3 - s2;
     Some(h00 * ya + h10 * h * da + h01 * yb + h11 * h * db)
-}
-
-/// InterpolatingFunction[data] / InterpolatingFunction[data, x].
-pub fn builtin_interpolating_function(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    match args.len() {
-        1 => Ok(Value::PureFunction {
-            body: Expr::Call {
-                head: Box::new(Expr::Symbol("InterpolatingFunction".to_string())),
-                args: vec![
-                    crate::eval::table::value_to_expr(&args[0]),
-                    Expr::Slot(Some(1)),
-                ],
-            },
-            slot_count: 1,
-            params: vec![],
-            env: None,
-        }),
-        2 => {
-            let t = match eval_scalar(&args[1], env) {
-                Some(t) => t,
-                None => return Ok(unevaluated("InterpolatingFunction", args)),
-            };
-            match hermite_eval(&args[0], t) {
-                Some(v) => Ok(super::real(v)),
-                None => Ok(unevaluated("InterpolatingFunction", args)),
-            }
-        }
-        _ => Ok(unevaluated("InterpolatingFunction", args)),
-    }
 }
 
 // ── FunctionInterpolation ───────────────────────────────────────────────────

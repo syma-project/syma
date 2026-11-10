@@ -1047,73 +1047,6 @@ pub fn builtin_argmax(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     Ok(super::real(x_max))
 }
 
-/// FindInstance[eqn, var, n] — find n numeric instances (solutions).
-pub fn builtin_find_instance(args: &[Value], env: &Env) -> Result<Value, EvalError> {
-    let (n_val, eqn_arg, var_arg) = if args.len() == 3 {
-        (unheld(&args[2]), unheld(&args[0]), deep_unheld(&args[1]))
-    } else if args.len() == 2 {
-        (
-            Value::Integer(Integer::from(1)),
-            unheld(&args[0]),
-            deep_unheld(&args[1]),
-        )
-    } else {
-        return Err(EvalError::Error(
-            "FindInstance requires 2 or 3 arguments".to_string(),
-        ));
-    };
-
-    let n = match &n_val {
-        Value::Integer(i) => {
-            let v = i.to_usize().unwrap_or(1);
-            if v == 0 { 1 } else { v }
-        }
-        _ => 1,
-    };
-
-    let (expr, rhs) = parse_equation(&eqn_arg)?;
-    let var = resolve_var(&var_arg, &[&expr])?;
-    let var_clone = var.clone();
-
-    let f = move |x: f64| {
-        let substituted = substitute_numeric(&expr, &var_clone, x);
-        eval_expr_to_f64(&substituted, env).unwrap_or(f64::INFINITY) - rhs
-    };
-
-    let mut solutions: Vec<f64> = Vec::new();
-    let search_lo = -10.0;
-    let search_hi = 10.0;
-    let range = search_hi - search_lo;
-
-    for i in 0..n.max(20) {
-        let start = search_lo + (i as f64 / 20.0) * range;
-        if let Ok(root) = newton_method(&f, start) {
-            if f(root).abs() < 1e-6 {
-                let is_duplicate = solutions.iter().any(|&s| (s - root).abs() < 1e-6);
-                if !is_duplicate && root >= search_lo && root <= search_hi {
-                    solutions.push(root);
-                }
-            }
-            if solutions.len() >= n {
-                break;
-            }
-        }
-    }
-
-    let instances: Vec<Value> = solutions
-        .into_iter()
-        .map(|root| {
-            Value::List(vec![Value::Rule {
-                lhs: Box::new(Value::Symbol(var.clone())),
-                rhs: Box::new(super::real(root)),
-                delayed: false,
-            }])
-        })
-        .collect();
-
-    Ok(Value::List(instances))
-}
-
 /// NSolve[eqn, var] — numeric solve for all roots.
 pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
@@ -1660,6 +1593,15 @@ pub fn register(env: &Env) {
             ],
         );
     }
+    super::register_builtin(env, "NRoots", builtin_n_roots);
+    super::register_builtin(env, "RootApproximant", builtin_root_approximant);
+    super::register_builtin_env(env, "Zeros", builtin_zeros);
+    // `NRoots` receives the equation unevaluated so `==` is not folded to
+    // `False` before the polynomial is parsed.
+    env.set_attributes(
+        "NRoots",
+        vec!["HoldAll".to_string(), "Protected".to_string()],
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2164,6 +2106,351 @@ fn optimization_builtin(
     Ok(run_optimization(
         name, args, &objective, &cons, &vars, env, init, use_newton,
     ))
+}
+
+// ── NRoots / RootApproximant / Zeros ────────────────────────────────────────
+
+/// Convert exact numbers (`Integer`, `Rational`, algebraic `Root`) in an
+/// expression to `Real`, preserving structure.
+fn numericize(v: &Value) -> Value {
+    match v {
+        Value::Integer(n) => super::real(n.to_f64()),
+        Value::Rational(r) => super::real(r.to_f64()),
+        Value::Root { coeffs, index } => {
+            let roots = crate::polynomial::find_polynomial_roots(coeffs);
+            if *index > 0 && *index <= roots.len() {
+                let (re, im) = roots[*index - 1];
+                if im.abs() < 1e-12 {
+                    super::real(re)
+                } else {
+                    Value::Complex { re, im }
+                }
+            } else {
+                v.clone()
+            }
+        }
+        Value::List(items) => Value::List(items.iter().map(numericize).collect()),
+        Value::Call { head, args } => Value::Call {
+            head: head.clone(),
+            args: args.iter().map(numericize).collect(),
+        },
+        _ => v.clone(),
+    }
+}
+
+/// NRoots[poly == 0, var] — numerical roots as a disjunction of equations.
+pub fn builtin_n_roots(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "NRoots".to_string(),
+        args: args.to_vec(),
+    };
+    if args.len() != 2 {
+        return Ok(uneval());
+    }
+    let res = super::polyreduce::builtin_roots(args)?;
+    match res {
+        Value::Call { ref head, .. } if head == "Roots" => Ok(uneval()),
+        other => Ok(numericize(&other)),
+    }
+}
+
+/// Best rational approximation of `x` via continued fractions, with
+/// denominator at most `max_den` and residual below `tol`.
+fn best_rational(mut x: f64, max_den: u64, tol: f64) -> Option<(rug::Integer, rug::Integer)> {
+    if !x.is_finite() {
+        return None;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    x = x.abs();
+    let (mut p0, mut q0) = (0i128, 1i128);
+    let (mut p1, mut q1) = (1i128, 0i128);
+    let mut frac = x;
+    for _ in 0..64 {
+        let a = frac.floor();
+        if !a.is_finite() {
+            break;
+        }
+        let a = a as i128;
+        let p2 = a * p1 + p0;
+        let q2 = a * q1 + q0;
+        if q2 > max_den as i128 {
+            break;
+        }
+        p0 = p1;
+        q0 = q1;
+        p1 = p2;
+        q1 = q2;
+        if (x - (p1 as f64) / (q1 as f64)).abs() < tol {
+            let num = if sign < 0.0 { -p1 } else { p1 };
+            return Some((rug::Integer::from(num), rug::Integer::from(q1)));
+        }
+        let f = frac - a as f64;
+        if f.abs() < 1e-18 {
+            break;
+        }
+        frac = 1.0 / f;
+    }
+    None
+}
+
+/// Search for small integer coefficients `a_i` with `Σ a_i x^i ≈ 0`,
+/// `deg >= 1`. Returns ascending coefficients (leading positive).
+fn integer_relation(x: f64, deg: usize, bound: i64, tol: f64) -> Option<Vec<i64>> {
+    // Degree 1 and 2 use dedicated searches; higher degrees brute-force the
+    // lower coefficients and round the constant term.
+    let scale = {
+        let mut s = 1.0_f64;
+        for _ in 0..deg {
+            s = s.max(s * x.abs());
+        }
+        s
+    };
+    let rtol = tol * scale.max(1.0);
+    if deg == 1 {
+        for a1 in 1..=bound {
+            let a0 = (-(a1 as f64) * x).round() as i64;
+            if (a1 as f64) * x + a0 as f64 == 0.0 || ((a1 as f64) * x + a0 as f64).abs() < rtol {
+                return Some(vec![a0, a1]);
+            }
+        }
+        return None;
+    }
+    if deg == 2 {
+        for a2 in 1..=bound {
+            for a1 in -bound..=bound {
+                let a0 = -((a2 as f64) * x * x + (a1 as f64) * x).round() as i64;
+                let r = (a2 as f64) * x * x + (a1 as f64) * x + a0 as f64;
+                if r.abs() < rtol {
+                    return Some(vec![a0, a1, a2]);
+                }
+            }
+        }
+        return None;
+    }
+    None
+}
+
+fn gcd_i64(mut a: i64, mut b: i64) -> i64 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Factor the largest perfect square out of `n`: returns `(front, radicand)`
+/// with `n = front² · radicand` and `radicand` squarefree.
+fn reduce_sqrt(mut n: i64) -> (i64, i64) {
+    if n <= 0 {
+        return (1, n);
+    }
+    let mut front = 1i64;
+    let mut d = 2i64;
+    while d * d <= n {
+        while n % (d * d) == 0 {
+            front *= d;
+            n /= d * d;
+        }
+        d += 1;
+    }
+    (front, n)
+}
+
+/// RootApproximant[x] — a "simple" algebraic number close to the real `x`.
+pub fn builtin_root_approximant(args: &[Value]) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "RootApproximant".to_string(),
+        args: args.to_vec(),
+    };
+    if args.is_empty() || args.len() > 2 {
+        return Ok(uneval());
+    }
+    let Some(x) = super::to_f64(&args[0]) else {
+        return Ok(args[0].clone());
+    };
+    let max_deg = if args.len() == 2 {
+        match &args[1] {
+            Value::Integer(n) if *n >= 1 => n.to_usize().unwrap_or(2).min(4),
+            _ => 2,
+        }
+    } else {
+        2
+    };
+    if x == x.round() && x.abs() < 1e15 {
+        return Ok(Value::Integer(rug::Integer::from(x as i64)));
+    }
+    if max_deg >= 2
+        && let Some(c) = integer_relation(x, 2, 1000, 1e-11)
+    {
+        let a = c[2];
+        let b = c[1];
+        let cc = c[0];
+        let g = gcd_i64(gcd_i64(a, b), cc).max(1);
+        let (a, b, cc) = (a / g, b / g, cc / g);
+        let disc = b * b - 4 * a * cc;
+        // Rational root when the discriminant is a perfect square.
+        let s = (disc as f64).sqrt();
+        if disc >= 0 && s.round() * s.round() == disc as f64 {
+            let si = s.round() as i64;
+            let r1 = rug::Rational::from(-b + si) / rug::Rational::from(2 * a);
+            let r2 = rug::Rational::from(-b - si) / rug::Rational::from(2 * a);
+            let chosen = if (r1.to_f64() - x).abs() <= (r2.to_f64() - x).abs() {
+                r1
+            } else {
+                r2
+            };
+            return Ok(Value::Rational(Box::new(chosen)));
+        }
+        // Exact quadratic irrational `(-b ± Sqrt[disc]) / (2a)`.
+        if b == 0 {
+            let val = rug::Rational::from(-cc) / rug::Rational::from(a);
+            let sqrt = Value::Call {
+                head: "Sqrt".to_string(),
+                args: vec![Value::Rational(Box::new(val))],
+            };
+            return Ok(if x < 0.0 {
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![Value::Integer(rug::Integer::from(-1)), sqrt],
+                }
+            } else {
+                sqrt
+            });
+        }
+        if disc > 0 {
+            let (front, rad) = reduce_sqrt(disc);
+            let root_part = if front == 1 {
+                Value::Call {
+                    head: "Sqrt".to_string(),
+                    args: vec![Value::Integer(rug::Integer::from(rad))],
+                }
+            } else {
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![
+                        Value::Integer(rug::Integer::from(front)),
+                        Value::Call {
+                            head: "Sqrt".to_string(),
+                            args: vec![Value::Integer(rug::Integer::from(rad))],
+                        },
+                    ],
+                }
+            };
+            let base = (-b as f64) / (2.0 * a as f64);
+            let offs = (front as f64) * (rad as f64).sqrt() / (2.0 * a as f64);
+            let signed = if (base + offs - x).abs() <= (base - offs - x).abs() {
+                root_part
+            } else {
+                Value::Call {
+                    head: "Times".to_string(),
+                    args: vec![Value::Integer(rug::Integer::from(-1)), root_part],
+                }
+            };
+            let numer = Value::Call {
+                head: "Plus".to_string(),
+                args: vec![Value::Integer(rug::Integer::from(-b)), signed],
+            };
+            return Ok(Value::Call {
+                head: "Times".to_string(),
+                args: vec![
+                    numer,
+                    Value::Call {
+                        head: "Power".to_string(),
+                        args: vec![
+                            Value::Integer(rug::Integer::from(2 * a)),
+                            Value::Integer(rug::Integer::from(-1)),
+                        ],
+                    },
+                ],
+            });
+        }
+    }
+    // Plain rational fallback.
+    if let Some((num, den)) = best_rational(x, 1_000_000, 1e-12)
+        && den != 1
+    {
+        return Ok(Value::Rational(Box::new(rug::Rational::from((num, den)))));
+    }
+    Ok(super::real(x))
+}
+
+/// Zeros[f, {x, xmin, xmax}] — numerically locate zeros of `f` on an interval.
+pub fn builtin_zeros(args: &[Value], env: &Env) -> Result<Value, EvalError> {
+    let uneval = || Value::Call {
+        head: "Zeros".to_string(),
+        args: args.to_vec(),
+    };
+    if args.len() < 2 {
+        return Ok(uneval());
+    }
+    let spec = match &args[1] {
+        Value::List(items) if items.len() >= 3 => items,
+        _ => return Ok(uneval()),
+    };
+    let var = match &spec[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Ok(uneval()),
+    };
+    let Some(lo) = eval_expr_to_f64(&spec[1], env).ok() else {
+        return Ok(uneval());
+    };
+    let Some(hi) = eval_expr_to_f64(&spec[2], env).ok() else {
+        return Ok(uneval());
+    };
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        return Ok(uneval());
+    }
+    let f = |t: f64| -> f64 {
+        // A pure function / callable is applied directly; an expression is
+        // substituted with the numeric value of `var`.
+        if matches!(
+            &args[0],
+            Value::PureFunction { .. }
+                | Value::Function(_)
+                | Value::Builtin(..)
+                | Value::Method { .. }
+        ) && let Ok(r) = crate::eval::apply_function(&args[0], &[super::real(t)], env)
+            && let Some(x) = super::to_f64(&r)
+        {
+            return x;
+        }
+        let sub = substitute_numeric(&args[0], &var, t);
+        eval_expr_to_f64(&sub, env).unwrap_or(f64::NAN)
+    };
+    let n = 1000usize;
+    let mut roots: Vec<f64> = Vec::new();
+    let mut prev_x = lo;
+    let mut prev_y = f(lo);
+    for i in 1..=n {
+        let x = lo + (hi - lo) * (i as f64) / (n as f64);
+        let y = f(x);
+        if y == 0.0 {
+            roots.push(x);
+        } else if prev_y.is_finite()
+            && y.is_finite()
+            && prev_y.signum() != y.signum()
+            && let Ok(r) = brent_method(&f, prev_x, x)
+        {
+            roots.push(r);
+        }
+        prev_x = x;
+        prev_y = y;
+    }
+    if roots.is_empty() {
+        return Ok(Value::List(vec![]));
+    }
+    // Deduplicate roots that differ by less than the grid spacing.
+    roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut dedup: Vec<f64> = Vec::new();
+    for r in roots {
+        if dedup.last().map(|p| (r - p).abs() > 1e-8).unwrap_or(true) {
+            dedup.push(r);
+        }
+    }
+    Ok(Value::List(dedup.into_iter().map(super::real).collect()))
 }
 
 #[cfg(test)]
@@ -2710,5 +2997,58 @@ mod tests {
             matches!(&z, Value::Call { head, .. } if head == "ConvexOptimization"),
             "expected unevaluated, got {z:?}"
         );
+    }
+
+    #[test]
+    fn test_nroots_numeric_disjunction() {
+        let out = eval_str("NRoots[x^2 - 1 == 0, x]").to_string();
+        assert!(out.contains("1.0"), "got {out}");
+        assert!(out.contains("-1.0"), "got {out}");
+    }
+
+    #[test]
+    fn test_solve_values() {
+        let out = eval_str("SolveValues[x^2 - 1 == 0, x]").to_string();
+        assert_eq!(out, "{-1, 1}");
+    }
+
+    #[test]
+    fn test_reduce_values() {
+        let out = eval_str("ReduceValues[x^2 - 3 x + 2 == 0, x]").to_string();
+        assert_eq!(out, "{1, 2}");
+        let out = eval_str("ReduceValues[x^2 - 3 x + 2 < 0, x]").to_string();
+        assert_eq!(out, "{Interval[{1, 2}]}");
+    }
+
+    #[test]
+    fn test_farey_sequence() {
+        let out = eval_str("FareySequence[4]").to_string();
+        assert_eq!(out, "{0, 1/4, 1/3, 1/2, 2/3, 3/4, 1}");
+    }
+
+    #[test]
+    fn test_root_approximant_quadratic() {
+        let out = eval_str("RootApproximant[1.4142135623730951]").to_string();
+        assert_eq!(out, "Sqrt[2]");
+        let out = eval_str("RootApproximant[0.3333333333333333]").to_string();
+        assert_eq!(out, "1/3");
+    }
+
+    #[test]
+    fn test_zeros_of_expression_and_function() {
+        let out = eval_str("Zeros[x^2 - 4, {x, -3, 3}]");
+        let Value::List(items) = out else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 2);
+        assert_close(super::super::to_f64(&items[0]).unwrap(), -2.0);
+        assert_close(super::super::to_f64(&items[1]).unwrap(), 2.0);
+
+        let out = eval_str("Zeros[#^2 - 2 &, {x, 0, 2}]");
+        let Value::List(items) = out else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 1);
+        assert_close(super::super::to_f64(&items[0]).unwrap(), 2.0_f64.sqrt());
     }
 }

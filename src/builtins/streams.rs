@@ -372,8 +372,30 @@ pub fn builtin_end_of_file(args: &[Value], _env: &Env) -> Result<Value, EvalErro
 }
 
 /// Register the builtins implemented in this module.
+/// StringToStream[s] — a read stream over the string `s`.
+pub fn builtin_string_to_stream(args: &[Value]) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Error(
+            "StringToStream requires exactly 1 argument".to_string(),
+        ));
+    }
+    let Some(s) = as_str(&args[0]) else {
+        return Err(EvalError::TypeError {
+            expected: "String".to_string(),
+            got: args[0].type_name().to_string(),
+        });
+    };
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    STREAMS
+        .lock()
+        .unwrap()
+        .insert(handle, StreamEntry::Read { content: s, pos: 0 });
+    Ok(Value::Integer(rug::Integer::from(handle as i64)))
+}
+
 pub fn register(env: &Env) {
     super::register_builtin_env(env, "OpenWrite", builtin_open_write);
+    super::register_builtin(env, "StringToStream", builtin_string_to_stream);
     super::register_builtin_env(env, "OpenAppend", builtin_open_append);
     super::register_builtin_env(env, "OpenRead", builtin_open_read);
     super::register_builtin_env(env, "Close", builtin_close);
@@ -390,6 +412,7 @@ pub fn register(env: &Env) {
         "OpenWrite",
         "OpenAppend",
         "OpenRead",
+        "StringToStream",
         "Close",
         "Streams",
         "Write",
@@ -423,6 +446,16 @@ mod tests {
 
     fn int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
+    }
+
+    #[test]
+    fn test_string_to_stream_readline() {
+        let env = env_with_builtins();
+        let handle = builtin_string_to_stream(&[s("one\ntwo\n")]).unwrap();
+        let l1 = builtin_read_line(&[handle.clone()], &env).unwrap();
+        let l2 = builtin_read_line(&[handle.clone()], &env).unwrap();
+        assert_eq!(l1, s("one"));
+        assert_eq!(l2, s("two"));
     }
 
     fn temp_path(tag: &str) -> String {
