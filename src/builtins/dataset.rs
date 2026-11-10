@@ -235,13 +235,11 @@ pub fn builtin_sort_by(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     match &args[0] {
         Value::List(items) => {
             let f = &args[1];
-            let mut pairs: Vec<(Value, Value)> = items
-                .iter()
-                .map(|item| {
-                    let key = apply_function(f, &[item.clone()], env).unwrap_or(Value::Null);
-                    (item.clone(), key)
-                })
-                .collect();
+            let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+            for item in items {
+                let key = apply_function(f, &[item.clone()], env)?;
+                pairs.push((item.clone(), key));
+            }
             pairs.sort_by(|a, b| compare_values(&a.1, &b.1));
             Ok(Value::List(pairs.into_iter().map(|(v, _)| v).collect()))
         }
@@ -630,5 +628,19 @@ mod tests {
     fn test_normalize_index_out_of_bounds() {
         assert!(normalize_index(6, 5).is_err());
         assert!(normalize_index(-6, 5).is_err());
+    }
+
+    #[test]
+    fn test_sort_by_propagates_error() {
+        // A key function that errors should surface the error rather than
+        // silently sorting by Null.
+        let env = Env::new();
+        builtins::register_builtins(&env);
+        let f = Value::Builtin(
+            "boom".to_string(),
+            crate::value::BuiltinFn::Pure(|_| Err(EvalError::Error("boom".to_string()))),
+        );
+        let candles = Value::List(vec![int(1), int(2)]);
+        assert!(builtin_sort_by(&[candles, f], &env).is_err());
     }
 }

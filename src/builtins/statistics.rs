@@ -1806,17 +1806,21 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
             let lambda = dist.get("Lambda").and_then(to_f64).unwrap_or(1.0);
             (0..n)
                 .map(|_| {
-                    let l = (-lambda).exp();
+                    // Knuth's method in log space. The naive form computes
+                    // L = e^{-lambda}, which underflows to 0 for lambda >~ 700,
+                    // so `p < L` can never become true once p is positive.
+                    // log L = -lambda does not underflow.
+                    let log_l = -lambda;
+                    let mut log_p = 0.0f64;
                     let mut k = 0u64;
-                    let mut p = 1.0f64;
                     loop {
-                        k += 1;
-                        p *= rng.f64();
-                        if p < l {
+                        log_p += rng.f64().max(1e-300).ln();
+                        if log_p < log_l {
                             break;
                         }
+                        k += 1;
                     }
-                    int((k - 1) as i64)
+                    int(k as i64)
                 })
                 .collect()
         }
@@ -2506,6 +2510,34 @@ mod tests {
         } else {
             panic!("Expected List");
         }
+    }
+
+    #[test]
+    fn test_random_variate_poisson_large_lambda() {
+        // lambda = 1000 makes e^{-lambda} underflow to 0; the naive sampler
+        // would spin forever. With log-space sampling the mean should be ~1000.
+        let dist = builtin_poisson_distribution(&[real_val(1000.0)]).unwrap();
+        let r = builtin_random_variate(&[dist, int_val(200)]).unwrap();
+        let items = match r {
+            Value::List(items) => items,
+            _ => panic!("Expected List"),
+        };
+        assert_eq!(items.len(), 200);
+        let mut sum = 0.0;
+        for v in &items {
+            let k = match v {
+                Value::Integer(n) => n.to_f64(),
+                _ => panic!("Expected Integer"),
+            };
+            assert!(k >= 0.0);
+            sum += k;
+        }
+        let mean = sum / items.len() as f64;
+        assert!(
+            (900.0..1100.0).contains(&mean),
+            "Poisson(1000) sample mean {} far from 1000",
+            mean
+        );
     }
 
     #[test]

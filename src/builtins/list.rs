@@ -70,6 +70,32 @@ pub(crate) fn normalize_index(index: i64, size: usize) -> Result<usize, EvalErro
     Ok(idx)
 }
 
+/// Resolve a `{m, n}` span spec into a half-open 0-based `[start, end)` range.
+/// Positions are 1-indexed and negative positions count from the end. The
+/// result is clamped to `[0, len]`, so out-of-range spans yield empty or
+/// shortened slices instead of panicking.
+pub(crate) fn resolve_span(m: i64, n: i64, len: usize) -> (usize, usize) {
+    let len_i = len as i64;
+    let start_i = if m > 0 {
+        m - 1
+    } else if m < 0 {
+        len_i + m
+    } else {
+        0
+    };
+    let end_i = if n > 0 {
+        n
+    } else if n < 0 {
+        len_i + n + 1
+    } else {
+        0
+    };
+    (
+        start_i.clamp(0, len_i) as usize,
+        end_i.clamp(0, len_i) as usize,
+    )
+}
+
 /// Extract a list slice from a Value, returning a TypeError for non-lists.
 fn get_list(val: &Value) -> Result<&[Value], EvalError> {
     match val {
@@ -89,7 +115,7 @@ pub fn builtin_length(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::List(items) => Ok(Value::Integer(Integer::from(items.len() as i64))),
-        Value::Str(s) => Ok(Value::Integer(Integer::from(s.len() as i64))),
+        Value::Str(s) => Ok(Value::Integer(Integer::from(s.chars().count() as i64))),
         _ => Ok(Value::Integer(Integer::from(1))),
     }
 }
@@ -407,22 +433,9 @@ pub fn builtin_part(args: &[Value]) -> Result<Value, EvalError> {
                     });
                 }
             };
-            let idx = if index > 0 {
-                (index - 1) as usize
-            } else {
-                return Err(EvalError::IndexOutOfBounds {
-                    index,
-                    length: s.len(),
-                });
-            };
-            if idx < s.len() {
-                Ok(Value::Str(s.chars().nth(idx).unwrap().to_string()))
-            } else {
-                Err(EvalError::IndexOutOfBounds {
-                    index,
-                    length: s.len(),
-                })
-            }
+            let chars: Vec<char> = s.chars().collect();
+            let idx = normalize_index(index, chars.len())?;
+            Ok(Value::Str(chars[idx].to_string()))
         }
         // Part[Call[f, args], n] — index into call arguments
         // n = 0 → head f, n > 0 → args[n-1]
@@ -722,8 +735,7 @@ pub fn builtin_take(args: &[Value]) -> Result<Value, EvalError> {
                 expected: "Integer".to_string(),
                 got: range[1].type_name().to_string(),
             })?;
-            let start = if m >= 1 { (m - 1) as usize } else { 0 };
-            let end = (n as usize).min(items.len());
+            let (start, end) = resolve_span(m, n, items.len());
             if start >= end {
                 return Ok(Value::List(vec![]));
             }
@@ -731,12 +743,15 @@ pub fn builtin_take(args: &[Value]) -> Result<Value, EvalError> {
         }
         (Value::List(items), Value::Integer(n)) => {
             let n_i64 = n.to_i64().unwrap_or(0);
-            let count = if n_i64 >= 0 {
-                n_i64 as usize
+            // Positive n takes the first n elements; negative n takes the last |n|.
+            let result = if n_i64 >= 0 {
+                let count = (n_i64 as usize).min(items.len());
+                items[..count].to_vec()
             } else {
-                items.len() - (-n_i64) as usize
+                let count = ((-n_i64) as usize).min(items.len());
+                items[items.len() - count..].to_vec()
             };
-            Ok(Value::List(items[..count.min(items.len())].to_vec()))
+            Ok(Value::List(result))
         }
         _ => Err(EvalError::TypeError {
             expected: "List and Integer".to_string(),
@@ -761,9 +776,10 @@ pub fn builtin_drop(args: &[Value]) -> Result<Value, EvalError> {
                 expected: "Integer".to_string(),
                 got: range[1].type_name().to_string(),
             })?;
-            let start = if m >= 1 { (m - 1) as usize } else { 0 };
-            let end = (n as usize).min(items.len());
-            if start == 0 {
+            let (start, end) = resolve_span(m, n, items.len());
+            if start >= end {
+                Ok(Value::List(items.to_vec()))
+            } else if start == 0 {
                 Ok(Value::List(items[end..].to_vec()))
             } else {
                 let mut result: Vec<Value> = items[..start].to_vec();
@@ -773,12 +789,15 @@ pub fn builtin_drop(args: &[Value]) -> Result<Value, EvalError> {
         }
         (Value::List(items), Value::Integer(n)) => {
             let n_i64 = n.to_i64().unwrap_or(0);
-            let count = if n_i64 >= 0 {
-                n_i64 as usize
+            // Positive n drops the first n elements; negative n drops the last |n|.
+            let result = if n_i64 >= 0 {
+                let count = (n_i64 as usize).min(items.len());
+                items[count..].to_vec()
             } else {
-                items.len() - (-n_i64) as usize
+                let count = ((-n_i64) as usize).min(items.len());
+                items[..items.len() - count].to_vec()
             };
-            Ok(Value::List(items[count.min(items.len())..].to_vec()))
+            Ok(Value::List(result))
         }
         _ => Err(EvalError::TypeError {
             expected: "List and Integer".to_string(),
@@ -822,15 +841,20 @@ pub fn builtin_transpose(args: &[Value]) -> Result<Value, EvalError> {
             if rows.is_empty() {
                 return Ok(Value::List(vec![]));
             }
-            let cols = match &rows[0] {
-                Value::List(items) => items.len(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "List of Lists".to_string(),
-                        got: "List of non-Lists".to_string(),
-                    });
+            // Support ragged input: use the widest row so no push is out of
+            // bounds. Short rows simply contribute fewer entries.
+            let mut cols = 0usize;
+            for row in rows {
+                match row {
+                    Value::List(items) => cols = cols.max(items.len()),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "List of Lists".to_string(),
+                            got: "List of non-Lists".to_string(),
+                        });
+                    }
                 }
-            };
+            }
             let mut result = vec![Vec::new(); cols];
             for row in rows {
                 match row {
@@ -1049,17 +1073,29 @@ pub fn builtin_pad_left(args: &[Value]) -> Result<Value, EvalError> {
             let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
                 expected: "Integer".to_string(),
                 got: args[1].type_name().to_string(),
-            })? as usize;
+            })?;
+            // `n` is the target length; a negative `n` pads on the right.
+            let width = n.unsigned_abs() as usize;
             let pad_val = if args.len() == 3 {
                 args[2].clone()
             } else {
                 Value::Null
             };
-            if n <= items.len() {
-                Ok(Value::List(items[items.len() - n..].to_vec()))
+            if n >= 0 {
+                if width <= items.len() {
+                    Ok(Value::List(items[items.len() - width..].to_vec()))
+                } else {
+                    let mut result: Vec<Value> = vec![pad_val; width - items.len()];
+                    result.extend(items.iter().cloned());
+                    Ok(Value::List(result))
+                }
             } else {
-                let mut result: Vec<Value> = vec![pad_val; n - items.len()];
-                result.extend(items.iter().cloned());
+                let mut result = items.clone();
+                if width > items.len() {
+                    result.resize(width, pad_val);
+                } else {
+                    result.truncate(width);
+                }
                 Ok(Value::List(result))
             }
         }
@@ -1081,19 +1117,29 @@ pub fn builtin_pad_right(args: &[Value]) -> Result<Value, EvalError> {
             let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
                 expected: "Integer".to_string(),
                 got: args[1].type_name().to_string(),
-            })? as usize;
+            })?;
+            // `n` is the target length; a negative `n` pads on the left.
+            let width = n.unsigned_abs() as usize;
             let pad_val = if args.len() == 3 {
                 args[2].clone()
             } else {
                 Value::Null
             };
-            let mut result = items.clone();
-            if n > items.len() {
-                result.resize(n, pad_val);
+            if n >= 0 {
+                let mut result = items.clone();
+                if width > items.len() {
+                    result.resize(width, pad_val);
+                } else {
+                    result.truncate(width);
+                }
+                Ok(Value::List(result))
+            } else if width <= items.len() {
+                Ok(Value::List(items[items.len() - width..].to_vec()))
             } else {
-                result.truncate(n);
+                let mut result: Vec<Value> = vec![pad_val; width - items.len()];
+                result.extend(items.iter().cloned());
+                Ok(Value::List(result))
             }
-            Ok(Value::List(result))
         }
         _ => Err(EvalError::TypeError {
             expected: "List".to_string(),
@@ -2629,6 +2675,130 @@ mod tests {
         let mat = list(vec![list(vec![int(1), int(2)]), list(vec![int(3), int(4)])]);
         let result = builtin_part(&[mat, int(2), int(1)]).unwrap();
         assert_eq!(result, int(3));
+    }
+
+    // ── Regression: negative Take/Drop must use last |n| elements ──
+
+    #[test]
+    fn test_take_negative_returns_last_n() {
+        let result = builtin_take(&[list(vec![int(1), int(2), int(3), int(4)]), int(-2)]).unwrap();
+        assert_eq!(result, list(vec![int(3), int(4)]));
+    }
+
+    #[test]
+    fn test_take_negative_overlong_no_panic() {
+        // |n| larger than the list must yield the whole list, not underflow.
+        let result = builtin_take(&[list(vec![int(1), int(2), int(3)]), int(-5)]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2), int(3)]));
+    }
+
+    #[test]
+    fn test_drop_negative_removes_last_n() {
+        let result = builtin_drop(&[list(vec![int(1), int(2), int(3), int(4)]), int(-2)]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2)]));
+    }
+
+    #[test]
+    fn test_drop_negative_overlong_no_panic() {
+        let result = builtin_drop(&[list(vec![int(1), int(2), int(3)]), int(-5)]).unwrap();
+        assert_eq!(result, list(vec![]));
+    }
+
+    #[test]
+    fn test_take_range_negative() {
+        let result = builtin_take(&[
+            list(vec![int(1), int(2), int(3), int(4), int(5)]),
+            list(vec![int(-2), int(-1)]),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![int(4), int(5)]));
+    }
+
+    #[test]
+    fn test_drop_range_negative() {
+        let result = builtin_drop(&[
+            list(vec![int(1), int(2), int(3), int(4), int(5)]),
+            list(vec![int(-2), int(-1)]),
+        ])
+        .unwrap();
+        assert_eq!(result, list(vec![int(1), int(2), int(3)]));
+    }
+
+    #[test]
+    fn test_take_range_out_of_range_clamped() {
+        let result =
+            builtin_take(&[list(vec![int(1), int(2)]), list(vec![int(1), int(9)])]).unwrap();
+        assert_eq!(result, list(vec![int(1), int(2)]));
+    }
+
+    // ── Regression: Transpose of ragged input must not panic ──
+
+    #[test]
+    fn test_transpose_ragged() {
+        let ragged = list(vec![
+            list(vec![int(1), int(2)]),
+            list(vec![int(3), int(4), int(5)]),
+        ]);
+        let result = builtin_transpose(&[ragged]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![
+                list(vec![int(1), int(3)]),
+                list(vec![int(2), int(4)]),
+                list(vec![int(5)]),
+            ])
+        );
+    }
+
+    // ── Regression: negative PadLeft/PadRight must not blow up ──
+
+    #[test]
+    fn test_pad_left_negative_pads_right() {
+        // Negative n pads on the right (Wolfram: "negative length
+        // specifications pad on the right"); |n| is the target length.
+        let result = builtin_pad_left(&[list(vec![int(1), int(2), int(3)]), int(-5)]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![int(1), int(2), int(3), Value::Null, Value::Null])
+        );
+        let result = builtin_pad_left(&[list(vec![int(1), int(2), int(3)]), int(-1)]).unwrap();
+        assert_eq!(result, list(vec![int(1)]));
+    }
+
+    #[test]
+    fn test_pad_right_negative_pads_left() {
+        let result = builtin_pad_right(&[list(vec![int(1), int(2), int(3)]), int(-5)]).unwrap();
+        assert_eq!(
+            result,
+            list(vec![Value::Null, Value::Null, int(1), int(2), int(3)])
+        );
+        let result = builtin_pad_right(&[list(vec![int(1), int(2), int(3)]), int(-1)]).unwrap();
+        assert_eq!(result, list(vec![int(3)]));
+    }
+
+    // ── Regression: Part on strings uses char indexing / no panic ──
+
+    #[test]
+    fn test_part_string_unicode() {
+        // "hé" has 2 chars but 3 bytes; Part[...,2] must give "é".
+        let result = builtin_part(&[Value::Str("hé".to_string()), int(2)]).unwrap();
+        assert_eq!(result, Value::Str("é".to_string()));
+        let result = builtin_part(&[Value::Str("hé".to_string()), int(-1)]).unwrap();
+        assert_eq!(result, Value::Str("é".to_string()));
+    }
+
+    #[test]
+    fn test_part_string_out_of_bounds() {
+        assert!(builtin_part(&[Value::Str("hi".to_string()), int(10)]).is_err());
+        assert!(builtin_part(&[Value::Str("hi".to_string()), int(0)]).is_err());
+    }
+
+    #[test]
+    fn test_length_string_counts_chars() {
+        assert_eq!(
+            builtin_length(&[Value::Str("hé".to_string())]).unwrap(),
+            int(2)
+        );
     }
 
     // ── Env-aware function tests ──

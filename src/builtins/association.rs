@@ -4,6 +4,8 @@ use crate::value::EvalError;
 use crate::value::Value;
 use std::collections::HashMap;
 
+use super::list::compare_values;
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Convert a Value to a string suitable for use as an Assoc key.
@@ -120,19 +122,17 @@ pub fn builtin_key_sort_by(args: &[Value], env: &Env) -> Result<Value, EvalError
     }
     match &args[0] {
         Value::Assoc(map) => {
-            let ordering_fn = &args[1];
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_by(|a, b| {
-                let va = Value::Str((*a).clone());
-                let vb = Value::Str((*b).clone());
-                match apply_function(ordering_fn, &[va, vb], env) {
-                    Ok(Value::Bool(true)) => std::cmp::Ordering::Less,
-                    Ok(Value::Bool(false)) => std::cmp::Ordering::Greater,
-                    _ => a.cmp(b),
-                }
-            });
+            // Wolfram: KeySortBy[assoc, f] sorts by applying the unary key
+            // function f to each key (mirrors SortBy's key semantics).
+            let f = &args[1];
+            let mut keyed: Vec<(Value, &String)> = Vec::with_capacity(map.len());
+            for k in map.keys() {
+                let sort_key = apply_function(f, &[Value::Str(k.clone())], env)?;
+                keyed.push((sort_key, k));
+            }
+            keyed.sort_by(|a, b| compare_values(&a.0, &b.0));
             let mut new_map = HashMap::with_capacity(map.len());
-            for k in keys {
+            for (_, k) in keyed {
                 new_map.insert(k.clone(), map[k].clone());
             }
             Ok(Value::Assoc(new_map))
@@ -777,6 +777,45 @@ mod tests {
             }
             _ => panic!("Expected Assoc"),
         }
+    }
+
+    #[test]
+    fn test_key_sort_by_uses_unary_key_function() {
+        let env = make_env();
+        let a = assoc(vec![
+            ("aaa", integer(1)),
+            ("ab", integer(2)),
+            ("abcd", integer(3)),
+        ]);
+        // StringLength is a unary key function; calling it with two arguments
+        // would fail, so this exercises the unary path.
+        let f = Value::Builtin(
+            "StringLength".to_string(),
+            crate::value::BuiltinFn::Pure(crate::builtins::string::builtin_string_length),
+        );
+        let result = builtin_key_sort_by(&[a, f], &env).unwrap();
+        match result {
+            Value::Assoc(map) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map.get("aaa"), Some(&integer(1)));
+                assert_eq!(map.get("ab"), Some(&integer(2)));
+                assert_eq!(map.get("abcd"), Some(&integer(3)));
+            }
+            _ => panic!("Expected Assoc"),
+        }
+    }
+
+    #[test]
+    fn test_key_sort_by_propagates_error() {
+        // Previously a failing key function was silently swallowed by the
+        // comparator fallback; it must now surface as an error.
+        let env = make_env();
+        let a = assoc(vec![("a", integer(1))]);
+        let f = Value::Builtin(
+            "boom".to_string(),
+            crate::value::BuiltinFn::Pure(|_| Err(EvalError::Error("boom".to_string()))),
+        );
+        assert!(builtin_key_sort_by(&[a, f], &env).is_err());
     }
 
     #[test]

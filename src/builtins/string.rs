@@ -1,8 +1,10 @@
 use crate::value::{EvalError, Format, Value};
 use rug::Integer;
 
+use super::list::resolve_span;
+
 /// Extract a `&str` from a `&Value`, returning TypeError if not a string.
-fn str_of<'a>(v: &'a Value) -> Result<&'a str, EvalError> {
+fn str_of(v: &Value) -> Result<&str, EvalError> {
     match v {
         Value::Str(s) => Ok(s.as_str()),
         _ => Err(EvalError::TypeError {
@@ -13,7 +15,7 @@ fn str_of<'a>(v: &'a Value) -> Result<&'a str, EvalError> {
 }
 
 /// Extract a single string argument from args at the given index.
-fn str_arg<'a>(args: &'a [Value], idx: usize) -> Result<&'a str, EvalError> {
+fn str_arg(args: &[Value], idx: usize) -> Result<&str, EvalError> {
     match args.get(idx) {
         Some(v) => str_of(v),
         None => Err(EvalError::TypeError {
@@ -24,7 +26,7 @@ fn str_arg<'a>(args: &'a [Value], idx: usize) -> Result<&'a str, EvalError> {
 }
 
 /// Extract two string arguments.
-fn str_args<'a>(args: &'a [Value], a: usize, b: usize) -> Result<(&'a str, &'a str), EvalError> {
+fn str_args(args: &[Value], a: usize, b: usize) -> Result<(&str, &str), EvalError> {
     Ok((str_arg(args, a)?, str_arg(args, b)?))
 }
 
@@ -55,7 +57,7 @@ pub fn builtin_string_length(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
-    Ok(Value::Integer(Integer::from(s.len() as i64)))
+    Ok(Value::Integer(Integer::from(s.chars().count() as i64)))
 }
 
 pub fn builtin_to_string(args: &[Value]) -> Result<Value, EvalError> {
@@ -99,11 +101,16 @@ pub fn builtin_string_split(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         " "
     };
-    Ok(Value::List(
+    // Splitting on the empty delimiter yields one part per character; Rust's
+    // `split("")` otherwise produces spurious empty strings at both ends.
+    let parts: Vec<Value> = if delim.is_empty() {
+        s.chars().map(|c| Value::Str(c.to_string())).collect()
+    } else {
         s.split(delim)
             .map(|part| Value::Str(part.to_string()))
-            .collect(),
-    ))
+            .collect()
+    };
+    Ok(Value::List(parts))
 }
 
 pub fn builtin_string_replace(args: &[Value]) -> Result<Value, EvalError> {
@@ -153,17 +160,39 @@ pub fn builtin_string_take(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    // {m, n} takes an inclusive character span; negative positions count from
+    // the end.
+    if let Value::List(range) = &args[1] {
+        if range.len() != 2 {
+            return Err(EvalError::Error(
+                "StringTake: range spec must have 2 elements".to_string(),
+            ));
+        }
+        let m = range[0].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: range[0].type_name().to_string(),
+        })?;
+        let n = range[1].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: range[1].type_name().to_string(),
+        })?;
+        let (start, end) = resolve_span(m, n, len);
+        return Ok(Value::Str(chars[start..end].iter().collect()));
+    }
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
-    let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 {
-        n as usize
+    // Positive n takes the first n characters; negative n takes the last |n|.
+    let result: String = if n >= 0 {
+        chars[..(n as usize).min(len)].iter().collect()
     } else {
-        chars.len().saturating_sub((-n) as usize)
+        let count = ((-n) as usize).min(len);
+        chars[len - count..].iter().collect()
     };
-    Ok(Value::Str(chars[..count.min(chars.len())].iter().collect()))
+    Ok(Value::Str(result))
 }
 
 pub fn builtin_string_drop(args: &[Value]) -> Result<Value, EvalError> {
@@ -173,17 +202,39 @@ pub fn builtin_string_drop(args: &[Value]) -> Result<Value, EvalError> {
         ));
     }
     let s = str_arg(args, 0)?;
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    if let Value::List(range) = &args[1] {
+        if range.len() != 2 {
+            return Err(EvalError::Error(
+                "StringDrop: range spec must have 2 elements".to_string(),
+            ));
+        }
+        let m = range[0].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: range[0].type_name().to_string(),
+        })?;
+        let n = range[1].to_integer().ok_or_else(|| EvalError::TypeError {
+            expected: "Integer".to_string(),
+            got: range[1].type_name().to_string(),
+        })?;
+        let (start, end) = resolve_span(m, n, len);
+        let mut result: String = chars[..start].iter().collect();
+        result.extend(chars[end..].iter());
+        return Ok(Value::Str(result));
+    }
     let n = args[1].to_integer().ok_or_else(|| EvalError::TypeError {
         expected: "Integer".to_string(),
         got: args[1].type_name().to_string(),
     })?;
-    let chars: Vec<char> = s.chars().collect();
-    let count = if n >= 0 {
-        n as usize
+    // Positive n drops the first n characters; negative n drops the last |n|.
+    let result: String = if n >= 0 {
+        chars[(n as usize).min(len)..].iter().collect()
     } else {
-        chars.len().saturating_sub((-n) as usize)
+        let count = ((-n) as usize).min(len);
+        chars[..len - count].iter().collect()
     };
-    Ok(Value::Str(chars[count.min(chars.len())..].iter().collect()))
+    Ok(Value::Str(result))
 }
 
 pub fn builtin_string_contains_q(args: &[Value]) -> Result<Value, EvalError> {
@@ -271,6 +322,25 @@ fn glob_match_chars(pat: &[char], txt: &[char]) -> bool {
     }
 }
 
+/// Number of leading/trailing characters produced by repeating `pad`.
+///
+/// `padding_prefix` returns the first `count` characters of the infinite
+/// repetition of `pad`; `padding_suffix` returns the last `count` characters.
+/// An empty `pad` falls back to a single space.
+fn padding_prefix(pad: &str, count: usize) -> String {
+    let pad = if pad.is_empty() { " " } else { pad };
+    let plen = pad.chars().count();
+    pad.repeat(count / plen + 1).chars().take(count).collect()
+}
+
+fn padding_suffix(pad: &str, count: usize) -> String {
+    let pad = if pad.is_empty() { " " } else { pad };
+    let plen = pad.chars().count();
+    let repeated = pad.repeat(count / plen + 1);
+    let chars: Vec<char> = repeated.chars().collect();
+    chars[chars.len() - count..].iter().collect()
+}
+
 /// StringPadLeft["str", n] or StringPadLeft["str", n, "pad"] — left-pad a string.
 pub fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
     if args.len() < 2 || args.len() > 3 {
@@ -288,12 +358,20 @@ pub fn builtin_string_pad_left(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         ' '.to_string()
     };
-    if n <= 0 || s.len() >= n as usize {
+    let width = n.unsigned_abs() as usize;
+    let cur = s.chars().count();
+    if width <= cur {
         return Ok(Value::Str(s));
     }
-    let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
-    Ok(Value::Str(format!("{}{}", padding, s)))
+    let count = width - cur;
+    if n >= 0 {
+        let padding = padding_suffix(&pad, count);
+        Ok(Value::Str(format!("{}{}", padding, s)))
+    } else {
+        // Negative width pads on the right.
+        let padding = padding_prefix(&pad, count);
+        Ok(Value::Str(format!("{}{}", s, padding)))
+    }
 }
 
 /// StringPadRight["str", n] or StringPadRight["str", n, "pad"] — right-pad a string.
@@ -313,12 +391,20 @@ pub fn builtin_string_pad_right(args: &[Value]) -> Result<Value, EvalError> {
     } else {
         ' '.to_string()
     };
-    if n <= 0 || s.len() >= n as usize {
+    let width = n.unsigned_abs() as usize;
+    let cur = s.chars().count();
+    if width <= cur {
         return Ok(Value::Str(s));
     }
-    let pad_char = pad.chars().next().unwrap_or(' ');
-    let padding: String = std::iter::repeat_n(pad_char, n as usize - s.len()).collect();
-    Ok(Value::Str(format!("{}{}", s, padding)))
+    let count = width - cur;
+    if n >= 0 {
+        let padding = padding_prefix(&pad, count);
+        Ok(Value::Str(format!("{}{}", s, padding)))
+    } else {
+        // Negative width pads on the left.
+        let padding = padding_suffix(&pad, count);
+        Ok(Value::Str(format!("{}{}", padding, s)))
+    }
 }
 
 /// StringTrim["str"] — remove leading and trailing whitespace.
@@ -397,7 +483,10 @@ pub fn builtin_string_position(args: &[Value]) -> Result<Value, EvalError> {
     let (s, sub) = str_args(args, 0, 1)?;
     let positions: Vec<Value> = s
         .match_indices(sub)
-        .map(|(pos, _)| Value::Integer(Integer::from(pos as i64 + 1)))
+        .map(|(byte_pos, _)| {
+            // Report character positions, not byte offsets.
+            Value::Integer(Integer::from(s[..byte_pos].chars().count() as i64 + 1))
+        })
         .collect();
     Ok(Value::List(positions))
 }
@@ -676,12 +765,11 @@ pub fn builtin_from_character_code(args: &[Value]) -> Result<Value, EvalError> {
     if let Value::List(codes) = &args[0] {
         let mut s = String::new();
         for code in codes {
-            if let Value::Integer(n) = code {
-                if let Some(val) = n.to_u32() {
-                    if let Some(c) = char::from_u32(val) {
-                        s.push(c);
-                    }
-                }
+            if let Value::Integer(n) = code
+                && let Some(val) = n.to_u32()
+                && let Some(c) = char::from_u32(val)
+            {
+                s.push(c);
             }
         }
         return Ok(Value::Str(s));
@@ -707,11 +795,11 @@ pub fn builtin_edit_distance(args: &[Value]) -> Result<Value, EvalError> {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, v) in dp[0].iter_mut().enumerate() {
+        *v = j;
     }
     for i in 1..=m {
         for j in 1..=n {
@@ -825,7 +913,7 @@ pub fn builtin_sentence_count(args: &[Value]) -> Result<Value, EvalError> {
         args: args.to_vec().into(),
     })?;
     let sentences: Vec<&str> = s
-        .split(|c| matches!(c, '.' | '!' | '?'))
+        .split(['.', '!', '?'])
         .filter(|s| !s.trim().is_empty())
         .collect();
     Ok(Value::Integer(Integer::from(sentences.len() as i64)))
@@ -1321,5 +1409,108 @@ mod tests {
     fn test_string_split_empty() {
         let result = builtin_string_split(&[string(""), string(",")]).unwrap();
         assert_eq!(result, Value::List(vec![string("")]));
+    }
+
+    // ── Regression: char-based length / positions on non-ASCII ──
+
+    #[test]
+    fn test_string_length_unicode() {
+        // "héllo" is 5 characters but 6 bytes.
+        assert_eq!(builtin_string_length(&[string("héllo")]).unwrap(), int(5));
+    }
+
+    #[test]
+    fn test_string_position_unicode() {
+        // Byte offsets would report position 10; character position is 4.
+        let result = builtin_string_position(&[string("日本語x"), string("x")]).unwrap();
+        assert_eq!(result, Value::List(vec![int(4)]));
+    }
+
+    // ── Regression: StringPad uses character width and repeated padding ──
+
+    #[test]
+    fn test_string_pad_left_multichar() {
+        let result = builtin_string_pad_left(&[string("x"), int(5), string("ab")]).unwrap();
+        assert_eq!(result, string("ababx"));
+    }
+
+    #[test]
+    fn test_string_pad_right_multichar() {
+        let result = builtin_string_pad_right(&[string("x"), int(5), string("ab")]).unwrap();
+        assert_eq!(result, string("xabab"));
+    }
+
+    #[test]
+    fn test_string_pad_left_unicode_width() {
+        // "é" is one character; pad to width 3 using single-char padding.
+        let result = builtin_string_pad_left(&[string("é"), int(3)]).unwrap();
+        assert_eq!(result, string("  é"));
+    }
+
+    #[test]
+    fn test_string_pad_negative_pads_opposite_side() {
+        // Negative width pads on the opposite side, matching PadLeft/PadRight.
+        assert_eq!(
+            builtin_string_pad_left(&[string("x"), int(-3)]).unwrap(),
+            string("x  ")
+        );
+        assert_eq!(
+            builtin_string_pad_right(&[string("x"), int(-3)]).unwrap(),
+            string("  x")
+        );
+    }
+
+    // ── Regression: empty delimiter splits into characters ──
+
+    #[test]
+    fn test_string_split_empty_delim() {
+        let result = builtin_string_split(&[string("abc"), string("")]).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![string("a"), string("b"), string("c")])
+        );
+    }
+
+    // ── Regression: StringTake/StringDrop negative + range semantics ──
+
+    #[test]
+    fn test_string_take_negative_returns_last_n() {
+        assert_eq!(
+            builtin_string_take(&[string("hello"), int(-2)]).unwrap(),
+            string("lo")
+        );
+        // |n| larger than the string yields the whole string.
+        assert_eq!(
+            builtin_string_take(&[string("hi"), int(-5)]).unwrap(),
+            string("hi")
+        );
+    }
+
+    #[test]
+    fn test_string_drop_negative_removes_last_n() {
+        assert_eq!(
+            builtin_string_drop(&[string("hello"), int(-2)]).unwrap(),
+            string("hel")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("hi"), int(-5)]).unwrap(),
+            string("")
+        );
+    }
+
+    #[test]
+    fn test_string_take_drop_range() {
+        assert_eq!(
+            builtin_string_take(&[string("hello"), Value::List(vec![int(2), int(4)])]).unwrap(),
+            string("ell")
+        );
+        assert_eq!(
+            builtin_string_drop(&[string("hello"), Value::List(vec![int(2), int(4)])]).unwrap(),
+            string("ho")
+        );
+        assert_eq!(
+            builtin_string_take(&[string("hello"), Value::List(vec![int(-2), int(-1)])]).unwrap(),
+            string("lo")
+        );
     }
 }
