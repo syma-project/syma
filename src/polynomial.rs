@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 /// Polynomial arithmetic helpers for algebraic number support.
 ///
 /// Provides root finding, resultants, GCD, Sturm sequences, and
@@ -241,10 +243,7 @@ pub fn make_monic(coeffs: &[Rational]) -> Vec<Rational> {
         return coeffs.to_vec();
     }
     let lead = &coeffs[deg];
-    coeffs
-        .iter()
-        .map(|c| (c.clone() / lead.clone()).into())
-        .collect()
+    coeffs.iter().map(|c| c.clone() / lead.clone()).collect()
 }
 
 /// Compute the derivative of a polynomial.
@@ -256,7 +255,7 @@ pub fn poly_derivative(coeffs: &[Rational]) -> Vec<Rational> {
     }
     (1..n)
         .map(|i| {
-            let mut c = Rational::from(coeffs[i].clone());
+            let mut c = coeffs[i].clone();
             c *= i;
             c
         })
@@ -332,36 +331,45 @@ fn is_zero_poly(coeffs: &[Rational]) -> bool {
 pub fn resultant(a: &[Rational], b: &[Rational]) -> Rational {
     let m = poly_degree(a);
     let n = poly_degree(b);
+    if m == 0 && n == 0 {
+        // Both are (nonzero) constants: the empty product convention gives 1.
+        return Rational::from(1);
+    }
     if m == 0 {
         // resultant(constant, b) = constant^n
-        let mut r = Rational::from(a[0].clone());
+        let mut r = a[0].clone();
         for _ in 1..n {
             r *= a[0].clone();
         }
         return r;
     }
     if n == 0 {
-        let mut r = Rational::from(b[0].clone());
+        let mut r = b[0].clone();
         for _ in 1..m {
             r *= b[0].clone();
         }
         return r;
     }
 
-    // Build Sylvester matrix: (m+n) x (m+n)
+    // Build Sylvester matrix: (m+n) x (m+n).
+    //
+    // Each row holds coefficients in descending order placed at offset `i`
+    // (i.e. column `i` gets the leading coefficient). Writing the coefficients
+    // in ascending order here flips the determinant sign for some degrees, so
+    // index them as `coeff[deg - j]`.
     let size = m + n;
     let mut matrix: Vec<Vec<Rational>> = vec![vec![Rational::from(0); size]; size];
 
     // First n rows: coefficients of a shifted
     for i in 0..n {
         for j in 0..=m {
-            matrix[i][i + j] = a[j].clone();
+            matrix[i][i + j] = a[m - j].clone();
         }
     }
     // Next m rows: coefficients of b shifted
     for i in 0..m {
         for j in 0..=n {
-            matrix[n + i][i + j] = b[j].clone();
+            matrix[n + i][i + j] = b[n - j].clone();
         }
     }
 
@@ -435,7 +443,7 @@ pub fn sturm_sequence(coeffs: &[Rational]) -> Vec<Vec<Rational>> {
         let prev = seq[seq.len() - 2].clone();
         let rem = poly_remainder(&prev, &last);
         // Negate the remainder
-        let neg_rem: Vec<Rational> = rem.iter().map(|c| Rational::from(-c.clone())).collect();
+        let neg_rem: Vec<Rational> = rem.iter().map(|c| -c.clone()).collect();
         seq.push(neg_rem);
     }
     seq
@@ -659,7 +667,7 @@ fn min_poly_add_sub(
                 let binom_kj = binomial(k, j);
                 let z_power = k - j;
                 let sign = if j % 2 == 1 { -1 } else { 1 };
-                let mut coeff = Rational::from(p[k].clone());
+                let mut coeff = p[k].clone();
                 coeff *= binom_kj;
                 if sign < 0 {
                     coeff = Rational::from(-&coeff.clone());
@@ -669,7 +677,7 @@ fn min_poly_add_sub(
                     // p(z + y) = sum p[k] * (z+y)^k
                     // coeff of y^j = sum_{k=j..n} p[k] * binom(k,j) * z^(k-j)
                     // (all positive, no (-1)^j factor, but sign depends on subtract)
-                    if subtract == false {
+                    if !subtract {
                         // already done above for add
                     }
                     // For subtract: alpha = z + beta, p(z+y)
@@ -693,7 +701,7 @@ fn min_poly_add_sub(
             for k in j..=n {
                 let binom_kj = binomial(k, j);
                 let z_power = k - j;
-                let mut coeff = Rational::from(p[k].clone());
+                let mut coeff = p[k].clone();
                 coeff *= binom_kj;
                 p_sub2[j][z_power] += coeff;
             }
@@ -717,9 +725,7 @@ fn min_poly_resultant_z(
 
     // First m rows: coeffs of p(z-y) in y, shifted
     for i in 0..m {
-        for j in 0..=n {
-            matrix[i][i + j] = p_expanded[j].clone();
-        }
+        matrix[i][i..=i + n].clone_from_slice(p_expanded);
     }
     // Next n rows: coeffs of q in y, shifted
     for i in 0..n {
@@ -844,19 +850,6 @@ fn interpolate_from_integers(evals: &[(i64, i64)], _max_deg: usize) -> Vec<Ratio
     let n = evals.len(); // = max_deg + 1
     let mut coeffs = vec![Rational::from(0); n];
 
-    // Newton interpolation
-    for i in 0..n {
-        let mut molecule = evals[i].1;
-        let _denominator = 1i64;
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            molecule *= evals[i].0;
-            // We need the Lagrange form
-        }
-    }
-
     // Use Lagrange interpolation formula
     // P(x) = sum_i y_i * l_i(x) where l_i(x) = prod_{j!=i} (x - x_j) / (x_i - x_j)
     // Since x_j = j, we have x_i - x_j = i - j
@@ -875,8 +868,8 @@ fn interpolate_from_integers(evals: &[(i64, i64)], _max_deg: usize) -> Vec<Ratio
             }
             let diff = evals[i].0 - evals[j].0;
             li_denom *= diff;
-            // Multiply li_num_poly by (x - j)
-            li_num_poly = poly_multiply_by_linear(li_num_poly, evals[j].0);
+            // Multiply li_num_poly by (x - x_j); the helper multiplies by (x + s).
+            li_num_poly = poly_multiply_by_linear(li_num_poly, -evals[j].0);
         }
         // Contribution: y_i / li_denom * li_num_poly
         let mut scale = Rational::from(evals[i].1);
@@ -991,17 +984,8 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
         return poly.to_vec();
     }
 
-    // Compute GCD of all nonzero coefficients
-    let mut gcd_num = Rational::from(1);
-    let mut gcd_set = false;
-    for c in poly.iter() {
-        if !c.is_zero() {
-            if !gcd_set {
-                gcd_num = c.clone().abs();
-                gcd_set = true;
-            }
-        }
-    }
+    // Bail out if every coefficient is zero.
+    let gcd_set = poly.iter().any(|c| !c.is_zero());
     if !gcd_set {
         return vec![Rational::from(0)];
     }
@@ -1009,14 +993,11 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
     // Make content an integer gcd (take rational content, then integer part)
     // For simplicity, just divide by the first nonzero coefficient's abs to make monic-ish
     let lead = poly[deg].clone();
-    let mut result: Vec<Rational> = poly
-        .iter()
-        .map(|c| (c.clone() / lead.clone()).into())
-        .collect();
+    let mut result: Vec<Rational> = poly.iter().map(|c| c.clone() / lead.clone()).collect();
 
     // Ensure leading coefficient is positive
     if !result[deg].is_zero() && result[deg].is_negative() {
-        result = result.into_iter().map(|c| Rational::from(-c)).collect();
+        result = result.into_iter().map(|c| -c).collect();
     }
 
     // Clear denominators if all coefficients have same denominator
@@ -1036,11 +1017,8 @@ fn remove_content(poly: &[Rational]) -> Vec<Rational> {
         den
     };
 
-    if common_den != Integer::from(1) {
-        result = result
-            .into_iter()
-            .map(|c| (c * &common_den).into())
-            .collect();
+    if common_den != 1 {
+        result = result.into_iter().map(|c| c * &common_den).collect();
         // Check if all are now integers
         let all_int = result.iter().all(|c| c.denom() == &Integer::from(1));
         if !all_int {
@@ -1106,7 +1084,7 @@ pub fn coeffs_to_value(coeffs: &[Rational]) -> Value {
                 if c.denom() == &Rational::from(1) {
                     Value::Integer(c.numer().clone())
                 } else {
-                    Value::Rational(Box::new(c.clone().into()))
+                    Value::Rational(Box::new(c.clone()))
                 }
             })
             .collect(),
@@ -1118,7 +1096,7 @@ pub fn rational_to_value(r: &Rational) -> Value {
     if r.denom() == &Rational::from(1) {
         Value::Integer(r.numer().clone())
     } else {
-        Value::Rational(Box::new((r.clone()).into()))
+        Value::Rational(Box::new(r.clone()))
     }
 }
 
@@ -1231,6 +1209,86 @@ mod tests {
         let b = vec![Rational::from(-2), Rational::from(1)];
         let r = resultant(&a, &b);
         assert_eq!(r, Rational::from(-1));
+    }
+
+    #[test]
+    fn test_resultant_swapped_linear() {
+        // Anti-symmetry: resultant(p, q) = (-1)^(mn) resultant(q, p).
+        // resultant(x - 2, x - 1) = 1
+        let a = vec![Rational::from(-2), Rational::from(1)];
+        let b = vec![Rational::from(-1), Rational::from(1)];
+        assert_eq!(resultant(&a, &b), Rational::from(1));
+    }
+
+    #[test]
+    fn test_resultant_constant_degree() {
+        // resultant(const, q) = const^deg(q)
+        assert_eq!(
+            resultant(
+                &[Rational::from(2)],
+                &[Rational::from(-1), Rational::from(1)]
+            ),
+            Rational::from(2)
+        );
+        // resultant(p, const) = const^deg(p)
+        assert_eq!(
+            resultant(
+                &[Rational::from(-1), Rational::from(1)],
+                &[Rational::from(2)]
+            ),
+            Rational::from(2)
+        );
+    }
+
+    #[test]
+    fn test_resultant_both_constants_is_one() {
+        assert_eq!(
+            resultant(&[Rational::from(2)], &[Rational::from(3)]),
+            Rational::from(1)
+        );
+    }
+
+    #[test]
+    fn test_resultant_shared_root_is_zero() {
+        // x^2 - 1 and x - 1 share the root 1.
+        let p = vec![Rational::from(-1), Rational::from(0), Rational::from(1)];
+        let q = vec![Rational::from(-1), Rational::from(1)];
+        assert_eq!(resultant(&p, &q), Rational::from(0));
+    }
+
+    #[test]
+    fn test_resultant_quadratic_linear() {
+        // resultant(x^2 - 2, x - 1) = q(sqrt2) * q(-sqrt2) = -1
+        let p = vec![Rational::from(-2), Rational::from(0), Rational::from(1)];
+        let q = vec![Rational::from(-1), Rational::from(1)];
+        assert_eq!(resultant(&p, &q), Rational::from(-1));
+    }
+
+    #[test]
+    fn test_resultant_quadratic_quadratic() {
+        // resultant(x^2 - 1, x^2 - 4) = q(1) * q(-1) = (-3)(-3) = 9
+        let p = vec![Rational::from(-1), Rational::from(0), Rational::from(1)];
+        let q = vec![Rational::from(-4), Rational::from(0), Rational::from(1)];
+        assert_eq!(resultant(&p, &q), Rational::from(9));
+    }
+
+    #[test]
+    fn test_interpolate_from_integers_linear() {
+        // Values of x + 1 at x = 0, 1 -> coeffs [1, 1].
+        let evals = vec![(0i64, 1i64), (1i64, 2i64)];
+        let coeffs = interpolate_from_integers(&evals, 1);
+        assert_eq!(coeffs, vec![Rational::from(1), Rational::from(1)]);
+    }
+
+    #[test]
+    fn test_interpolate_from_integers_quadratic() {
+        // Values of x^2 at x = 0, 1, 2 -> coeffs [0, 0, 1].
+        let evals = vec![(0i64, 0i64), (1i64, 1i64), (2i64, 4i64)];
+        let coeffs = interpolate_from_integers(&evals, 2);
+        assert_eq!(
+            coeffs,
+            vec![Rational::from(0), Rational::from(0), Rational::from(1)]
+        );
     }
 
     #[test]

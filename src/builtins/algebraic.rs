@@ -1,4 +1,5 @@
 use crate::env::Env;
+use crate::eval::apply_function;
 use crate::polynomial;
 use crate::value::{EvalError, Value, rational_value};
 use rug::{Integer, Rational};
@@ -44,7 +45,9 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
 
     let index = match &args[1] {
         Value::Integer(n) => {
-            let v = usize::try_from(n).unwrap_or(1);
+            // An index that does not fit in `usize` is certainly larger than
+            // the degree, so map it to `usize::MAX` to trigger the bound check.
+            let v = n.to_usize().unwrap_or(usize::MAX);
             if v == 0 {
                 return Err(EvalError::Error("Root index must be >= 1".to_string()));
             }
@@ -86,7 +89,7 @@ pub fn builtin_root(args: &[Value]) -> Result<Value, EvalError> {
         let denom = norm[1].clone();
         let result = neg / denom;
         let (num, denom) = result.into_numer_denom();
-        if denom == Integer::from(1) {
+        if denom == 1 {
             return Ok(Value::Integer(num));
         } else {
             return Ok(rational_value(num, denom));
@@ -185,10 +188,9 @@ fn root_reduce_value(v: &Value) -> Result<Value, EvalError> {
             for root in roots.iter().skip(1) {
                 result = root_mul(&result, root)?;
             }
-            // Multiply by non-root scalars if needed
-            if !non_root.is_empty() {
-                // For now just return as expression with RootReduce applied
-                result = root_mul(&result, &non_root[0].clone())?;
+            // Multiply by every remaining (non-root) factor.
+            for factor in &non_root {
+                result = root_mul(&result, factor)?;
             }
             Ok(result)
         }
@@ -324,13 +326,32 @@ fn find_root_index(root_list: &[(f64, f64)], target: f64) -> Option<usize> {
 
 // ── ToRadicals ──────────────────────────────────────────────────────────────────
 
-pub fn builtin_to_radicals(args: &[Value]) -> Result<Value, EvalError> {
+pub fn builtin_to_radicals(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(EvalError::Error(
             "ToRadicals requires 1 argument".to_string(),
         ));
     }
-    to_radicals_value(&args[0])
+    let built = to_radicals_value(&args[0])?;
+    eval_radical(built, env)
+}
+
+/// Evaluate a freshly built radical expression so arithmetic and `Sqrt`
+/// simplify (e.g. `Sqrt[8]` becomes `2 Sqrt[2]`, `Times[-1, 0]` becomes `0`).
+fn eval_radical(v: Value, env: &Env) -> Result<Value, EvalError> {
+    match v {
+        Value::Call { head, args } => {
+            let args: Result<Vec<Value>, EvalError> =
+                args.into_iter().map(|a| eval_radical(a, env)).collect();
+            apply_function(&Value::Symbol(head), &args?, env)
+        }
+        Value::List(items) => {
+            let items: Result<Vec<Value>, EvalError> =
+                items.into_iter().map(|i| eval_radical(i, env)).collect();
+            Ok(Value::List(items?))
+        }
+        other => Ok(other),
+    }
 }
 
 fn to_radicals_value(v: &Value) -> Result<Value, EvalError> {
@@ -381,7 +402,7 @@ fn quadratic_to_radicals(coeffs: &[Rational], index: usize) -> Result<Value, Eva
         let two_a: Rational = Rational::from(2_i64) * a.clone();
         let result = neg_b / two_a;
         let (n, d) = result.into_numer_denom();
-        if d == Integer::from(1) {
+        if d == 1 {
             return Ok(Value::Integer(n));
         } else {
             return Ok(rational_value(n, d));
@@ -528,7 +549,7 @@ fn isolating_interval_real(coeffs: &[Rational], approx: f64) -> Result<Value, Ev
 
 fn rat_value(r: &Rational) -> Value {
     let (num, den) = r.clone().into_numer_denom();
-    if den == Integer::from(1) {
+    if den == 1 {
         Value::Integer(num)
     } else {
         rational_value(num, den)
@@ -543,6 +564,83 @@ pub fn register(env: &Env) {
     register_builtin(env, "Root", builtin_root);
     register_builtin_env(env, "MinimalPolynomial", builtin_minimal_polynomial);
     register_builtin(env, "RootReduce", builtin_root_reduce);
-    register_builtin(env, "ToRadicals", builtin_to_radicals);
+    register_builtin_env(env, "ToRadicals", builtin_to_radicals);
     register_builtin(env, "IsolatingInterval", builtin_isolating_interval);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::ops::Pow;
+
+    fn sqrt2_root() -> Value {
+        Value::Root {
+            coeffs: vec![Rational::from(-2), Rational::from(0), Rational::from(1)],
+            index: 2,
+        }
+    }
+
+    fn sqrt2_root_index(index: usize) -> Value {
+        Value::Root {
+            coeffs: vec![Rational::from(-2), Rational::from(0), Rational::from(1)],
+            index,
+        }
+    }
+
+    #[test]
+    fn test_root_reduce_times_keeps_all_scalars() {
+        // RootReduce[x*y*Root[...]] must keep both symbolic factors.
+        let expr = Value::Call {
+            head: "Times".to_string(),
+            args: vec![
+                Value::Symbol("x".to_string()),
+                Value::Symbol("y".to_string()),
+                sqrt2_root(),
+            ],
+        };
+        let result = root_reduce_value(&expr).unwrap();
+        let rendered = result.to_string();
+        assert!(rendered.contains('x'), "lost factor x: {rendered}");
+        assert!(rendered.contains('y'), "lost factor y: {rendered}");
+    }
+
+    #[test]
+    fn test_root_index_out_of_range_errors() {
+        let coeffs = Value::List(vec![
+            Value::Integer(Integer::from(-2)),
+            Value::Integer(Integer::from(0)),
+            Value::Integer(Integer::from(1)),
+        ]);
+        // Fits in usize but exceeds degree 2.
+        let small = Value::Integer(Integer::from(5));
+        assert!(builtin_root(&[coeffs.clone(), small]).is_err());
+
+        // Does not even fit in usize.
+        let huge = Value::Integer(Integer::from(10).pow(30));
+        assert!(builtin_root(&[coeffs, huge]).is_err());
+    }
+
+    #[test]
+    fn test_to_radicals_quadratic_is_built_and_simplified() {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        // Root 1 of x^2 - 2 is -Sqrt[2]; root 2 is +Sqrt[2].
+        let neg = builtin_to_radicals(&[sqrt2_root_index(1)], &env).unwrap();
+        let neg_s = neg.to_string();
+        assert!(neg_s.contains("Sqrt[2]"), "got {neg_s}");
+        assert!(!neg_s.contains('0'), "unsimplified zero artifact: {neg_s}");
+        let pos = builtin_to_radicals(&[sqrt2_root_index(2)], &env).unwrap();
+        assert!(pos.to_string().contains("Sqrt[2]"));
+    }
+
+    #[test]
+    fn test_root_linear_exact() {
+        // Root of x - 3 is the exact integer 3.
+        let coeffs = Value::List(vec![
+            Value::Integer(Integer::from(-3)),
+            Value::Integer(Integer::from(1)),
+        ]);
+        let result = builtin_root(&[coeffs, Value::Integer(Integer::from(1))]).unwrap();
+        assert_eq!(result, Value::Integer(Integer::from(3)));
+    }
 }

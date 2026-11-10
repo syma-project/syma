@@ -5,43 +5,50 @@ use crate::value::{EvalError, Value};
 use rug::Integer;
 use std::rc::Rc;
 
-// ── Helper: value to expr conversion ──
+// ── Identity ──
 
-fn value_to_expr(v: &Value) -> Expr {
-    match v {
-        Value::Integer(n) => Expr::Integer(n.clone()),
-        Value::Real(r) => Expr::Real(r.clone()),
-        Value::Rational(r) => Expr::Call {
-            head: Box::new(Expr::Symbol("Rational".to_string())),
-            args: vec![
-                Expr::Integer(r.numer().clone()),
-                Expr::Integer(r.denom().clone()),
-            ],
-        },
-        Value::Str(s) => Expr::Str(s.clone()),
-        Value::Bool(b) => Expr::Bool(*b),
-        Value::Null => Expr::Null,
-        Value::Symbol(s) => Expr::Symbol(s.clone()),
-        Value::List(items) => Expr::List(items.iter().map(|item| value_to_expr(item)).collect()),
-        Value::Call { head, args } => Expr::Call {
-            head: Box::new(Expr::Symbol(head.clone())),
-            args: args.iter().map(|a| value_to_expr(a)).collect(),
-        },
-        _ => Expr::Null,
+/// Identity[expr] returns expr unchanged.
+pub fn builtin_identity(args: &[Value]) -> Result<Value, EvalError> {
+    match args.len() {
+        0 => Ok(Value::Null),
+        1 => Ok(args[0].clone()),
+        _ => Ok(Value::Sequence(args.to_vec())),
     }
 }
 
 // ── Helper: create env with stored function values ──
 
+/// Store function values under internal names.
+///
+/// Note: the names intentionally contain no `_`, because `eval` treats any
+/// symbol containing `_` as a blank pattern rather than a normal binding.
 fn func_env_with_stored(parent: &Env, values: Rc<Vec<Value>>) -> (Env, Vec<String>) {
     let child = parent.child();
     let mut names = Vec::new();
     for (i, v) in values.iter().enumerate() {
-        let name = format!("__op_{}", i);
+        let name = format!("op{}", i);
         child.set(name.clone(), v.clone());
         names.push(name);
     }
     (child, names)
+}
+
+/// Build `names[0][names[1][...[names.last()[#]]]]` when `right_to_left`, and the
+/// reverse nesting (`names.last()[...[names[0][#]]]`) otherwise. `#` is the slot.
+fn compose_body(names: &[String], right_to_left: bool) -> Expr {
+    let mut body = Expr::Slot(None);
+    let ordered: Box<dyn Iterator<Item = &String>> = if right_to_left {
+        Box::new(names.iter().rev())
+    } else {
+        Box::new(names.iter())
+    };
+    for name in ordered {
+        body = Expr::Call {
+            head: Box::new(Expr::Symbol(name.clone())),
+            args: vec![body],
+        };
+    }
+    body
 }
 
 // ── Helper: get list slice from Value ──
@@ -62,121 +69,50 @@ fn get_list(val: &Value) -> Result<&[Value], EvalError> {
 /// Compose functions right-to-left: rightmost applied first.
 pub fn builtin_composition(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.is_empty() {
-        Ok(Value::Call {
-            head: "Identity".to_string(),
-            args: vec![],
-        })
-    } else if args.len() == 1 {
-        Ok(args[0].clone())
-    } else {
-        let funcs: Rc<Vec<Value>> = Rc::new(args.to_vec());
-        let (child_env, names) = func_env_with_stored(env, funcs.clone());
-
-        let mut names_iter = names.into_iter();
-        let first_name = names_iter.next().unwrap();
-        let first_expr = Expr::Call {
-            head: Box::new(Expr::Slot(None)),
-            args: vec![],
-        };
-        let mut body = Expr::Call {
-            head: Box::new(Expr::Symbol(first_name)),
-            args: vec![first_expr],
-        };
-
-        for name in names_iter {
-            body = Expr::Call {
-                head: Box::new(Expr::Symbol(name)),
-                args: vec![body],
-            };
-        }
-
-        let mut pf = Value::PureFunction {
-            body,
-            slot_count: 1,
-            params: vec![],
-            env: Some(child_env.clone()),
-        };
-
-        let mut prev_env_opt = Some(child_env);
-        for _ in 1..args.len() {
-            let child = prev_env_opt.unwrap().child();
-            child.set("__outer".to_string(), pf);
-            pf = Value::PureFunction {
-                body: Expr::Call {
-                    head: Box::new(Expr::Symbol("__outer".to_string())),
-                    args: vec![Expr::Slot(None)],
-                },
-                slot_count: 1,
-                params: vec![],
-                env: Some(child),
-            };
-            prev_env_opt = Some(env.child());
-        }
-
-        Ok(pf)
+        return Ok(Value::Symbol("Identity".to_string()));
     }
+    if args.len() == 1 {
+        return Ok(args[0].clone());
+    }
+    let funcs: Rc<Vec<Value>> = Rc::new(args.to_vec());
+    let (child_env, names) = func_env_with_stored(env, funcs);
+    // Function names are bound in order [f, g, h]; nesting right-to-left gives
+    // f[g[h[#]]].
+    let body = compose_body(&names, true);
+    Ok(Value::PureFunction {
+        body,
+        slot_count: 1,
+        params: vec![],
+        env: Some(child_env),
+    })
 }
 
 /// RightComposition[f, g, h, ...] = Composition[..., h, g, f]
 /// Leftmost function is applied first: (...h(g(f(x)))).
 pub fn builtin_right_composition(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.is_empty() {
-        Ok(Value::Call {
-            head: "Identity".to_string(),
-            args: vec![],
-        })
-    } else if args.len() == 1 {
-        Ok(args[0].clone())
-    } else {
-        let funcs: Rc<Vec<Value>> = Rc::new(args.iter().rev().cloned().collect());
-        let (child_env, names) = func_env_with_stored(env, funcs.clone());
-
-        let mut names_iter = names.into_iter();
-        let first_name = names_iter.next().unwrap();
-        let first_expr = Expr::Call {
-            head: Box::new(Expr::Slot(None)),
-            args: vec![],
-        };
-        let mut body = Expr::Call {
-            head: Box::new(Expr::Symbol(first_name)),
-            args: vec![first_expr],
-        };
-
-        for name in names_iter {
-            body = Expr::Call {
-                head: Box::new(Expr::Symbol(name)),
-                args: vec![body],
-            };
-        }
-
-        let mut pf = Value::PureFunction {
-            body,
-            slot_count: 1,
-            params: vec![],
-            env: Some(child_env.clone()),
-        };
-
-        for _ in 1..args.len() {
-            let child = env.child();
-            child.set("__outer".to_string(), pf);
-            pf = Value::PureFunction {
-                body: Expr::Call {
-                    head: Box::new(Expr::Symbol("__outer".to_string())),
-                    args: vec![Expr::Slot(None)],
-                },
-                slot_count: 1,
-                params: vec![],
-                env: Some(child),
-            };
-        }
-
-        Ok(pf)
+        return Ok(Value::Symbol("Identity".to_string()));
     }
+    if args.len() == 1 {
+        return Ok(args[0].clone());
+    }
+    let funcs: Rc<Vec<Value>> = Rc::new(args.to_vec());
+    let (child_env, names) = func_env_with_stored(env, funcs);
+    // Applying left-to-right gives h[g[f[#]]].
+    let body = compose_body(&names, false);
+    Ok(Value::PureFunction {
+        body,
+        slot_count: 1,
+        params: vec![],
+        env: Some(child_env),
+    })
 }
 
 // ── Through ──
 
-/// Through[{f, g, h}[expr]] applies each function to the same expression.
+/// Through[{f, g, h}[expr]] applies each function to the same expression,
+/// giving `{f[expr], g[expr], h[expr]}`. A single function head passes through
+/// directly: `Through[f[expr]]` = `f[expr]`.
 pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(EvalError::Error(
@@ -184,14 +120,19 @@ pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
         ));
     }
 
-    let expr = &args[0];
-
-    if let Value::Call { head: _, args: _inner } = expr {
-        // head is String, not a Value, so we can't extract a list from it
-        // Fall through to the general match below
-    }
-
-    match expr {
+    match &args[0] {
+        Value::Call { head, args: inner } => {
+            let funcs = parse_through_head(head);
+            if funcs.len() == 1 {
+                apply_function(&funcs[0], inner, env)
+            } else {
+                let mut result = Vec::with_capacity(funcs.len());
+                for f in &funcs {
+                    result.push(apply_function(f, inner, env)?);
+                }
+                Ok(Value::List(result))
+            }
+        }
         Value::List(funcs) => {
             let mut result = Vec::with_capacity(funcs.len());
             for f in funcs {
@@ -199,11 +140,38 @@ pub fn builtin_through(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
             Ok(Value::List(result))
         }
-        _ => Err(EvalError::TypeError {
-            expected: "Call with list head or List".to_string(),
-            got: expr.type_name().to_string(),
-        }),
+        // Anything else (e.g. an already-evaluated atom) passes through.
+        other => Ok(other.clone()),
     }
+}
+
+/// Recover function values from a `Call` head string.
+///
+/// A head is either a single name (e.g. `"Abs"`) or the rendered form of a list
+/// of functions (e.g. `"{Builtin[Abs], Builtin[Sign]}"`), since `Value::Call`
+/// stores its head as a string.
+fn parse_through_head(head: &str) -> Vec<Value> {
+    let trimmed = head.trim();
+    if let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        inner
+            .split(',')
+            .map(|part| through_func(part.trim()))
+            .collect()
+    } else {
+        vec![through_func(trimmed)]
+    }
+}
+
+fn through_func(part: &str) -> Value {
+    for prefix in ["Builtin[", "Function["] {
+        if let Some(name) = part.strip_prefix(prefix).and_then(|s| s.strip_suffix(']'))
+            && !name.is_empty()
+            && !name.contains('[')
+        {
+            return Value::Symbol(name.to_string());
+        }
+    }
+    Value::Symbol(part.to_string())
 }
 
 // ── OperatorApply ──
@@ -252,83 +220,39 @@ pub fn builtin_curry(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
 
     let n = n as usize;
-    let mut collected: Vec<Value> = Vec::new();
-    let func_rc = Rc::new(func.clone());
+    let child = env.child();
+    child.set("curryFn".to_string(), func.clone());
 
-    let mut current = Value::Null;
-    for i in (1..=n).rev() {
-        let func_name = format!("__curry_func");
-        let _collected_so_far = collected.clone();
-        let _func_clone = Rc::new(func_rc.clone());
-        let remaining = n - i + 1;
-
-        let child = env.child();
-        child.set(func_name.clone(), (*func_rc).clone());
-
-        let body = Expr::Call {
-            head: Box::new(Expr::Symbol(func_name.clone())),
-            args: vec![Expr::Slot(None)],
-        };
-
-        let inner_pf = Value::PureFunction {
-            body: body.clone(),
-            slot_count: 1,
-            params: vec![],
-            env: Some(child.clone()),
-        };
-
-        if remaining == 1 {
-            current = inner_pf;
-        } else {
-            let outer_child = env.child();
-            outer_child.set("__curry_next".to_string(), inner_pf);
-            current = Value::PureFunction {
-                body: Expr::Call {
-                    head: Box::new(Expr::Symbol("__curry_next".to_string())),
-                    args: vec![Expr::Slot(None)],
-                },
-                slot_count: 1,
-                params: vec![],
-                env: Some(outer_child),
-            };
-        }
-
-        collected.push(Value::Null);
-    }
-
-    Ok(current)
+    // The first argument is bound as a named parameter; each further argument
+    // is bound by an inner `Function`, so the call chain accumulates its args
+    // and finally applies the stored function to all of them at once.
+    let mut bound = vec!["curryArg0".to_string()];
+    let body = curry_body("curryFn", &mut bound, n);
+    Ok(Value::PureFunction {
+        body,
+        slot_count: 0,
+        params: vec!["curryArg0".to_string()],
+        env: Some(child),
+    })
 }
 
-/// curry_internal collects arguments via an internal curried function.
-fn curry_build(func: &Value, n: usize, env: &Env) -> Value {
-    if n == 0 {
-        return func.clone();
-    }
-    if n == 1 {
-        let child = env.child();
-        child.set("__cf".to_string(), func.clone());
-        return Value::PureFunction {
-            body: Expr::Call {
-                head: Box::new(Expr::Symbol("__cf".to_string())),
-                args: vec![Expr::Slot(None)],
-            },
-            slot_count: 1,
-            params: vec![],
-            env: Some(child),
+/// Build the body of a curried chain. `bound` holds the parameter names already
+/// bound; while fewer than `n` names are bound, wrap the rest in a nested
+/// `Function[{next}, ...]`. Once `n` names exist, apply `fname` to all of them.
+fn curry_body(fname: &str, bound: &mut Vec<String>, n: usize) -> Expr {
+    if bound.len() == n {
+        return Expr::Call {
+            head: Box::new(Expr::Symbol(fname.to_string())),
+            args: bound.iter().map(|p| Expr::Symbol(p.clone())).collect(),
         };
     }
-
-    let inner = curry_build(func, n - 1, env);
-    let child = env.child();
-    child.set("__cf_inner".to_string(), inner);
-    Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("__cf_inner".to_string())),
-            args: vec![Expr::Slot(None)],
-        },
-        slot_count: 1,
-        params: vec![],
-        env: Some(child),
+    let next = format!("curryArg{}", bound.len());
+    bound.push(next.clone());
+    let inner = curry_body(fname, bound, n);
+    bound.pop();
+    Expr::Function {
+        params: vec![next],
+        body: Box::new(inner),
     }
 }
 
@@ -344,12 +268,26 @@ pub fn builtin_uncurry(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
     let func = &args[0];
     let child = env.child();
-    child.set("__uncurry_f".to_string(), func.clone());
+    child.set("uncurryFn".to_string(), func.clone());
+    // Fold the list through `#1[#2]&`, i.e. apply the curried function to each
+    // argument in turn: F[a][b][c].
+    let apply_step = Expr::Function {
+        params: vec!["uncurryG".to_string(), "uncurryX".to_string()],
+        body: Box::new(Expr::Call {
+            head: Box::new(Expr::Symbol("uncurryG".to_string())),
+            args: vec![Expr::Symbol("uncurryX".to_string())],
+        }),
+    };
+    let body = Expr::Call {
+        head: Box::new(Expr::Symbol("Fold".to_string())),
+        args: vec![
+            apply_step,
+            Expr::Symbol("uncurryFn".to_string()),
+            Expr::Slot(None),
+        ],
+    };
     Ok(Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("__uncurry_f".to_string())),
-            args: vec![Expr::Slot(None)],
-        },
+        body,
         slot_count: 1,
         params: vec![],
         env: Some(child),
@@ -509,7 +447,12 @@ pub fn builtin_replace(args: &[Value], env: &Env) -> Result<Value, EvalError> {
 
 // ── MapAll ──
 
-/// MapAll[f, expr] applies f to every subexpression including the top level.
+/// MapAll[f, expr] applies f to every subexpression, mapping children first.
+///
+/// For a call `h[a, b]` this yields `f[h[f[a], f[b]]]`. The head of a call is
+/// not itself mapped (only the arguments are). A top-level list is mapped
+/// element-wise without an additional wrapping application, so
+/// `MapAll[Head, {1, 2}]` gives `{Integer, Integer}`.
 pub fn builtin_map_all(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Error(
@@ -518,38 +461,37 @@ pub fn builtin_map_all(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     }
     let f = &args[0];
     let expr = &args[1];
-    map_all_inner(f, expr, env)
+    let wrap_top = !matches!(expr, Value::List(_));
+    map_all_inner(f, expr, env, wrap_top)
 }
 
-fn map_all_inner(f: &Value, val: &Value, env: &Env) -> Result<Value, EvalError> {
-    let applied = apply_function(f, &[val.clone()], env)?;
-    match &applied {
+/// Recursively map children first, then (when `wrap`) apply `f` to the rebuilt
+/// node. Atoms always have `f` applied.
+fn map_all_inner(f: &Value, val: &Value, env: &Env, wrap: bool) -> Result<Value, EvalError> {
+    let rebuilt = match val {
         Value::List(items) => {
             let mapped: Result<Vec<Value>, EvalError> = items
                 .iter()
-                .map(|item| map_all_inner(f, item, env))
+                .map(|item| map_all_inner(f, item, env, true))
                 .collect();
-            Ok(Value::List(mapped?))
+            Value::List(mapped?)
         }
-        Value::Call {
-            head,
-            args: call_args,
-        } => {
-            let mapped_head = map_all_inner(f, &Value::Symbol(head.clone()), env)?;
-            let head_name = match &mapped_head {
-                Value::Symbol(s) => s.clone(),
-                _ => mapped_head.to_string(),
-            };
-            let mapped_args: Result<Vec<Value>, EvalError> = call_args
+        Value::Call { head, args } => {
+            let mapped: Result<Vec<Value>, EvalError> = args
                 .iter()
-                .map(|arg| map_all_inner(f, arg, env))
+                .map(|arg| map_all_inner(f, arg, env, true))
                 .collect();
-            Ok(Value::Call {
-                head: head_name,
-                args: mapped_args?,
-            })
+            Value::Call {
+                head: head.clone(),
+                args: mapped?,
+            }
         }
-        other => Ok(other.clone()),
+        atom => return apply_function(f, &[atom.clone()], env),
+    };
+    if wrap {
+        apply_function(f, &[rebuilt], env)
+    } else {
+        Ok(rebuilt)
     }
 }
 
@@ -577,56 +519,10 @@ pub fn builtin_undulate(args: &[Value]) -> Result<Value, EvalError> {
     Ok(Value::List(flatten_all(&args[0])))
 }
 
-// ── Curry internal helper ──
-
-/// Internal curry builder that correctly chains unary applications.
-fn curry_inner(func: &Value, n: usize, env: &Env) -> Value {
-    if n == 0 {
-        return func.clone();
-    }
-    if n == 1 {
-        let child = env.child();
-        child.set("__cf".to_string(), func.clone());
-        return Value::PureFunction {
-            body: Expr::Call {
-                head: Box::new(Expr::Symbol("__cf".to_string())),
-                args: vec![Expr::Slot(None)],
-            },
-            slot_count: 1,
-            params: vec![],
-            env: Some(child),
-        };
-    }
-    let inner = curry_inner(func, n - 1, env);
-    let child = env.child();
-    child.set("__cf_inner".to_string(), inner);
-    Value::PureFunction {
-        body: Expr::Call {
-            head: Box::new(Expr::Symbol("__cf_inner".to_string())),
-            args: vec![Expr::Slot(None)],
-        },
-        slot_count: 1,
-        params: vec![],
-        env: Some(child),
-    }
-}
-
-// ── uncurry apply helper ──
-
-/// Internal: applies a curried function to a list of arguments one at a time.
-fn uncurry_apply(curried: &Value, args_list: &[Value], env: &Env) -> Result<Value, EvalError> {
-    match args_list.len() {
-        0 => Ok(curried.clone()),
-        _ => {
-            let result = apply_function(curried, &[args_list[0].clone()], env)?;
-            uncurry_apply(&result, &args_list[1..], env)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::Env;
 
     fn val_int(n: i64) -> Value {
         Value::Integer(Integer::from(n))
@@ -728,10 +624,13 @@ mod tests {
     #[test]
     fn test_position_first() {
         assert_eq!(
-            builtin_position_first(&[
-                val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
-                val_int(2)
-            ])
+            builtin_position_first(
+                &[
+                    val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
+                    val_int(2)
+                ],
+                &Env::new()
+            )
             .unwrap(),
             val_int(2)
         );
@@ -739,8 +638,11 @@ mod tests {
 
     #[test]
     fn test_position_first_not_found() {
-        let result =
-            builtin_position_first(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)]).unwrap();
+        let result = builtin_position_first(
+            &[val_list(vec![val_int(1), val_int(2)]), val_int(9)],
+            &Env::new(),
+        )
+        .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -753,10 +655,13 @@ mod tests {
     #[test]
     fn test_position_last() {
         assert_eq!(
-            builtin_position_last(&[
-                val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
-                val_int(2)
-            ])
+            builtin_position_last(
+                &[
+                    val_list(vec![val_int(1), val_int(2), val_int(3), val_int(2)]),
+                    val_int(2)
+                ],
+                &Env::new()
+            )
             .unwrap(),
             val_int(4)
         );
@@ -764,8 +669,11 @@ mod tests {
 
     #[test]
     fn test_position_last_not_found() {
-        let result =
-            builtin_position_last(&[val_list(vec![val_int(1), val_int(2)]), val_int(9)]).unwrap();
+        let result = builtin_position_last(
+            &[val_list(vec![val_int(1), val_int(2)]), val_int(9)],
+            &Env::new(),
+        )
+        .unwrap();
         assert_eq!(
             result,
             Value::Call {
@@ -854,10 +762,7 @@ mod tests {
         let gt_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![
-                    Box::new(Expr::Slot(None)),
-                    Box::new(Expr::Integer(Integer::from(10))),
-                ],
+                args: vec![Expr::Slot(None), Expr::Integer(Integer::from(10))],
             },
             slot_count: 1,
             params: vec![],
@@ -906,10 +811,7 @@ mod tests {
         let big_crit = Value::PureFunction {
             body: Expr::Call {
                 head: Box::new(Expr::Symbol("Greater".to_string())),
-                args: vec![
-                    Box::new(Expr::Slot(None)),
-                    Box::new(Expr::Integer(Integer::from(100))),
-                ],
+                args: vec![Expr::Slot(None), Expr::Integer(Integer::from(100))],
             },
             slot_count: 1,
             params: vec![],
@@ -944,13 +846,7 @@ mod tests {
     fn test_composition_empty() {
         let env = test_env();
         let result = builtin_composition(&[], &env).unwrap();
-        assert_eq!(
-            result,
-            Value::Call {
-                head: "Identity".to_string(),
-                args: vec![]
-            }
-        );
+        assert_eq!(result, Value::Symbol("Identity".to_string()));
     }
 
     #[test]
@@ -978,13 +874,7 @@ mod tests {
     fn test_right_composition_empty() {
         let env = test_env();
         let result = builtin_right_composition(&[], &env).unwrap();
-        assert_eq!(
-            result,
-            Value::Call {
-                head: "Identity".to_string(),
-                args: vec![]
-            }
-        );
+        assert_eq!(result, Value::Symbol("Identity".to_string()));
     }
 
     #[test]
@@ -1012,31 +902,22 @@ mod tests {
     fn test_through_basic() {
         let env = test_env();
         let expr = Value::Call {
-            head: Box::new(val_list(vec![Value::Symbol("Abs".to_string())])),
-            args: vec![Box::new(val_int(-5))],
+            head: "Abs".to_string(),
+            args: vec![val_int(-5)],
         };
         let result = builtin_through(&[expr], &env).unwrap();
-        assert_eq!(result, val_list(vec![val_int(5)]));
+        assert_eq!(result, val_int(5));
     }
 
     #[test]
     fn test_through_multi() {
         let env = test_env();
         let expr = Value::Call {
-            head: Box::new(val_list(vec![
-                Value::Symbol("Abs".to_string()),
-                Value::Symbol("Sign".to_string()),
-            ])),
-            args: vec![Box::new(val_int(-3))],
+            head: "Abs".to_string(),
+            args: vec![val_int(-3)],
         };
         let result = builtin_through(&[expr], &env).unwrap();
-        if let Value::List(items) = result {
-            assert_eq!(items.len(), 2);
-            assert_eq!(items[0], val_int(3));
-            assert_eq!(items[1], val_int(-1));
-        } else {
-            panic!("Expected List");
-        }
+        assert_eq!(result, val_int(3));
     }
 
     #[test]
@@ -1136,5 +1017,178 @@ mod tests {
         let env = test_env();
         let result = builtin_curry(&[Value::Symbol("Plus".to_string()), val_int(3)], &env).unwrap();
         assert!(matches!(result, Value::PureFunction { .. }));
+    }
+
+    #[test]
+    fn test_identity_builtin() {
+        assert_eq!(builtin_identity(&[val_int(7)]).unwrap(), val_int(7));
+        assert_eq!(builtin_identity(&[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_composition_nests_right_to_left() {
+        let env = test_env();
+        // Composition[f, g][x] = f[g[x]]
+        let f = builtin_composition(&[val_func("f"), val_func("g")], &env).unwrap();
+        let result = apply_function(&f, &[Value::Symbol("x".to_string())], &env).unwrap();
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Call {
+                    head: "g".to_string(),
+                    args: vec![Value::Symbol("x".to_string())],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_right_composition_nests_left_to_right() {
+        let env = test_env();
+        // RightComposition[f, g][x] = g[f[x]]
+        let f = builtin_right_composition(&[val_func("f"), val_func("g")], &env).unwrap();
+        let result = apply_function(&f, &[Value::Symbol("x".to_string())], &env).unwrap();
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "g".to_string(),
+                args: vec![Value::Call {
+                    head: "f".to_string(),
+                    args: vec![Value::Symbol("x".to_string())],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_composition_applies_end_to_end() {
+        let env = test_env();
+        // Composition[Abs, Sign][-3] = Abs[Sign[-3]] = Abs[-1] = 1
+        let f = builtin_composition(&[val_func("Abs"), val_func("Sign")], &env).unwrap();
+        let result = apply_function(&f, &[val_int(-3)], &env).unwrap();
+        assert_eq!(result, val_int(1));
+    }
+
+    #[test]
+    fn test_curry_accumulates_args() {
+        let env = test_env();
+        let curried = builtin_curry(&[val_func("Plus"), val_int(2)], &env).unwrap();
+        let step1 = apply_function(&curried, &[val_int(3)], &env).unwrap();
+        let step2 = apply_function(&step1, &[val_int(4)], &env).unwrap();
+        assert_eq!(step2, val_int(7));
+    }
+
+    #[test]
+    fn test_curry_accumulates_three_args() {
+        let env = test_env();
+        let curried = builtin_curry(&[val_func("Times"), val_int(3)], &env).unwrap();
+        let s1 = apply_function(&curried, &[val_int(2)], &env).unwrap();
+        let s2 = apply_function(&s1, &[val_int(3)], &env).unwrap();
+        let s3 = apply_function(&s2, &[val_int(4)], &env).unwrap();
+        assert_eq!(s3, val_int(24));
+    }
+
+    #[test]
+    fn test_uncurry_applies_curried_function() {
+        let env = test_env();
+        let curried = builtin_curry(&[val_func("Plus"), val_int(3)], &env).unwrap();
+        let uncurried = builtin_uncurry(&[curried], &env).unwrap();
+        let result = apply_function(
+            &uncurried,
+            &[val_list(vec![val_int(1), val_int(2), val_int(3)])],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(result, val_int(6));
+    }
+
+    #[test]
+    fn test_through_list_head() {
+        let env = test_env();
+        let expr = Value::Call {
+            head: "{Abs, Sign}".to_string(),
+            args: vec![val_int(-3)],
+        };
+        let result = builtin_through(&[expr], &env).unwrap();
+        assert_eq!(result, val_list(vec![val_int(3), val_int(-1)]));
+    }
+
+    #[test]
+    fn test_through_rendered_builtin_head() {
+        let env = test_env();
+        // This is the head string a `{Abs, Sign}[...]` call actually carries.
+        let expr = Value::Call {
+            head: "{Builtin[Abs], Builtin[Sign]}".to_string(),
+            args: vec![val_int(-4)],
+        };
+        let result = builtin_through(&[expr], &env).unwrap();
+        assert_eq!(result, val_list(vec![val_int(4), val_int(-1)]));
+    }
+
+    #[test]
+    fn test_map_all_wraps_call_children_first() {
+        let env = test_env();
+        let expr = Value::Call {
+            head: "h".to_string(),
+            args: vec![
+                Value::Symbol("a".to_string()),
+                Value::Symbol("b".to_string()),
+            ],
+        };
+        let result = builtin_map_all(&[val_func("f"), expr], &env).unwrap();
+        // f[h[f[a], f[b]]]
+        let fcall = |s: &str| Value::Call {
+            head: "f".to_string(),
+            args: vec![Value::Symbol(s.to_string())],
+        };
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Call {
+                    head: "h".to_string(),
+                    args: vec![fcall("a"), fcall("b")],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_all_does_not_wrap_head() {
+        let env = test_env();
+        let expr = Value::Call {
+            head: "g".to_string(),
+            args: vec![Value::Symbol("a".to_string())],
+        };
+        let result = builtin_map_all(&[val_func("f"), expr], &env).unwrap();
+        // f[g[f[a]]] — head `g` is not itself mapped.
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Call {
+                    head: "g".to_string(),
+                    args: vec![Value::Call {
+                        head: "f".to_string(),
+                        args: vec![Value::Symbol("a".to_string())],
+                    }],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_all_atom() {
+        let env = test_env();
+        let result =
+            builtin_map_all(&[val_func("f"), Value::Symbol("a".to_string())], &env).unwrap();
+        assert_eq!(
+            result,
+            Value::Call {
+                head: "f".to_string(),
+                args: vec![Value::Symbol("a".to_string())],
+            }
+        );
     }
 }
