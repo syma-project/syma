@@ -34,8 +34,8 @@ pub(crate) fn local_symbols_dir() -> PathBuf {
 /// Sanitize a symbol name for use as a filename.
 ///
 /// Replaces path separators and other unsafe characters to prevent
-/// directory traversal. Only alphanumeric, underscore, hyphen, and
-/// dot are allowed; everything else becomes underscore.
+/// directory traversal. Only alphanumeric characters, `_`, and `-` are
+/// kept; everything else (including `.` and `/`) becomes `_`.
 pub(crate) fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|c| {

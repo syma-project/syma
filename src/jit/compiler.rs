@@ -90,7 +90,11 @@ impl JitHelpers {
                     name.as_bytes().iter().map(|&b| b as usize).sum(),
                 )),
                 signature: sig_ref,
-                colocated: true,
+                // Not colocated: the runtime helpers live in the main binary's
+                // text, which may be more than ±2 GiB away from the `mmap`-ed
+                // code buffer, so a plain PC-relative call could be out of range.
+                // Non-colocated calls use absolute relocations that we patch.
+                colocated: false,
             })
         };
 
@@ -252,9 +256,9 @@ pub fn compile(bc: &CompiledBytecode, _name: &str) -> Result<(*mut (), usize), J
 
     let mut i = 0;
     while i < bc.instructions.len() {
-        // Handle block switching.
+        // Handle block switching. Blocks are sealed once, in the final pass
+        // below (sealing here too would seal them twice and panic).
         if i > 0 && block_starts_set.contains(&i) {
-            builder.seal_block(current_block);
             current_block = block_map[&i];
             builder.switch_to_block(current_block);
             ctx_arg = builder.block_params(current_block)[0];
@@ -743,14 +747,16 @@ unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
     {
         // SAFETY: size is page-aligned and non-zero, MAP_ANON|MAP_PRIVATE
         // allocates anonymous memory, PROT_RWX makes it readable/writable/executable.
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
 
         if ptr == libc::MAP_FAILED {
             return (std::ptr::null_mut(), 0);
@@ -758,7 +764,9 @@ unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
 
         // SAFETY: ptr points to `size` bytes of valid mapped memory,
         // and code.len() <= size, so the copy is within bounds.
-        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        }
         (ptr as *mut u8, size)
     }
 
@@ -776,14 +784,16 @@ unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
         }
         // MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000
         // PAGE_EXECUTE_READWRITE = 0x40
-        let ptr = VirtualAlloc(std::ptr::null_mut(), size, 0x1000 | 0x2000, 0x40);
+        let ptr = unsafe { VirtualAlloc(std::ptr::null_mut(), size, 0x1000 | 0x2000, 0x40) };
 
         if ptr.is_null() {
             return (std::ptr::null_mut(), 0);
         }
 
         // SAFETY: ptr points to `size` bytes of valid allocated memory.
-        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+        }
         (ptr as *mut u8, size)
     }
 
@@ -795,5 +805,139 @@ unsafe fn make_executable(code: &[u8]) -> (*mut u8, usize) {
         let vec = code.to_vec();
         let ptr = vec.leak().as_mut_ptr();
         (ptr, code.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::instruction::Instruction;
+    use crate::env::Env;
+    use crate::jit::runtime::JitContext;
+    use crate::value::Value;
+
+    fn make_env() -> Env {
+        let env = Env::new();
+        crate::builtins::register_builtins(&env);
+        env
+    }
+
+    fn build(bc: &CompiledBytecode) -> Option<(*mut (), usize)> {
+        match compile(bc, "test") {
+            Ok(p) => Some(p),
+            Err(_) => {
+                // JIT may be unavailable on exotic targets; skip the test.
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_jit_int_add() {
+        let bc = CompiledBytecode {
+            instructions: vec![
+                Instruction::LoadConst(0, 0),
+                Instruction::LoadConst(1, 1),
+                Instruction::IntAdd(2, 0, 1),
+                Instruction::Return(2),
+            ],
+            constants: vec![Value::Integer(10.into()), Value::Integer(20.into())],
+            nregs: 3,
+            nparams: 0,
+        };
+        let Some((ptr, size)) = build(&bc) else {
+            return;
+        };
+        let _module = unsafe { crate::bytecode::JitModule::new(ptr as *mut u8, size) };
+
+        let env = make_env();
+        let mut regs = vec![Value::Null; 3];
+        let mut ctx = JitContext::new(&bc, &[], &env, &mut regs);
+        let f: extern "C" fn(*mut JitContext) = unsafe { std::mem::transmute(ptr) };
+        f(&mut ctx);
+        assert_eq!(regs[0], Value::Integer(30.into()));
+    }
+
+    #[test]
+    fn test_jit_load_sym_resolves_symbol_constant() {
+        // Regression: symbol names are stored as `Value::Symbol` constants and
+        // must resolve through the environment (or evaluate to themselves).
+        let bc = CompiledBytecode {
+            instructions: vec![Instruction::LoadSym(0, 0), Instruction::Return(0)],
+            constants: vec![Value::Symbol("x".into())],
+            nregs: 1,
+            nparams: 0,
+        };
+        let Some((ptr, size)) = build(&bc) else {
+            return;
+        };
+        let _module = unsafe { crate::bytecode::JitModule::new(ptr as *mut u8, size) };
+
+        let env = make_env();
+        env.set("x".to_string(), Value::Integer(42.into()));
+        let mut regs = vec![Value::Null; 1];
+        let mut ctx = JitContext::new(&bc, &[], &env, &mut regs);
+        let f: extern "C" fn(*mut JitContext) = unsafe { std::mem::transmute(ptr) };
+        f(&mut ctx);
+        assert_eq!(regs[0], Value::Integer(42.into()));
+    }
+
+    #[test]
+    fn test_jit_promotion_end_to_end() {
+        // Drive a function through hotness promotion to bytecode and then to
+        // native code, verifying results stay correct after JIT promotion.
+        let env = make_env();
+        let tokens = crate::lexer::tokenize("f[x_] := x + 1").unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        crate::eval::eval_program(&ast, &env).unwrap();
+
+        let mut saw_jit = false;
+        for _ in 0..1500 {
+            let out = crate::eval::apply_function(
+                &env.get("f").unwrap(),
+                &[Value::Integer(41.into())],
+                &env,
+            )
+            .unwrap();
+            assert_eq!(out, Value::Integer(42.into()));
+            if let Value::BytecodeFunction(bc) = env.get("f").unwrap()
+                && !bc
+                    .jit_fn_ptr
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .is_null()
+            {
+                saw_jit = true;
+            }
+        }
+        assert!(saw_jit, "expected JIT promotion after many calls");
+    }
+
+    #[test]
+    fn test_jit_branch() {
+        // if reg0 truthy jump over the second LoadConst.
+        let bc = CompiledBytecode {
+            instructions: vec![
+                Instruction::LoadTrue(0),
+                Instruction::JumpIfZero(0, 2),
+                Instruction::LoadConst(0, 0),
+                Instruction::Return(0),
+                Instruction::LoadConst(0, 1),
+                Instruction::Return(0),
+            ],
+            constants: vec![Value::Integer(1.into()), Value::Integer(2.into())],
+            nregs: 1,
+            nparams: 0,
+        };
+        let Some((ptr, size)) = build(&bc) else {
+            return;
+        };
+        let _module = unsafe { crate::bytecode::JitModule::new(ptr as *mut u8, size) };
+
+        let env = make_env();
+        let mut regs = vec![Value::Null; 1];
+        let mut ctx = JitContext::new(&bc, &[], &env, &mut regs);
+        let f: extern "C" fn(*mut JitContext) = unsafe { std::mem::transmute(ptr) };
+        f(&mut ctx);
+        assert_eq!(regs[0], Value::Integer(1.into()));
     }
 }

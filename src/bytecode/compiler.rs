@@ -65,6 +65,32 @@ impl RegAlloc {
         Ok(r)
     }
 
+    /// Allocate `count` consecutive registers `[base, base + count)` that are
+    /// guaranteed not to overlap any currently-live register.
+    ///
+    /// Unlike [`Self::alloc`], this never reuses a freed register.  It is used
+    /// for instructions (call argument packing, list/assoc construction) that
+    /// read a contiguous block starting at the destination register: reusing a
+    /// freed register for the destination could collide with one of the source
+    /// registers being moved into that block.
+    fn alloc_span(&mut self, count: u16) -> Result<u16, CompileError> {
+        if count == 0 {
+            return self.alloc();
+        }
+        // Use u32 math so `base + count - 1` cannot overflow u16.
+        let base = self.next as u32;
+        let end = base + count as u32 - 1;
+        if end >= u16::MAX as u32 {
+            return Err(CompileError::RegisterOverflow);
+        }
+        let end = end as u16;
+        self.next = end + 1;
+        if end > self.max_reg {
+            self.max_reg = end;
+        }
+        Ok(base as u16)
+    }
+
     fn _free(&mut self, reg: u16) {
         self._freed.push(reg);
     }
@@ -166,6 +192,11 @@ impl BytecodeCompiler {
         body: &Expr,
         _name: &str,
     ) -> Result<CompiledBytecode, CompileError> {
+        if params.len() > u8::MAX as usize {
+            return Err(CompileError::UnsupportedFeature(
+                "function with more than 255 parameters".to_string(),
+            ));
+        }
         let mut c = Self::new();
 
         for (i, param) in params.iter().enumerate() {
@@ -245,11 +276,24 @@ impl BytecodeCompiler {
                 Ok(dst)
             }
             Expr::List(items) => {
+                if items.len() > u8::MAX as usize {
+                    return Err(CompileError::UnsupportedFeature(
+                        "list with more than 255 elements".to_string(),
+                    ));
+                }
                 let mut regs = Vec::with_capacity(items.len());
                 for item in items {
                     regs.push(self.compile_expr(item)?);
                 }
-                let dst = self.regs.alloc()?;
+                // `MakeList(d, n)` reads its operands from the contiguous block
+                // `d+1 ..= d+n`, so pack the compiled items into a fresh span.
+                let dst = self.regs.alloc_span(1 + regs.len() as u16)?;
+                for (i, r) in regs.iter().enumerate() {
+                    let target = dst + 1 + i as u16;
+                    if target != *r {
+                        self.emit(Instruction::Mov(target, *r));
+                    }
+                }
                 self.emit(Instruction::MakeList(dst, regs.len() as u8));
                 for r in regs {
                     self.regs._free(r);
@@ -473,6 +517,11 @@ impl BytecodeCompiler {
     }
 
     fn compile_call(&mut self, head: &Expr, args: &[Expr]) -> Result<u16, CompileError> {
+        if args.len() > u8::MAX as usize {
+            return Err(CompileError::UnsupportedFeature(
+                "call with more than 255 arguments".to_string(),
+            ));
+        }
         // Try inline arithmetic for known binary ops
         if let Expr::Symbol(name) = head
             && let Some(instr) = self.try_inline_arithmetic(name, args)?
@@ -488,20 +537,17 @@ impl BytecodeCompiler {
         }
         // The Apply instruction expects function and args in consecutive
         // registers starting at dst: [func, arg0, arg1, ..., argN].
-        // Allocate dst and emit Mov instructions to pack them.
-        let dst = self.regs.alloc()?;
+        // Allocate a fresh span so the sources (which are all below `dst`)
+        // cannot be clobbered while packing.
+        let dst = self.regs.alloc_span(1 + args.len() as u16)?;
         if func_reg != dst {
             self.emit(Instruction::Mov(dst, func_reg));
         }
-        // Emit arg Movs in reverse order to avoid overwriting source
-        // registers that later args still reference (e.g. when an inner
-        // compile_call returns a register that overlaps an earlier target).
-        for (i, arg_reg) in arg_regs.iter().enumerate().rev() {
-            let target = dst.checked_add(1 + i as u16).ok_or_else(|| {
-                CompileError::UnsupportedFeature("register overflow in call".to_string())
-            })?;
-            self.regs.note_reg(target);
-            self.emit(Instruction::Mov(target, *arg_reg));
+        for (i, arg_reg) in arg_regs.iter().enumerate() {
+            let target = dst + 1 + i as u16;
+            if target != *arg_reg {
+                self.emit(Instruction::Mov(target, *arg_reg));
+            }
         }
         self.emit(Instruction::Apply(dst, args.len() as u8));
         self.regs._free(func_reg);
@@ -531,6 +577,25 @@ impl BytecodeCompiler {
         }
 
         if args.len() != 2 {
+            return Ok(None);
+        }
+        // Bail out before compiling operands when the head has no inline form.
+        const BINARY_OPS: [&str; 13] = [
+            "Plus",
+            "Times",
+            "Power",
+            "Subtract",
+            "Equal",
+            "Unequal",
+            "Less",
+            "Greater",
+            "LessEqual",
+            "GreaterEqual",
+            "And",
+            "Or",
+            "Divide",
+        ];
+        if !BINARY_OPS.contains(&name) {
             return Ok(None);
         }
         let a_reg = self.compile_expr(&args[0])?;
@@ -746,7 +811,8 @@ impl BytecodeCompiler {
             ));
         }
         // Layout: dst = assoc result, dst+1 = key0, dst+2 = val0, dst+3 = key1, ...
-        let dst = self.regs.alloc()?;
+        // A fresh span avoids clobbering a source register with a target.
+        let dst = self.regs.alloc_span(1 + 2 * n as u16)?;
         let mut temp_regs = Vec::with_capacity(2 * n);
         for (key, val_expr) in entries {
             temp_regs.push(self.emit_const(Value::Str(key.clone()))?);
@@ -909,7 +975,8 @@ impl BytecodeCompiler {
     fn compile_switch(&mut self, expr: &Expr, cases: &[(Expr, Expr)]) -> Result<u16, CompileError> {
         let switch_reg = self.compile_expr(expr)?;
         let result_reg = self.regs.alloc()?;
-        let mut patch_labels = Vec::new();
+        let mut next_labels = Vec::new();
+        let mut end_jumps = Vec::new();
 
         for (i, (pat, val)) in cases.iter().enumerate() {
             let pat_reg = self.compile_expr(pat)?;
@@ -928,19 +995,28 @@ impl BytecodeCompiler {
             }
             self.regs._free(val_reg);
 
+            // Every case needs a Jump past the LoadNull so a matched value is
+            // not overwritten by the "no match" result.
+            let end_jump = self.emit(Instruction::Jump(0));
             if i < cases.len() - 1 {
-                let end_jump = self.emit(Instruction::Jump(0));
-                patch_labels.push((next_label, end_jump));
+                next_labels.push(next_label);
+                end_jumps.push(end_jump);
             } else {
+                // Last case: JumpIfZero goes to the LoadNull (no match).
                 self.patch_jump(next_label, self.code.len() as i32);
+                end_jumps.push(end_jump);
             }
         }
 
         // No match — return Null
         self.emit(Instruction::LoadNull(result_reg));
 
-        for (next_label, end_jump) in patch_labels {
+        for (&next_label, &end_jump) in next_labels.iter().zip(end_jumps.iter()) {
+            // JumpIfZero → instruction past the corresponding Jump(end)
             self.patch_jump(next_label, end_jump as i32 + 1);
+        }
+        for &end_jump in &end_jumps {
+            // Jump(end) → past LoadNull
             self.patch_jump(end_jump, self.code.len() as i32);
         }
 
@@ -1414,6 +1490,26 @@ mod tests {
                 .any(|i| matches!(i, Instruction::JumpIfZero(..))),
             "Switch should contain JumpIfZero"
         );
+    }
+
+    #[test]
+    fn test_list_over_255_elements_rejected() {
+        // `MakeList`'s operand count is a u8; a larger list must not silently
+        // truncate.
+        let items: Vec<Expr> = (0..256).map(|i| Expr::Integer(i.into())).collect();
+        let res = BytecodeCompiler::compile_function(&[], &Expr::List(items), "f");
+        assert!(res.is_err(), "256-element list should be rejected");
+    }
+
+    #[test]
+    fn test_call_over_255_args_rejected() {
+        let args: Vec<Expr> = (0..256).map(|i| Expr::Integer(i.into())).collect();
+        let body = Expr::Call {
+            head: Box::new(Expr::Symbol("f".to_string())),
+            args,
+        };
+        let res = BytecodeCompiler::compile_function(&[], &body, "f");
+        assert!(res.is_err(), "256-argument call should be rejected");
     }
 
     #[test]

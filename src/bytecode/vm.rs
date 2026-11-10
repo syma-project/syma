@@ -225,14 +225,24 @@ impl VmState<'_> {
                     )?;
                 }
                 Instruction::And(d, a, b) => {
-                    let av = self.regs[*a as usize].is_truthy();
-                    let bv = self.regs[*b as usize].is_truthy();
-                    self.regs[*d as usize] = Value::Bool(av && bv);
+                    // Mirror `builtin_and`: short-circuit on the first falsey
+                    // operand, otherwise yield the last operand's value.
+                    let av = self.regs[*a as usize].clone();
+                    self.regs[*d as usize] = if !av.is_truthy() {
+                        av
+                    } else {
+                        self.regs[*b as usize].clone()
+                    };
                 }
                 Instruction::Or(d, a, b) => {
-                    let av = self.regs[*a as usize].is_truthy();
-                    let bv = self.regs[*b as usize].is_truthy();
-                    self.regs[*d as usize] = Value::Bool(av || bv);
+                    // Mirror `builtin_or`: short-circuit on the first truthy
+                    // operand, otherwise yield the last operand's value.
+                    let av = self.regs[*a as usize].clone();
+                    self.regs[*d as usize] = if av.is_truthy() {
+                        av
+                    } else {
+                        self.regs[*b as usize].clone()
+                    };
                 }
 
                 // List/Assoc
@@ -430,15 +440,11 @@ pub(crate) trait Truthy {
 }
 
 impl Truthy for Value {
+    /// Delegate to [`Value::to_bool`] so bytecode conditions agree with the
+    /// tree-walk evaluator (notably, an unevaluated `Call` such as a symbolic
+    /// relation is *falsey*, like it is for `If`/`And`/`Or` in `eval`).
     fn is_truthy(&self) -> bool {
-        match self {
-            Value::Bool(b) => *b,
-            Value::Integer(n) => *n != 0,
-            Value::Real(r) => *r != 0.0,
-            Value::Null => false,
-            Value::Symbol(s) => s != "False",
-            _ => true,
-        }
+        self.to_bool()
     }
 }
 
@@ -531,6 +537,7 @@ fn max_reg_index(instr: &Instruction) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Expr;
     use crate::builtins;
     use crate::bytecode::CompiledBytecode;
     use crate::bytecode::compiler::BytecodeCompiler;
@@ -649,6 +656,201 @@ mod tests {
             msg.contains("out of bounds"),
             "expected bounds error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_compile_list_literal_packs_operands() {
+        // Regression: `MakeList(d, n)` reads operands from `d+1 ..= d+n`, so the
+        // compiler must pack the items into a contiguous span at `d`.
+        use crate::ast::Expr;
+        let body = Expr::List(vec![
+            Expr::Integer(1.into()),
+            Expr::Integer(2.into()),
+            Expr::Integer(3.into()),
+        ]);
+        let bc = BytecodeCompiler::compile_function(&[], &body, "f").unwrap();
+        assert_eq!(
+            run(&bc, &[]).unwrap(),
+            Value::List(vec![
+                Value::Integer(1.into()),
+                Value::Integer(2.into()),
+                Value::Integer(3.into())
+            ])
+        );
+    }
+
+    #[test]
+    fn test_compile_assoc_literal_packs_operands() {
+        // Regression: `MakeAssoc(d, n)` reads key/value pairs from `d+1 ..`.
+        use crate::ast::Expr;
+        let body = Expr::Assoc(vec![
+            ("a".to_string(), Expr::Integer(1.into())),
+            ("b".to_string(), Expr::Integer(2.into())),
+        ]);
+        let bc = BytecodeCompiler::compile_function(&[], &body, "f").unwrap();
+        match run(&bc, &[]).unwrap() {
+            Value::Assoc(map) => {
+                assert_eq!(map.get("a"), Some(&Value::Integer(1.into())));
+                assert_eq!(map.get("b"), Some(&Value::Integer(2.into())));
+            }
+            other => panic!("expected assoc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_nested_call_packing() {
+        // Regression: packing call arguments into `d+1 ..` must not clobber
+        // source registers when `d` is reused from the free list.
+        use crate::ast::Expr;
+        let leaf = |s: &str| Expr::Str(s.to_string());
+        let sj = |a: Expr, b: Expr| Expr::Call {
+            head: Box::new(Expr::Symbol("StringJoin".into())),
+            args: vec![a, b],
+        };
+        let mut body = sj(leaf("a"), leaf("b"));
+        for _ in 0..6 {
+            body = sj(body.clone(), body);
+        }
+        let bc = BytecodeCompiler::compile_function(&[], &body, "f").unwrap();
+        assert_eq!(run(&bc, &[]).unwrap(), Value::Str("ab".repeat(64)));
+    }
+
+    fn check_bytecode_matches_treewalk(body: Expr) {
+        let tree = crate::eval::eval(&body, &make_env()).unwrap();
+        let bc = BytecodeCompiler::compile_function(&[], &body, "f").unwrap();
+        let byte = execute_bytecode(&bc, &[], &make_env()).unwrap();
+        assert_eq!(byte, tree, "bytecode diverged from tree-walk");
+    }
+
+    #[test]
+    fn test_control_flow_bytecode_matches_treewalk() {
+        use crate::ast::Expr;
+        let int = |n: i64| Expr::Integer(n.into());
+        let call = |name: &str, args: Vec<Expr>| Expr::Call {
+            head: Box::new(Expr::Symbol(name.to_string())),
+            args,
+        };
+        // If with Greater / Not conditions and both branches.
+        check_bytecode_matches_treewalk(Expr::If {
+            condition: Box::new(call("Greater", vec![int(3), int(2)])),
+            then_branch: Box::new(int(10)),
+            else_branch: Some(Box::new(int(20))),
+        });
+        check_bytecode_matches_treewalk(Expr::If {
+            condition: Box::new(call("Not", vec![Expr::Bool(false)])),
+            then_branch: Box::new(int(1)),
+            else_branch: Some(Box::new(int(2))),
+        });
+        // Which picks the first true branch and otherwise falls through.
+        check_bytecode_matches_treewalk(Expr::Which {
+            pairs: vec![
+                (Expr::Bool(false), int(1)),
+                (Expr::Bool(true), int(2)),
+                (Expr::Bool(true), int(3)),
+            ],
+        });
+        check_bytecode_matches_treewalk(Expr::Which {
+            pairs: vec![(Expr::Bool(false), int(1)), (Expr::Bool(false), int(2))],
+        });
+        // Switch matches a value and falls through to Null otherwise.
+        check_bytecode_matches_treewalk(Expr::Switch {
+            expr: Box::new(int(2)),
+            cases: vec![(int(1), int(10)), (int(2), int(20))],
+        });
+        check_bytecode_matches_treewalk(Expr::Switch {
+            expr: Box::new(int(9)),
+            cases: vec![(int(1), int(10)), (int(2), int(20))],
+        });
+    }
+
+    #[test]
+    fn test_arithmetic_bytecode_matches_treewalk() {
+        use crate::ast::Expr;
+        let int = |n: i64| Expr::Integer(n.into());
+        let call = |name: &str, args: Vec<Expr>| Expr::Call {
+            head: Box::new(Expr::Symbol(name.to_string())),
+            args,
+        };
+        check_bytecode_matches_treewalk(call("Plus", vec![int(2), int(3)]));
+        check_bytecode_matches_treewalk(call("Times", vec![int(-1), int(7)]));
+        check_bytecode_matches_treewalk(call("Divide", vec![int(12), int(4)]));
+        check_bytecode_matches_treewalk(call("Power", vec![int(2), int(10)]));
+        check_bytecode_matches_treewalk(call("And", vec![Expr::Bool(true), Expr::Bool(false)]));
+        check_bytecode_matches_treewalk(call("Or", vec![Expr::Bool(false), Expr::Bool(true)]));
+
+        // `Subtract` is an alias the compiler inlines; tree-walk leaves the
+        // explicit head unevaluated, so assert the bytecode result directly.
+        let body = call("Subtract", vec![int(10), int(4)]);
+        let bc = BytecodeCompiler::compile_function(&[], &body, "f").unwrap();
+        assert_eq!(run(&bc, &[]).unwrap(), Value::Integer(6.into()));
+    }
+
+    #[test]
+    fn test_symbolic_condition_matches_treewalk() {
+        // Regression: the VM used a truthiness rule that treated an unevaluated
+        // Call (e.g. a symbolic relation) as true, diverging from the tree-walk
+        // evaluator's `to_bool` semantics for `If`.
+        let params = vec![Expr::NamedBlank {
+            name: "x".to_string(),
+            type_constraint: None,
+        }];
+        let body = Expr::If {
+            condition: Box::new(Expr::Call {
+                head: Box::new(Expr::Symbol("Greater".to_string())),
+                args: vec![Expr::Symbol("x".to_string()), Expr::Integer(0.into())],
+            }),
+            then_branch: Box::new(Expr::Integer(1.into())),
+            else_branch: Some(Box::new(Expr::Integer(2.into()))),
+        };
+        let arg = Value::Symbol("y".to_string());
+
+        let tree_env = make_env();
+        tree_env.set("x".to_string(), arg.clone());
+        let tree = crate::eval::eval(&body, &tree_env).unwrap();
+
+        let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+        let byte = execute_bytecode(&bc, &[arg], &make_env()).unwrap();
+        assert_eq!(byte, tree);
+    }
+
+    #[test]
+    fn test_symbolic_and_or_matches_treewalk() {
+        // `And`/`Or` yield an operand value (not a canonical Bool); the VM must
+        // match the tree-walk builtins for symbolic/falsey operands.
+        let params = vec![
+            Expr::NamedBlank {
+                name: "x".to_string(),
+                type_constraint: None,
+            },
+            Expr::NamedBlank {
+                name: "y".to_string(),
+                type_constraint: None,
+            },
+        ];
+        let combos = [
+            (
+                Value::Symbol("a".to_string()),
+                Value::Symbol("b".to_string()),
+            ),
+            (Value::Bool(false), Value::Symbol("b".to_string())),
+            (Value::Bool(true), Value::Symbol("b".to_string())),
+            (Value::Bool(true), Value::Bool(false)),
+        ];
+        for head in ["And", "Or"] {
+            let body = Expr::Call {
+                head: Box::new(Expr::Symbol(head.to_string())),
+                args: vec![Expr::Symbol("x".to_string()), Expr::Symbol("y".to_string())],
+            };
+            let bc = BytecodeCompiler::compile_function(&params, &body, "f").unwrap();
+            for (x, y) in &combos {
+                let tree_env = make_env();
+                tree_env.set("x".to_string(), x.clone());
+                tree_env.set("y".to_string(), y.clone());
+                let tree = crate::eval::eval(&body, &tree_env).unwrap();
+                let byte = execute_bytecode(&bc, &[x.clone(), y.clone()], &make_env()).unwrap();
+                assert_eq!(byte, tree, "{head} mismatch for ({x:?}, {y:?})");
+            }
+        }
     }
 
     #[test]

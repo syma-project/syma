@@ -162,10 +162,15 @@ pub extern "C" fn jit_and(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
         && (a as usize) < ctx.nregs as usize
         && (b as usize) < ctx.nregs as usize
     {
-        let va = unsafe { &*ctx.regs.add(a as usize) };
-        let vb = unsafe { &*ctx.regs.add(b as usize) };
+        // Mirror `builtin_and`: first falsey operand, else the last operand.
+        let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
+        let out = if !va.is_truthy() {
+            va
+        } else {
+            unsafe { (*ctx.regs.add(b as usize)).clone() }
+        };
         unsafe {
-            *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() && vb.is_truthy());
+            *ctx.regs.add(dst as usize) = out;
         }
     }
 }
@@ -176,10 +181,15 @@ pub extern "C" fn jit_or(ctx: &mut JitContext, dst: u32, a: u32, b: u32) {
         && (a as usize) < ctx.nregs as usize
         && (b as usize) < ctx.nregs as usize
     {
-        let va = unsafe { &*ctx.regs.add(a as usize) };
-        let vb = unsafe { &*ctx.regs.add(b as usize) };
+        // Mirror `builtin_or`: first truthy operand, else the last operand.
+        let va = unsafe { (*ctx.regs.add(a as usize)).clone() };
+        let out = if va.is_truthy() {
+            va
+        } else {
+            unsafe { (*ctx.regs.add(b as usize)).clone() }
+        };
         unsafe {
-            *ctx.regs.add(dst as usize) = Value::Bool(va.is_truthy() || vb.is_truthy());
+            *ctx.regs.add(dst as usize) = out;
         }
     }
 }
@@ -352,13 +362,18 @@ pub extern "C" fn jit_load_sym(ctx: &mut JitContext, dst: u32, idx: u32) {
         return;
     }
     let name_const = unsafe { &*ctx.constants.add(idx as usize) };
-    if let Value::Str(name) = name_const {
-        let env = unsafe { &*ctx.env };
-        if let Some(val) = env.get(name) {
-            unsafe {
-                *ctx.regs.add(dst as usize) = val.clone();
-            }
-        }
+    // The bytecode compiler stores symbol names as `Value::Symbol` constants
+    // (and `Value::Str` for string constants); accept both, matching the VM's
+    // `const_str` behaviour.
+    let name = match name_const {
+        Value::Str(name) | Value::Symbol(name) => name.clone(),
+        _ => return,
+    };
+    let env = unsafe { &*ctx.env };
+    // Mirror `LoadSym` in the VM: unresolved names evaluate to themselves.
+    let val = env.get(&name).unwrap_or(Value::Symbol(name));
+    unsafe {
+        *ctx.regs.add(dst as usize) = val;
     }
 }
 
@@ -368,11 +383,13 @@ pub extern "C" fn jit_store_sym(ctx: &mut JitContext, idx: u32, src: u32) {
         return;
     }
     let name_const = unsafe { &*ctx.constants.add(idx as usize) };
-    if let Value::Str(name) = name_const {
-        let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
-        let env = unsafe { &*ctx.env };
-        env.set(name.clone(), val);
-    }
+    let name = match name_const {
+        Value::Str(name) | Value::Symbol(name) => name.clone(),
+        _ => return,
+    };
+    let val = unsafe { (*ctx.regs.add(src as usize)).clone() };
+    let env = unsafe { &*ctx.env };
+    env.set(name, val);
 }
 
 #[unsafe(no_mangle)]
@@ -392,5 +409,49 @@ pub extern "C" fn jit_apply(ctx: &mut JitContext, dst: u32, nargs: u32) {
     match eval::apply_function(&func, &args, env) {
         Ok(result) => unsafe { *ctx.regs.add(dst as usize) = result },
         Err(_) => unsafe { *ctx.regs.add(dst as usize) = Value::Null },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::CompiledBytecode;
+    use crate::env::Env;
+
+    fn bc_with(constants: Vec<Value>, nregs: u16) -> CompiledBytecode {
+        CompiledBytecode {
+            instructions: vec![],
+            constants,
+            nregs,
+            nparams: 0,
+        }
+    }
+
+    #[test]
+    fn test_jit_load_sym_reads_symbol_constant_and_falls_back() {
+        // Regression: the compiler stores symbol names as `Value::Symbol`, but
+        // `jit_load_sym` only matched `Value::Str` and left `dst` untouched.
+        let env = Env::new();
+        env.set("x".to_string(), Value::Integer(42.into()));
+        let bc = bc_with(
+            vec![Value::Symbol("x".into()), Value::Symbol("y".into())],
+            2,
+        );
+        let mut regs = vec![Value::Null; 2];
+        let mut ctx = JitContext::new(&bc, &[], &env, &mut regs);
+        jit_load_sym(&mut ctx, 0, 0);
+        jit_load_sym(&mut ctx, 1, 1);
+        assert_eq!(regs[0], Value::Integer(42.into()));
+        assert_eq!(regs[1], Value::Symbol("y".into()));
+    }
+
+    #[test]
+    fn test_jit_store_sym_writes_symbol_constant() {
+        let env = Env::new();
+        let bc = bc_with(vec![Value::Symbol("bound".into())], 1);
+        let mut regs = vec![Value::Integer(7.into())];
+        let mut ctx = JitContext::new(&bc, &[], &env, &mut regs);
+        jit_store_sym(&mut ctx, 0, 0);
+        assert_eq!(env.get("bound"), Some(Value::Integer(7.into())));
     }
 }

@@ -118,10 +118,23 @@ impl Manifest {
     }
 
     /// Resolved entry-point path (absolute).
-    /// Defaults to `src/main.syma` when `entry` is not set.
+    ///
+    /// Uses the explicit `entry` key when present. Otherwise prefers
+    /// `src/main.syma` and falls back to `src/lib.syma` (so `syma run` also
+    /// works for library packages created with `syma new --lib`).
     pub fn entry_path(&self) -> PathBuf {
-        let rel = self.entry.as_deref().unwrap_or("src/main.syma");
-        self.root().join(rel)
+        if let Some(rel) = self.entry.as_deref() {
+            return self.root().join(rel);
+        }
+        let main = self.root().join("src/main.syma");
+        if main.exists() {
+            return main;
+        }
+        let lib = self.root().join("src/lib.syma");
+        if lib.exists() {
+            return lib;
+        }
+        main
     }
 }
 
@@ -269,4 +282,59 @@ fn parse_kv(line: &str) -> Option<(&str, &str)> {
         raw
     };
     Some((key, val))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempPkg {
+        root: PathBuf,
+    }
+
+    impl TempPkg {
+        fn new(toml: &str) -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!("syma_manifest_test_{n}"));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("syma.toml"), toml).unwrap();
+            TempPkg { root }
+        }
+
+        fn manifest(&self) -> Manifest {
+            Manifest::read(&self.root.join("syma.toml")).unwrap()
+        }
+    }
+
+    impl Drop for TempPkg {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn test_entry_path_explicit() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\nentry = \"src/other.syma\"\n");
+        assert!(pkg.manifest().entry_path().ends_with("src/other.syma"));
+    }
+
+    #[test]
+    fn test_entry_path_defaults_to_lib_for_library_package() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\n");
+        // No main.syma, but a lib.syma exists → use lib.syma.
+        fs::write(pkg.root.join("src/lib.syma"), "x = 1\n").unwrap();
+        assert!(pkg.manifest().entry_path().ends_with("src/lib.syma"));
+    }
+
+    #[test]
+    fn test_entry_path_prefers_main() {
+        let pkg = TempPkg::new("[package]\nname = \"x\"\n");
+        fs::write(pkg.root.join("src/main.syma"), "x = 1\n").unwrap();
+        fs::write(pkg.root.join("src/lib.syma"), "x = 1\n").unwrap();
+        assert!(pkg.manifest().entry_path().ends_with("src/main.syma"));
+    }
 }

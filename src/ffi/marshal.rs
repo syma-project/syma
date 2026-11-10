@@ -76,8 +76,8 @@ pub fn c_ret_to_value(bits: u64, ty: &NativeType) -> Value {
         NativeType::Void => Value::Null,
         NativeType::I32 => Value::Integer(Integer::from(bits as i32 as i64)),
         NativeType::I64 => Value::Integer(Integer::from(bits as i64)),
-        NativeType::U32 => Value::Integer(Integer::from(bits as u32 as i64)),
-        NativeType::U64 => Value::Integer(Integer::from(bits as i64)),
+        NativeType::U32 => Value::Integer(Integer::from(bits as u32)),
+        NativeType::U64 => Value::Integer(Integer::from(bits)),
         NativeType::F32 => {
             let f = f32::from_bits(bits as u32);
             Value::Real(Float::with_val(DEFAULT_PRECISION, f))
@@ -611,9 +611,22 @@ pub fn json_to_value(json: &str) -> Result<Value, EvalError> {
 
 pub fn value_to_json(v: &Value) -> Result<serde_json::Value, EvalError> {
     match v {
-        Value::Integer(n) => Ok(serde_json::Value::Number(serde_json::Number::from(
-            n.to_i64().unwrap_or(0),
-        ))),
+        Value::Integer(n) => {
+            // Prefer an exact integer representation; `to_i64().unwrap_or(0)`
+            // previously collapsed any value outside i64 to 0.
+            if let Some(i) = n.to_i64() {
+                Ok(serde_json::Value::Number(serde_json::Number::from(i)))
+            } else if let Some(u) = n.to_u64() {
+                Ok(serde_json::Value::Number(serde_json::Number::from(u)))
+            } else {
+                let f = n.to_f64();
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| {
+                        EvalError::FfiError(format!("Integer {n} is not JSON-serialisable"))
+                    })
+            }
+        }
         Value::Real(r) => {
             let f = r.to_f64();
             serde_json::Number::from_f64(f)
@@ -687,7 +700,12 @@ fn json_val_to_value(jv: &serde_json::Value) -> Result<Value, EvalError> {
 
 fn require_int(v: &Value, ty_name: &str) -> Result<i64, EvalError> {
     match v {
-        Value::Integer(n) => Ok(n.to_i64().unwrap_or(0)),
+        // Report an error rather than silently coercing an out-of-range
+        // arbitrary-precision integer to 0.
+        Value::Integer(n) => n.to_i64().ok_or_else(|| EvalError::TypeError {
+            expected: ty_name.to_string(),
+            got: format!("Integer {n} out of 64-bit range"),
+        }),
         Value::Real(r) => Ok(r.to_f64() as i64),
         Value::Rational(r) => {
             if r.denom() == &Integer::from(1) {
@@ -715,5 +733,55 @@ fn require_real(v: &Value, ty_name: &str) -> Result<f64, EvalError> {
             expected: ty_name.to_string(),
             got: v.type_name().to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_c_ret_u64_not_truncated() {
+        // Regression: `bits as i64` wrapped values above i64::MAX to negative.
+        let big = u64::MAX;
+        assert_eq!(
+            c_ret_to_value(big, &NativeType::U64),
+            Value::Integer(Integer::from(big))
+        );
+        let mid = (i64::MAX as u64) + 1;
+        assert_eq!(
+            c_ret_to_value(mid, &NativeType::U64),
+            Value::Integer(Integer::from(mid))
+        );
+    }
+
+    #[test]
+    fn test_value_to_c_arg_huge_integer_errors() {
+        // 2^100 does not fit in i64; previously it silently became 0.
+        let huge = Value::Integer(Integer::from(1) << 100);
+        assert!(value_to_c_arg(&huge, &NativeType::I64).is_err());
+        // A value within range still works.
+        assert!(matches!(
+            value_to_c_arg(&Value::Integer(5.into()), &NativeType::I64),
+            Ok(CArg::I64(5))
+        ));
+    }
+
+    #[test]
+    fn test_value_to_json_big_integer_not_zero() {
+        // 2^63 fits in u64 but not i64; previously it serialised as 0.
+        let v = Value::Integer(Integer::from(1u64) << 63);
+        let j = value_to_json(&v).unwrap();
+        assert_eq!(j.as_u64(), Some(1u64 << 63));
+        assert_ne!(j, serde_json::Value::Number(0.into()));
+    }
+
+    #[test]
+    fn test_c_ret_u32_not_sign_extended() {
+        let big = u32::MAX;
+        assert_eq!(
+            c_ret_to_value(big as u64, &NativeType::U32),
+            Value::Integer(Integer::from(big))
+        );
     }
 }

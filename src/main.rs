@@ -362,7 +362,7 @@ fn main() {
 
     match args.get(1).map(|s| s.as_str()) {
         // ── Meta ──────────────────────────────────────────────────────────────
-        Some("--help") | Some("-h") => print_usage(),
+        Some("--help") | Some("-h") | Some("help") => print_usage(),
         Some("--version") | Some("-v") => println!("syma {}", VERSION),
 
         // ── Kernel mode ──────────────────────────────────────────────────────

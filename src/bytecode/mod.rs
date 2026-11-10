@@ -61,18 +61,16 @@ impl Drop for JitModule {
         }
         #[cfg(windows)]
         unsafe {
-            use std::ptr::null_mut;
-            // VirtualFree with MEM_RELEASE to free the entire allocation
+            // VirtualFree with MEM_RELEASE frees the entire allocation.
             extern "system" {
-                fn VirtualAlloc(
+                fn VirtualFree(
                     lp_address: *mut std::ffi::c_void,
                     dw_size: usize,
-                    fl_allocation_type: u32,
-                    fl_protect: u32,
-                ) -> *mut std::ffi::c_void;
+                    dw_free_type: u32,
+                ) -> i32;
             }
             // MEM_RELEASE = 0x8000
-            let _ = VirtualAlloc(self.ptr as *mut std::ffi::c_void, 0, 0x8000, 0);
+            let _ = VirtualFree(self.ptr as *mut std::ffi::c_void, 0, 0x8000);
         }
         self.ptr = std::ptr::null_mut();
         self.size = 0;
@@ -120,9 +118,10 @@ pub struct BytecodeFunctionDef {
     pub call_count: Arc<AtomicU64>,
     /// Pointer to JIT-compiled native code (null = not compiled yet).
     pub jit_fn_ptr: Arc<JitFnPtr>,
-    /// Owning handle for JIT-allocated executable memory.
-    /// When this is dropped, the executable memory is released.
-    pub jit_module: Mutex<Option<JitModule>>,
+    /// Shared handle for JIT-allocated executable memory.
+    /// The memory is released once the last owner (including clones) is dropped,
+    /// so a clone's `jit_fn_ptr` never dangles.
+    pub jit_module: Arc<Mutex<Option<JitModule>>>,
 }
 
 impl BytecodeFunctionDef {
@@ -133,7 +132,7 @@ impl BytecodeFunctionDef {
             bytecode,
             call_count,
             jit_fn_ptr: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
-            jit_module: Mutex::new(None),
+            jit_module: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,16 +157,15 @@ impl std::fmt::Debug for BytecodeFunctionDef {
 
 impl Clone for BytecodeFunctionDef {
     fn clone(&self) -> Self {
-        // When cloning, we do NOT clone the JitModule — the original owner
-        // retains exclusive ownership of the executable memory. The clone
-        // shares the jit_fn_ptr (AtomicPtr) via Arc, so it can still call
-        // the JIT function, but only the original drops the allocation.
+        // Share the JIT module (and thus the executable memory) with the clone
+        // so that whichever owner is dropped last frees the allocation and the
+        // clone's `jit_fn_ptr` never dangles.
         Self {
             name: self.name.clone(),
             bytecode: self.bytecode.clone(),
             call_count: self.call_count.clone(),
             jit_fn_ptr: self.jit_fn_ptr.clone(),
-            jit_module: Mutex::new(None),
+            jit_module: self.jit_module.clone(),
         }
     }
 }
