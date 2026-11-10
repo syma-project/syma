@@ -1177,7 +1177,7 @@ fn sqrt_integer(n: &Integer) -> (Integer, Integer) {
     if n.is_zero() {
         return (Integer::from(0), Integer::from(0));
     }
-    if *n == Integer::from(1) {
+    if *n == 1 {
         return (Integer::from(1), Integer::from(1));
     }
     let mut remaining = n.clone().abs();
@@ -1188,9 +1188,9 @@ fn sqrt_integer(n: &Integer) -> (Integer, Integer) {
         if d_sq > remaining {
             break;
         }
-        while remaining.clone() % d.clone() == Integer::from(0) {
+        while remaining.clone() % d.clone() == 0 {
             let q = remaining.clone() / d.clone();
-            if q.clone() % d.clone() == Integer::from(0) {
+            if q.clone() % d.clone() == 0 {
                 remaining = q / d.clone();
                 factor *= d.clone();
             } else {
@@ -1203,11 +1203,9 @@ fn sqrt_integer(n: &Integer) -> (Integer, Integer) {
 }
 
 fn sqrt_value_from_parts(outside: Integer, inside: Integer) -> Value {
-    if inside == Integer::from(0) {
+    if inside == 0 || inside == 1 {
         Value::Integer(outside)
-    } else if inside == Integer::from(1) {
-        Value::Integer(outside)
-    } else if outside == Integer::from(1) {
+    } else if outside == 1 {
         Value::Call {
             head: "Sqrt".to_string(),
             args: vec![Value::Integer(inside)],
@@ -1264,7 +1262,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
             // where a = num_out^2 * num_in, b = den_out^2 * den_in
             let (num_out, num_in) = sqrt_integer(n.numer());
             let (den_out, den_in) = sqrt_integer(n.denom());
-            if num_in == Integer::from(1) && den_in == Integer::from(1) {
+            if num_in == 1 && den_in == 1 {
                 // Both numerator and denominator are perfect squares
                 return Ok(Value::Rational(Box::new(rug::Rational::from((
                     num_out, den_out,
@@ -1277,7 +1275,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                 args: vec![sqrt_arg],
             };
             let outside_rat = rug::Rational::from((num_out, den_out));
-            if outside_rat == rug::Rational::from(1) {
+            if outside_rat == 1 {
                 Ok(sqrt_part)
             } else {
                 Ok(Value::Call {
@@ -1309,7 +1307,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                     Value::Integer(n) if !n.is_negative() => {
                         let (o, i) = sqrt_integer(n);
                         outside *= o;
-                        if i > Integer::from(1) {
+                        if i > 1 {
                             inside_args.push(Value::Integer(i));
                         }
                     }
@@ -1318,7 +1316,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
             }
             if inside_args.is_empty() {
                 Ok(Value::Integer(outside))
-            } else if inside_args.len() == 1 && outside == Integer::from(1) {
+            } else if inside_args.len() == 1 && outside == 1 {
                 Ok(Value::Call {
                     head: "Sqrt".to_string(),
                     args: inside_args,
@@ -1334,7 +1332,7 @@ pub fn builtin_sqrt(args: &[Value]) -> Result<Value, EvalError> {
                         },
                     ],
                 })
-            } else if outside == Integer::from(1) {
+            } else if outside == 1 {
                 Ok(Value::Call {
                     head: "Sqrt".to_string(),
                     args: vec![Value::Call {

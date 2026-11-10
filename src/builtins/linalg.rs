@@ -837,15 +837,26 @@ pub fn builtin_eigenvalues(args: &[Value]) -> Result<Value, EvalError> {
             rows, cols
         )));
     }
-    let a = matrix_to_f64(m)?;
-    let (mut eigenvalues, _) = qr_iteration(&a);
+    let mut a = matrix_to_f64(m)?;
+    let mut eigenvalues = super::numericsolve::qr_eigenvalues(&mut a, rows);
     // Sort by descending absolute value (Wolfram convention)
-    eigenvalues.sort_by(|a, b| {
-        b.abs()
-            .partial_cmp(&a.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
+    eigenvalues.sort_by(|x, y| {
+        let ax = x.0 * x.0 + x.1 * x.1;
+        let ay = y.0 * y.0 + y.1 * y.1;
+        ay.partial_cmp(&ax).unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(Value::List(eigenvalues.into_iter().map(real).collect()))
+    Ok(Value::List(
+        eigenvalues
+            .into_iter()
+            .map(|(re, im)| {
+                if im.abs() < 1e-8 {
+                    real(re)
+                } else {
+                    Value::Complex { re, im }
+                }
+            })
+            .collect(),
+    ))
 }
 
 /// Eigenvectors[m] — numerical eigenvectors via QR iteration.
@@ -1833,6 +1844,31 @@ mod tests {
         let v1 = to_f64(&evals[1]).unwrap();
         assert!((v0 - 3.0).abs() < 1e-6);
         assert!((v1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_eigenvalues_rotation_complex() {
+        // A 90° rotation has eigenvalues ±i, which the old unshifted QR missed.
+        let m = list(vec![
+            list(vec![real(0.0), real(-1.0)]),
+            list(vec![real(1.0), real(0.0)]),
+        ]);
+        let result = builtin_eigenvalues(&[m]).unwrap();
+        let evals = as_list(&result).unwrap();
+        assert_eq!(evals.len(), 2);
+        let mut ims: Vec<f64> = evals
+            .iter()
+            .map(|v| match v {
+                Value::Complex { re, im } => {
+                    assert!(re.abs() < 1e-8, "Expected real part 0, got {}", re);
+                    *im
+                }
+                other => panic!("Expected complex eigenvalue, got {:?}", other),
+            })
+            .collect();
+        ims.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((ims[0] + 1.0).abs() < 1e-8);
+        assert!((ims[1] - 1.0).abs() < 1e-8);
     }
 
     #[test]

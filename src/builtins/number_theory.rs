@@ -7,8 +7,9 @@ use rug::ops::Pow;
 
 // ── Primality ─────────────────────────────────────────────────────────────
 
-/// Deterministic Miller-Rabin witnesses sufficient for n < 3,215,031,751
-const WITNESSES: &[u64] = &[2, 3, 5, 7];
+/// Miller-Rabin witnesses that make the test deterministic for every `u64`
+/// (Jim Sinclair's seven-base set).
+const WITNESSES: &[u64] = &[2, 325, 9375, 28178, 450775, 9780504, 1795265022];
 
 fn mod_pow(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
     if modulus == 1 {
@@ -27,11 +28,16 @@ fn mod_pow(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
 }
 
 fn miller_rabin(n: u64, a: u64) -> bool {
-    if n == a {
+    if n == 2 {
         return true;
     }
     if n.is_multiple_of(2) {
         return false;
+    }
+    // Reduce the witness; a witness divisible by `n` is a no-op and passes.
+    let a = a % n;
+    if a == 0 {
+        return true;
     }
     let mut d = n - 1;
     let mut r = 0u32;
@@ -1193,6 +1199,32 @@ mod tests {
         assert_eq!(
             builtin_prime_q(&[int(1)]).unwrap(),
             Value::Symbol("False".to_string())
+        );
+    }
+
+    #[test]
+    fn test_prime_q_large_deterministic() {
+        // Strong pseudoprime to bases 2,3,5,7 (so the old four-witness set
+        // wrongly reported it prime) and the smallest strong pseudoprime to
+        // the first nine prime bases.
+        assert_eq!(
+            builtin_prime_q(&[int(3_215_031_751)]).unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        assert_eq!(
+            builtin_prime_q(&[Value::Integer(Integer::from(3_825_123_056_546_413_051u64))])
+                .unwrap(),
+            Value::Symbol("False".to_string())
+        );
+        // Largest prime below 2^64, and an ordinary large prime.
+        assert_eq!(
+            builtin_prime_q(&[Value::Integer(Integer::from(18_446_744_073_709_551_557u64))])
+                .unwrap(),
+            Value::Symbol("True".to_string())
+        );
+        assert_eq!(
+            builtin_prime_q(&[int(32_416_190_071)]).unwrap(),
+            Value::Symbol("True".to_string())
         );
     }
 

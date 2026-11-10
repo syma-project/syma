@@ -140,7 +140,7 @@ fn brent_method(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> Result<f64, EvalError
         };
 
         let fd = f(d_clamped);
-        m_flag = if fb > fd { true } else { false };
+        m_flag = fb > fd;
 
         if fd * fb < 0.0 {
             a = b;
@@ -176,15 +176,23 @@ fn golden_section<F: Fn(f64) -> f64>(f: F, a: f64, b: f64) -> (f64, f64) {
     let mut b = b;
 
     loop {
-        if (b - a).abs() < tol {
+        if (b - a).abs() <= tol * (1.0 + a.abs() + b.abs()) {
             break;
         }
         let c = b - (b - a) / phi;
         let d = a + (b - a) / phi;
-        if f(c) < f(d) {
+        let fc = f(c);
+        let fd = f(d);
+        if fc < fd {
             b = d;
-        } else {
+        } else if fc > fd {
             a = c;
+        } else {
+            // Equal samples (common once the function is flat to rounding) keep
+            // the inner bracket instead of always shifting one side, which
+            // otherwise makes a centred minimum drift by a full interval.
+            a = c;
+            b = d;
         }
     }
 
@@ -215,7 +223,7 @@ fn multi_restart_minimize(
                 best_x = center;
             }
         } else {
-            let (val, x) = golden_section(&f, lo, hi);
+            let (val, x) = golden_section(f, lo, hi);
             if val < best_val {
                 best_val = val;
                 best_x = x;
@@ -223,7 +231,7 @@ fn multi_restart_minimize(
         }
     }
 
-    let (val, x) = golden_section(&f, xmin, xmax);
+    let (val, x) = golden_section(f, xmin, xmax);
     if val < best_val {
         best_val = val;
         best_x = x;
@@ -720,8 +728,7 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             }
 
             let mut coeffs_trimmed = coeffs;
-            while coeffs_trimmed.len() > 1
-                && coeffs_trimmed.last().map_or(true, |&c| c.abs() < 1e-15)
+            while coeffs_trimmed.len() > 1 && coeffs_trimmed.last().is_none_or(|&c| c.abs() < 1e-15)
             {
                 coeffs_trimmed.pop();
             }
@@ -812,12 +819,12 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
                 let b = a + step;
                 let fa = f(a);
                 let fb = f(b);
-                if fa * fb <= 0.0 {
-                    if let Ok(root) = brent_method(&f, a, b) {
-                        let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
-                        if !is_dup {
-                            roots.push(root);
-                        }
+                if fa * fb <= 0.0
+                    && let Ok(root) = brent_method(&f, a, b)
+                {
+                    let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
+                    if !is_dup {
+                        roots.push(root);
                     }
                 }
             }
@@ -825,12 +832,12 @@ pub fn builtin_nsolve(args: &[Value], env: &Env) -> Result<Value, EvalError> {
             for i in 0..grid_size {
                 let start =
                     search_lo + ((i as f64 + 0.5) / grid_size as f64) * (search_hi - search_lo);
-                if let Ok(root) = newton_method(&f, start) {
-                    if f(root).abs() < 1e-6 {
-                        let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
-                        if !is_dup {
-                            roots.push(root);
-                        }
+                if let Ok(root) = newton_method(&f, start)
+                    && f(root).abs() < 1e-6
+                {
+                    let is_dup = roots.iter().any(|&r| (r - root).abs() < 1e-6);
+                    if !is_dup {
+                        roots.push(root);
                     }
                 }
             }
@@ -864,18 +871,17 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
             "Plus" => {
                 let mut coeffs: Vec<f64> = vec![0.0; 1];
                 for arg in args {
-                    if let Some(sub) = extract_polynomial_coeffs(arg, var) {
+                    {
+                        let sub = extract_polynomial_coeffs(arg, var)?;
                         if sub.len() > coeffs.len() {
                             coeffs.resize(sub.len(), 0.0);
                         }
                         for (i, &c) in sub.iter().enumerate() {
                             coeffs[i] += c;
                         }
-                    } else {
-                        return None;
                     }
                 }
-                while coeffs.len() > 1 && coeffs.last().map_or(false, |&c| c.abs() < 1e-15) {
+                while coeffs.len() > 1 && coeffs.last().is_some_and(|&c| c.abs() < 1e-15) {
                     coeffs.pop();
                 }
                 Some(coeffs)
@@ -916,15 +922,14 @@ fn extract_polynomial_coeffs(expr: &Value, var: &str) -> Option<Vec<f64>> {
                                 }
                             }
                         } else if inner_head == "Times" {
-                            if let Some(sub_coeffs) = extract_polynomial_coeffs(arg, var) {
+                            {
+                                let sub_coeffs = extract_polynomial_coeffs(arg, var)?;
                                 if let Some(ref mut pp) = poly_part {
                                     let multiplied = multiply_polys(pp, &sub_coeffs);
                                     *pp = multiplied;
                                 } else {
                                     poly_part = Some(sub_coeffs);
                                 }
-                            } else {
-                                return None;
                             }
                         } else {
                             return None;
@@ -978,137 +983,181 @@ fn multiply_polys(a: &[f64], b: &[f64]) -> Vec<f64> {
     result
 }
 
-fn qr_eigenvalues(matrix: &mut Vec<Vec<f64>>, n: usize) -> Vec<(f64, f64)> {
-    let mut a = matrix.clone();
+/// Eigenvalues of a square matrix.
+///
+/// Reduces the matrix to upper Hessenberg form, then iterates the implicitly
+/// shifted QR algorithm, deflating converged 1x1 (real) and 2x2 (possibly
+/// complex) trailing blocks. Exactly `n` `(re, im)` pairs are returned, so a
+/// repeated eigenvalue appears once per multiplicity.
+pub(crate) fn qr_eigenvalues(matrix: &mut [Vec<f64>], n: usize) -> Vec<(f64, f64)> {
+    let mut a = matrix.to_owned();
+    let mut eigenvalues: Vec<(f64, f64)> = Vec::with_capacity(n);
+
+    if n == 0 {
+        return eigenvalues;
+    }
 
     hessenberg(&mut a, n);
 
-    let max_iter = 1000;
     let tol = 1e-12;
-    let mut converged = vec![false; n];
-    let mut eigenvalues: Vec<(f64, f64)> = Vec::new();
-    let m = n;
+    let max_iter = 2000 * n;
+    // The active block is `a[lo..hi][lo..hi]`; everything at or above `hi` is done.
+    let mut hi = n;
+    let mut iter = 0;
 
-    for _ in 0..max_iter {
-        let mut split = m;
-        for i in (1..m).rev() {
-            if a[i - 1][i].abs() < tol && !converged[i] {
-                split = i;
-                converged[i] = true;
-            }
-        }
-
-        if split == 0 {
+    while hi > 0 {
+        if hi == 1 {
+            eigenvalues.push((a[0][0], 0.0));
             break;
         }
 
-        if split == 1 {
-            eigenvalues.push((a[0][0], 0.0));
-            converged[0] = true;
-        } else if split == 2 {
-            let tr = a[0][0] + a[1][1];
-            let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-            let disc = tr * tr - 4.0 * det;
-            if disc >= 0.0 {
-                let sqrt_disc = disc.sqrt();
-                eigenvalues.push(((tr + sqrt_disc) / 2.0, 0.0));
-                eigenvalues.push(((tr - sqrt_disc) / 2.0, 0.0));
-            } else {
-                let re = tr / 2.0;
-                let im = (-disc).sqrt() / 2.0;
-                eigenvalues.push((re, im));
-                eigenvalues.push((re, -im));
+        // Split off the trailing block at the first negligible subdiagonal entry.
+        let mut lo = hi - 1;
+        while lo > 0 {
+            let scale = a[lo - 1][lo - 1].abs() + a[lo][lo].abs();
+            if a[lo][lo - 1].abs() <= tol * scale.max(1.0) {
+                break;
             }
-            for i in 0..split {
-                converged[i] = true;
+            lo -= 1;
+        }
+
+        match hi - lo {
+            1 => {
+                eigenvalues.push((a[hi - 1][hi - 1], 0.0));
+                hi -= 1;
+                iter = 0;
             }
-        } else {
-            let mut shift = a[split - 1][split - 1];
-            if a[split - 2][split - 2].abs() > a[split - 1][split - 1].abs() {
-                let tr = a[split - 2][split - 2] + a[split - 1][split - 1];
-                let det = a[split - 2][split - 2] * a[split - 1][split - 1]
-                    - a[split - 2][split - 1] * a[split - 1][split - 2];
-                let disc = tr * tr - 4.0 * det;
-                if disc >= 0.0 {
-                    let sqrt_disc = disc.sqrt();
-                    let r1 = (tr + sqrt_disc) / 2.0;
-                    let r2 = (tr - sqrt_disc) / 2.0;
-                    shift = if (r1 - a[split - 1][split - 1]).abs()
-                        < (r2 - a[split - 1][split - 1]).abs()
-                    {
-                        r1
-                    } else {
-                        r2
-                    };
-                }
+            2 => {
+                eigenvalues.extend(eig2x2(
+                    a[lo][lo],
+                    a[lo][lo + 1],
+                    a[lo + 1][lo],
+                    a[lo + 1][lo + 1],
+                ));
+                hi -= 2;
+                iter = 0;
             }
-
-            let mut q = identity_matrix(split);
-            let mut r = a[..split]
-                .iter()
-                .map(|row| row[..split].to_vec())
-                .collect::<Vec<_>>();
-
-            for i in 0..split {
-                r[i][i] -= shift;
-            }
-
-            for i in 0..split - 1 {
-                let rr = (r[i][i] * r[i][i] + r[i + 1][i] * r[i + 1][i]).sqrt();
-                let c = if rr.abs() < 1e-30 { 0.0 } else { r[i][i] / rr };
-                let s = if rr.abs() < 1e-30 {
-                    1.0
-                } else {
-                    -r[i + 1][i] / rr
-                };
-
-                for j in 0..split {
-                    let rt = r[i][j] * c + r[i + 1][j] * s;
-                    r[i + 1][j] = -r[i][j] * s + r[i + 1][j] * c;
-                    r[i][j] = rt;
+            _ => {
+                iter += 1;
+                if iter > max_iter {
+                    eigenvalues.extend((lo..hi).map(|i| (a[i][i], 0.0)));
+                    hi = lo;
+                    iter = 0;
+                    continue;
                 }
 
-                for j in 0..split {
-                    let qt = q[j][i] * c + q[j][i + 1] * s;
-                    q[j][i + 1] = -q[j][i] * s + q[j][i + 1] * c;
-                    q[j][i] = qt;
+                let mut shift = wilkinson_shift(
+                    a[hi - 2][hi - 2],
+                    a[hi - 2][hi - 1],
+                    a[hi - 1][hi - 2],
+                    a[hi - 1][hi - 1],
+                );
+                // A zero shift leaves an orthogonal block invariant; nudge it off.
+                let scale = a[hi - 2][hi - 2].abs()
+                    + a[hi - 1][hi - 1].abs()
+                    + a[hi - 2][hi - 1].abs()
+                    + a[hi - 1][hi - 2].abs();
+                if shift.abs() <= 1e-14 * scale.max(1.0) {
+                    shift += 0.75 * scale.max(1.0);
                 }
-            }
-
-            let mut rq = zero_matrix(split);
-            for i in 0..split {
-                for j in 0..split {
-                    for k in 0..split {
-                        rq[i][j] += r[i][k] * q[k][j];
-                    }
-                }
-            }
-
-            for i in 0..split {
-                rq[i][i] += shift;
-            }
-
-            for i in 0..split {
-                for j in 0..split {
-                    a[i][j] = rq[i][j];
-                }
+                qr_step(&mut a, lo, hi, shift);
             }
         }
     }
 
-    for i in 0..n {
-        if !converged[i] {
-            eigenvalues.push((a[i][i], 0.0));
-        }
-    }
-
+    // Every eigenvalue is recorded exactly once even if a step never converged.
+    eigenvalues.resize(n, (0.0, 0.0));
+    eigenvalues.truncate(n);
     eigenvalues
+}
+
+/// Eigenvalues of a real 2x2 block, as `(re, im)` pairs.
+fn eig2x2(a: f64, b: f64, c: f64, d: f64) -> [(f64, f64); 2] {
+    let tr = a + d;
+    let det = a * d - b * c;
+    let disc = tr * tr - 4.0 * det;
+    if disc >= 0.0 {
+        let sqrt_disc = disc.sqrt();
+        [((tr + sqrt_disc) / 2.0, 0.0), ((tr - sqrt_disc) / 2.0, 0.0)]
+    } else {
+        let re = tr / 2.0;
+        let im = (-disc).sqrt() / 2.0;
+        [(re, im), (re, -im)]
+    }
+}
+
+/// Wilkinson shift: the eigenvalue of the trailing 2x2 block nearest its
+/// bottom-right entry, or the block mean when the pair is complex.
+fn wilkinson_shift(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    let tr = a + d;
+    let det = a * d - b * c;
+    let disc = tr * tr - 4.0 * det;
+    if disc >= 0.0 {
+        let sqrt_disc = disc.sqrt();
+        let r1 = (tr + sqrt_disc) / 2.0;
+        let r2 = (tr - sqrt_disc) / 2.0;
+        if (r1 - d).abs() < (r2 - d).abs() {
+            r1
+        } else {
+            r2
+        }
+    } else {
+        tr / 2.0
+    }
+}
+
+/// One implicitly shifted QR step on the Hessenberg block `a[lo..hi][lo..hi]`.
+#[allow(clippy::needless_range_loop)] // row/column index arithmetic reads clearer here.
+fn qr_step(a: &mut [Vec<f64>], lo: usize, hi: usize, shift: f64) {
+    let m = hi - lo;
+    let mut q = identity_matrix(m);
+    let mut r = zero_matrix(m);
+    for i in 0..m {
+        for j in 0..m {
+            r[i][j] = a[lo + i][lo + j];
+        }
+        r[i][i] -= shift;
+    }
+
+    // Reduce `r` to upper triangular with Givens rotations, accumulating them in `q`.
+    for i in 0..m - 1 {
+        let x = r[i][i];
+        let y = r[i + 1][i];
+        let norm = (x * x + y * y).sqrt();
+        let (c, s) = if norm < 1e-300 {
+            (1.0, 0.0)
+        } else {
+            (x / norm, y / norm)
+        };
+        for j in 0..m {
+            let t = r[i][j] * c + r[i + 1][j] * s;
+            r[i + 1][j] = -r[i][j] * s + r[i + 1][j] * c;
+            r[i][j] = t;
+        }
+        for j in 0..m {
+            let t = q[j][i] * c + q[j][i + 1] * s;
+            q[j][i + 1] = -q[j][i] * s + q[j][i + 1] * c;
+            q[j][i] = t;
+        }
+    }
+
+    // `a[block] = R Q + shift I`, similar to the original block.
+    for i in 0..m {
+        for j in 0..m {
+            let mut acc = 0.0;
+            for k in 0..m {
+                acc += r[i][k] * q[k][j];
+            }
+            a[lo + i][lo + j] = acc;
+        }
+        a[lo + i][lo + i] += shift;
+    }
 }
 
 fn identity_matrix(n: usize) -> Vec<Vec<f64>> {
     let mut m = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        m[i][i] = 1.0;
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] = 1.0;
     }
     m
 }
@@ -1117,7 +1166,8 @@ fn zero_matrix(n: usize) -> Vec<Vec<f64>> {
     vec![vec![0.0; n]; n]
 }
 
-fn hessenberg(a: &mut Vec<Vec<f64>>, n: usize) {
+#[allow(clippy::needless_range_loop)] // Householder column/row index arithmetic.
+fn hessenberg(a: &mut [Vec<f64>], n: usize) {
     for k in 0..n - 2 {
         let mut col = Vec::new();
         for i in k + 1..n {
@@ -1142,7 +1192,7 @@ fn hessenberg(a: &mut Vec<Vec<f64>>, n: usize) {
                 .zip(a.iter().skip(k + 1))
                 .map(|(&c, row)| c * row[j])
                 .sum();
-            let factor = dot / hh_norm_sq;
+            let factor = 2.0 * dot / hh_norm_sq;
             for i in k + 1..n {
                 a[i][j] -= col[i - k - 1] * factor;
             }
@@ -1153,7 +1203,7 @@ fn hessenberg(a: &mut Vec<Vec<f64>>, n: usize) {
             for j in k + 1..n {
                 dot_right += col[j - k - 1] * a[i][j];
             }
-            let factor = dot_right / hh_norm_sq;
+            let factor = 2.0 * dot_right / hh_norm_sq;
             for j in k + 1..n {
                 a[i][j] -= col[j - k - 1] * factor;
             }
@@ -1189,6 +1239,25 @@ mod tests {
         assert!(
             (f_min - 3.0).abs() < 1e-10,
             "Expected f_min near 3, got {}",
+            f_min
+        );
+    }
+
+    #[test]
+    fn test_golden_section_offset_offcentre() {
+        // A large constant offset makes `f(c)` and `f(d)` tie once the bracket
+        // is tiny; the minimiser must keep the true minimum in the bracket
+        // instead of drifting away from it.
+        let f = |x: f64| (x - 0.7) * (x - 0.7) + 17.0;
+        let (f_min, x_min) = golden_section(f, 0.0, 1.0);
+        assert!(
+            (x_min - 0.7).abs() < 1e-7,
+            "Expected x_min near 0.7, got {}",
+            x_min
+        );
+        assert!(
+            (f_min - 17.0).abs() < 1e-10,
+            "Expected f_min near 17, got {}",
             f_min
         );
     }
@@ -1379,6 +1448,58 @@ mod tests {
                 re
             );
             assert!(im.abs() < 1e-8, "Expected imaginary 0, got {}", im);
+        }
+    }
+
+    #[test]
+    fn test_qr_eigenvalues_companion() {
+        // Companion matrix of x^3 - 6x^2 + 11x - 6 = (x-1)(x-2)(x-3).
+        let mut m = vec![
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![6.0, -11.0, 6.0],
+        ];
+        let mut evals = qr_eigenvalues(&mut m, 3);
+        evals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(evals.len(), 3);
+        for ((re, im), want) in evals.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((re - want).abs() < 1e-8, "Expected {}, got {}", want, re);
+            assert!(im.abs() < 1e-8, "Expected real eigenvalue, got im {}", im);
+        }
+    }
+
+    #[test]
+    fn test_qr_eigenvalues_quartic() {
+        // A 4x4 companion matrix needing Hessenberg reduction and several
+        // deflations: roots are 1, 2, 3, 4.
+        let mut m = vec![
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![-24.0, 50.0, -35.0, 10.0],
+        ];
+        let mut evals = qr_eigenvalues(&mut m, 4);
+        evals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(evals.len(), 4);
+        for ((re, im), want) in evals.iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert!((re - want).abs() < 1e-8, "Expected {}, got {}", want, re);
+            assert!(im.abs() < 1e-8, "Expected real eigenvalue, got im {}", im);
+        }
+    }
+
+    #[test]
+    fn test_qr_eigenvalues_complex_pair() {
+        // A rotation has eigenvalues ±i and must not stall on a zero shift.
+        let mut m = vec![vec![0.0, -1.0], vec![1.0, 0.0]];
+        let evals = qr_eigenvalues(&mut m, 2);
+        assert_eq!(evals.len(), 2);
+        for (re, im) in &evals {
+            assert!(re.abs() < 1e-8, "Expected real part 0, got {}", re);
+            assert!(
+                (im.abs() - 1.0).abs() < 1e-8,
+                "Expected imaginary ±1, got {}",
+                im
+            );
         }
     }
 

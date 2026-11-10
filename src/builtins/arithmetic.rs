@@ -285,13 +285,12 @@ pub fn builtin_times(args: &[Value]) -> Result<Value, EvalError> {
             head,
             args: inner_args,
         } = &v
+            && head == "Times"
         {
-            if head == "Times" {
-                for f in inner_args {
-                    factors.push(f.clone());
-                }
-                return;
+            for f in inner_args {
+                factors.push(f.clone());
             }
+            return;
         }
         factors.push(v);
     };
@@ -352,11 +351,10 @@ fn flatten_times(v: Value) -> Result<Value, EvalError> {
                     head: h,
                     args: inner,
                 } = &arg
+                    && h == "Times"
                 {
-                    if h == "Times" {
-                        flat.extend(inner.clone());
-                        continue;
-                    }
+                    flat.extend(inner.clone());
+                    continue;
                 }
                 flat.push(arg);
             }
@@ -1087,9 +1085,7 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, angle)))
         }
         Value::Integer(n) => {
-            if n.is_zero() {
-                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
-            } else if n.is_positive() {
+            if n.is_zero() || n.is_positive() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
             } else {
                 Ok(Value::Real(Float::with_val(
@@ -1099,9 +1095,7 @@ pub fn builtin_arg(args: &[Value]) -> Result<Value, EvalError> {
             }
         }
         Value::Real(r) => {
-            if r.is_zero() {
-                Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
-            } else if r.is_sign_positive() {
+            if r.is_zero() || r.is_sign_positive() {
                 Ok(Value::Real(Float::with_val(DEFAULT_PRECISION, 0.0)))
             } else {
                 let pi = Float::with_val(DEFAULT_PRECISION, rug::float::Constant::Pi);

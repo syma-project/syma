@@ -1,3 +1,4 @@
+use crate::env::Env;
 use crate::value::{EvalError, Value};
 use rug::Integer;
 
@@ -18,7 +19,7 @@ fn get_list(val: &Value) -> Result<&[Value], EvalError> {
 fn non_neg_int(val: &Value) -> Result<Integer, EvalError> {
     match val {
         Value::Integer(n) if !n.is_negative() => Ok(n.clone()),
-        Value::Integer(n) => Err(EvalError::TypeError {
+        Value::Integer(_) => Err(EvalError::TypeError {
             expected: "non-negative Integer".to_string(),
             got: "negative Integer".to_string(),
         }),
@@ -105,7 +106,7 @@ pub fn builtin_binomial(args: &[Value]) -> Result<Value, EvalError> {
 /// Multinomial[n1, n2, ...] and Multinomial[{n1, n2, ...}] — the multinomial coefficient.
 /// Returns (n1+n2+...!) / (n1! * n2! * ...).
 pub fn builtin_multinomial(args: &[Value]) -> Result<Value, EvalError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         return Err(EvalError::Error(
             "Multinomial requires at least 1 argument".to_string(),
         ));
@@ -125,7 +126,7 @@ pub fn builtin_multinomial(args: &[Value]) -> Result<Value, EvalError> {
     let sum: Integer = ints.iter().cloned().fold(Integer::from(0), |a, b| a + b);
     let mut result = integer_factorial(&sum);
     for k in &ints {
-        result /= integer_factorial(&k);
+        result /= integer_factorial(k);
     }
     Ok(Value::Integer(result))
 }
@@ -144,19 +145,16 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
     }
     match &args[0] {
         Value::Integer(n) => {
-            if *n <= Integer::from(-2) {
+            if *n <= -2 {
                 // Negative odd n: 1 / ((-n - 2)!!)
                 let neg = -n.clone();
                 let adjusted = neg - Integer::from(2);
                 let denom = integer_double_factorial(&adjusted);
                 Ok(Value::Call {
                     head: "Divide".to_string(),
-                    args: vec![
-                        Value::Integer(Integer::from(1)),
-                        Value::Integer(denom),
-                    ],
+                    args: vec![Value::Integer(Integer::from(1)), Value::Integer(denom)],
                 })
-            } else if *n == Integer::from(0) || *n == Integer::from(-1) {
+            } else if *n == 0 || *n == -1 {
                 Ok(Value::Integer(Integer::from(1)))
             } else if !n.is_negative() {
                 Ok(Value::Integer(integer_double_factorial(n)))
@@ -178,7 +176,7 @@ pub fn builtin_factorial2(args: &[Value]) -> Result<Value, EvalError> {
 fn integer_double_factorial(n: &Integer) -> Integer {
     let mut result = Integer::from(1);
     let mut i = n.clone();
-    while i > Integer::from(0) {
+    while i > 0 {
         result *= i.clone();
         i -= Integer::from(2);
     }
@@ -242,8 +240,7 @@ pub fn builtin_subfactorial(args: &[Value]) -> Result<Value, EvalError> {
             if n_val == 1 {
                 return Ok(Value::Integer(Integer::from(0)));
             }
-            // Iterative: !n = n * !(n-1) + (-1)^n.
-            let mut prev = Integer::from(1); // !0
+            // Iterative: !n = n * !(n-1) + (-1)^n, seeded with !1 = 0.
             let mut curr = Integer::from(0); // !1
             for i in 2..=n_val {
                 let sign = if i % 2 == 0 {
@@ -251,8 +248,7 @@ pub fn builtin_subfactorial(args: &[Value]) -> Result<Value, EvalError> {
                 } else {
                     Integer::from(-1)
                 };
-                curr = Integer::from(i) * prev.clone() + sign;
-                prev = curr.clone();
+                curr = Integer::from(i) * curr + sign;
             }
             Ok(Value::Integer(curr))
         }
@@ -295,14 +291,11 @@ pub fn builtin_permutations(args: &[Value]) -> Result<Value, EvalError> {
 }
 
 /// Generate permutations with a specification (k or {kmin, kmax}).
-fn generate_permutations(
-    items: &[Value],
-    spec: &Value,
-) -> Result<Vec<Value>, EvalError> {
+fn generate_permutations(items: &[Value], spec: &Value) -> Result<Vec<Value>, EvalError> {
     match spec {
         Value::Integer(k) => {
-            let k = *k;
-            if k <= Integer::from(0) {
+            let k = k.clone();
+            if k <= 0 {
                 return Ok(vec![Value::List(vec![])]);
             }
             let k_usize = k
@@ -317,8 +310,8 @@ fn generate_permutations(
             // or simpler: generate all permutations of size k from the n items.
             let mut result = Vec::new();
             let used = vec![false; len];
-            let mut current = Vec::with_capacity(k_usize);
-            partial_permutations(items, &used, &mut current, k_usize, &mut result);
+            let current = Vec::with_capacity(k_usize);
+            partial_permutations(items, &used, &current, k_usize, &mut result);
             Ok(result)
         }
         Value::List(spec_list) if spec_list.len() == 2 => {
@@ -433,11 +426,7 @@ pub fn builtin_subsets(args: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-fn generate_subsets_of_size(
-    items: &[Value],
-    n: usize,
-    k: usize,
-) -> Vec<Value> {
+fn generate_subsets_of_size(items: &[Value], n: usize, k: usize) -> Vec<Value> {
     if k == 0 {
         return vec![Value::List(vec![])];
     }
@@ -449,14 +438,15 @@ fn generate_subsets_of_size(
     loop {
         let subset: Vec<Value> = indices.iter().map(|&i| items[i].clone()).collect();
         result.push(Value::List(subset));
-        // Next combination using standard algorithm.
-        let mut j = k - 1;
-        while j >= 0 && indices[j] == n - k + j {
+        // Next combination using the standard odometer algorithm.
+        let mut j = k as isize - 1;
+        while j >= 0 && indices[j as usize] == n - k + j as usize {
             j -= 1;
         }
-        if j == usize::MAX {
+        if j < 0 {
             break;
         }
+        let j = j as usize;
         indices[j] += 1;
         for m in (j + 1)..k {
             indices[m] = indices[m - 1] + 1;
@@ -473,7 +463,7 @@ fn generate_subsets_specified(
     match spec {
         Value::Integer(k) => {
             let k = k.clone();
-            if k < Integer::from(0) {
+            if k < 0 {
                 return Ok(Vec::new());
             }
             let k_usize = k
@@ -605,9 +595,7 @@ pub fn builtin_stirling_s2(args: &[Value]) -> Result<Value, EvalError> {
                 for col in (1..=k_val.min(row)).rev() {
                     dp[col] = Integer::from(col) * dp[col].clone() + dp[col - 1].clone();
                 }
-                if k_val <= row {
-                    dp[0] = Integer::from(0);
-                }
+                dp[0] = Integer::from(0);
             }
             Ok(Value::Integer(dp[k_val].clone()))
         }
@@ -661,12 +649,9 @@ pub fn builtin_stirling_s1(args: &[Value]) -> Result<Value, EvalError> {
             dp[0] = Integer::from(1); // s(0, 0) = 1
             for row in 1..=n_val {
                 for col in (1..=k_val.min(row)).rev() {
-                    dp[col] = dp[col - 1].clone()
-                        + Integer::from(row - 1) * dp[col].clone();
+                    dp[col] = dp[col - 1].clone() + Integer::from(row - 1) * dp[col].clone();
                 }
-                if k_val <= row {
-                    dp[0] = Integer::from(0);
-                }
+                dp[0] = Integer::from(0);
             }
             Ok(Value::Integer(dp[k_val].clone()))
         }
@@ -723,6 +708,22 @@ fn integer_factorial(n: &Integer) -> Integer {
         result *= Integer::from(i);
     }
     result
+}
+
+/// Register the combinatorics builtins. Called from `super::register_builtins`.
+pub fn register(env: &Env) {
+    super::register_builtin(env, "Binomial", builtin_binomial);
+    super::register_builtin(env, "Multinomial", builtin_multinomial);
+    super::register_builtin(env, "Factorial2", builtin_factorial2);
+    super::register_builtin(env, "AlternatingFactorial", builtin_alternating_factorial);
+    super::register_builtin(env, "Subfactorial", builtin_subfactorial);
+    super::register_builtin(env, "Permutations", builtin_permutations);
+    super::register_builtin(env, "Subsets", builtin_subsets);
+    super::register_builtin(env, "Tuples", builtin_tuples);
+    super::register_builtin(env, "Arrangements", builtin_arrangements);
+    super::register_builtin(env, "StirlingS2", builtin_stirling_s2);
+    super::register_builtin(env, "StirlingS1", builtin_stirling_s1);
+    super::register_builtin(env, "LucasL", builtin_lucas_l);
 }
 
 #[cfg(test)]
@@ -806,11 +807,8 @@ mod tests {
         assert_eq!(builtin_factorial2(&[int(-1)]).unwrap(), int(1));
         // Factorial2[-3] = 1 / ((-(-3) - 2)!!) = 1 / (1!!) = 1
         let result = builtin_factorial2(&[int(-3)]).unwrap();
-        if let Value::Call {
-            head: "Divide",
-            args,
-        } = result
-        {
+        if let Value::Call { head, args } = result {
+            assert_eq!(head, "Divide");
             assert_eq!(args[0], int(1));
             assert_eq!(args[1], int(1));
         } else {
@@ -824,18 +822,9 @@ mod tests {
     fn test_alternating_factorial() {
         assert_eq!(builtin_alternating_factorial(&[int(0)]).unwrap(), int(0));
         assert_eq!(builtin_alternating_factorial(&[int(1)]).unwrap(), int(1));
-        assert_eq!(
-            builtin_alternating_factorial(&[int(2)]).unwrap(),
-            int(-1)
-        ); // 1! - 2! = 1 - 2
-        assert_eq!(
-            builtin_alternating_factorial(&[int(3)]).unwrap(),
-            int(5)
-        ); // 1 - 2 + 6
-        assert_eq!(
-            builtin_alternating_factorial(&[int(4)]).unwrap(),
-            int(-19)
-        ); // 1 - 2 + 6 - 24
+        assert_eq!(builtin_alternating_factorial(&[int(2)]).unwrap(), int(-1)); // 1! - 2! = 1 - 2
+        assert_eq!(builtin_alternating_factorial(&[int(3)]).unwrap(), int(5)); // 1 - 2 + 6
+        assert_eq!(builtin_alternating_factorial(&[int(4)]).unwrap(), int(-19)); // 1 - 2 + 6 - 24
     }
 
     // ── Subfactorial ────────────────────────────────────────────────────────
@@ -864,8 +853,7 @@ mod tests {
 
     #[test]
     fn test_permutations_k() {
-        let result = builtin_permutations(&[list(vec![int(1), int(2), int(3)]), int(2)])
-            .unwrap();
+        let result = builtin_permutations(&[list(vec![int(1), int(2), int(3)]), int(2)]).unwrap();
         if let Value::List(perms) = result {
             assert_eq!(perms.len(), 6);
         } else {
@@ -944,18 +932,14 @@ mod tests {
     #[test]
     fn test_tuples_single() {
         let result = builtin_tuples(&[list(vec![int(1), int(2)]), int(1)]).unwrap();
-        assert_eq!(
-            result,
-            list(vec![list(vec![int(1)]), list(vec![int(2)])])
-        );
+        assert_eq!(result, list(vec![list(vec![int(1)]), list(vec![int(2)])]));
     }
 
     // ── Arrangements ────────────────────────────────────────────────────────
 
     #[test]
     fn test_arrangements() {
-        let result = builtin_arrangements(&[list(vec![int(1), int(2), int(3)]), int(2)])
-            .unwrap();
+        let result = builtin_arrangements(&[list(vec![int(1), int(2), int(3)]), int(2)]).unwrap();
         if let Value::List(arrs) = result {
             assert_eq!(arrs.len(), 6);
         } else {
