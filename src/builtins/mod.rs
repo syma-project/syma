@@ -1,8 +1,10 @@
 pub mod algebraic;
 pub mod arithmetic;
 pub mod association;
+pub mod calendar;
 pub mod charting;
 pub mod clearing;
+pub mod combinatorics;
 pub mod comparison;
 pub mod dataset;
 pub mod developer;
@@ -30,6 +32,7 @@ pub mod operators;
 pub mod parallel;
 pub mod pattern;
 pub mod random;
+pub mod specialfunctions;
 pub mod statistics;
 pub mod string;
 pub mod symbolic;
@@ -60,6 +63,9 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "AbsArg", arithmetic::builtin_abs_arg);
     register_builtin(env, "Complex", arithmetic::builtin_complex);
     register_builtin(env, "ComplexQ", arithmetic::builtin_complex_q);
+
+    // ── Combinatorics ──
+    combinatorics::register(env);
 
     // ── Noncommutative Algebra ──
     register_builtin(
@@ -172,6 +178,22 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "DeleteCases", pattern::builtin_delete_cases);
     register_builtin(env, "Dispatch", pattern::builtin_dispatch);
 
+    // ── Expression inspection & predicates ──
+    register_builtin(env, "Level", expression::builtin_level);
+    register_builtin(env, "LeafCount", expression::builtin_leaf_count);
+    register_builtin(env, "Depth", expression::builtin_depth);
+    register_builtin(env, "Extract", expression::builtin_extract);
+    register_builtin_env(env, "ReplaceList", expression::builtin_replace_list);
+    register_builtin_env(env, "Check", expression::builtin_check);
+    register_builtin(env, "NumericQ", expression::builtin_numeric_q);
+    register_builtin(env, "RealQ", expression::builtin_real_q);
+    register_builtin(env, "ExactNumberQ", expression::builtin_exact_number_q);
+    register_builtin_env(env, "VectorQ", expression::builtin_vector_q);
+    register_builtin(env, "MatrixQ", expression::builtin_matrix_q);
+    register_builtin(env, "ScalarQ", expression::builtin_scalar_q);
+    register_builtin(env, "ArrayQ", expression::builtin_array_q);
+    register_builtin(env, "FullSimplify", expression::builtin_full_simplify);
+
     // ── String ──
     register_builtin(env, "StringJoin", string::builtin_string_join);
     register_builtin(env, "StringLength", string::builtin_string_length);
@@ -270,8 +292,10 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "TrueQ", integration::builtin_true_q);
     register_builtin(env, "FalseQ", integration::builtin_false_q);
     register_builtin(env, "OddQ", integration::builtin_odd_q);
+    register_builtin(env, "EvenQ", integration::builtin_even_q);
     register_builtin(env, "HalfIntegerQ", integration::builtin_half_integer_q);
     register_builtin(env, "RationalQ", integration::builtin_rational_q);
+    register_builtin(env, "FractionQ", integration::builtin_fraction_q);
     register_builtin(env, "IntegersQ", integration::builtin_integers_q);
     register_builtin(env, "PolyQ", integration::builtin_poly_q);
     register_builtin(env, "PolynomialQ", integration::builtin_polynomial_q);
@@ -357,7 +381,8 @@ pub fn register_builtins(env: &Env) {
     register_builtin(env, "Numer", integration::builtin_numer);
     register_builtin(env, "Denom", integration::builtin_denom);
     register_builtin(env, "Exponent", integration::builtin_exponent);
-    register_builtin(env, "Sign", integration::builtin_sign);
+    // Note: `Sign` is registered once (in the arithmetic group) so its
+    // complex-aware implementation is not shadowed by a later registration.
     register_builtin(env, "PerfectSquareQ", integration::builtin_perfect_square_q);
     register_builtin(env, "BinomialQ", integration::builtin_binomial_q);
     register_builtin(env, "IntBinomialQ", integration::builtin_int_binomial_q);
@@ -583,11 +608,7 @@ pub fn register_builtins(env: &Env) {
         "FunctionOfSquareRootOfQuadratic",
         integration::builtin_function_of_sqrt_of_quadratic,
     );
-    register_builtin(
-        env,
-        "FunctionOfLinear",
-        integration::builtin_function_of_linear_fn,
-    );
+
     register_builtin(
         env,
         "TryPureTanSubst",
@@ -686,7 +707,6 @@ pub fn register_builtins(env: &Env) {
     // ── Numerical / piecewise ──
     register_builtin(env, "IntegerPart", math::builtin_integer_part);
     register_builtin(env, "FractionalPart", math::builtin_fractional_part);
-    register_builtin(env, "Sign", math::builtin_sign);
     register_builtin(env, "UnitStep", math::builtin_unit_step);
     register_builtin(env, "Clip", math::builtin_clip);
     register_builtin(env, "Rescale", math::builtin_rescale);
@@ -813,6 +833,7 @@ pub fn register_builtins(env: &Env) {
     register_builtin_env(env, "MapApply", list::builtin_map_apply);
 
     // ── Functional Operators (operators.rs) ──
+    register_builtin(env, "Identity", operators::builtin_identity);
     register_builtin_env(env, "Composition", operators::builtin_composition);
     register_builtin_env(
         env,
@@ -954,6 +975,9 @@ pub fn register_builtins(env: &Env) {
 
     // ── Assumptions & Domains ──
     domains::register(env);
+
+    // ── Date & Time ──
+    calendar::register(env);
 
     // ── Symbol Clearing ──
     register_builtin_env(env, "Clear", clearing::builtin_clear);
@@ -1114,6 +1138,9 @@ pub fn register_builtins(env: &Env) {
             }
         }
     }
+
+    // ── Special functions ──
+    specialfunctions::register_sfs(env);
 
     // ── System limits ──
     env.set(
@@ -2497,6 +2524,8 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         // -- Calculus (HoldAll so expressions are not pre-evaluated) --
         "D" | "Integrate" => vec!["HoldAll", "Locked", "ReadProtected"],
         "ReplaceAll" | "ReplaceRepeated" => vec!["Locked", "ReadProtected", "SequenceHold"],
+        // -- Error handling (HoldAll so the guarded expression is not pre-evaluated) --
+        "Check" => vec!["HoldAll", "Locked", "ReadProtected"],
         // -- Equation solvers (need HoldAll so equations aren't evaluated before solving) --
         "Solve" | "RSolve" => vec!["HoldAll", "Locked", "ReadProtected"],
         // -- Constants --
@@ -2521,5 +2550,33 @@ pub fn get_attributes(name: &str) -> Vec<&'static str> {
         "Clear" | "ClearAll" | "Remove" => vec!["Locked", "ReadProtected"],
         "Unset" => vec!["HoldFirst", "Locked", "ReadProtected"],
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::env::Env;
+
+    /// `Sign` was registered three times (arithmetic, integration, math), with
+    /// the last registration shadowing the complex-aware implementation. Guard
+    /// that the complex-aware version wins.
+    #[test]
+    fn sign_is_complex_aware() {
+        let env = Env::new();
+        register_builtins(&env);
+        let result = crate::eval::apply_function(
+            &env.get("Sign").unwrap(),
+            &[Value::Complex { re: 3.0, im: 4.0 }],
+            &env,
+        )
+        .unwrap();
+        match result {
+            Value::Complex { re, im } => {
+                assert!((re - 0.6).abs() < 1e-9, "real part: {re}");
+                assert!((im - 0.8).abs() < 1e-9, "imag part: {im}");
+            }
+            other => panic!("expected complex result, got {other:?}"),
+        }
     }
 }
