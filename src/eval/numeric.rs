@@ -29,6 +29,14 @@ pub(super) fn numeric_eval_expr(
         },
         Expr::Integer(n) => Ok(Value::Real(Float::with_val(prec_bits, n))),
         Expr::Real(r) => Ok(Value::Real(Float::with_val(prec_bits, r))),
+        // Numerically evaluate each element of a list.
+        Expr::List(items) => {
+            let vals: Result<Vec<Value>, EvalError> = items
+                .iter()
+                .map(|it| numeric_eval_expr(it, prec_bits, env))
+                .collect();
+            Ok(Value::List(vals?))
+        }
         // Recursively evaluate calls at the requested precision.
         Expr::Call { head, args } => {
             if let Expr::Symbol(name) = head.as_ref() {
@@ -50,8 +58,8 @@ pub(super) fn numeric_eval_expr(
                     .collect();
                 let evaluated_args = evaluated_args?;
                 match name.as_str() {
-                    "Plus" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a + b),
-                    "Times" => numeric_fold_op(evaluated_args, prec_bits, |a, b| a * b),
+                    "Plus" => numeric_combine("Plus", evaluated_args, prec_bits, env, false),
+                    "Times" => numeric_combine("Times", evaluated_args, prec_bits, env, true),
                     "Power" if evaluated_args.len() == 2 => {
                         try_power_float("Power", &evaluated_args, prec_bits, env)
                     }
@@ -72,15 +80,18 @@ pub(super) fn numeric_eval_expr(
                     }
                     "Sqrt" => try_sqrt_float("Sqrt", &evaluated_args, prec_bits, env),
                     "Abs" => try_unary_float("Abs", &evaluated_args, prec_bits, env, |f| f.abs()),
-                    // For numeric evaluation of other functions, fall back to normal evaluation
-                    // and coerce the result to a float.
+                    // For numeric evaluation of other functions, compute with the
+                    // numeric args; if that fails (special forms handled in eval)
+                    // fall back to normal evaluation and coerce the result.
                     _ => {
-                        let v = crate::eval::apply_function(
-                            &super::eval(head, env)?,
-                            &evaluated_args,
-                            env,
-                        )?;
-                        coerce_to_float(v, prec_bits)
+                        let head_val = super::eval(head, env)?;
+                        match super::apply_function(&head_val, &evaluated_args, env) {
+                            Ok(v) => coerce_to_float(v, prec_bits),
+                            Err(_) => {
+                                let v = super::eval(expr, env)?;
+                                coerce_to_float(v, prec_bits)
+                            }
+                        }
                     }
                 }
             } else {
@@ -221,21 +232,45 @@ fn to_float(v: &Value, prec_bits: u32) -> Option<Float> {
     }
 }
 
-/// Helper: fold a binary float operation over argument list.
-fn numeric_fold_op<F>(args: Vec<Value>, prec_bits: u32, op: F) -> Result<Value, EvalError>
+/// Numerically combine `Plus`/`Times` args when all are numeric, otherwise
+/// rebuild the expression symbolically (evaluated args, e.g. `N[2 x + 2 y]`
+/// → `2.0 x + 2.0 y`).
+fn numeric_combine(
+    head: &str,
+    args: Vec<Value>,
+    prec_bits: u32,
+    env: &Env,
+    multiply: bool,
+) -> Result<Value, EvalError> {
+    if !args.is_empty() && args.iter().all(|a| to_float(a, prec_bits).is_some()) {
+        numeric_fold_op(
+            &args,
+            prec_bits,
+            move |a, b| if multiply { a * b } else { a + b },
+        )
+    } else {
+        super::apply_function(
+            &super::eval(&Expr::Symbol(head.to_string()), env)?,
+            &args,
+            env,
+        )
+    }
+}
+
+/// Helper: fold a binary float operation over an all-numeric argument list.
+fn numeric_fold_op<F>(args: &[Value], prec_bits: u32, op: F) -> Result<Value, EvalError>
 where
     F: Fn(Float, Float) -> Float,
 {
-    let mut iter = args.into_iter();
-    let first = iter.next().ok_or_else(|| {
+    let first = args.first().ok_or_else(|| {
         EvalError::Error("expected at least one argument for numeric fold".to_string())
     })?;
-    let mut acc = to_float(&first, prec_bits).ok_or_else(|| EvalError::TypeError {
+    let mut acc = to_float(first, prec_bits).ok_or_else(|| EvalError::TypeError {
         expected: "Number".to_string(),
         got: first.type_name().to_string(),
     })?;
-    for arg in iter {
-        let f = to_float(&arg, prec_bits).ok_or_else(|| EvalError::TypeError {
+    for arg in &args[1..] {
+        let f = to_float(arg, prec_bits).ok_or_else(|| EvalError::TypeError {
             expected: "Number".to_string(),
             got: arg.type_name().to_string(),
         })?;

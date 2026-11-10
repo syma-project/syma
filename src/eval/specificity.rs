@@ -60,6 +60,106 @@ pub(crate) fn try_match_params(
     args: &[Value],
     env: &Env,
 ) -> Result<Option<Bindings>, EvalError> {
+    try_match_params_named(params, args, env, None)
+}
+
+/// True for a runtime value that is an option rule (`a -> v`).
+fn is_rule_val(v: &Value) -> bool {
+    matches!(v, Value::Rule { .. })
+}
+
+/// True for a value that can be consumed by `OptionsPattern[]`: a rule or a
+/// non-empty list of rules.
+fn is_option_arg(v: &Value) -> bool {
+    match v {
+        Value::Rule { .. } => true,
+        Value::List(items) => !items.is_empty() && items.iter().all(is_rule_val),
+        _ => false,
+    }
+}
+
+/// Extract `(key, value)` from an option rule value, evaluating a held rhs.
+fn rule_key_value(r: &Value, env: &Env) -> Result<Option<(String, Value)>, EvalError> {
+    if let Value::Rule { lhs, rhs, .. } = r {
+        let key = match lhs.as_ref() {
+            Value::Symbol(s) | Value::Str(s) => s.clone(),
+            Value::Pattern(Expr::Symbol(s)) => s.clone(),
+            _ => return Ok(None),
+        };
+        let value = match rhs.as_ref() {
+            Value::Pattern(e) => eval(e, env)?,
+            other => other.clone(),
+        };
+        return Ok(Some((key, value)));
+    }
+    Ok(None)
+}
+
+/// Like [`try_match_params`] but aware of the defining function's name so that
+/// a trailing `OptionsPattern[]` parameter can be filled with the function's
+/// default options (registered via `SetOptions`) plus any options passed in the
+/// call. The merged options are bound to `$OptionsValues` for `OptionValue`.
+pub(crate) fn try_match_params_named(
+    params: &[Expr],
+    args: &[Value],
+    env: &Env,
+    name: Option<&str>,
+) -> Result<Option<Bindings>, EvalError> {
+    let has_options_pattern = params.last().is_some_and(|p| {
+        matches!(p, Expr::Call { head, .. } if matches!(head.as_ref(), Expr::Symbol(s) if s == "OptionsPattern"))
+    });
+    if has_options_pattern {
+        let fixed = &params[..params.len() - 1];
+        // Trailing rule/list-of-rules arguments are options, not positionals.
+        let mut split = args.len();
+        while split > 0 && is_option_arg(&args[split - 1]) {
+            split -= 1;
+        }
+        let mut bindings = match try_match_params_named(fixed, &args[..split], env, None)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        // Collect defaults: env options first, then inline `OptionsPattern[{...}]`.
+        let mut merged: Vec<(String, Value)> = name.map(|n| env.get_options(n)).unwrap_or_default();
+        if let Some(Expr::Call { args: op_args, .. }) = params.last()
+            && let Some(list_expr) = op_args.first()
+            && let Value::List(items) = eval(list_expr, env)?
+        {
+            for item in &items {
+                if let Some((k, v)) = rule_key_value(item, env)? {
+                    merged.retain(|(ek, _)| *ek != k);
+                    merged.push((k, v));
+                }
+            }
+        }
+        // Call-time options override defaults.
+        for arg in &args[split..] {
+            let rules: Vec<&Value> = match arg {
+                Value::List(items) => items.iter().collect(),
+                other => vec![other],
+            };
+            for r in rules {
+                if let Some((k, v)) = rule_key_value(r, env)? {
+                    merged.retain(|(ek, _)| *ek != k);
+                    merged.push((k, v));
+                }
+            }
+        }
+        let mut assoc = std::collections::HashMap::new();
+        for (k, v) in merged {
+            assoc.insert(k, v);
+        }
+        bindings.insert("$OptionsValues".to_string(), Value::Assoc(assoc));
+        return Ok(Some(bindings));
+    }
+    try_match_params_inner(params, args, env)
+}
+
+fn try_match_params_inner(
+    params: &[Expr],
+    args: &[Value],
+    env: &Env,
+) -> Result<Option<Bindings>, EvalError> {
     let _attr_checker = AttributeChecker::new(env.attributes.clone());
     let has_sequences = params.iter().any(|p| {
         let (inner, _guard) = extract_guard_expr(p);

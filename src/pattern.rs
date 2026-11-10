@@ -133,6 +133,27 @@ pub fn match_pattern(
         return match_pattern(pattern, inner, attr_checker);
     }
 
+    // ── HoldPattern[p]: match the content as a pattern (unwraps the hold) ──
+    // ── Verbatim[e]:   match e literally (no pattern interpretation) ──
+    if let Expr::Call { head, args } = pattern
+        && let Expr::Symbol(h) = head.as_ref()
+    {
+        if h == "HoldPattern" && args.len() == 1 {
+            return match_pattern(&args[0], value, attr_checker);
+        }
+        if h == "Verbatim" && args.len() == 1 {
+            let literal = unwrap_expr_to_value(&args[0]);
+            return if literal.struct_eq(value) {
+                MatchResult::Match(HashMap::new())
+            } else {
+                MatchResult::NoMatch
+            };
+        }
+        if h == "KeyValuePattern" {
+            return match_key_value_pattern(args, value, attr_checker);
+        }
+    }
+
     match pattern {
         // ── Blank patterns ──
         Expr::Blank { type_constraint } => {
@@ -810,6 +831,101 @@ fn match_repeated_pattern(
         MatchResult::Match(bindings)
     } else {
         MatchResult::NoMatch
+    }
+}
+
+/// Handle `KeyValuePattern[{k -> v, ...}]` (and the single-rule form).
+///
+/// Matches an association — or a list of rules, which is its normalized form —
+/// that contains at least the given key/value patterns. Values are matched as
+/// patterns, so named blanks bind as usual. Keys may themselves be patterns.
+fn match_key_value_pattern(
+    args: &[Expr],
+    value: &Value,
+    attr_checker: Option<&AttributeChecker>,
+) -> MatchResult {
+    let rules: &[Expr] = match args {
+        [Expr::List(items)] => items,
+        [single] => std::slice::from_ref(single),
+        _ => return MatchResult::NoMatch,
+    };
+
+    // Normalize the candidate value into ordered key/value pairs.
+    let pairs: Vec<(String, Value)> = match value {
+        Value::Assoc(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Rule {
+                        lhs,
+                        rhs,
+                        delayed: false,
+                    } => out.push((value_key_string(lhs), rhs.as_ref().clone())),
+                    _ => return MatchResult::NoMatch,
+                }
+            }
+            out
+        }
+        _ => return MatchResult::NoMatch,
+    };
+
+    let mut bindings = Bindings::new();
+    for rule in rules {
+        let (key_pat, val_pat) = match rule {
+            Expr::Rule { lhs, rhs } | Expr::RuleDelayed { lhs, rhs } => {
+                (lhs.as_ref(), rhs.as_ref())
+            }
+            _ => return MatchResult::NoMatch,
+        };
+
+        let mut matched_rule = false;
+        if let Some(literal) = literal_key(key_pat) {
+            if let Some((_, stored)) = pairs.iter().find(|(k, _)| *k == literal)
+                && let MatchResult::Match(b) = match_pattern(val_pat, stored, attr_checker)
+            {
+                bindings.extend(b);
+                matched_rule = true;
+            }
+        } else {
+            for (k, stored) in &pairs {
+                if let MatchResult::Match(key_bindings) =
+                    match_pattern(key_pat, &Value::Str(k.clone()), attr_checker)
+                    && let MatchResult::Match(val_bindings) =
+                        match_pattern(val_pat, stored, attr_checker)
+                {
+                    bindings.extend(key_bindings);
+                    bindings.extend(val_bindings);
+                    matched_rule = true;
+                    break;
+                }
+            }
+        }
+
+        if !matched_rule {
+            return MatchResult::NoMatch;
+        }
+    }
+    MatchResult::Match(bindings)
+}
+
+/// If a key expression is a literal, return its association-key string.
+fn literal_key(key: &Expr) -> Option<String> {
+    match key {
+        Expr::Str(s) | Expr::Symbol(s) => Some(s.clone()),
+        Expr::Integer(n) => Some(n.to_string()),
+        Expr::Real(r) => Some(r.to_string()),
+        _ => None,
+    }
+}
+
+/// String form of a value used as an association key.
+fn value_key_string(v: &Value) -> String {
+    match v {
+        Value::Str(s) | Value::Symbol(s) => s.clone(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(r) => r.to_string(),
+        other => other.to_string(),
     }
 }
 

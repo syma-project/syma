@@ -144,6 +144,7 @@ pub enum Token {
 
     // ── Special tokens ──
     ColonSlashSemicolon, // /;  (guard)
+    TagSet,              // /:  (upvalue tag)
     AtTransform,         // @transform
 
     // ── End of input ──
@@ -251,6 +252,7 @@ impl fmt::Display for Token {
             Token::Decrement => write!(f, "--"),
             Token::Unset => write!(f, "=."),
             Token::ColonSlashSemicolon => write!(f, "/;"),
+            Token::TagSet => write!(f, "/:"),
             Token::AtTransform => write!(f, "@transform"),
             Token::Operator(s) => write!(f, "{}", s),
             Token::Eof => write!(f, "EOF"),
@@ -870,6 +872,10 @@ impl Lexer {
                         Some(';') => {
                             self.advance();
                             push!(Token::ColonSlashSemicolon);
+                        }
+                        Some(':') => {
+                            self.advance();
+                            push!(Token::TagSet);
                         }
                         _ => {
                             push!(Token::Slash);

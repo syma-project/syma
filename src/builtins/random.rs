@@ -4,17 +4,35 @@ use rug::Integer;
 use std::cell::RefCell;
 
 thread_local! {
-    static RNG_STATE: RefCell<u64> = const { RefCell::new(1) };
+    /// Thread-local RNG shared by all random builtins (RandomReal, RandomChoice,
+    /// RandomInteger, RandomVariate, …). Seeded deterministically so that
+    /// `SeedRandom[n]` makes subsequent draws reproducible.
+    static RNG: RefCell<fastrand::Rng> =
+        const { RefCell::new(fastrand::Rng::with_seed(0x9E37_79B9_7F4A_7C15)) };
+}
+
+/// Reseed the shared RNG with an explicit seed (`SeedRandom[n]`).
+pub fn seed_rng(seed: u64) {
+    RNG.with(|cell| *cell.borrow_mut() = fastrand::Rng::with_seed(seed));
+}
+
+/// Reseed the shared RNG from system entropy (`SeedRandom[]`).
+pub fn reseed_entropy() {
+    RNG.with(|cell| *cell.borrow_mut() = fastrand::Rng::new());
+}
+
+/// Run `f` with mutable access to the shared RNG.
+pub fn with_rng<T>(f: impl FnOnce(&mut fastrand::Rng) -> T) -> T {
+    RNG.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+/// Draw the next raw 64-bit value from the shared RNG.
+pub fn next_u64() -> u64 {
+    with_rng(|rng| rng.u64(..))
 }
 
 fn next_random() -> u64 {
-    RNG_STATE.with(|state| {
-        let mut s = state.borrow_mut();
-        *s ^= *s << 13;
-        *s ^= *s >> 7;
-        *s ^= *s << 17;
-        *s
-    })
+    next_u64()
 }
 
 pub fn builtin_random_integer(args: &[Value]) -> Result<Value, EvalError> {

@@ -82,6 +82,44 @@ pub(super) fn eval_assign(
             head,
             args: call_args,
         } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part") => {
+            // Options[f] = {...} — register default options.
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Options") && call_args.len() == 1 {
+                let sym = match &call_args[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Options assignment requires a symbol".to_string(),
+                        ));
+                    }
+                };
+                let opts = crate::builtins::introspect::options_from_value(&val, env)?;
+                env.replace_options(&sym, opts);
+                return Ok(val);
+            }
+            // Subvalue definition: f[a][b] := body
+            if let Expr::Call {
+                head: inner_head,
+                args: outer,
+            } = head.as_ref()
+                && let Expr::Symbol(name) = inner_head.as_ref()
+            {
+                let body_expr = if delayed {
+                    rhs.clone()
+                } else {
+                    table::value_to_expr(&val)
+                };
+                env.add_subvalue(
+                    name,
+                    crate::env::SubValue {
+                        outer: outer.clone(),
+                        inner: call_args.clone(),
+                        rhs: body_expr,
+                        delayed,
+                        guard: None,
+                    },
+                );
+                return Ok(val);
+            }
             if let Expr::Symbol(name) = head.as_ref() {
                 // Check for OOP field access: field[object] = value
                 // where object evaluates to an Object

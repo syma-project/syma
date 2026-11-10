@@ -213,11 +213,22 @@ pub fn builtin_cases(args: &[Value], env: &Env) -> Result<Value, EvalError> {
     };
     let attr_checker = AttributeChecker::new(env.attributes.clone());
     let pattern = &args[1];
-    let result: Vec<Value> = items
-        .iter()
-        .filter(|item| matches_value(item, pattern, Some(&attr_checker), Some(env)))
-        .cloned()
-        .collect();
+    let mut result: Vec<Value> = Vec::new();
+    if matches!(pattern, Value::Rule { .. }) {
+        // `Cases[list, patt :> rhs]` / `->`: apply the rule and collect the RHS.
+        for item in items {
+            if let Some(v) = crate::eval::rules::apply_rules_once_pub(item, pattern, env)? {
+                result.push(v);
+            }
+        }
+    } else {
+        result.extend(
+            items
+                .iter()
+                .filter(|item| matches_value(item, pattern, Some(&attr_checker), Some(env)))
+                .cloned(),
+        );
+    }
     Ok(Value::List(result))
 }
 

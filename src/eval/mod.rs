@@ -45,6 +45,7 @@ use control_flow::eval_control_flow;
 use information::eval_information;
 use set::eval_set;
 pub(crate) use specificity::try_match_params;
+pub(crate) use specificity::try_match_params_named;
 use specificity::{flatten_sequences, specificity};
 pub(crate) use substitute::substitute_in_expr;
 pub fn eval_program(stmts: &[Expr], env: &Env) -> Result<Value, EvalError> {
@@ -1094,9 +1095,134 @@ pub(super) fn parse_local_specs(arg: &Expr) -> Result<Vec<(String, Option<Expr>)
     Ok(specs)
 }
 
+/// Evaluate a function call, then give any applicable upvalue a chance to fire
+/// when the call remains unevaluated.
+fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    let result = eval_call_inner(head, args, env)?;
+    apply_upvalues(result, env)
+}
+
+/// Evaluate `TagSet[tag, def]` — an upvalue definition `tag /: lhs := rhs`.
+///
+/// The resulting rule is stored under `tag` (so `UpValues[tag]` reports it and
+/// it can fire during evaluation). When the definition's head is not a builtin
+/// it is also registered as a normal definition, so plain calls resolve without
+/// the upvalue hook.
+fn eval_tag_set(args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Error(
+            "TagSet requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let tag = match &args[0] {
+        Expr::Symbol(s) => s.clone(),
+        _ => {
+            return Err(EvalError::Error("TagSet tag must be a symbol".to_string()));
+        }
+    };
+    let def = &args[1];
+    let (lhs_expr, rhs_expr, delayed, guard) = match def {
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            delayed,
+            guard,
+        } => (
+            Expr::Call {
+                head: Box::new(Expr::Symbol(name.clone())),
+                args: params.clone(),
+            },
+            body.as_ref().clone(),
+            *delayed,
+            guard.as_ref().map(|g| g.as_ref().clone()),
+        ),
+        Expr::Call {
+            head,
+            args: call_args,
+        } if call_args.len() == 2
+            && matches!(head.as_ref(), Expr::Symbol(h) if h == "Set" || h == "SetDelayed") =>
+        {
+            let delayed = matches!(head.as_ref(), Expr::Symbol(h) if h == "SetDelayed");
+            let rhs = call_args[1].clone();
+            if let Expr::PatternGuard { pattern, condition } = rhs {
+                (
+                    call_args[0].clone(),
+                    pattern.as_ref().clone(),
+                    delayed,
+                    Some(condition.as_ref().clone()),
+                )
+            } else {
+                (call_args[0].clone(), rhs, delayed, None)
+            }
+        }
+        Expr::Assign { lhs, rhs } => (lhs.as_ref().clone(), rhs.as_ref().clone(), false, None),
+        _ => {
+            return Err(EvalError::Error(
+                "TagSet requires an assignment on the right-hand side".to_string(),
+            ));
+        }
+    };
+
+    // Record the upvalue as `HoldPattern[lhs /; guard] :> rhs` so a failing
+    // guard makes the rule not apply (leaving the original call intact).
+    let lhs_inner = if let Some(g) = guard {
+        Expr::PatternGuard {
+            pattern: Box::new(lhs_expr.clone()),
+            condition: Box::new(g),
+        }
+    } else {
+        lhs_expr.clone()
+    };
+    let lhs_wrapped = Expr::Call {
+        head: Box::new(Expr::Symbol("HoldPattern".to_string())),
+        args: vec![lhs_inner],
+    };
+    env.add_upvalue(
+        &tag,
+        Value::Rule {
+            lhs: Box::new(Value::Pattern(lhs_wrapped)),
+            rhs: Box::new(Value::Pattern(rhs_expr)),
+            delayed,
+        },
+    );
+
+    // For non-builtin heads, also register the definition normally.
+    let head_name = match &lhs_expr {
+        Expr::Call { head, .. } => match head.as_ref() {
+            Expr::Symbol(h) => Some(h.clone()),
+            _ => None,
+        },
+        Expr::Symbol(h) => Some(h.clone()),
+        _ => None,
+    };
+    if let Some(h) = head_name
+        && !matches!(env.get(&h), Some(Value::Builtin(_, _)))
+    {
+        let _ = eval(def, env)?;
+    }
+    Ok(Value::Null)
+}
+
+/// Attempt to apply a user-registered upvalue (`f /: g[...] := ...`) to an
+/// unevaluated call result.
+fn apply_upvalues(result: Value, env: &Env) -> Result<Value, EvalError> {
+    if !matches!(result, Value::Call { .. }) {
+        return Ok(result);
+    }
+    let rules = env.all_upvalues();
+    if rules.is_empty() {
+        return Ok(result);
+    }
+    match crate::eval::rules::apply_rules_once_pub(&result, &Value::List(rules), env)? {
+        Some(v) => Ok(v),
+        None => Ok(result),
+    }
+}
+
 /// Evaluate a function call.
 #[inline(never)]
-fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
+fn eval_call_inner(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> {
     // Special forms that don't evaluate all arguments
     if let Expr::Symbol(s) = head {
         match s.as_str() {
@@ -1305,6 +1431,74 @@ fn eval_call(head: &Expr, args: &[Expr], env: &Env) -> Result<Value, EvalError> 
             }
             "Module" | "With" | "Block" => Ok(eval_control_flow(s, args, env)?
                 .expect("Module/With/Block handled by eval_control_flow")),
+            "TagSet" => eval_tag_set(args, env),
+            // Introspection builtins: pass bare symbol arguments through as
+            // `Value::Symbol` so their names survive (the generic HoldAll path
+            // would evaluate them to their values).
+            "DownValues" | "OwnValues" | "UpValues" | "SubValues" | "Definition" | "Context"
+            | "Options" | "OptionValue" => {
+                let head_val = eval(head, env)?;
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Expr::Symbol(sym) => vals.push(Value::Symbol(sym.clone())),
+                        Expr::Str(s) => vals.push(Value::Str(s.clone())),
+                        other => vals.push(eval(other, env)?),
+                    }
+                }
+                apply_function(&head_val, &vals, env)
+            }
+            "SetOptions" => {
+                let head_val = eval(head, env)?;
+                let mut vals = Vec::with_capacity(args.len());
+                if let Some(first) = args.first() {
+                    match first {
+                        Expr::Symbol(sym) => vals.push(Value::Symbol(sym.clone())),
+                        other => vals.push(eval(other, env)?),
+                    }
+                }
+                for rest in &args[1..] {
+                    vals.push(eval(rest, env)?);
+                }
+                apply_function(&head_val, &vals, env)
+            }
+            "HoldPattern" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Error(
+                        "HoldPattern requires exactly 1 argument".to_string(),
+                    ));
+                }
+                Ok(Value::Pattern(Expr::Call {
+                    head: Box::new(Expr::Symbol("HoldPattern".to_string())),
+                    args: vec![args[0].clone()],
+                }))
+            }
+            "Verbatim" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Error(
+                        "Verbatim requires exactly 1 argument".to_string(),
+                    ));
+                }
+                Ok(Value::Pattern(Expr::Call {
+                    head: Box::new(Expr::Symbol("Verbatim".to_string())),
+                    args: vec![args[0].clone()],
+                }))
+            }
+            "Inactive" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Error(
+                        "Inactive requires exactly 1 argument".to_string(),
+                    ));
+                }
+                let inner = match &args[0] {
+                    Expr::Symbol(sym) => Value::Symbol(sym.clone()),
+                    other => Value::Pattern(other.clone()),
+                };
+                Ok(Value::Call {
+                    head: "Inactive".to_string(),
+                    args: vec![inner],
+                })
+            }
             _ => {
                 // Check if this is a custom operator symbol registered in the operator table.
                 // If so, resolve it to the actual head name and dispatch.
@@ -1568,7 +1762,8 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
             // Try each definition in order
             let mut found_result: Option<Result<Value, EvalError>> = None;
             for def in func_def.definitions.iter() {
-                let match_result = try_match_params(&def.params, args, env)?;
+                let match_result =
+                    try_match_params_named(&def.params, args, env, Some(&func_def.name))?;
                 if let Some(bindings) = match_result {
                     // Evaluate function-level guard if present (f[x_] := body /; condition)
                     if let Some(guard_expr) = &def.guard {
@@ -1808,6 +2003,46 @@ pub(crate) fn apply_function(func: &Value, args: &[Value], env: &Env) -> Result<
         Value::Dataset(data) => {
             // ds[args...] -> query dispatch
             dataset::dataset_query(data, args, env)
+        }
+
+        // ── Subvalues: `f[a][b] := ...` — the head is a partially-applied call ──
+        Value::Call {
+            head: h,
+            args: curried,
+        } => {
+            let mut applied: Option<Value> = None;
+            for sv in env.get_subvalues(h) {
+                let outer_match = try_match_params(&sv.outer, curried, env)?;
+                let Some(mut bindings) = outer_match else {
+                    continue;
+                };
+                let Some(inner_bindings) = try_match_params(&sv.inner, args, env)? else {
+                    continue;
+                };
+                bindings.extend(inner_bindings);
+                if let Some(guard) = &sv.guard {
+                    let ge = env.child();
+                    for (k, v) in &bindings {
+                        ge.set(k.clone(), v.clone());
+                    }
+                    if !eval(guard, &ge)?.to_bool() {
+                        continue;
+                    }
+                }
+                let child_env = env.child();
+                for (k, v) in &bindings {
+                    child_env.set(k.clone(), v.clone());
+                }
+                applied = Some(eval(&sv.rhs, &child_env)?);
+                break;
+            }
+            match applied {
+                Some(v) => Ok(v),
+                None => Ok(Value::Call {
+                    head: func.to_string(),
+                    args: args.to_vec(),
+                }),
+            }
         }
 
         _ => {
@@ -2441,7 +2676,11 @@ mod tests {
                 let expected = std::f64::consts::PI / 180.0;
                 assert!((r.to_f64() - expected).abs() < 1e-15);
             }
-            _ => panic!("Expected Real, got {:?}", val),
+            // `Degree` is registered as a builtin (doubling as the graph
+            // `Degree[g]` function); numeric coercion resolves it to π/180.
+            Value::Builtin(name, _) => assert_eq!(name, "Degree"),
+            Value::Symbol(s) => assert_eq!(s, "Degree"),
+            other => panic!("Expected Real, got {:?}", other),
         }
     }
 

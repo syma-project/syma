@@ -260,7 +260,7 @@ fn compute_median(nums: &mut [f64]) -> f64 {
 // ── Distribution helpers (private) ──────────────────────────────────────────
 
 /// Analytical mean of a distribution (returns None for undefined/infinite mean).
-fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
+pub(crate) fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
     let dist_type = dist.get("Distribution").and_then(|v| match v {
         Value::Str(s) => Some(s.as_str()),
         _ => None,
@@ -314,7 +314,7 @@ fn distribution_mean_f64(dist: &HashMap<String, Value>) -> Option<f64> {
 }
 
 /// Analytical variance of a distribution.
-fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
+pub(crate) fn distribution_variance_f64(dist: &HashMap<String, Value>) -> Option<f64> {
     let dist_type = dist.get("Distribution").and_then(|v| match v {
         Value::Str(s) => Some(s.as_str()),
         _ => None,
@@ -1773,7 +1773,8 @@ pub fn builtin_random_variate(args: &[Value]) -> Result<Value, EvalError> {
             )
         })?;
 
-    let mut rng = fastrand::Rng::new();
+    // Seed from the shared RNG so `SeedRandom[n]` makes RandomVariate reproducible.
+    let mut rng = fastrand::Rng::with_seed(crate::builtins::random::next_u64());
     let samples: Vec<Value> = match dist_type {
         "Normal" => {
             let mu = dist.get("Mean").and_then(super::to_f64).unwrap_or(0.0);
@@ -2015,6 +2016,21 @@ pub const SYMBOLS: &[&str] = &[
     "CDF",
     // Sampling
     "RandomVariate",
+    // Gap-fill statistics (implemented in `statsmore`)
+    "SeedRandom",
+    "Quartiles",
+    "CentralMoment",
+    "Moment",
+    "Expectation",
+    "Probability",
+    "InverseCDF",
+    "MomentGeneratingFunction",
+    "CharacteristicFunction",
+    "BinLists",
+    "ExponentialMovingAverage",
+    "SmoothHistogram",
+    "FindDistribution",
+    "EstimatedDistribution",
 ];
 
 #[cfg(test)]

@@ -51,6 +51,44 @@ pub(super) fn eval_set(s: &str, args: &[Expr], env: &Env) -> Result<Option<Value
         } if !matches!(head.as_ref(), Expr::Symbol(s) if s == "Part")
             && !matches!(head.as_ref(), Expr::Symbol(s) if s == "Attributes") =>
         {
+            // Options[f] = {...} — register default options.
+            if matches!(head.as_ref(), Expr::Symbol(h) if h == "Options") && call_args.len() == 1 {
+                let sym = match &call_args[0] {
+                    Expr::Symbol(s) => s.clone(),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Options assignment requires a symbol".to_string(),
+                        ));
+                    }
+                };
+                let opts = crate::builtins::introspect::options_from_value(&val, env)?;
+                env.replace_options(&sym, opts);
+                return Ok(Some(val));
+            }
+            // Subvalue definition: f[a][b] := body
+            if let Expr::Call {
+                head: inner_head,
+                args: outer,
+            } = head.as_ref()
+                && let Expr::Symbol(name) = inner_head.as_ref()
+            {
+                let body_expr = if s == "SetDelayed" {
+                    args[1].clone()
+                } else {
+                    table::value_to_expr(&val)
+                };
+                env.add_subvalue(
+                    name,
+                    crate::env::SubValue {
+                        outer: outer.clone(),
+                        inner: call_args.clone(),
+                        rhs: body_expr,
+                        delayed: s == "SetDelayed",
+                        guard: None,
+                    },
+                );
+                return Ok(Some(val));
+            }
             if let Expr::Symbol(name) = head.as_ref() {
                 if call_args.len() == 1 {
                     let target = eval(&call_args[0], env)?;

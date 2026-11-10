@@ -7,7 +7,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::ast::Expr;
 use crate::value::{EvalError, NativeLibHandle, Value};
+
+/// A stored subvalue definition (`f[outer...][inner...] := rhs`).
+///
+/// Kept separate from [`crate::value::FunctionDef`] so that `SubValues[f]` can
+/// distinguish `f[a][b]` from a plain downvalue `f[a, b]`.
+#[derive(Debug, Clone)]
+pub struct SubValue {
+    /// Pattern arguments of the inner (curried) call, e.g. `a` in `f[a][b]`.
+    pub outer: Vec<Expr>,
+    /// Pattern arguments of the outermost call, e.g. `b`.
+    pub inner: Vec<Expr>,
+    /// Definition body (unevaluated for delayed definitions).
+    pub rhs: Expr,
+    pub delayed: bool,
+    pub guard: Option<Expr>,
+}
 
 /// Global module registry shared across all scopes in a session.
 /// Maps module names (e.g. `"LinearAlgebra"`, `"Math.Stats"`) to their `Value::Module`.
@@ -23,6 +40,15 @@ pub struct Scope {
 /// Shared registry of opened native libraries, keyed by path.
 /// Prevents double-dlopen when `LoadLibrary["x"]` is called twice.
 pub type NativeLibRegistry = Arc<Mutex<HashMap<String, Arc<NativeLibHandle>>>>;
+
+/// Per-symbol default options: symbol name → ordered `(option name, value)` pairs.
+pub type OptionsMap = HashMap<String, Vec<(String, Value)>>;
+
+/// Per-tag upvalue rules: tag symbol → list of `HoldPattern[lhs] :> rhs` rules.
+pub type UpValueMap = HashMap<String, Vec<Value>>;
+
+/// Per-head subvalue definitions: head symbol → list of curried definitions.
+pub type SubValueMap = HashMap<String, Vec<SubValue>>;
 
 /// A lazy-loading provider: when an undefined symbol is first used in a call,
 /// the provider is fired once, then removed from the registry.
@@ -92,6 +118,18 @@ pub struct Env {
     /// Custom operator table: maps operator strings (e.g. "⊕") to their metadata.
     /// Shared across all child envs in a session.
     pub operator_table: Arc<Mutex<HashMap<String, OperatorInfo>>>,
+    /// Wolfram-style context stack (e.g. `["Global`"]`). Shared session-wide;
+    /// manipulated by `Begin`/`End`/`BeginPackage`/`EndPackage`.
+    pub context_stack: Arc<Mutex<Vec<String>>>,
+    /// Per-symbol default options set via `SetOptions`/`Options[f] = ...`.
+    /// Shared across all child envs in a session. Each entry is `(name, value)`.
+    pub options: Arc<Mutex<OptionsMap>>,
+    /// Per-tag upvalues (`f /: g[...] := ...`), keyed by the tag symbol.
+    /// Shared across all child envs in a session.
+    pub upvalues: Arc<Mutex<UpValueMap>>,
+    /// Per-head subvalue definitions (`f[a][b] := ...`), keyed by head symbol.
+    /// Shared across all child envs in a session.
+    pub subvalues: Arc<Mutex<SubValueMap>>,
 }
 
 impl Scope {
@@ -186,6 +224,10 @@ impl Env {
             attributes: Arc::new(Mutex::new(HashMap::new())),
             lazy_providers: Arc::new(Mutex::new(HashMap::new())),
             operator_table: Arc::new(Mutex::new(HashMap::new())),
+            context_stack: Arc::new(Mutex::new(vec!["Global`".to_string()])),
+            options: Arc::new(Mutex::new(HashMap::new())),
+            upvalues: Arc::new(Mutex::new(HashMap::new())),
+            subvalues: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -200,6 +242,10 @@ impl Env {
             attributes: self.attributes.clone(),
             lazy_providers: self.lazy_providers.clone(),
             operator_table: self.operator_table.clone(),
+            context_stack: self.context_stack.clone(),
+            options: self.options.clone(),
+            upvalues: self.upvalues.clone(),
+            subvalues: self.subvalues.clone(),
         }
     }
 
@@ -252,6 +298,10 @@ impl Env {
             attributes: self.attributes.clone(),
             lazy_providers: self.lazy_providers.clone(),
             operator_table: self.operator_table.clone(),
+            context_stack: self.context_stack.clone(),
+            options: self.options.clone(),
+            upvalues: self.upvalues.clone(),
+            subvalues: self.subvalues.clone(),
         }
     }
 
@@ -370,6 +420,115 @@ impl Env {
     /// Look up a registered custom operator.
     pub fn get_operator(&self, op_name: &str) -> Option<OperatorInfo> {
         self.operator_table.lock().unwrap().get(op_name).cloned()
+    }
+
+    // ── Context stack ──
+
+    /// The current (innermost) context, e.g. `"Global`"`.
+    pub fn current_context(&self) -> String {
+        self.context_stack
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "Global`".to_string())
+    }
+
+    /// Push a new context onto the context stack.
+    pub fn push_context(&self, ctx: String) {
+        self.context_stack.lock().unwrap().push(ctx);
+    }
+
+    /// Pop the innermost context. Never pops below the base context.
+    pub fn pop_context(&self) -> Option<String> {
+        let mut stack = self.context_stack.lock().unwrap();
+        if stack.len() > 1 {
+            stack.pop()
+        } else {
+            stack.last().cloned()
+        }
+    }
+
+    // ── Options ──
+
+    /// Return the default options registered for `name`.
+    pub fn get_options(&self, name: &str) -> Vec<(String, Value)> {
+        self.options
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Add or override a default option for `name`, preserving insertion order.
+    pub fn set_option(&self, name: &str, key: String, value: Value) {
+        let mut map = self.options.lock().unwrap();
+        let entry = map.entry(name.to_string()).or_default();
+        if let Some(slot) = entry.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            entry.push((key, value));
+        }
+    }
+
+    /// Replace all default options for `name`.
+    pub fn replace_options(&self, name: &str, opts: Vec<(String, Value)>) {
+        self.options.lock().unwrap().insert(name.to_string(), opts);
+    }
+
+    // ── Upvalues ──
+
+    /// Return the upvalue rules registered under `tag`.
+    pub fn get_upvalues(&self, tag: &str) -> Vec<Value> {
+        self.upvalues
+            .lock()
+            .unwrap()
+            .get(tag)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// All upvalue rules across every tag (used for runtime dispatch).
+    pub fn all_upvalues(&self) -> Vec<Value> {
+        self.upvalues
+            .lock()
+            .unwrap()
+            .values()
+            .flat_map(|v| v.iter().cloned())
+            .collect()
+    }
+
+    /// Register an upvalue rule under `tag`.
+    pub fn add_upvalue(&self, tag: &str, rule: Value) {
+        self.upvalues
+            .lock()
+            .unwrap()
+            .entry(tag.to_string())
+            .or_default()
+            .push(rule);
+    }
+
+    // ── Subvalues ──
+
+    /// Return the subvalue definitions registered under `head`.
+    pub fn get_subvalues(&self, head: &str) -> Vec<SubValue> {
+        self.subvalues
+            .lock()
+            .unwrap()
+            .get(head)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Register a subvalue definition under `head`.
+    pub fn add_subvalue(&self, head: &str, sv: SubValue) {
+        self.subvalues
+            .lock()
+            .unwrap()
+            .entry(head.to_string())
+            .or_default()
+            .push(sv);
     }
 }
 

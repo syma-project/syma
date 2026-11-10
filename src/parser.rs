@@ -779,6 +779,16 @@ impl Parser {
                     expr: Box::new(lhs),
                 })
             }
+            // TagSet (upvalue definition): tag /: lhs = rhs  or  tag /: lhs := rhs.
+            // Represented as TagSet[tag, definition] so no new AST node is needed.
+            Token::TagSet => {
+                self.advance();
+                let def = self.parse_expression()?;
+                Ok(Expr::Call {
+                    head: Box::new(Expr::Symbol("TagSet".to_string())),
+                    args: vec![lhs, def],
+                })
+            }
             // Pure function: expr &
             Token::FuncRef => {
                 self.advance();
@@ -921,6 +931,14 @@ impl Parser {
                 break;
             };
             self.advance();
+            // `<->` is lexed as `<` followed by `->`; recognise the pair and
+            // desugar it to `UndirectedEdge` rather than a `Less` comparison.
+            let op = if op == "Less" && self.at(&Token::Rule) {
+                self.advance(); // consume the `->` of `<->`
+                "UndirectedEdge"
+            } else {
+                op
+            };
             let right = self.parse_add_expr()?;
             left = Expr::Call {
                 head: Box::new(Expr::Symbol(op.to_string())),
@@ -2014,6 +2032,14 @@ impl Parser {
                 break;
             };
             self.advance();
+            // `<->` is lexed as `<` followed by `->`; recognise the pair and
+            // desugar it to `UndirectedEdge` rather than a `Less` comparison.
+            let op = if op == "Less" && self.at(&Token::Rule) {
+                self.advance(); // consume the `->` of `<->`
+                "UndirectedEdge"
+            } else {
+                op
+            };
             let right = self.parse_pattern_add()?;
             left = Expr::Call {
                 head: Box::new(Expr::Symbol(op.to_string())),
@@ -2913,9 +2939,21 @@ impl Parser {
                     rhs: Box::new(rhs),
                 };
             }
-            return Expr::Assign {
-                lhs: Box::new(Expr::Call { head, args }),
-                rhs: Box::new(rhs),
+            // Nested head (e.g. `f[a][b] := ...`): desugar to Set/SetDelayed so
+            // the evaluator can register a subvalue while preserving `delayed`.
+            let call = Expr::Call { head, args };
+            let rhs = if let Some(g) = guard {
+                Expr::PatternGuard {
+                    pattern: Box::new(rhs),
+                    condition: g,
+                }
+            } else {
+                rhs
+            };
+            let set_head = if delayed { "SetDelayed" } else { "Set" };
+            return Expr::Call {
+                head: Box::new(Expr::Symbol(set_head.to_string())),
+                args: vec![call, rhs],
             };
         }
         if let Expr::List(patterns) = lhs {

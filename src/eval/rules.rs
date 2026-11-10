@@ -176,6 +176,15 @@ pub fn apply_rules_value(value: &Value, rules: &Value, env: &Env) -> Result<Valu
     Ok(apply_rules_once(value, rules, env)?.unwrap_or_else(|| value.clone()))
 }
 
+/// Public wrapper around [`apply_rules_once`] for the evaluator's upvalue hook.
+pub fn apply_rules_once_pub(
+    value: &Value,
+    rules: &Value,
+    env: &Env,
+) -> Result<Option<Value>, EvalError> {
+    apply_rules_once(value, rules, env)
+}
+
 /// Apply rules to `value` and all of its subexpressions (used by `ReplaceAll`).
 ///
 /// Like the Wolfram Language, the whole expression is tried first; if a rule
